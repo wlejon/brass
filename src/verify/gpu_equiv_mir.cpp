@@ -505,9 +505,11 @@ GpuExecTrace execute_gpu_mir(
                             ? env.eval_uf(ctx, "fp_add", {old_v, arg}, rw, true)
                             : bv_bin(ctx, BVOp::Add, rw, old_v, arg);
                     } else if (sym.find("_min_") != std::string_view::npos) {
-                        new_v = bv_ite(ctx, rw, bv_bin(ctx, BVOp::Slt, 1, old_v, arg), old_v, arg);
+                        BVOp cmp = sym.ends_with("u32") ? BVOp::Ult : BVOp::Slt;
+                        new_v = bv_ite(ctx, rw, bv_bin(ctx, cmp, 1, old_v, arg), old_v, arg);
                     } else if (sym.find("_max_") != std::string_view::npos) {
-                        new_v = bv_ite(ctx, rw, bv_bin(ctx, BVOp::Sgt, 1, old_v, arg), old_v, arg);
+                        BVOp cmp = sym.ends_with("u32") ? BVOp::Ugt : BVOp::Sgt;
+                        new_v = bv_ite(ctx, rw, bv_bin(ctx, cmp, 1, old_v, arg), old_v, arg);
                     }
                     st_vec.push_back({cur.cond, caddr, nb, new_v});
                     res = old_v;

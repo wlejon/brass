@@ -229,8 +229,12 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_atom_add_u32",        &atom<AtomOp::add, StateSpace::global> },
         { "ptx_atom_add_i64",        &atom<AtomOp::add, StateSpace::global> },
         { "ptx_atom_min_i32",        &atom<AtomOp::min, StateSpace::global> },
+        { "ptx_atom_min_u32",        &atom<AtomOp::min, StateSpace::global, true> },
         { "ptx_atom_max_i32",        &atom<AtomOp::max, StateSpace::global> },
+        { "ptx_atom_max_u32",        &atom<AtomOp::max, StateSpace::global, true> },
         { "ptx_atom_exch_i32",       &atom<AtomOp::exch, StateSpace::global> },
+        { "ptx_atom_exch_u32",       &atom<AtomOp::exch, StateSpace::global> },
+        { "ptx_atom_exch_f32",       &atom<AtomOp::exch, StateSpace::global> },
         { "ptx_atom_shared_add_f32", &atom<AtomOp::add, StateSpace::shared> },
         { "ptx_atom_shared_add_i32", &atom<AtomOp::add, StateSpace::shared> },
 

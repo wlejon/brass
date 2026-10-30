@@ -683,7 +683,9 @@ GpuExecTrace execute_gpu_spirv(
             case spv::OpAtomicIAdd:
             case spv::OpAtomicFAddEXT:
             case spv::OpAtomicSMin:
+            case spv::OpAtomicUMin:
             case spv::OpAtomicSMax:
+            case spv::OpAtomicUMax:
             case spv::OpAtomicExchange: {
                 spirv::Id ptr_id = inst.operands[0].value;
                 BVNodeId arg = gpu_coerce_width(ctx, get_v(inst.operands[3].value), rw);
@@ -706,7 +708,9 @@ GpuExecTrace execute_gpu_spirv(
                 if (inst.op == spv::OpAtomicIAdd) new_v = bv_bin(ctx, BVOp::Add, rw, old_v, arg);
                 else if (inst.op == spv::OpAtomicFAddEXT) new_v = env.eval_uf(ctx, "fp_add", {old_v, arg}, rw, true);
                 else if (inst.op == spv::OpAtomicSMin) new_v = bv_ite(ctx, rw, bv_bin(ctx, BVOp::Slt, 1, old_v, arg), old_v, arg);
+                else if (inst.op == spv::OpAtomicUMin) new_v = bv_ite(ctx, rw, bv_bin(ctx, BVOp::Ult, 1, old_v, arg), old_v, arg);
                 else if (inst.op == spv::OpAtomicSMax) new_v = bv_ite(ctx, rw, bv_bin(ctx, BVOp::Sgt, 1, old_v, arg), old_v, arg);
+                else if (inst.op == spv::OpAtomicUMax) new_v = bv_ite(ctx, rw, bv_bin(ctx, BVOp::Ugt, 1, old_v, arg), old_v, arg);
                 st_vec.push_back({cur.cond, caddr, nb, new_v});
                 res = old_v;
                 break;

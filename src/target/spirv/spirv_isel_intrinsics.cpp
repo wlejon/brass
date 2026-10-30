@@ -235,8 +235,12 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_atom_add_u32",        &atom<Atom::add, false> },
         { "ptx_atom_add_i64",        &atom<Atom::add, false> },
         { "ptx_atom_min_i32",        &atom<Atom::min, false> },
+        { "ptx_atom_min_u32",        &atom<Atom::umin, false> },
         { "ptx_atom_max_i32",        &atom<Atom::max, false> },
+        { "ptx_atom_max_u32",        &atom<Atom::umax, false> },
         { "ptx_atom_exch_i32",       &atom<Atom::exch, false> },
+        { "ptx_atom_exch_u32",       &atom<Atom::exch, false> },
+        { "ptx_atom_exch_f32",       &atom<Atom::exch, false> },
         { "ptx_atom_shared_add_f32", &atom<Atom::add, true> },
         { "ptx_atom_shared_add_i32", &atom<Atom::add, true> },
 

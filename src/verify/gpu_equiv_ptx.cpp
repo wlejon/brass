@@ -610,9 +610,11 @@ GpuExecTrace execute_gpu_ptx(
                         ? env.eval_uf(ctx, "fp_add", {old_v, arg}, dw, true)
                         : bv_bin(ctx, BVOp::Add, dw, old_v, arg);
                 } else if (inst.atom_op == ptx::AtomOp::min) {
-                    new_v = bv_ite(ctx, dw, bv_bin(ctx, BVOp::Slt, 1, old_v, arg), old_v, arg);
+                    BVOp cmp = (inst.type == ptx::Type::u32 || inst.type == ptx::Type::u64) ? BVOp::Ult : BVOp::Slt;
+                    new_v = bv_ite(ctx, dw, bv_bin(ctx, cmp, 1, old_v, arg), old_v, arg);
                 } else if (inst.atom_op == ptx::AtomOp::max) {
-                    new_v = bv_ite(ctx, dw, bv_bin(ctx, BVOp::Sgt, 1, old_v, arg), old_v, arg);
+                    BVOp cmp = (inst.type == ptx::Type::u32 || inst.type == ptx::Type::u64) ? BVOp::Ugt : BVOp::Sgt;
+                    new_v = bv_ite(ctx, dw, bv_bin(ctx, cmp, 1, old_v, arg), old_v, arg);
                 }
                 st_vec.push_back({eff_cond, caddr, nb, new_v});
                 res = old_v;

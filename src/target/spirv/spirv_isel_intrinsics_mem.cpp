@@ -115,8 +115,8 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
     Module& m = isel.m_;
     Type vt = value->type();
     Id t = isel.scalar_type(vt);
-    if constexpr (A != Atom::add) {
-        if (vt.is_float()) isel.malformed(inst, "only atomic add supports float values");
+    if constexpr (A != Atom::add && A != Atom::exch) {
+        if (vt.is_float()) isel.malformed(inst, "only atomic add and exchange support float values");
     }
     if (vt.size_in_bytes() == 8) m.add_capability(spv::CapabilityInt64Atomics);
 
@@ -139,8 +139,12 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
         }
     } else if constexpr (A == Atom::min) {
         o = spv::OpAtomicSMin;
+    } else if constexpr (A == Atom::umin) {
+        o = spv::OpAtomicUMin;
     } else if constexpr (A == Atom::max) {
         o = spv::OpAtomicSMax;
+    } else if constexpr (A == Atom::umax) {
+        o = spv::OpAtomicUMax;
     } else if constexpr (A == Atom::exch) {
         o = spv::OpAtomicExchange;
     }
@@ -149,7 +153,9 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
 }
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::add, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::min, false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::umin, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::max, false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::umax, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::exch, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::add, true>(SpirvISel&, const brass::Instruction&);
 

@@ -61,7 +61,7 @@ struct SpirvISel::Intrinsics {
     template <Shfl M>
     static void shfl(SpirvISel& isel, const brass::Instruction& inst);
     static void shfl_down_sync_f32(SpirvISel& isel, const brass::Instruction& inst);
-    enum class Atom { add, min, max, exch };
+    enum class Atom { add, min, umin, max, umax, exch };
     template <Atom A, bool Shared>
     static void atom(SpirvISel& isel, const brass::Instruction& inst);
     template <bool Signed>

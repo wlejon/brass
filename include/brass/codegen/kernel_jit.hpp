@@ -380,6 +380,14 @@ public:
     // Atomics (global memory; return the previous value)
     Value* atom_add_f32(Value* ptr, Value* val);
     Value* atom_add_i32(Value* ptr, Value* val);
+    Value* atom_add_u32(Value* ptr, Value* val);
+    Value* atom_min_i32(Value* ptr, Value* val);
+    Value* atom_min_u32(Value* ptr, Value* val);
+    Value* atom_max_i32(Value* ptr, Value* val);
+    Value* atom_max_u32(Value* ptr, Value* val);
+    Value* atom_exch_i32(Value* ptr, Value* val);
+    Value* atom_exch_u32(Value* ptr, Value* val);
+    Value* atom_exch_f32(Value* ptr, Value* val);
 
     // ------------------------------------------------------------------
     // SPIR-V descriptor-bound 2D/3D storage images & sampled textures

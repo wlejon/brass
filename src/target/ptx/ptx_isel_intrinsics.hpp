@@ -71,7 +71,7 @@ struct PtxISel::Intrinsics {
     static void shfl_down_sync_f32(PtxISel& isel, const brass::Instruction& inst);
     template <ShflMode M>
     static void shfl(PtxISel& isel, const brass::Instruction& inst);
-    template <AtomOp A, StateSpace S>
+    template <AtomOp A, StateSpace S, bool Unsigned = false>
     static void atom(PtxISel& isel, const brass::Instruction& inst);
     static void mul_wide_u32(PtxISel& isel, const brass::Instruction& inst);
     static void mul_wide_s32(PtxISel& isel, const brass::Instruction& inst);

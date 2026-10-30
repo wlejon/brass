@@ -101,8 +101,9 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_shfl_bfly_i32", Sig::shfl_i32}, {"ptx_shfl_xor_i32", Sig::shfl_i32}, {"ptx_shfl_idx_i32", Sig::shfl_i32},
 
         {"ptx_atom_add_f32", Sig::atom_f32}, {"ptx_atom_add_i32", Sig::atom_i32}, {"ptx_atom_add_u32", Sig::atom_i32},
-        {"ptx_atom_add_i64", Sig::atom_i64}, {"ptx_atom_min_i32", Sig::atom_i32}, {"ptx_atom_max_i32", Sig::atom_i32},
-        {"ptx_atom_exch_i32", Sig::atom_i32},
+        {"ptx_atom_add_i64", Sig::atom_i64}, {"ptx_atom_min_i32", Sig::atom_i32}, {"ptx_atom_min_u32", Sig::atom_i32},
+        {"ptx_atom_max_i32", Sig::atom_i32}, {"ptx_atom_max_u32", Sig::atom_i32},
+        {"ptx_atom_exch_i32", Sig::atom_i32}, {"ptx_atom_exch_u32", Sig::atom_i32}, {"ptx_atom_exch_f32", Sig::atom_f32},
         {"ptx_atom_shared_add_f32", Sig::atom_shared_f32}, {"ptx_atom_shared_add_i32", Sig::atom_shared_i32},
 
         {"ptx_mul_wide_u32", Sig::i32i32_i64}, {"ptx_mul_wide_s32", Sig::i32i32_i64},

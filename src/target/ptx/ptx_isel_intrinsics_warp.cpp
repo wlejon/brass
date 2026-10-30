@@ -75,16 +75,16 @@ template void PtxISel::Intrinsics::shfl<ShflMode::idx>(PtxISel&, const brass::In
 // for min/max and .b32/.b64 for exch.
 // ---------------------------------------------------------------------------
 
-template <AtomOp A, StateSpace S>
+template <AtomOp A, StateSpace S, bool Unsigned>
 void PtxISel::Intrinsics::atom(PtxISel& isel, const brass::Instruction& inst) {
     const Value* value = inst.operand(1);
     if (!inst.operand(0) || !value) isel.malformed(inst, "missing argument");
     brass::Type vt = value->type();
-    Type t = (A == AtomOp::min || A == AtomOp::max) ? signed_type_for(vt)
-           : (A == AtomOp::exch)                     ? bit_type_for(vt)
-                                                     : type_for(vt);
-    if constexpr (A != AtomOp::add) {
-        if (is_float(t)) isel.malformed(inst, "only atom.add supports float values");
+    Type t = ((A == AtomOp::min || A == AtomOp::max) && !Unsigned) ? signed_type_for(vt)
+           : (A == AtomOp::exch)                                   ? bit_type_for(vt)
+                                                                   : type_for(vt);
+    if constexpr (A != AtomOp::add && A != AtomOp::exch) {
+        if (is_float(type_for(vt))) isel.malformed(inst, "only atom.add and atom.exch support float values");
     }
     isel.emit(Inst::make(Opcode::atom, t).space(S).atom(A)
                   .dst(isel.result_reg(inst))
@@ -93,7 +93,9 @@ void PtxISel::Intrinsics::atom(PtxISel& isel, const brass::Instruction& inst) {
 }
 template void PtxISel::Intrinsics::atom<AtomOp::add, StateSpace::global>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::min, StateSpace::global>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::min, StateSpace::global, true>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::max, StateSpace::global>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::max, StateSpace::global, true>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::exch, StateSpace::global>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::add, StateSpace::shared>(PtxISel&, const brass::Instruction&);
 

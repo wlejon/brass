@@ -196,8 +196,16 @@ Instruction* KernelBuilder::store_u16(Value* ptr, Value* val, int32_t off) {
     return b_.current_block()->tail();
 }
 
-Value* KernelBuilder::atom_add_f32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_add_f32", Type::f32(), {ptr, val}); }
-Value* KernelBuilder::atom_add_i32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_add_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_add_f32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_add_f32", Type::f32(), {ptr, val}); }
+Value* KernelBuilder::atom_add_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_add_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_add_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_add_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_min_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_min_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_min_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_min_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_max_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_max_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_max_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_max_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_exch_i32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_exch_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_exch_u32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_exch_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_exch_f32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_exch_f32", Type::f32(), {ptr, val}); }
 
 // ---------------------------------------------------------------------------
 // SPIR-V descriptor-bound images & samplers
