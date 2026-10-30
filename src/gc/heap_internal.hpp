@@ -122,6 +122,17 @@ enum class GcTrigger : uint8_t {
     Exhausted,   // an old allocation found the reservation full
 };
 
+// What a minor collection tells the adaptive eden (HeapState::adapt_eden_limit).
+struct MinorSample {
+    uint64_t eden_collected = 0;  // eden bytes allocated when it started
+    uint64_t copied = 0;          // every byte it copied, survivor-space objects too
+    uint64_t aged = 0;            // the survivor space's bytes when it started
+    uint64_t tenured = 0;         // of those, the bytes promoted: kept two collections
+    unsigned tenure_age = 1;      // 2 or more: the survivor space held survivors of the last one
+    bool overflow = false;        // the survivor space could not hold what was young enough
+    bool at_whole_eden = false;   // it ran at eden_hi, not a shrunk limit
+};
+
 struct HeapState {
     Heap& heap;
     HeapConfig config;
@@ -311,6 +322,41 @@ struct HeapState {
     // ---- the young generation (heap.cpp) ----
     void reset_eden() noexcept;
     void update_fast_limit() noexcept;
+    // The adaptive eden (HeapConfig::adaptive_eden): allocation stops at
+    // eden_limit and a minor collection runs there, eden_hi but for one
+    // object too large for an empty eden_limit. survival_estimate is the
+    // fraction of eden expected to survive the next minor collection; each
+    // minor collection raises it to what it saw at once (the next is then
+    // bounded) and otherwise halves it, so the limit doubles back toward
+    // eden_hi once survival falls, and one odd collection costs a few short
+    // ones rather than a long one.
+    uintptr_t eden_limit = 0;
+    double survival_estimate = 0.0;
+    // While eden is shrunk: running averages, over the minor collections
+    // that aged survivors, of the survivor-space bytes each started with, of
+    // those that died before it, and of the eden it collected, which give
+    // the survivors' lifetime in eden bytes (adapt_eden_limit); how many
+    // collections they hold; and how many a verdict needs: kFirstDyingNeeded,
+    // doubled each time the whole eden it restored shrank again at the first
+    // collection that could (after restore_hold of them), so a build-up that
+    // only looks like a working set at times does not swing eden back and
+    // forth.
+    double aged_average = 0.0;
+    double dead_average = 0.0;
+    double collected_average = 0.0;
+    uint32_t dying_measured = 0;
+    uint32_t dying_needed = 4;
+    bool restored = false;      // the whole eden came back by that test, not yet judged
+    uint32_t restore_hold = 0;  // whole-eden collections left that cannot shrink it
+    void forget_dying() noexcept;
+    // After a minor collection: resets eden_limit.
+    void adapt_eden_limit(const MinorSample& m) noexcept;
+    // The whole eden, survival forgotten: a new heap, and after a full
+    // collection that found most of the old generation's growth dead (the
+    // next minor collection measures the whole eden again, so a program that
+    // has moved from building data to churning a working set does not keep
+    // the small eden the build-up called for).
+    void reset_eden_limit() noexcept;
     uint64_t old_direct_bytes = 0;  // allocated straight into the old generation
 
     // ---- the promotion reserve (heap_spaces.cpp) ----
@@ -394,6 +440,7 @@ struct GcState {
     std::vector<EphemeronEntry> ephemerons;  // keys not (yet) known alive
     uint64_t copied_bytes = 0;
     uint64_t promoted_bytes = 0;
+    uint64_t tenured_bytes = 0;  // promoted out of the survivor space
     uint64_t marked_bytes = 0;
 
     // Measurement for the log: objects handled and where the pause went.
@@ -402,6 +449,7 @@ struct GcState {
     uint64_t marked_objects = 0;
     uint64_t dirty_cards = 0;
     uint64_t eden_used = 0;
+    uint64_t eden_limit = 0;    // the limit eden_used was allocated under
     uint64_t phase_ns[kGcPhaseCount] = {};
 
     GcState(HeapState& state, Heap& h, CollectionKind k) : s(state), heap(h), kind(k) {}

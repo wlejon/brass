@@ -61,6 +61,19 @@ struct HeapConfig {
     // promoted (1: promoted by its first minor collection; at most 7, since
     // an object's age saturates there).
     uint8_t tenure_age = 2;
+    // Survival-adaptive eden: a minor collection's copying costs about its
+    // survivors' bytes, so after each one the eden the next may fill is set
+    // to `minor_copy_budget_bytes` over the fraction of eden that survived
+    // (at least 1 MB, at most `eden_bytes`), when the survivors are data the
+    // program keeps (promoted, not dying in the survivor space), and goes
+    // back to the whole eden once they start dying young. A burst of
+    // survivors then costs several short minor collections instead of one
+    // long one, and a program whose young data dies keeps the whole eden
+    // (docs/gc_contract.md, "Adaptive eden"). false (or
+    // BRASS_GC_FIXED_EDEN=1): every minor collection fills all of eden.
+    bool adaptive_eden = true;
+    // About 0.5 ms of single-thread copying (1.3-2 MB/ms measured on x64).
+    size_t minor_copy_budget_bytes = size_t{1} << 20;
     // Address space reserved for the mature blocks and the large objects;
     // memory is committed as the heap grows.
     size_t mature_reserve_bytes = size_t{4} << 30;
@@ -104,7 +117,8 @@ struct HeapConfig {
     // their frame pointers elsewhere, where that code must keep them.
     bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1,
-    // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_MARK_THREADS=n and
+    // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_FIXED_EDEN=1,
+    // BRASS_GC_MARK_THREADS=n and
     // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
     // above when set.
     bool read_environment = true;
@@ -133,6 +147,8 @@ struct HeapStats {
 // frames) collects ahead of the trigger rather than at an allocation.
 struct HeapPressure {
     size_t eden_used = 0;
+    // The eden a minor collection runs at: the adaptive limit
+    // (HeapConfig::adaptive_eden), at most the eden reserved.
     size_t eden_capacity = 0;
     uint64_t old_growth = 0;      // old-generation bytes added since the last full collection
     uint64_t full_threshold = 0;  // the growth that runs a full collection

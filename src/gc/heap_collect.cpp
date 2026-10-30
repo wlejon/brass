@@ -71,6 +71,7 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
         g.promoted_bytes += total;
         ++g.promoted_objects;
         s.old_allocated_since_full += total;
+        if (!s.in_eden(object)) g.tenured_bytes += total;
     } else {
         s.set_young_start(moved);
     }
@@ -144,7 +145,12 @@ void poison_evacuated(HeapState& s, const GcState& g) {
 void minor(GcState& g) {
     HeapState& s = g.s;
     PhaseClock clock(g);
-    g.tenure_age = s.promote_all ? 1u : s.config.tenure_age;
+    // While the adaptive eden is shrunk, survivors age through the survivor
+    // space even after an overflow: how many of them live through a second
+    // collection is what tells a build-up from a working set
+    // (HeapState::adapt_eden_limit), and promote_all would tenure them unseen.
+    const bool shrunk = s.eden_limit < s.eden_hi;
+    g.tenure_age = s.promote_all && !shrunk ? 1u : s.config.tenure_age;
     evacuate(g, clock);
     run_hooks(g);
     clock.lap(kPhaseHooks);
@@ -156,6 +162,15 @@ void minor(GcState& g) {
     s.survivor_top[g.from] = s.survivor_lo[g.from];
     s.from_survivor = g.to;
     s.eden_bytes_retired += g.eden_top - s.eden_lo;
+    MinorSample sample;
+    sample.eden_collected = g.eden_top - s.eden_lo;
+    sample.copied = g.copied_bytes;
+    sample.aged = g.from_top - s.survivor_lo[g.from];
+    sample.tenured = g.tenured_bytes;
+    sample.tenure_age = g.tenure_age;
+    sample.overflow = g.survivor_overflow;
+    sample.at_whole_eden = g.eden_limit == s.eden_hi - s.eden_lo;
+    s.adapt_eden_limit(sample);
     s.reset_eden();
     s.minor_requested = false;
     if (s.old_allocated_since_full > s.full_threshold) s.full_requested = true;
@@ -203,11 +218,25 @@ void full(GcState& g) {
     s.survivor_top[0] = s.survivor_lo[0];
     s.survivor_top[1] = s.survivor_lo[1];
     s.eden_bytes_retired += g.eden_top - s.eden_lo;
+    // The adaptive eden goes back to the whole of it when most of what the
+    // old generation gained since the last full collection is dead: the
+    // program is not building data, so a shrunk eden may be promoting a
+    // working set that the whole eden would let die young (reset_eden_limit).
+    // While the live old data grows by half the growth or more, the build-up
+    // that shrank eden goes on, and the whole eden would copy it in one go.
+    const uint64_t live_gained = g.marked_bytes > s.stats.old_live_bytes ? g.marked_bytes - s.stats.old_live_bytes : 0;
+    // promote_all is otherwise left as the last minor collection set it: a
+    // full collection says nothing about how much of the young data
+    // survives, and a program still building long-lived data would refill
+    // the survivor space only to promote it all again at the next overflow.
+    // When the growth was dead, though, the program has stopped building,
+    // and the minor collection at the whole eden must age its survivors to
+    // measure whether they are kept, not promote them all.
+    if (live_gained * 2 < s.old_allocated_since_full) {
+        s.reset_eden_limit();
+        s.promote_all = false;
+    }
     s.reset_eden();
-    // promote_all is left as the last minor collection set it: a full
-    // collection says nothing about how much of the young data survives, and
-    // a program still building long-lived data would otherwise refill the
-    // survivor space only to promote it all again at the next overflow.
 
     const double grown = static_cast<double>(g.marked_bytes) * s.config.growth_factor;
     s.full_threshold = std::max<uint64_t>(s.config.min_full_threshold_bytes, static_cast<uint64_t>(grown));
@@ -385,6 +414,7 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     g.eden_top = heap.alloc_->top;
     g.from_top = s.survivor_top[g.from];
     g.eden_used = g.eden_top - s.eden_lo;
+    g.eden_limit = s.eden_limit - s.eden_lo;
     s.gc_eden_top = g.eden_top;
     s.gc_from_top = g.from_top;
     if (kind == CollectionKind::Minor) minor(g);

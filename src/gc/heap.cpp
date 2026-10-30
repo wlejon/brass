@@ -66,6 +66,9 @@ void apply_environment(HeapConfig& config) {
     if (!poison.empty() && poison != "0") config.poison = true;
     const std::string log = env_value("BRASS_GC_LOG");
     if (!log.empty() && log != "0") config.log = true;
+    // The A/B switch for the adaptive eden: every minor collection at a full eden.
+    const std::string fixed_eden = env_value("BRASS_GC_FIXED_EDEN");
+    if (!fixed_eden.empty() && fixed_eden != "0") config.adaptive_eden = false;
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
     // Both old spaces' reservations, in MB: a small one makes the
@@ -150,6 +153,7 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.verify = s.config.verify;
     s.poison = s.config.poison;
     s.log = s.config.log;
+    s.reset_eden_limit();
     s.reset_eden();
 }
 
@@ -202,7 +206,133 @@ void HeapState::reset_eden() noexcept {
 }
 
 void HeapState::update_fast_limit() noexcept {
-    heap.alloc_->end = stress != StressMode::None ? heap.alloc_->top : eden_hi;
+    // Generated code bumps against `end` and nothing else, so the adaptive
+    // limit takes effect there with no change to the code. `end` is never
+    // below `top`: an object allowed past eden_limit (Heap::allocate_at) puts
+    // `top` above it, and the bump path computes end - top unsigned.
+    const uintptr_t top = heap.alloc_->top;
+    heap.alloc_->end = stress != StressMode::None ? top : std::max(top, eden_limit);
+}
+
+namespace {
+// The least eden the adaptive limit leaves: below this a minor collection's
+// fixed costs (roots, cards) outweigh the copying it bounds.
+constexpr size_t kMinEdenLimitBytes = size_t{1} << 20;
+// A minor collection that collected less eden than this (one a host ran just
+// after another) says nothing of an eden's survival: its survivor-space
+// copies would read as a rate many times 1.
+constexpr uint64_t kMinSurvivalSampleBytes = 64 * 1024;
+// How much of the survival estimate carries to the next minor collection
+// when that one sees less: 0.5 doubles the limit back per collection, so a
+// spike's end costs about one eden's worth of extra, smaller collections.
+constexpr double kSurvivalDecay = 0.5;
+// The weight of the newest shrunk minor collection in the running averages
+// of what died in the survivor space (HeapState::aged_average and the rest).
+constexpr double kDyingWeight = 1.0 / 8.0;
+// The shrunk minor collections averaged before the first verdict, and the
+// most a verdict can come to need (HeapState::dying_needed doubles).
+constexpr uint32_t kFirstDyingNeeded = 4;
+constexpr uint32_t kMaxDyingNeeded = 64;
+// A lifetime under this many whole edens sends eden back whole. Not one: the
+// survivors' deaths read low, since a container promoted at a shrunk eden
+// (a growing array's store) keeps the young objects it names alive through
+// its dirty card after it has died, until a full collection; and the whole
+// eden's first collection judges again with no such distortion.
+constexpr double kDyingLifetimeEdens = 4.0;
+// The minor collections at the whole eden, after the lifetime test restored
+// it, that cannot shrink it again (HeapState::restore_hold).
+constexpr uint32_t kRestoreHold = 4;
+} // namespace
+
+void HeapState::forget_dying() noexcept {
+    aged_average = 0.0;
+    dead_average = 0.0;
+    collected_average = 0.0;
+    dying_measured = 0;
+}
+
+void HeapState::reset_eden_limit() noexcept {
+    survival_estimate = 0.0;
+    forget_dying();
+    restored = false;
+    restore_hold = 0;
+    eden_limit = eden_hi;
+}
+
+void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
+    if (!config.adaptive_eden) {
+        eden_limit = eden_hi;
+        return;
+    }
+    const size_t eden = eden_hi - eden_lo;
+    if (m.eden_collected >= kMinSurvivalSampleBytes) {
+        // A smaller eden spreads copying out only when the survivors are data
+        // the program keeps (a build-up), whose copying is proportional to
+        // eden. Young data that lives a while and then dies (a working set)
+        // reads as survival too while eden is shorter than its life, the
+        // more so the smaller eden is, so after a build-up nothing in the
+        // survival rate would ever bring the whole eden back, and shrinking
+        // only promotes what the whole eden would let die young. What tells
+        // them apart is how many of last collection's survivors, aged in the
+        // survivor space (minor() keeps promote_all off while eden is
+        // shrunk), die before this one: a build-up keeps nearly all of them,
+        // and a working set loses a share that is the eden allocated between
+        // the two over its lifetime. That lifetime, averaged over the last
+        // several collections and short against the whole eden, means the
+        // whole eden may let the data die young: eden goes back whole for the
+        // collection there to judge (kDyingLifetimeEdens).
+        bool dying = false;
+        if (!m.at_whole_eden && m.tenure_age >= 2 && m.aged >= kMinSurvivalSampleBytes) {
+            const double dead = static_cast<double>(m.aged - std::min(m.tenured, m.aged));
+            aged_average += (static_cast<double>(m.aged) - aged_average) * kDyingWeight;
+            dead_average += (dead - dead_average) * kDyingWeight;
+            collected_average += (static_cast<double>(m.eden_collected) - collected_average) * kDyingWeight;
+            ++dying_measured;
+            // lifetime = collected * aged / dead, compared free of a division.
+            dying = dying_measured >= dying_needed && collected_average * aged_average <
+                                                          kDyingLifetimeEdens * static_cast<double>(eden) * dead_average;
+        }
+        if (dying) {
+            survival_estimate = 0.0;
+            forget_dying();
+            restored = true;
+            restore_hold = kRestoreHold;
+        } else {
+            double seen = static_cast<double>(m.copied) / static_cast<double>(m.eden_collected);
+            // At the whole eden the survivors must also be shown kept before
+            // eden shrinks at all: overflowing the survivor space, or a
+            // quarter of what was copied promoted out of it (kept through two
+            // collections, not promoted wholesale by promote_all).
+            if (m.at_whole_eden && !m.overflow && m.tenured * 4 < m.copied) seen = 0.0;
+            if (m.at_whole_eden && restore_hold > 0) {
+                // Just after the lifetime test restored the whole eden, what
+                // the shrunk eden promoted still keeps young objects alive
+                // through its dirty cards and the survivor space holds what
+                // its short span aged: a few collections must pass before the
+                // whole eden's own survival says anything.
+                --restore_hold;
+                seen = 0.0;
+            } else if (m.at_whole_eden && restored) {
+                // The first collection that judges: shrinking again says the
+                // test misread a build-up, so its next verdict averages twice
+                // as many collections; staying whole says it read a working
+                // set right.
+                dying_needed = seen > 0.0 ? std::min(dying_needed * 2, kMaxDyingNeeded) : kFirstDyingNeeded;
+                restored = false;
+            }
+            // A shrink starts: the averages are about what comes now.
+            if (m.at_whole_eden && seen > 0.0) forget_dying();
+            survival_estimate = std::max(seen, survival_estimate * kSurvivalDecay);
+        }
+    }
+    const size_t floor = std::min(kMinEdenLimitBytes, eden);
+    double want = static_cast<double>(eden);
+    if (survival_estimate > 0.0) {
+        want = std::min(want, static_cast<double>(config.minor_copy_budget_bytes) / survival_estimate);
+    }
+    // Whole pages, so the limit does not wander by a few bytes per collection.
+    const size_t bytes = std::clamp(static_cast<size_t>(want) / kPageBytes * kPageBytes, floor, eden);
+    eden_limit = eden_lo + bytes;
 }
 
 void HeapState::sync_eden_starts() noexcept {
@@ -292,7 +422,10 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
     }
 
     for (int attempt = 0; attempt < 3; ++attempt) {
-        if (s.eden_hi - alloc_->top >= total) {
+        // Allocation stops at the adaptive limit, but an empty eden takes any
+        // young object whole: max_young_total_ can be above the least limit.
+        const uintptr_t limit = alloc_->top == s.eden_lo ? s.eden_hi : std::max(s.eden_limit, alloc_->top);
+        if (limit - alloc_->top >= total) {
             const uintptr_t at = alloc_->top;
             alloc_->top = at + total;
             s.update_fast_limit();
@@ -511,7 +644,7 @@ size_t Heap::young_used_bytes() const noexcept {
 
 HeapPressure Heap::pressure() const noexcept {
     const HeapState& s = *s_;
-    return {alloc_->top - s.eden_lo, s.eden_hi - s.eden_lo, s.old_allocated_since_full, s.full_threshold};
+    return {alloc_->top - s.eden_lo, s.eden_limit - s.eden_lo, s.old_allocated_since_full, s.full_threshold};
 }
 
 size_t Heap::old_used_bytes() const noexcept {
