@@ -10,6 +10,7 @@
 #include <brass/runtime/coroutine.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -325,11 +326,20 @@ void Heap::collect_at(CollectionKind kind, uintptr_t caller_fp, uintptr_t caller
     }
 
     // Finalizers run once the heap is consistent again; they may allocate.
+    const auto t0 = std::chrono::steady_clock::now();
+    uint64_t ran = 0;
     while (!s.pending_finalizers.empty()) {
         std::vector<detail::FinalizerEntry> pending;
         pending.swap(s.pending_finalizers);
         for (const auto& f : pending) f.fn(f.context);
+        ran += pending.size();
     }
+    s.stats.last_finalizers = ran;
+    s.stats.last_finalizer_ns = ran == 0 ? 0 : static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+    if (s.log && ran > 0)
+        std::fprintf(stderr, "[brass gc %p] finalizers: %llu in %.3f ms\n", static_cast<void*>(this),
+                     static_cast<unsigned long long>(ran), s.stats.last_finalizer_ns / 1e6);
 }
 
 void Heap::safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip) {
@@ -461,6 +471,11 @@ size_t Heap::young_used_bytes() const noexcept {
     const HeapState& s = *s_;
     const int from = s.from_survivor;
     return (alloc_->top - s.eden_lo) + (s.survivor_top[from] - s.survivor_lo[from]);
+}
+
+HeapPressure Heap::pressure() const noexcept {
+    const HeapState& s = *s_;
+    return {alloc_->top - s.eden_lo, s.eden_hi - s.eden_lo, s.old_allocated_since_full, s.full_threshold};
 }
 
 size_t Heap::old_used_bytes() const noexcept {

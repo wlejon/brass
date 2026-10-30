@@ -121,6 +121,21 @@ struct HeapStats {
     uint64_t promoted_bytes = 0;       // copied into the old generation, all time
     uint64_t last_survived_bytes = 0;  // copied by the last collection
     uint64_t old_live_bytes = 0;       // old generation after the last full collection
+    // The finalizers of the objects the last collection found dead, run once
+    // it had finished (not part of last_pause_ns), and how long they took.
+    uint64_t last_finalizers = 0;
+    uint64_t last_finalizer_ns = 0;
+};
+
+// How near each generation is to the collection its own trigger would run: a
+// minor one when eden is full, a full one when the old generation has grown
+// past its threshold. A host that knows when a pause costs nothing (between
+// frames) collects ahead of the trigger rather than at an allocation.
+struct HeapPressure {
+    size_t eden_used = 0;
+    size_t eden_capacity = 0;
+    uint64_t old_growth = 0;      // old-generation bytes added since the last full collection
+    uint64_t full_threshold = 0;  // the growth that runs a full collection
 };
 
 class Heap {
@@ -378,6 +393,7 @@ public:
     // object's address (an identity hash table) is stale once it changes.
     [[nodiscard]] uint64_t relocation_epoch() const noexcept;
     [[nodiscard]] size_t young_used_bytes() const noexcept;
+    [[nodiscard]] HeapPressure pressure() const noexcept;
     [[nodiscard]] size_t old_used_bytes() const noexcept;
     [[nodiscard]] size_t committed_bytes() const noexcept;
     [[nodiscard]] uint64_t allocated_bytes() const noexcept;
