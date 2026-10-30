@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/div_magic.hpp>
 #include <cstring>
 
 namespace brass::aarch64 {
@@ -299,6 +300,71 @@ void AArch64ISel::lower_div_mod(
     uint8_t sz = dst.size;
 
     ImmIntInfo imm1 = get_imm_int_info(op1_val);
+
+    // sdiv / smod i64 by a constant d >= 3, not a power of two: smulh by the
+    // magic multiplier and shifts (div_magic.hpp), as on x64; sdiv's latency
+    // is several times smulh's. The remainder's multiply reads the divisor's
+    // register; for a quotient its constant is left unused and deleted.
+    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val) && signed_div_magic_enabled()) {
+        const SignedDivMagic mg = signed_div_magic64(imm1.val);
+        VReg m = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto mov_m = std::make_unique<LirInst>(LirOpcode::Movabs);
+        mov_m->add_def(LirOperand::vreg(m, 8));
+        mov_m->add_use(LirOperand::imm(mg.multiplier, 8));
+        lir_bb.append_inst(std::move(mov_m));
+
+        VReg q = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto mulh = std::make_unique<LirInst>(LirOpcode::Smulh);
+        mulh->add_def(LirOperand::vreg(q, 8));
+        mulh->add_use(LirOperand::vreg(op0, 8));
+        mulh->add_use(LirOperand::vreg(m, 8));
+        lir_bb.append_inst(std::move(mulh));
+
+        if (mg.multiplier < 0) {
+            auto add_n = std::make_unique<LirInst>(LirOpcode::Add);
+            add_n->add_def(LirOperand::vreg(q, 8));
+            add_n->add_use(LirOperand::vreg(q, 8));
+            add_n->add_use(LirOperand::vreg(op0, 8));
+            lir_bb.append_inst(std::move(add_n));
+        }
+        if (mg.shift > 0) {
+            auto sar = std::make_unique<LirInst>(LirOpcode::Sar);
+            sar->add_def(LirOperand::vreg(q, 8));
+            sar->add_use(LirOperand::vreg(q, 8));
+            sar->add_use(LirOperand::imm(mg.shift, 1));
+            lir_bb.append_inst(std::move(sar));
+        }
+        VReg sign = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto shr_s = std::make_unique<LirInst>(LirOpcode::Shr);
+        shr_s->add_def(LirOperand::vreg(sign, 8));
+        shr_s->add_use(LirOperand::vreg(op0, 8));
+        shr_s->add_use(LirOperand::imm(63, 1));
+        lir_bb.append_inst(std::move(shr_s));
+
+        VReg quot = is_mod ? lir_fn_->allocate_vreg(RegClass::GPR, 8) : dst;
+        auto add_s = std::make_unique<LirInst>(LirOpcode::Add);
+        add_s->add_def(LirOperand::vreg(quot, 8));
+        add_s->add_use(LirOperand::vreg(q, 8));
+        add_s->add_use(LirOperand::vreg(sign, 8));
+        if (!is_mod) add_s->mir_origin = &inst;
+        lir_bb.append_inst(std::move(add_s));
+        if (!is_mod) return;
+
+        VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto mul_d = std::make_unique<LirInst>(LirOpcode::Imul);
+        mul_d->add_def(LirOperand::vreg(prod, 8));
+        mul_d->add_use(LirOperand::vreg(quot, 8));
+        mul_d->add_use(LirOperand::vreg(get_vreg(op1_val), 8));
+        lir_bb.append_inst(std::move(mul_d));
+
+        auto sub_r = std::make_unique<LirInst>(LirOpcode::Sub);
+        sub_r->add_def(LirOperand::vreg(dst, 8));
+        sub_r->add_use(LirOperand::vreg(op0, 8));
+        sub_r->add_use(LirOperand::vreg(prod, 8));
+        sub_r->mir_origin = &inst;
+        lir_bb.append_inst(std::move(sub_r));
+        return;
+    }
 
     // Check for power-of-2 unsigned optimizations
     if (!is_signed && imm1.is_imm && imm1.val > 0) {

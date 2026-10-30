@@ -139,6 +139,7 @@ public:
 
     void imul(GPR src);
     void imul32(GPR src);
+    void imul(const MemAddress& src);  // one-operand: RDX:RAX = RAX * [src]
     void imul(GPR dst, GPR src);
     void imul32(GPR dst, GPR src);
     void imul(GPR dst, const MemAddress& src);

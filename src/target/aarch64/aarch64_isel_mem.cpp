@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
@@ -32,7 +33,17 @@ bool AArch64ISel::can_fuse_load(const Instruction* load_inst, const Instruction*
     return true;
 }
 
-AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset) const {
+// As on x64 (x64_isel_mem.cpp fold_two_register_sum): a register + register
+// sum from another block that is a value of its own anyway stays one, rather
+// than keeping both addends live to the use as well. AArch64 has no
+// base + index + displacement form, so such a fold was also an add at the use.
+// BRASS_NO_LOCAL_ADDR_FOLD=1 folds across blocks as before (the A/B seam).
+bool AArch64ISel::fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const {
+    static const bool anywhere = std::getenv("BRASS_NO_LOCAL_ADDR_FOLD") != nullptr;
+    return anywhere || !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
+}
+
+AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const {
     MemFold fold;
     fold.base_val = ptr;
     fold.disp = offset;
@@ -56,7 +67,8 @@ AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset
 
             if (op0 && op0->is_instruction()) {
                 const Instruction* def0 = op0->defining_instruction();
-                if (def0 && def0->opcode() == Opcode::add && def0->parent() == def->parent()) {
+                if (def0 && def0->opcode() == Opcode::add && def0->parent() == def->parent() &&
+                    fold_two_register_sum(def0, ptr, user_bb)) {
                     const Value* a0 = def0->operand(0);
                     const Value* a1 = def0->operand(1);
                     ImmIntInfo imm_a0 = get_imm_int_info(a0);
@@ -96,7 +108,7 @@ AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset
             if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
             return fold;
         }
-    } else {
+    } else if (fold_two_register_sum(def, ptr, user_bb)) {
         if (op1 && op1->is_instruction()) {
             const Instruction* s_def = op1->defining_instruction();
             if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl) {
@@ -186,7 +198,7 @@ LirOperand AArch64ISel::get_load_mem_operand(const Instruction* load_inst) const
     uint8_t sz = static_cast<uint8_t>(load_inst->type().size_in_bytes());
     if (sz == 0) sz = 8;
     if (load_inst->opcode() == Opcode::load) {
-        MemFold mf = match_address(load_inst->operand(0), load_inst->offset());
+        MemFold mf = match_address(load_inst->operand(0), load_inst->offset(), load_inst->parent());
         VReg base = get_vreg(mf.base_val);
         if (mf.index_val) {
             return LirOperand::mem(base, get_vreg(mf.index_val), mf.scale, mf.disp, sz);
@@ -206,7 +218,7 @@ LirOperand AArch64ISel::get_load_mem_operand(const Instruction* load_inst) const
 void AArch64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     uint8_t sz = dst.size;
-    MemFold mf = match_address(inst.operand(0), inst.offset());
+    MemFold mf = match_address(inst.operand(0), inst.offset(), inst.parent());
     VReg base_vreg = get_vreg(mf.base_val);
     LirOperand mem_op;
     if (mf.index_val) {
@@ -238,7 +250,7 @@ void AArch64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
     ImmIntInfo imm_src = get_imm_int_info(src_val);
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
-    MemFold mf = match_address(inst.operand(0), inst.offset());
+    MemFold mf = match_address(inst.operand(0), inst.offset(), inst.parent());
     VReg base_vreg = get_vreg(mf.base_val);
     LirOperand mem_op;
     if (mf.index_val) {

@@ -91,6 +91,23 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
             }
         }
     }
+    // Address-only values (match_address): every use the address operand of
+    // a load or store, as on x64.
+    address_only_.clear();
+    {
+        std::unordered_map<const Value*, uint32_t> address_uses;
+        for (const auto* bb : mir_fn.blocks()) {
+            for (const auto* inst : *bb) {
+                if ((inst->opcode() == Opcode::load || inst->opcode() == Opcode::store) && inst->operand(0)) {
+                    address_uses[inst->operand(0)]++;
+                }
+            }
+        }
+        for (const auto& [v, n] : address_uses) {
+            auto it = use_count_.find(v);
+            if (it != use_count_.end() && it->second == n) address_only_.insert(v);
+        }
+    }
 
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
@@ -146,7 +163,7 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
             switch (inst->opcode()) {
                 case Opcode::load:
                 case Opcode::store:
-                    count_direct(match_address(inst->operand(0), inst->offset()), {inst->operand(0)});
+                    count_direct(match_address(inst->operand(0), inst->offset(), bb), {inst->operand(0)});
                     break;
                 case Opcode::load_indexed:
                 case Opcode::store_indexed:

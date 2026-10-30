@@ -56,6 +56,9 @@ private:
     const Function* mir_fn_ = nullptr;
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
     std::unordered_map<const Value*, uint32_t> use_count_;
+    // Values every use of which is the address operand of a load or store
+    // (analyze_function; match_address).
+    std::unordered_set<const Value*> address_only_;
     std::unordered_set<const Instruction*> skipped_insts_;
     // br_if -> the leaves of its AND condition, tested one branch each
     // (x64_isel_and_chain.cpp).
@@ -116,7 +119,16 @@ private:
     // Emits the ucomis of a fused floating-point comparison and returns the
     // condition that holds exactly when the comparison is true.
     void append_fused_float_compare(const Instruction& cmp, codegen::LirBlock& lir_bb, Condition& cond);
-    MemFold match_address(const Value* ptr, int32_t offset) const;
+    // `user_bb` is the block of the memory operation: a register + register
+    // sum is folded into its address only there (x64_isel_mem.cpp).
+    MemFold match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const;
+    bool fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const;
+    // Fills address_only_ from use_count_ (x64_isel_mem.cpp).
+    void find_address_only(const Function& mir_fn);
+    // True when the lowering of this sdiv / udiv / smod / umod never reads its
+    // divisor's register (x64_isel_shift_div.cpp). The use analysis and
+    // lower_div_mod must agree, or the divisor is left without one.
+    bool divisor_unread(const Instruction& inst) const;
     MemFold match_indexed_address(const Value* base, const Value* index, Scale scale, int32_t offset) const;
     bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
@@ -133,6 +145,7 @@ private:
     void lower_binary_alu(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64, codegen::LirOpcode op_f64, codegen::LirOpcode op_f32);
     bool lower_three_operand_float(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode alu_op);
     void lower_div_mod(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_signed, bool is_mod);
+    void lower_signed_div_magic(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor);
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, Condition cond, Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);

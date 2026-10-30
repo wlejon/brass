@@ -753,6 +753,7 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Sub32:
         case LirOpcode::Imul:
         case LirOpcode::Imul32:
+        case LirOpcode::Smulh:
         case LirOpcode::Idiv:
         case LirOpcode::Idiv32:
         case LirOpcode::Div:

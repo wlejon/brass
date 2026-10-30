@@ -1,4 +1,5 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
@@ -52,7 +53,40 @@ bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* use
     return true;
 }
 
-X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset) const {
+// A sum of two registers computed in another block than the memory operation,
+// that is a value of its own anyway (it has a use other than as an address),
+// stays one there: folding it as base + index would keep both addends live up
+// to the use as well as the sum. A module's IC table base (the image address
+// plus the thread's delta, computed once per function and also added to
+// indices) was three values live across every call in place of one, the image
+// address spilled and reloaded at each site. A sum only ever used as an
+// address still folds everywhere: it is then never computed at all.
+// BRASS_NO_LOCAL_ADDR_FOLD=1 folds across blocks as before (the A/B seam).
+bool X64ISel::fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const {
+    static const bool anywhere = std::getenv("BRASS_NO_LOCAL_ADDR_FOLD") != nullptr;
+    return anywhere || !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
+}
+
+// A value is address-only when its uses are all the address operand of a load
+// or store (and it is not also the stored value, which counts as another use):
+// folding it into every one leaves nothing to compute.
+void X64ISel::find_address_only(const Function& mir_fn) {
+    address_only_.clear();
+    std::unordered_map<const Value*, uint32_t> address_uses;
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            if ((inst->opcode() == Opcode::load || inst->opcode() == Opcode::store) && inst->operand(0)) {
+                address_uses[inst->operand(0)]++;
+            }
+        }
+    }
+    for (const auto& [v, n] : address_uses) {
+        auto it = use_count_.find(v);
+        if (it != use_count_.end() && it->second == n) address_only_.insert(v);
+    }
+}
+
+X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const {
     MemFold fold;
     fold.base_val = ptr;
     fold.disp = offset;
@@ -69,6 +103,17 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset) const 
     if (imm1.is_imm && imm1.fits_i32) {
         int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val;
         if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
+            // `(a + b) + imm` from another block: the inner sum is one lea
+            // with the constant (analyze_function's lea fusion skips it
+            // as a value), so the address takes that lea's result whole.
+            if (op0 && op0->is_instruction()) {
+                const Instruction* def0 = op0->defining_instruction();
+                if (def0 && def0->opcode() == Opcode::add && def0->parent() == def->parent() &&
+                    !get_imm_int_info(def0->operand(0)).is_imm && !get_imm_int_info(def0->operand(1)).is_imm &&
+                    !fold_two_register_sum(def0, ptr, user_bb)) {
+                    return fold;
+                }
+            }
             fold.disp = static_cast<int32_t>(new_disp);
             fold.base_val = op0;
             fold.folded_instructions.push_back(def);
@@ -116,7 +161,7 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset) const 
             if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
             return fold;
         }
-    } else {
+    } else if (fold_two_register_sum(def, ptr, user_bb)) {
         if (op1 && op1->is_instruction()) {
             const Instruction* s_def = op1->defining_instruction();
             if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl) {
@@ -206,7 +251,7 @@ LirOperand X64ISel::get_load_mem_operand(const Instruction* load_inst) const {
     uint8_t sz = static_cast<uint8_t>(load_inst->type().size_in_bytes());
     if (sz == 0) sz = 8;
     if (load_inst->opcode() == Opcode::load) {
-        return mem_operand(match_address(load_inst->operand(0), load_inst->offset()), sz);
+        return mem_operand(match_address(load_inst->operand(0), load_inst->offset(), load_inst->parent()), sz);
     } else if (load_inst->opcode() == Opcode::load_indexed) {
         return mem_operand(match_indexed_address(load_inst->operand(0), load_inst->operand(1),
                                                  scale_from_int(load_inst->scale()), load_inst->offset()), sz);
@@ -217,7 +262,7 @@ LirOperand X64ISel::get_load_mem_operand(const Instruction* load_inst) const {
 void X64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     uint8_t sz = dst.size;
-    const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset()), sz);
+    const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset(), inst.parent()), sz);
 
     LirOpcode op = dst.is_xmm() ? (sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd)
                                 : (sz == 1 ? LirOpcode::Movzx8 : sz == 2 ? LirOpcode::Movzx16
@@ -234,7 +279,7 @@ void X64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
     ImmIntInfo imm_src = get_imm_int_info(src_val);
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
-    const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset()), sz);
+    const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset(), inst.parent()), sz);
 
     bool is_xmm = src_val->type().is_float();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {

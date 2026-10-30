@@ -358,6 +358,12 @@ void X64Encoder::imul32(GPR src) {
     emit_modrm(3, 5, reg_code(src));
 }
 
+void X64Encoder::imul(const MemAddress& src) {
+    emit_rex(true, false, is_extended(src.index), is_extended(src.base));
+    buffer_.emit8(0xF7);
+    emit_mem_operand(5, src);
+}
+
 void X64Encoder::imul(GPR dst, GPR src) {
     emit_rex(true, is_extended(dst), false, is_extended(src));
     buffer_.emit8(0x0F);

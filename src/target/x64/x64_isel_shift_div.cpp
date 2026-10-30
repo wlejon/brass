@@ -1,8 +1,111 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/codegen/div_magic.hpp>
 
 namespace brass::x64 {
 
 using namespace brass::codegen;
+
+// sdiv / smod i64 by a constant d >= 3 that is not a power of two
+// (div_magic.hpp): a one-operand imul gives the high half of M * n in RDX,
+// about a quarter of an idiv's latency, and the dependent work after it is
+// adds and shifts. Its sign correction reads n's own sign bit, which does not
+// wait for the multiply. The divisor's constant is then read as an immediate
+// (or, past 32 bits, from its register) by the remainder's multiply only.
+void X64ISel::lower_signed_div_magic(const Instruction& inst, LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor) {
+    const SignedDivMagic mg = signed_div_magic64(divisor.val);
+    VReg dst = get_vreg(inst.result());
+    VReg n = get_vreg(inst.operand(0));
+
+    auto mov_m = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_m->add_def(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+    mov_m->add_use(LirOperand::imm(mg.multiplier, 8));
+    lir_bb.append_inst(std::move(mov_m));
+
+    // imul n: RDX:RAX = RAX * n, signed.
+    auto mulh = std::make_unique<LirInst>(LirOpcode::Smulh);
+    mulh->add_def(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+    mulh->add_def(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+    mulh->add_use(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+    mulh->add_use(LirOperand::vreg(n, 8));
+    lir_bb.append_inst(std::move(mulh));
+
+    VReg q = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mov_t = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_t->add_def(LirOperand::vreg(q, 8));
+    mov_t->add_use(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+    lir_bb.append_inst(std::move(mov_t));
+
+    if (mg.multiplier < 0) {
+        auto add_n = std::make_unique<LirInst>(LirOpcode::Add);
+        add_n->add_def(LirOperand::vreg(q, 8));
+        add_n->add_use(LirOperand::vreg(q, 8));
+        add_n->add_use(LirOperand::vreg(n, 8));
+        lir_bb.append_inst(std::move(add_n));
+    }
+    if (mg.shift > 0) {
+        auto sar = std::make_unique<LirInst>(LirOpcode::Sar);
+        sar->add_def(LirOperand::vreg(q, 8));
+        sar->add_use(LirOperand::vreg(q, 8));
+        sar->add_use(LirOperand::imm(mg.shift, 1));
+        lir_bb.append_inst(std::move(sar));
+    }
+
+    VReg sign = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mov_s = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_s->add_def(LirOperand::vreg(sign, 8));
+    mov_s->add_use(LirOperand::vreg(n, 8));
+    lir_bb.append_inst(std::move(mov_s));
+    auto shr_s = std::make_unique<LirInst>(LirOpcode::Shr);
+    shr_s->add_def(LirOperand::vreg(sign, 8));
+    shr_s->add_use(LirOperand::vreg(sign, 8));
+    shr_s->add_use(LirOperand::imm(63, 1));
+    lir_bb.append_inst(std::move(shr_s));
+
+    auto add_s = std::make_unique<LirInst>(LirOpcode::Add);
+    add_s->add_def(LirOperand::vreg(is_mod ? q : dst, 8));
+    if (!is_mod) {
+        auto mov_d = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_d->add_def(LirOperand::vreg(dst, 8));
+        mov_d->add_use(LirOperand::vreg(q, 8));
+        lir_bb.append_inst(std::move(mov_d));
+        add_s->add_use(LirOperand::vreg(dst, 8));
+        add_s->add_use(LirOperand::vreg(sign, 8));
+        add_s->mir_origin = &inst;
+        lir_bb.append_inst(std::move(add_s));
+        return;
+    }
+    add_s->add_use(LirOperand::vreg(q, 8));
+    add_s->add_use(LirOperand::vreg(sign, 8));
+    lir_bb.append_inst(std::move(add_s));
+
+    // r = n - q * d
+    VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mul_d = std::make_unique<LirInst>(LirOpcode::Imul);
+    mul_d->add_def(LirOperand::vreg(prod, 8));
+    if (divisor.fits_i32) {
+        mul_d->add_use(LirOperand::vreg(q, 8));
+        mul_d->add_use(LirOperand::imm(divisor.val, 8));
+    } else {
+        auto mov_p = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_p->add_def(LirOperand::vreg(prod, 8));
+        mov_p->add_use(LirOperand::vreg(q, 8));
+        lir_bb.append_inst(std::move(mov_p));
+        mul_d->add_use(LirOperand::vreg(prod, 8));
+        mul_d->add_use(LirOperand::vreg(get_vreg(inst.operand(1)), 8));
+    }
+    lir_bb.append_inst(std::move(mul_d));
+
+    auto mov_r = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_r->add_def(LirOperand::vreg(dst, 8));
+    mov_r->add_use(LirOperand::vreg(n, 8));
+    lir_bb.append_inst(std::move(mov_r));
+    auto sub_r = std::make_unique<LirInst>(LirOpcode::Sub);
+    sub_r->add_def(LirOperand::vreg(dst, 8));
+    sub_r->add_use(LirOperand::vreg(dst, 8));
+    sub_r->add_use(LirOperand::vreg(prod, 8));
+    sub_r->mir_origin = &inst;
+    lir_bb.append_inst(std::move(sub_r));
+}
 
 bool X64ISel::divisor_folds(const ImmIntInfo& divisor, bool is_mod) noexcept {
     if (!divisor.is_imm || divisor.val <= 0) return false;
@@ -11,6 +114,18 @@ bool X64ISel::divisor_folds(const ImmIntInfo& divisor, bool is_mod) noexcept {
     // A remainder masks with C - 1 (unsigned) or ~(C - 1) (signed), which
     // an and-immediate sign-extends from 32 bits: only 2^0 .. 2^31 fit.
     return !is_mod || c <= (uint64_t{1} << 31);
+}
+
+bool X64ISel::divisor_unread(const Instruction& inst) const {
+    const Opcode op = inst.opcode();
+    const bool is_mod = op == Opcode::umod || op == Opcode::smod;
+    const ImmIntInfo dv = get_imm_int_info(inst.operand(1));
+    // lower_div_mod's first choice: the magic-number lowering reads the
+    // divisor only for a remainder, and then as an immediate when it fits.
+    const bool magic = (op == Opcode::sdiv || op == Opcode::smod) && inst.type() == Type::i64() && dv.is_imm &&
+                       takes_signed_div_magic(dv.val) && signed_div_magic_enabled();
+    if (magic) return !is_mod || dv.fits_i32;
+    return divisor_folds(dv, is_mod);
 }
 
 bool X64ISel::mul_imm_folds(const ImmIntInfo& factor) noexcept {
@@ -33,6 +148,10 @@ void X64ISel::lower_div_mod(
     uint8_t sz = dst.size;
 
     ImmIntInfo imm1 = get_imm_int_info(op1_val);
+    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val) && signed_div_magic_enabled()) {
+        lower_signed_div_magic(inst, lir_bb, is_mod, imm1);
+        return;
+    }
     if (divisor_folds(imm1, is_mod)) {
         uint64_t C = static_cast<uint64_t>(imm1.val);
         {

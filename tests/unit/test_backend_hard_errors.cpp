@@ -64,9 +64,34 @@ TEST_CASE("Hard errors - x64 emitter rejects LIR it has no encoding for") {
     // the output in release.
     CHECK_EQ(x64_emit_error_stage(LirOpcode::Adds), std::string("x64 emit"));
     CHECK_EQ(x64_emit_error_stage(LirOpcode::Subs32), std::string("x64 emit"));
+    // x64 has smulh only as the one-operand imul (defs RAX, RDX; uses RAX
+    // and the factor, x64_isel_shift_div.cpp): AArch64's three-register form
+    // built above is still rejected.
     CHECK_EQ(x64_emit_error_stage(LirOpcode::Smulh), std::string("x64 emit"));
     // A supported opcode still compiles.
     CHECK_EQ(x64_emit_error_stage(LirOpcode::Add), std::string());
+}
+
+TEST_CASE("Hard errors - x64 smulh in its RDX:RAX form compiles") {
+    LirFunction fn;
+    fn.name = "mulh";
+    fn.calling_conv = CallingConvention::sysv64();
+    LirBlock* bb = fn.create_block("entry");
+    auto inst = std::make_unique<LirInst>(LirOpcode::Smulh);
+    inst->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 8));
+    inst->add_def(LirOperand::preg_gpr(x64::GPR::RDX, 8));
+    inst->add_use(LirOperand::preg_gpr(x64::GPR::RAX, 8));
+    inst->add_use(LirOperand::preg_gpr(x64::GPR::RCX, 8));
+    bb->append_inst(std::move(inst));
+    bb->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+    bool threw = false;
+    try {
+        EmitContext ctx(fn, Target::x64_linux());
+        (void)ctx.compile();
+    } catch (const UnsupportedOperation&) {
+        threw = true;
+    }
+    CHECK(!threw);
 }
 
 TEST_CASE("Hard errors - UnsupportedOperation is a runtime_error naming stage and operation") {

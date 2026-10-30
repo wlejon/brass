@@ -46,6 +46,8 @@ private:
     std::unordered_map<const Value*, codegen::VReg> val_to_vreg_;
     std::unordered_map<const Value*, VRegPair> val_to_vreg_pair_;
     std::unordered_map<const Value*, uint32_t> use_count_;
+    // Values every use of which is the address operand of a load or store.
+    std::unordered_set<const Value*> address_only_;
     std::unordered_set<const Instruction*> skipped_insts_;
     // Comparisons recomputed at each of their users, in whatever block, in
     // place of one materialized 0/1 (aarch64_isel_fused_cmp.cpp,
@@ -71,7 +73,11 @@ private:
     };
 
     ImmIntInfo get_imm_int_info(const Value* val) const;
-    MemFold match_address(const Value* ptr, int32_t offset) const;
+    // `user_bb` is the block of the memory operation: a register + register sum
+    // that is also a value of its own is folded into its address only there
+    // (x64 the same; x64_isel_mem.cpp).
+    MemFold match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const;
+    bool fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const;
     MemFold match_indexed_address(const Value* base, const Value* index, x64::Scale scale, int32_t offset) const;
     bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;

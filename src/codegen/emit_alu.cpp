@@ -1,4 +1,5 @@
 #include <brass/codegen/emit_context.hpp>
+#include <brass/codegen/unsupported_operation.hpp>
 #include <stdexcept>
 
 namespace brass::codegen {
@@ -246,6 +247,21 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
                     enc_.imul32(dst, static_cast<int32_t>(src.imm_int));
                 }
             } else enc_.imul32(dst, to_mem_address(src));
+            break;
+        }
+        case LirOpcode::Smulh: {
+            // One-operand imul: RDX:RAX = RAX * src (x64_isel_shift_div.cpp
+            // fixes RAX / RDX as the operands and both defs). Any other
+            // shape, such as AArch64's three-register smulh, has no x64
+            // encoding: a compile error, not a wrong multiply.
+            if (inst.defs.size() != 2 || inst.uses.size() != 2 || !inst.defs[0].is_preg() ||
+                !inst.defs[1].is_preg() || !inst.uses[0].is_preg() || to_gpr(inst.defs[0]) != GPR::RAX ||
+                to_gpr(inst.defs[1]) != GPR::RDX || to_gpr(inst.uses[0]) != GPR::RAX) {
+                throw_unsupported("x64 emit", to_string(inst.opcode));
+            }
+            const auto& src = inst.uses.back();
+            if (src.is_preg()) enc_.imul(to_gpr(src));
+            else enc_.imul(to_mem_address(src));
             break;
         }
         case LirOpcode::Idiv:

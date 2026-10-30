@@ -758,6 +758,9 @@ bool PeepholeOptimizer::run_pass() {
     for (size_t i = 0; i < fn_.blocks.size(); ++i) {
         changed |= optimize_block(*fn_.blocks[i], i);
     }
+    // After the block passes, which can forward a store into a reload or
+    // drop a jump, and over the layout as it now stands.
+    changed |= reuse_scratch_reloads();
     return changed;
 }
 

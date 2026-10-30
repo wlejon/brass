@@ -117,6 +117,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
 
         case LirOpcode::Imul:
         case LirOpcode::Imul32:
+        case LirOpcode::Smulh:
+        case LirOpcode::Umulh:
             return has_mem_load ? 6 : 3;
 
         case LirOpcode::Idiv:

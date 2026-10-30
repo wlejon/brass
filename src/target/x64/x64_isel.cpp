@@ -115,6 +115,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
             }
         }
     }
+    find_address_only(mir_fn);
 
     // 2. Identify fused comparisons in br_if and guard, and LEA fusions in add
     // (add, operand) pairs where the add is lowered as one lea that
@@ -235,13 +236,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
             if (skipped_insts_.count(inst)) continue;
 
             if (inst->opcode() == Opcode::load) {
-                MemFold mf = match_address(inst->operand(0), inst->offset());
+                MemFold mf = match_address(inst->operand(0), inst->offset(), bb);
                 count_address_fold(mf, {inst->operand(0)});
                 continue;
             }
 
             if (inst->opcode() == Opcode::store) {
-                MemFold mf = match_address(inst->operand(0), inst->offset());
+                MemFold mf = match_address(inst->operand(0), inst->offset(), bb);
                 count_address_fold(mf, {inst->operand(0)});
                 const Value* src = inst->operand(1);
                 ImmIntInfo imm_src = get_imm_int_info(src);
@@ -313,8 +314,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
             // register count in CL otherwise.
             if (inst->opcode() == Opcode::udiv || inst->opcode() == Opcode::umod ||
                 inst->opcode() == Opcode::sdiv || inst->opcode() == Opcode::smod) {
-                const bool is_mod = inst->opcode() == Opcode::umod || inst->opcode() == Opcode::smod;
-                if (!inst->type().is_float() && divisor_folds(get_imm_int_info(inst->operand(1)), is_mod)) {
+                if (!inst->type().is_float() && divisor_unread(*inst)) {
                     folded_uses[inst->operand(1)]++;
                 }
                 continue;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/codegen/lir.hpp>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -13,10 +14,12 @@ struct PeepholeStats {
     size_t arithmetic_simplified = 0;
     size_t branches_simplified = 0;
     size_t bitcasts_through_slots = 0;
+    size_t reloads_reused = 0;
 
     constexpr size_t total_optimizations() const noexcept {
         return redundant_moves_eliminated + load_after_store_eliminated +
-               dead_moves_eliminated + arithmetic_simplified + branches_simplified + bitcasts_through_slots;
+               dead_moves_eliminated + arithmetic_simplified + branches_simplified + bitcasts_through_slots +
+               reloads_reused;
     }
 };
 
@@ -25,6 +28,15 @@ public:
     explicit PeepholeOptimizer(LirFunction& fn);
 
     PeepholeStats run();
+
+    // What a scratch register is known to hold: a spill slot's value as one
+    // reload left it (reuse_scratch_reloads).
+    struct ScratchHeld {
+        PReg reg;
+        int32_t slot = -1;  // -1: nothing known
+        LirOpcode opcode = LirOpcode::Nop;
+        uint8_t size = 0;
+    };
 
 private:
     LirFunction& fn_;
@@ -37,6 +49,12 @@ private:
     bool eliminate_load_after_store(LirBlock& block);
     bool eliminate_dead_moves(LirBlock& block);
     bool bitcast_through_slots(LirBlock& block);
+    // A spill reload into a scratch register that already holds that slot
+    // (peephole_reload.cpp, which also lists the audited implicit writers).
+    // Function-wide: a block entered only by falling through keeps what the
+    // block before it left.
+    bool reuse_scratch_reloads();
+    bool reuse_scratch_reloads_block(LirBlock& block, std::array<ScratchHeld, 5>& held, PReg r11, PReg fp, PReg sp);
     bool simplify_arithmetic(LirBlock& block);
     bool simplify_branches(LirBlock& block, size_t block_index);
 

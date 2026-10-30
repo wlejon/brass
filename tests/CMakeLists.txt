@@ -30,6 +30,9 @@ add_executable(brass_unit_tests
     unit/test_linear_scan_spill_copies.cpp
     unit/test_regalloc_held_pregs.cpp
     unit/test_peephole.cpp
+    unit/test_reload_reuse.cpp
+    unit/test_local_addr_fold.cpp
+    unit/test_div_magic.cpp
     unit/test_x64_codegen.cpp
     unit/test_coff_writer.cpp
     unit/test_elf_writer.cpp
