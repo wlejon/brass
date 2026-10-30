@@ -49,6 +49,15 @@ A collection's roots are:
 - generated frames below re-entered interpreter code, recorded by `NativeFramesScope` (`native_frames.hpp`) at every native-to-interpreter transition brass makes;
 - the suspended coroutine frames the heap allocated (`Heap::coro_frames()`).
 
+A root source is called with the collection's tracer, whose `purpose()` says which pass it serves: `Minor` (a minor collection, and also the first phase of a full one, which evacuates the young generation exactly as a minor does but promotes every survivor), `Full` (the old generation's marking) or `Verify` (`set_verify`'s walk). A `Minor` pass needs only the slots that may name a young object: an old or non-reference target is not moved or decided by it. So a source whose table is large and rarely written may keep a remembered set of its own (the slots written with a young reference since the last minor collection) and visit only those in a `Minor` pass, under these rules:
+
+- every slot it skips holds no young reference at that moment; a store of a young reference into one must put the slot on the set before the next collection;
+- after visiting a slot, `Tracer::is_young(slot)` says whether it still names a young object (a survivor that was not promoted); the slot stays on the set while that is true and may leave it once it is false. After a full collection's first phase nothing is young, so the set empties;
+- a `Full` or `Verify` pass visits every slot, as a source without a set does;
+- under `verifying()` (`set_verify`, `BRASS_GC_VERIFY=1`), the `Minor` pass also reads the slots it skips and stops the process if one names a young object: a store that missed the set is then a hard error rather than a dangling reference after the copy.
+
+Weak slots (`visit_weak`) are settled after every root has been visited, so a source asks `is_young` of its weak slots in a post-collection hook, where they hold their final words.
+
 A runtime call that may collect, made from generated code that no stack map describes, is fatal (`brass: fatal: ... no stack maps are active`), because that frame's references could not be updated. Safepoints and `brass_gc_collect` in such code do nothing.
 
 ---

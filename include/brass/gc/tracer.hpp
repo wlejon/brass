@@ -66,6 +66,15 @@ public:
         ephemeron_(*this, key_slot, value_slot, cleared_key, cleared_value);
     }
 
+    // Whether `*slot` names a young object now. Asked of a slot a minor
+    // collection has just visited, it says whether the slot still names a
+    // young object (a survivor) or not (promoted, or never young): a root
+    // source that visits only the slots it knows may hold young references
+    // keeps a slot on its list while this is true and drops it once it is
+    // false (docs/gc_contract.md, "Roots of a Collection"). Defined in
+    // heap.hpp.
+    [[nodiscard]] bool is_young(const uint64_t* slot) const noexcept;
+
     [[nodiscard]] Heap& heap() const noexcept { return *heap_; }
     [[nodiscard]] Purpose purpose() const noexcept { return purpose_; }
 

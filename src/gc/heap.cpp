@@ -468,6 +468,7 @@ void Heap::set_stress(StressMode mode) noexcept {
 
 StressMode Heap::stress() const noexcept { return s_->stress; }
 void Heap::set_verify(bool enable) noexcept { s_->verify = enable; }
+bool Heap::verifying() const noexcept { return s_->verify; }
 void Heap::set_poison(bool enable) noexcept { s_->poison = enable; }
 const HeapStats& Heap::stats() const noexcept { return s_->stats; }
 uint64_t Heap::collection_count() const noexcept {

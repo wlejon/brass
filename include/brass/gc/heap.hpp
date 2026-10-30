@@ -292,6 +292,11 @@ public:
         write_barrier(object, value);
     }
     [[nodiscard]] bool is_young(uintptr_t address) const noexcept { return address - young_lo_ < young_span_; }
+    // Whether the slot word `word` is a reference to a young object: its
+    // address is young and its tag one of the reference tags.
+    [[nodiscard]] bool holds_young(uint64_t word) const noexcept {
+        return is_young(static_cast<uintptr_t>(word & kAddressMask)) && is_reference_tag(word);
+    }
     [[nodiscard]] bool is_old(uintptr_t address) const noexcept { return address - old_lo_ < old_span_; }
     // Whether `address` lies inside this heap's reservation.
     [[nodiscard]] bool contains(uintptr_t address) const noexcept { return address - heap_lo_ < heap_span_; }
@@ -388,6 +393,10 @@ public:
     void set_stress(StressMode mode) noexcept;
     [[nodiscard]] StressMode stress() const noexcept;
     void set_verify(bool enable) noexcept;
+    // Whether collections verify (set_verify, BRASS_GC_VERIFY=1). A root
+    // source that skips slots in a minor collection checks the skipped ones
+    // when this is on (docs/gc_contract.md, "Roots of a Collection").
+    [[nodiscard]] bool verifying() const noexcept;
     void set_poison(bool enable) noexcept;
     // Checks every object and root now; a violation stops the process with a
     // message naming the object and slot.
@@ -437,6 +446,8 @@ private:
     uint64_t raw_address_tag_ = 0;
     std::unique_ptr<detail::HeapState> s_;
 };
+
+inline bool Tracer::is_young(const uint64_t* slot) const noexcept { return heap_->holds_young(*slot); }
 
 // Binds `heap` as the calling thread's current heap for the scope's
 // lifetime, restoring the previous one after.
