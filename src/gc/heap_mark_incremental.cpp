@@ -212,6 +212,12 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     const uint64_t t0 = gc_now_ns();
     std::optional<runtime::CoroRootsLock> coro_lock;
     if (s.coro_frames) coro_lock.emplace(*s.coro_frames);
+    // What the last cycle's lazy sweep has left is finished first, in this
+    // pause: the sweep clears the marks it reads, so only then are they all
+    // clear for this cycle, and no unswept block is left for the marker to
+    // meet (heap_sweep_lazy.cpp).
+    s.complete_sweep();
+    const uint64_t swept_ns = gc_now_ns() - t0;
     if (s.verify) verify_heap(heap, "before a collection");
 
     // The mark bitmaps are clear: the last cycle's sweep cleared every mark
@@ -219,6 +225,7 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     s.cycle.reset(new MarkCycle(s, heap));
     MarkCycle& c = *s.cycle;
     GcState& g = c.g;
+    g.start_sweep_ns = swept_ns;
     begin_collection(g);
     PhaseClock clock(g);
     if (evacuate) full_evacuate(g, clock, false);
@@ -301,7 +308,7 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
     PhaseClock clock(g);
     full_reclaim(g, clock);
     s.collecting = false;
-    s.old_critical = s.old_in_reserve();
+    s.old_critical = s.old_in_reserve_swept();
     s.mark_phase = MarkPhase::Idle;
     s.update_fast_limit();
     if (s.verify) verify_heap(heap, "after a collection");
@@ -341,6 +348,13 @@ void Collector::finish_open_cycle(Heap& heap) {
 void Collector::stress_incremental(Heap& heap) {
     HeapState& s = state(heap);
     if (s.mark_phase == MarkPhase::Idle) {
+        // The last cycle's sweep, left pending: most steps sweep a tiny
+        // slice of it (the allocation they serve may sweep blocks too), every
+        // fourth starts the next cycle, which finishes what is left.
+        if (s.sweep.active && (s.stress_counter & 3) != 0) {
+            heap.sweep_slice(0);
+            return;
+        }
         heap.start_marking();
         return;
     }

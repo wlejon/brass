@@ -15,6 +15,13 @@
 // Only the regions (kCardRegionShift, one per 32 KB) that a card store marked
 // are visited, so the cost follows the remembered set rather than the size of
 // the old generation: the walk reads one byte per region, eight at a time.
+//
+// While the last cycle's sweep is pending, a dirty card never covers a dead
+// object's slots: every card was cleaned at the cycle's finish and nothing
+// stores into a dead object, but a mature card is shared by the objects
+// starting in it, so an unswept block's dead starts are masked off by its
+// marks. A dead large object (unswept, not yet freed) has cards of its own,
+// all clean.
 
 #include "heap_internal.hpp"
 
@@ -60,6 +67,11 @@ void scan_mature_cards(Tracer& t, GcState& g) {
             cards[c] = kCardClean;
             ++g.dirty_cards;
             uint64_t starts = meta.starts[c];  // card c covers start word c
+            // An unswept block (heap_sweep_lazy.cpp) still holds the starts of
+            // the objects the last cycle found dead, whose slots may name
+            // memory freed since: only its marked starts are objects. Asked
+            // per card, since this scan's promotions may sweep the block.
+            if (s.block_unswept(meta)) starts &= meta.marks[c];
             while (starts) {
                 const unsigned bit = ctz64(starts);
                 starts &= starts - 1;

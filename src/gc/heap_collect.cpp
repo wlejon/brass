@@ -71,6 +71,9 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     uint8_t bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask));
     if (!promoted) bits = static_cast<uint8_t>(bits | (age << kGcAgeShift));
     nh->gc_bits = bits;
+    // Promoted into the large-object space where a pending sweep has yet to
+    // walk: marked, so the walk keeps it (HeapState::note_large_allocated).
+    if (promoted) s.note_large_allocated(dest);
     const uintptr_t moved = dest + kHeaderBytes;
     // Promoted during a marking cycle: marked as it is copied, and grey, not
     // black. This collection's scan of it shades its old referents, but
@@ -241,7 +244,11 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     run_hooks(g);
     clock.lap(kPhaseHooks);
 
-    s.sweep_old();
+    // Liveness is settled: the old generation's memory is freed by the lazy
+    // sweep from here (all of it now with HeapConfig::lazy_sweep off). A dead
+    // object's card may be dirty; cleaning every card here means no card
+    // names a dead object afterwards, since nothing stores into one.
+    s.begin_sweep(g.marked_bytes);
     clean_all_cards(s);
     poison_evacuated(s, g);
     std::fill(s.young_starts.begin(), s.young_starts.end(), 0);
@@ -486,7 +493,7 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     begin_collection(g);
     minor(g);
     s.collecting = false;
-    s.old_critical = s.old_in_reserve();
+    s.old_critical = s.old_in_reserve_swept();
 
     if (s.verify) verify_heap(heap, "after a collection");
     coro_lock.reset();

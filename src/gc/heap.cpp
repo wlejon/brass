@@ -70,6 +70,10 @@ void apply_environment(HeapConfig& config) {
     // The A/B switch for the adaptive eden: every minor collection at a full eden.
     const std::string fixed_eden = env_value("BRASS_GC_FIXED_EDEN");
     if (!fixed_eden.empty() && fixed_eden != "0") config.adaptive_eden = false;
+    // The A/B switch for the lazy sweep: the old generation swept inside the
+    // full collection's pause.
+    const std::string eager_sweep = env_value("BRASS_GC_EAGER_SWEEP");
+    if (!eager_sweep.empty() && eager_sweep != "0") config.lazy_sweep = false;
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
     // Both old spaces' reservations, in MB: a small one makes the
@@ -155,6 +159,7 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.verify = s.config.verify;
     s.poison = s.config.poison;
     s.log = s.config.log;
+    s.sweep.lazy = s.config.lazy_sweep;
     s.reset_eden_limit();
     s.reset_eden();
 }
@@ -417,6 +422,9 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         h->layout = layout;
         h->gc_bits = (flags & kAllocPinned) ? kGcPinned : 0;
         h->host_bits = host_bits;
+        // A large object made where the pending sweep has yet to walk is
+        // marked, so the walk keeps it (HeapState::note_large_allocated).
+        s.note_large_allocated(header);
         if (zero) std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
         s.old_allocated_since_full += total;
         s.old_direct_bytes += total;
@@ -666,11 +674,17 @@ size_t Heap::young_used_bytes() const noexcept {
 
 HeapPressure Heap::pressure() const noexcept {
     const HeapState& s = *s_;
-    return {alloc_->top - s.eden_lo, s.eden_limit - s.eden_lo, s.old_allocated_since_full, s.full_threshold};
+    return {alloc_->top - s.eden_lo, s.eden_limit - s.eden_lo, s.old_allocated_since_full, s.full_threshold,
+            s.sweep.unswept_blocks, s.sweep.active};
 }
 
 size_t Heap::old_used_bytes() const noexcept {
-    return s_->mature_used_lines * kLineBytes + s_->large_used_bytes + s_->old_allocated_since_full;
+    const HeapState& s = *s_;
+    // While blocks or large objects are unswept, the line counts and the
+    // large bytes still hold the dead: the last cycle's marked bytes stand in
+    // for them until the sweep has counted again.
+    if (s.sweep.unswept_blocks > 0 || s.sweep.large_active) return s.sweep.live_bytes + s.old_allocated_since_full;
+    return s.mature_used_lines * kLineBytes + s.large_used_bytes + s.old_allocated_since_full;
 }
 
 size_t Heap::committed_bytes() const noexcept {

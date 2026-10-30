@@ -3,6 +3,7 @@
 // The heap's private state, shared by the translation units that implement
 // gc::Heap: heap.cpp (construction, allocation, roots, queries),
 // heap_spaces.cpp (the mature blocks and the large-object space),
+// heap_sweep_lazy.cpp (their sweep after a marking cycle, a piece at a time),
 // heap_collect.cpp (the collections), heap_mark.cpp and
 // heap_mark_incremental.cpp (the old generation's marking and its cycle),
 // heap_weak.cpp (weak slots, ephemerons, finalizers), heap_verify.cpp
@@ -64,13 +65,22 @@ inline constexpr size_t kCardsPerBlock = kBlockBytes / kCardBytes;
 
 // Side metadata of one mature block. Bits are indexed by the granule of an
 // object's PAYLOAD address within the block.
+//
+// Between a marking cycle's finish and the block's sweep (heap_sweep_lazy.cpp)
+// a block in use is unswept: its sweep_epoch is not the heap's
+// (LazySweep::epoch). Its starts then still include the objects the cycle
+// found dead, and its marks and line marks are that cycle's: an object of it
+// is live exactly when its start is marked. Nothing is allocated into it
+// until it is swept, and the sweep clears its marks, so the next cycle's
+// marks start clear.
 struct BlockMeta {
     uint64_t starts[kStartWordsPerBlock] = {};  // an object's payload begins here
-    uint64_t marks[kStartWordsPerBlock] = {};   // reached by the running full collection
+    uint64_t marks[kStartWordsPerBlock] = {};   // reached by the running (or last, while unswept) cycle
     uint8_t line_used[kLinesPerBlock] = {};     // allocation state: some object overlaps the line
     uint8_t line_mark[kLinesPerBlock] = {};     // some reached object overlaps the line
     bool in_use = false;                        // holds (or may hold) objects
     bool committed = false;
+    uint32_t sweep_epoch = 0;                   // LazySweep::epoch when last swept or taken free
 };
 
 // A bump region over a run of free lines of one block.
@@ -131,6 +141,70 @@ enum class MarkPhase : uint8_t {
     Idle,       // no cycle: the mark bitmaps are clear
     Marking,    // started: roots are grey, slices drain the grey work
     Finishing,  // in finish_marking: weakness, hooks, sweep
+};
+
+// Who did a piece of the lazy sweep (the log's account of it).
+enum class SweepBy : uint8_t {
+    Slice,      // Heap::sweep_slice
+    Allocator,  // an old allocation or promotion that needed a block or pages
+    Complete,   // the rest at once: a cycle's start, or an old space near its end
+};
+
+// The old generation's sweep after a marking cycle's finish, done a piece at
+// a time (heap_sweep_lazy.cpp). The finish decides what is dead (the mark
+// bits) and settles everything that depends on it (weak slots, ephemerons,
+// finalizers, hooks); freeing the memory is left to the sweep, which runs
+// in three phases, each resumable: the large objects (freeing the dead,
+// clearing the mark of the rest), the mature blocks (rebuilding each one's
+// free lines, clearing its marks), and handing excess free blocks back to the
+// OS. It is done by Heap::sweep_slice, by the allocator as it needs blocks
+// or pages, and whatever is left when the next cycle starts is finished
+// there (so a cycle's marks always start clear).
+struct LazySweep {
+    bool lazy = true;     // HeapConfig::lazy_sweep: false sweeps at the finish
+    bool active = false;  // some of the last cycle's sweep is left
+    // A block in use is unswept while its sweep_epoch differs. Each finish
+    // bumps it, which makes every block in use unswept at no cost.
+    uint32_t epoch = 0;
+    // The unswept blocks lie in [low, high): the allocator sweeps up from
+    // low (taking the lowest blocks first, as the eager sweep's lists did),
+    // slices down from high. Blocks past `high` (taken from the frontier
+    // since) were never unswept.
+    uint32_t low = 0;
+    uint32_t high = 0;
+    size_t unswept_blocks = 0;
+    // Large objects whose head page is at or past large_cursor (and below the
+    // frontier) are unswept: dead unless marked. One allocated there while
+    // the phase runs is marked as it is made (note_large_allocated), so the
+    // sweep keeps it and clears the mark; one allocated behind is left clear.
+    bool large_active = false;
+    uint32_t large_cursor = 0;
+    // The free blocks to decommit, highest first, planned once the blocks are
+    // swept: release_list[release_next...]. Each is checked again before its
+    // run is decommitted, since the allocator may have taken it since.
+    bool release_active = false;
+    bool release_planned = false;
+    std::vector<uint32_t> release_list;
+    size_t release_next = 0;
+    // The cycle's marked bytes: what old_used_bytes() reports until the sweep
+    // is done and the line counts are exact again.
+    uint64_t live_bytes = 0;
+
+    // For the log line at the end (BRASS_GC_LOG): the collection it sweeps
+    // for, and the time and work by who did it. The allocator's share is
+    // timed only when logging.
+    uint64_t collection_index = 0;
+    uint64_t slice_ns = 0;
+    uint64_t slice_max_ns = 0;
+    uint64_t slices = 0;
+    uint64_t allocator_ns = 0;
+    uint64_t allocator_blocks = 0;
+    uint64_t complete_ns = 0;
+    uint64_t blocks_swept = 0;
+    uint64_t blocks_freed = 0;
+    uint64_t large_freed = 0;
+    uint64_t large_freed_bytes = 0;
+    uint64_t released_bytes = 0;
 };
 
 // A marking cycle's state between its calls (heap_mark_incremental.cpp).
@@ -334,16 +408,52 @@ struct HeapState {
         return total <= kMaxMediumObjectBytes ? mature_allocate(total) : large_allocate(total);
     }
     void mark_lines(BlockMeta& meta, uintptr_t block_lo, uintptr_t header, size_t total, bool mark) noexcept;
-    // After a full collection's marking: reclaims unmarked mature objects and
-    // large objects, rebuilds the free and recyclable block lists. Returns the
-    // live old bytes.
-    uint64_t sweep_old();
     // Commits (and cleans) the cards covering old addresses [lo, hi).
     void commit_cards(uintptr_t lo, uintptr_t hi);
     bool refill_region(BumpRegion& region, bool whole_block);
     uint32_t acquire_free_block();
-    void free_large(uint32_t head, uint32_t pages);
+    // Frees a large object's pages; returns the pages of the free run they
+    // joined.
+    uint32_t free_large(uint32_t head, uint32_t pages);
     [[nodiscard]] uint32_t large_head_of(uintptr_t address) const noexcept;
+
+    // ---- the lazy sweep (heap_sweep_lazy.cpp) ----
+    LazySweep sweep;
+    // At a cycle's finish, once liveness is settled: every block in use
+    // becomes unswept, the allocation regions and recyclable list start
+    // over, and the large objects' phase begins. `live_bytes`: the cycle's
+    // marked bytes. With HeapConfig::lazy_sweep off, sweeps all of it now.
+    void begin_sweep(uint64_t live_bytes);
+    // Whether block `meta` still holds the last cycle's dead objects.
+    [[nodiscard]] bool block_unswept(const BlockMeta& meta) const noexcept {
+        return meta.in_use && meta.sweep_epoch != sweep.epoch;
+    }
+    // Whether the large object whose run starts at page `head` is one the
+    // last cycle found dead and the sweep has not yet freed.
+    [[nodiscard]] bool large_dead_pending(uint32_t head) const noexcept;
+    // A large object just allocated (its header written) while the large
+    // objects' phase runs: marked when the sweep has yet to reach it.
+    void note_large_allocated(uintptr_t header) noexcept {
+        if (sweep.large_active && in_large(header) && (header - large_lo) / kPageBytes >= sweep.large_cursor) {
+            auto* h = reinterpret_cast<ObjectHeader*>(header);
+            h->gc_bits = static_cast<uint8_t>(h->gc_bits | kGcLargeMarked);
+        }
+    }
+    // Sweep work until it is all done (true) or `deadline_ns` (gc_now_ns)
+    // passes, making some progress however close the deadline.
+    bool sweep_work(uint64_t deadline_ns);
+    // All of what is left, at once (a cycle's start; a space near its end).
+    void complete_sweep();
+    // The allocator's share: unswept blocks from the bottom until one has
+    // free lines (or is free), at most a few; true when one was found.
+    bool sweep_blocks_for_allocation();
+    // Unswept large objects until a free run of `pages` exists (at most a
+    // few): true when one was made.
+    bool sweep_large_for_allocation(uint32_t pages);
+    // Whether the old generation has eaten into the promotion reserve, the
+    // pending sweep's free memory counted (it finishes the blocks and large
+    // objects first when only they would make the difference).
+    bool old_in_reserve_swept();
 
     // ---- the young generation (heap.cpp) ----
     void reset_eden() noexcept;
@@ -485,6 +595,7 @@ struct GcState {
     // A full collection's cycle: the pauses of its start, its mark slices
     // (and how many) and its finish.
     uint64_t start_ns = 0;
+    uint64_t start_sweep_ns = 0;  // of start_ns: the last cycle's sweep, finished first
     uint64_t mark_ns = 0;
     uint64_t finish_ns = 0;
     uint64_t slices = 0;
@@ -557,6 +668,8 @@ void settle_weakness(GcState& g);
 // heap is destroyed.
 void log_collection(const GcState& g, uint64_t pause_ns);
 void log_summary(const HeapState& s);
+// The line for a lazy sweep once it is done: its time and work, by who did it.
+void log_sweep(const HeapState& s);
 // heap_verify.cpp
 void verify_heap(Heap& heap, const char* when);
 // heap_mark_verify.cpp: at a cycle's finish, once its marking is done (the

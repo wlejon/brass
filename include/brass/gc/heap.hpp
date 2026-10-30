@@ -99,6 +99,11 @@ struct HeapConfig {
     // collecting thread alone. 0: half the hardware threads, at most 8.
     unsigned mark_threads = 0;
     size_t parallel_mark_bytes = size_t{16} << 20;
+    // A full collection's sweep of the old generation is left for after its
+    // pause: done by sweep_slice, by allocation as it needs memory, and
+    // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy
+    // Sweep"). false (or BRASS_GC_EAGER_SWEEP=1): swept inside the pause.
+    bool lazy_sweep = true;
     StressMode stress = StressMode::None;
     bool verify = false;  // verify the heap before and after every collection
     bool poison = false;  // overwrite freed memory with 0xDB after every collection
@@ -122,7 +127,7 @@ struct HeapConfig {
     bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|incremental|1), BRASS_GC_VERIFY=1,
     // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_FIXED_EDEN=1,
-    // BRASS_GC_MARK_THREADS=n and
+    // BRASS_GC_EAGER_SWEEP=1, BRASS_GC_MARK_THREADS=n and
     // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
     // above when set.
     bool read_environment = true;
@@ -156,6 +161,11 @@ struct HeapPressure {
     size_t eden_capacity = 0;
     uint64_t old_growth = 0;      // old-generation bytes added since the last full collection
     uint64_t full_threshold = 0;  // the growth that runs a full collection
+    // The last full collection's sweep still to do (Heap::sweep_slice): the
+    // mature blocks not yet swept (about a microsecond each), and whether
+    // anything at all is left (large objects, memory to hand back).
+    size_t unswept_blocks = 0;
+    bool sweeping = false;
 };
 
 class Heap {
@@ -295,7 +305,20 @@ public:
     [[nodiscard]] bool marking() const noexcept;
     // Finishes the open cycle (marking whatever grey work is left first),
     // then runs the finalizers it queued. No cycle open stops the process.
+    // The old generation's sweep is left pending (HeapConfig::lazy_sweep).
     void finish_marking();
+
+    // ---- Lazy sweep ----------------------------------------------------------
+    // After a full collection (or finish_marking) the dead old objects are
+    // decided, their weak slots, finalizers and hooks settled, but their
+    // memory is freed afterwards: by these slices, by allocation as it needs
+    // blocks or pages, and whatever is left by the next cycle's start, in its
+    // pause. A host sweeps where a pause costs nothing (between frames).
+    // Sweeps for about `budget_ns` (at least a little, however small); true
+    // once nothing is left (at once when nothing was). Not during a collection.
+    bool sweep_slice(uint64_t budget_ns);
+    // Whether some of the last cycle's sweep is left.
+    [[nodiscard]] bool sweeping() const noexcept;
 
     // ---- Barrier -----------------------------------------------------------
     // Every store of a reference into an object that may be old: `object` is
@@ -458,8 +481,10 @@ public:
     [[nodiscard]] static size_t object_size(uintptr_t object) noexcept { return header_of(object)->size; }
     // Whether the object may move in a later collection.
     [[nodiscard]] bool is_movable(uintptr_t object) const noexcept;
-    // Every object the heap holds (live or not yet reclaimed), in no
-    // particular order. `fn` must not allocate on this heap.
+    // Every object the heap holds (live or not yet found dead: an object the
+    // last full collection found dead is not reported while the sweep that
+    // frees it is pending), in no particular order. `fn` must not allocate on
+    // this heap.
     void for_each_object(const std::function<void(uintptr_t object)>& fn) const;
 
     // ---- Modes -------------------------------------------------------------

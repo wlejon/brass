@@ -167,6 +167,7 @@ add_executable(brass_unit_tests
     unit/test_gc_heap_eden.cpp
     unit/test_gc_heap_incremental.cpp
     unit/test_gc_heap_marking_mutator.cpp
+    unit/test_gc_heap_lazy_sweep.cpp
     unit/test_write_barrier_elim.cpp
     differential/test_generational_differential.cpp
     unit/test_tiering.cpp

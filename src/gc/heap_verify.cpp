@@ -49,12 +49,17 @@ bool Heap::is_valid_object(uintptr_t a) const noexcept {
     if (s.in_mature(a)) {
         const uint32_t index = s.block_index(a);
         if (index >= s.blocks.size() || !s.blocks[index]->in_use) return false;
+        const detail::BlockMeta& meta = *s.blocks[index];
         const size_t granule = (a - s.block_base(index)) / kGranuleBytes;
-        return ((s.blocks[index]->starts[granule >> 6] >> (granule & 63)) & 1) != 0;
+        uint64_t word = meta.starts[granule >> 6];
+        // Unswept (heap_sweep_lazy.cpp): only the marked starts are objects.
+        if (s.block_unswept(meta)) word &= meta.marks[granule >> 6];
+        return ((word >> (granule & 63)) & 1) != 0;
     }
     if (s.in_large(a)) {
         const uint32_t head = s.large_head_of(a);
-        return head != UINT32_MAX && a == s.large_lo + static_cast<uintptr_t>(head) * kPageBytes + kHeaderBytes;
+        return head != UINT32_MAX && a == s.large_lo + static_cast<uintptr_t>(head) * kPageBytes + kHeaderBytes &&
+               !s.large_dead_pending(head);
     }
     return false;
 }
@@ -96,14 +101,19 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
         const uint32_t index = s.block_index(a);
         if (index >= s.blocks.size() || !s.blocks[index]->in_use) return 0;
         const uintptr_t lo = s.block_base(index);
+        const BlockMeta& meta = *s.blocks[index];
         const uintptr_t probe = std::min(a + kHeaderBytes, lo + kBlockBytes - kGranuleBytes);
-        const size_t bit = find_prev_bit(s.blocks[index]->starts, (probe - lo) / kGranuleBytes, 1);
+        const size_t bit = find_prev_bit(meta.starts, (probe - lo) / kGranuleBytes, 1);
         if (bit == SIZE_MAX) return 0;
+        // In an unswept block (heap_sweep_lazy.cpp) the nearest start may be
+        // an object the last cycle found dead: objects never overlap, so an
+        // address inside it lies in no live one.
+        if (s.block_unswept(meta) && ((meta.marks[bit >> 6] >> (bit & 63)) & 1) == 0) return 0;
         return inside(lo + bit * kGranuleBytes);
     }
     if (s.in_large(a)) {
         const uint32_t head = s.large_head_of(a);
-        if (head == UINT32_MAX) return 0;
+        if (head == UINT32_MAX || s.large_dead_pending(head)) return 0;
         return inside(s.large_lo + static_cast<uintptr_t>(head) * kPageBytes + kHeaderBytes);
     }
     return 0;
@@ -189,11 +199,20 @@ void Heap::for_each_object(const std::function<void(uintptr_t)>& fn) const {
     for (size_t i = 0; i < s.blocks.size(); ++i) {
         const detail::BlockMeta& meta = *s.blocks[i];
         if (!meta.in_use) continue;
+        if (s.block_unswept(meta)) {
+            // The last cycle's dead are not objects any more (heap_sweep_lazy.cpp).
+            uint64_t live[detail::kStartWordsPerBlock];
+            for (size_t w = 0; w < detail::kStartWordsPerBlock; ++w) live[w] = meta.starts[w] & meta.marks[w];
+            walk_bits(live, 0, kGranulesPerBlock, s.block_base(static_cast<uint32_t>(i)));
+            continue;
+        }
         walk_bits(meta.starts, 0, kGranulesPerBlock, s.block_base(static_cast<uint32_t>(i)));
     }
     std::vector<uint32_t> heads;
     heads.reserve(s.large_objects.size());
-    for (const auto& entry : s.large_objects) heads.push_back(entry.first);
+    for (const auto& entry : s.large_objects) {
+        if (!s.large_dead_pending(entry.first)) heads.push_back(entry.first);
+    }
     for (uint32_t head : heads) fn(s.large_lo + static_cast<uintptr_t>(head) * kPageBytes + kHeaderBytes);
 }
 

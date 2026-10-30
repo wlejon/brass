@@ -2,6 +2,9 @@
 // of 256-byte lines, bump allocation into runs of free lines, reclaimed a
 // line at a time after a full collection) and the large-object space (page
 // runs, one object each, reclaimed whole). Objects in either never move.
+// Their sweep after a marking cycle is heap_sweep_lazy.cpp; while it is
+// pending the allocator here takes only swept blocks and free page runs,
+// sweeping a few more itself when it finds none.
 
 #include "heap_internal.hpp"
 
@@ -12,14 +15,12 @@ namespace brass::gc::detail {
 
 namespace {
 
-constexpr size_t kRetainedFreeBlocks = 64;
 // Bytes of freed large-object pages kept committed at least: a reused run
 // then costs no VirtualAlloc / mprotect and no fresh page faults. Up to the
 // full-collection threshold is kept, the old bytes one cycle allocates, so
 // a program whose large garbage dies every cycle commits nothing in steady
 // state.
 constexpr size_t kRetainedLargeBytes = size_t{8} << 20;
-constexpr uint8_t kPoisonByte = 0xDB;
 
 } // namespace
 
@@ -46,6 +47,17 @@ void HeapState::mark_lines(BlockMeta& meta, uintptr_t block_lo, uintptr_t header
 }
 
 uint32_t HeapState::acquire_free_block() {
+    // While the last cycle's sweep is pending, some unswept blocks are free
+    // ones the eager sweep would have listed: a few are looked at before a
+    // fresh block is taken from the frontier, and all of them before the
+    // allocation is refused for the promotion reserve or the reservation's
+    // end.
+    if (sweep.low < sweep.high) {
+        if (free_blocks.empty()) sweep_blocks_for_allocation();
+        const bool at_reserve = !collecting && mature_blocks_available() <= reserve_mature_blocks;
+        const bool at_end = free_blocks.empty() && (blocks.size() + 1) * kBlockBytes > mature_reserve;
+        if (at_reserve || at_end) complete_sweep();
+    }
     // The last `reserve_mature_blocks` are a collection's (the promotion reserve).
     if (!collecting && mature_blocks_available() <= reserve_mature_blocks) return UINT32_MAX;
     uint32_t index;
@@ -64,6 +76,9 @@ uint32_t HeapState::acquire_free_block() {
         meta.committed = true;
     }
     meta.in_use = true;
+    // A free block holds nothing to sweep: swept as of this sweep, so the
+    // pending sweep passes over it and what is allocated into it stays.
+    meta.sweep_epoch = sweep.epoch;
     return index;
 }
 
@@ -91,7 +106,11 @@ bool HeapState::refill_region(BumpRegion& region, bool whole_block) {
                 return true;
             }
         }
-        // The next block with holes, else a free one (a single hole).
+        // The next block with holes, else a free one (a single hole). With
+        // the last cycle's sweep pending, holes may be in unswept blocks:
+        // the allocator sweeps a few (a block it takes is always swept, so
+        // nothing is allocated over an object the sweep has yet to judge).
+        if (recyclable_blocks.empty() && sweep.low < sweep.high) (void)sweep_blocks_for_allocation();
         if (!recyclable_blocks.empty()) {
             region.block = recyclable_blocks.back();
             recyclable_blocks.pop_back();
@@ -131,18 +150,35 @@ uintptr_t HeapState::mature_allocate(size_t total) {
 uintptr_t HeapState::large_allocate(size_t total) {
     const uint32_t pages = static_cast<uint32_t>((total + kPageBytes - 1) / kPageBytes);
     // The promotion reserve: the last `reserve_large_bytes` are a collection's.
-    if (!collecting && large_used_bytes + static_cast<size_t>(pages) * kPageBytes + reserve_large_bytes > large_reserve) {
-        return 0;
-    }
-    uint32_t start = UINT32_MAX;
-    for (auto it = large_free_runs.begin(); it != large_free_runs.end(); ++it) {
-        if (it->second >= pages) {
-            start = it->first;
-            const uint32_t rest = it->second - pages;
-            large_free_runs.erase(it);
-            if (rest) large_free_runs.emplace(start + pages, rest);
-            break;
+    // Dead objects the pending sweep has not freed count as used until it
+    // does, so it is finished first when they would make the difference.
+    const auto over_reserve = [&] {
+        return !collecting &&
+               large_used_bytes + static_cast<size_t>(pages) * kPageBytes + reserve_large_bytes > large_reserve;
+    };
+    if (over_reserve() && sweep.large_active) complete_sweep();
+    if (over_reserve()) return 0;
+    const auto take_run = [&]() -> uint32_t {
+        for (auto it = large_free_runs.begin(); it != large_free_runs.end(); ++it) {
+            if (it->second >= pages) {
+                const uint32_t at = it->first;
+                const uint32_t rest = it->second - pages;
+                large_free_runs.erase(it);
+                if (rest) large_free_runs.emplace(at + pages, rest);
+                return at;
+            }
         }
+        return UINT32_MAX;
+    };
+    uint32_t start = take_run();
+    // No free run fits: the pending sweep may free one (a few objects are
+    // looked at) before the frontier grows, and must free what it can before
+    // the allocation fails at the reservation's end.
+    if (start == UINT32_MAX && sweep.large_active && sweep_large_for_allocation(pages)) start = take_run();
+    if (start == UINT32_MAX && sweep.large_active &&
+        (static_cast<size_t>(large_frontier) + pages) * kPageBytes > large_reserve) {
+        complete_sweep();
+        start = take_run();
     }
     if (start == UINT32_MAX) {
         if ((static_cast<size_t>(large_frontier) + pages) * kPageBytes > large_reserve) return 0;
@@ -174,7 +210,7 @@ uintptr_t HeapState::large_allocate(size_t total) {
     return header;
 }
 
-void HeapState::free_large(uint32_t head, uint32_t pages) {
+uint32_t HeapState::free_large(uint32_t head, uint32_t pages) {
     const uintptr_t header = large_lo + static_cast<uintptr_t>(head) * kPageBytes;
     const size_t bytes = static_cast<size_t>(pages) * kPageBytes;
     const size_t retain_cap = std::max<size_t>(kRetainedLargeBytes, static_cast<size_t>(full_threshold));
@@ -203,6 +239,7 @@ void HeapState::free_large(uint32_t head, uint32_t pages) {
         large_free_runs.erase(next);
     }
     large_free_runs.emplace(start, count);
+    return count;
 }
 
 uint32_t HeapState::large_head_of(uintptr_t address) const noexcept {
@@ -210,108 +247,6 @@ uint32_t HeapState::large_head_of(uintptr_t address) const noexcept {
     if (page >= large_page_head.size()) return UINT32_MAX;
     const uint32_t v = large_page_head[page];
     return v == 0 ? UINT32_MAX : v - 1;
-}
-
-uint64_t HeapState::sweep_old() {
-    small_region = BumpRegion{};
-    medium_region = BumpRegion{};
-    free_blocks.clear();
-    recyclable_blocks.clear();
-    mature_used_lines = 0;
-
-    for (size_t i = blocks.size(); i-- > 0;) {
-        BlockMeta& meta = *blocks[i];
-        const uint32_t index = static_cast<uint32_t>(i);
-        if (!meta.in_use) {
-            free_blocks.push_back(index);
-            continue;
-        }
-        const uintptr_t lo = block_base(index);
-        for (size_t w = 0; w < kStartWordsPerBlock; ++w) {
-            uint64_t dead = meta.starts[w] & ~meta.marks[w];
-            if (poison) {
-                while (dead) {
-                    const unsigned bit = ctz64(dead);
-                    dead &= dead - 1;
-                    const uintptr_t payload = lo + (w * 64 + bit) * kGranuleBytes;
-                    const size_t size = header_of(payload)->size;
-                    std::memset(reinterpret_cast<void*>(payload - kHeaderBytes), kPoisonByte, size + kHeaderBytes);
-                }
-            }
-            meta.starts[w] &= meta.marks[w];
-            meta.marks[w] = 0;
-        }
-        std::memcpy(meta.line_used, meta.line_mark, kLinesPerBlock);
-        std::memset(meta.line_mark, 0, kLinesPerBlock);
-        size_t used = 0;  // line marks are 0 or 1, so a word's popcount counts its lines
-        for (size_t l = 0; l < kLinesPerBlock; l += 8) {
-            uint64_t word;
-            std::memcpy(&word, meta.line_used + l, 8);
-            used += popcount64(word);
-        }
-        mature_used_lines += used;
-        if (used == 0) {
-            meta.in_use = false;
-            free_blocks.push_back(index);
-        } else if (used < kLinesPerBlock) {
-            recyclable_blocks.push_back(index);
-        }
-    }
-    // Both lists run from the highest block down, so popping from the back
-    // hands out the lowest addresses first. Free blocks past the retained
-    // ones (the highest) go back to the OS; they stay on the list and are
-    // committed again when reused. The retained count scales with the blocks
-    // in use, so a heap that promotes steadily is not decommitting and
-    // recommitting the same blocks at every full collection; runs of
-    // adjacent blocks go back in one call. The blocks one cycle's old
-    // allocation fills before the next full collection are kept too, else a
-    // program allocating old garbage (a runtime that allocates its objects
-    // pinned) page-faults a fresh block for every 32 KiB it allocates.
-    const size_t in_use = blocks.size() - free_blocks.size();
-    const size_t retained = std::max({kRetainedFreeBlocks, in_use / 4,
-                                      static_cast<size_t>(config.min_full_threshold_bytes / kBlockBytes)});
-    if (free_blocks.size() > retained) {
-        const size_t release = free_blocks.size() - retained;
-        size_t k = 0;
-        while (k < release) {
-            if (!blocks[free_blocks[k]]->committed) {
-                ++k;
-                continue;
-            }
-            const uint32_t high = free_blocks[k];
-            uint32_t low = high;
-            blocks[low]->committed = false;
-            while (k + 1 < release && free_blocks[k + 1] == low - 1 && blocks[low - 1]->committed) {
-                ++k;
-                --low;
-                blocks[low]->committed = false;
-            }
-            vm_decommit(reinterpret_cast<void*>(block_base(low)), static_cast<size_t>(high - low + 1) * kBlockBytes);
-            ++k;
-        }
-    }
-    if (poison) {
-        for (uint32_t index : free_blocks) {
-            if (blocks[index]->committed) {
-                std::memset(reinterpret_cast<void*>(block_base(index)), kPoisonByte, kBlockBytes);
-            }
-        }
-    }
-
-    std::vector<std::pair<uint32_t, uint32_t>> dead_large;
-    for (auto& [head, pages] : large_objects) {
-        auto* header = reinterpret_cast<ObjectHeader*>(large_lo + static_cast<uintptr_t>(head) * kPageBytes);
-        if (header->gc_bits & kGcLargeMarked) {
-            header->gc_bits = static_cast<uint8_t>(header->gc_bits & ~kGcLargeMarked);
-        } else {
-            dead_large.emplace_back(head, pages);
-        }
-    }
-    for (auto [head, pages] : dead_large) {
-        large_objects.erase(head);
-        free_large(head, pages);
-    }
-    return mature_used_lines * kLineBytes + large_used_bytes;
 }
 
 } // namespace brass::gc::detail
