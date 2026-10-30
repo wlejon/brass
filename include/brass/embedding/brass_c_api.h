@@ -77,7 +77,8 @@ BRASS_API void BRASS_CALL brass_heap_remove_root(brass_heap_t* heap, uint64_t* s
 // The barrier for a store of `value` into the object at `object`.
 BRASS_API void BRASS_CALL brass_heap_write_barrier(brass_heap_t* heap, uintptr_t object, uint64_t value);
 // Stress mode: 0 off, 1 a young collection at every allocation, 2 a full
-// one, 3 alternating.
+// one, 3 alternating, 4 a marking cycle always open (slices and young
+// collections inside it).
 BRASS_API void BRASS_CALL brass_heap_set_stress(brass_heap_t* heap, int mode);
 BRASS_API int BRASS_CALL brass_heap_get_stress(const brass_heap_t* heap);
 BRASS_API size_t BRASS_CALL brass_heap_collection_count(const brass_heap_t* heap);

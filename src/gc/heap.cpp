@@ -59,6 +59,7 @@ void apply_environment(HeapConfig& config) {
     if (stress == "minor" || stress == "1") config.stress = StressMode::Minor;
     else if (stress == "full") config.stress = StressMode::Full;
     else if (stress == "alternate") config.stress = StressMode::Alternate;
+    else if (stress == "incremental") config.stress = StressMode::Incremental;
     else if (stress == "0" || stress == "none") config.stress = StressMode::None;
     const std::string verify = env_value("BRASS_GC_VERIFY");
     if (!verify.empty() && verify != "0") config.verify = true;
@@ -126,6 +127,7 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     heap_lo_ = s.base;
     heap_span_ = s.reserve_bytes;
     cards_ = s.cards;
+    set_barrier_marking(false);
 
     // What one collection could promote, doubled for fragmentation, held back
     // from the mutator (HeapState::reserve_mature_blocks); never more than a
@@ -210,10 +212,11 @@ void HeapState::update_fast_limit() noexcept {
     // limit takes effect there with no change to the code. `end` is never
     // below `top`: an object allowed past eden_limit (Heap::allocate_at) puts
     // `top` above it, and the bump path computes end - top unsigned. Stress
-    // mode and an open marking cycle (where allocating is an error, caught
-    // in allocate_at) shut it, so every allocation reaches the runtime.
+    // mode shuts it, so every allocation reaches the runtime. An open marking
+    // cycle does not: young allocation is the same during one (young objects
+    // are never marked; minor collections and the finish trace them).
     const uintptr_t top = heap.alloc_->top;
-    const bool shut = stress != StressMode::None || mark_phase == MarkPhase::Marking;
+    const bool shut = stress != StressMode::None;
     heap.alloc_->end = shut ? top : std::max(top, eden_limit);
 }
 
@@ -367,13 +370,6 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         detail::gc_fatal("allocation during a collection (a trace function, root source or "
                          "post-collection hook allocated on the heap it runs for)");
     }
-    // An object allocated while a cycle is open would be neither marked nor
-    // scanned by it (nothing allocates black or shades yet), so finish would
-    // sweep it or what it points at: a hard error until that is supported.
-    if (s.mark_phase != detail::MarkPhase::Idle) {
-        detail::gc_fatal("allocation while a marking cycle is open (Heap::start_marking): nothing may allocate "
-                         "or collect before finish_marking");
-    }
     if (bytes > (size_t{1} << 31)) throw std::bad_alloc();
     const size_t payload = payload_bytes_for(bytes);
     const size_t total = payload + kHeaderBytes;
@@ -384,11 +380,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
     MutatorFrame frame(s, caller_fp, caller_ip);
 
     if (s.stress != StressMode::None) {
-        ++s.stress_counter;
-        const bool full = s.stress == StressMode::Full ||
-                          (s.stress == StressMode::Alternate && (s.stress_counter & 7) == 0);
-        s.trigger = detail::GcTrigger::Stress;
-        collect_at(full ? CollectionKind::Full : CollectionKind::Minor, 0, 0);
+        stress_step(0, 0);
     } else if (s.full_requested) {
         s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Full, 0, 0);
@@ -428,6 +420,12 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         if (zero) std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
         s.old_allocated_since_full += total;
         s.old_direct_bytes += total;
+        // While a cycle is open a new old object is live to it (grey: the
+        // marker scans it once its caller has filled it, at a later GC
+        // point) and its card dirty, so a caller that fills it with stores
+        // the barrier never sees (a frame, B13 in the design) has them
+        // rescanned by the next minor collection too.
+        if (s.mark_phase == detail::MarkPhase::Marking) Collector::allocated_old(*this, header + kHeaderBytes);
         return header + kHeaderBytes;
     }
 
@@ -514,11 +512,7 @@ void Heap::safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip) {
     HeapState& s = *s_;
     if (s.collecting) return;
     if (s.stress != StressMode::None) {
-        ++s.stress_counter;
-        const bool full = s.stress == StressMode::Full ||
-                          (s.stress == StressMode::Alternate && (s.stress_counter & 7) == 0);
-        s.trigger = detail::GcTrigger::Stress;
-        collect_at(full ? CollectionKind::Full : CollectionKind::Minor, caller_fp, caller_ip);
+        stress_step(caller_fp, caller_ip);
     } else if (s.full_requested) {
         s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Full, caller_fp, caller_ip);
@@ -526,6 +520,20 @@ void Heap::safepoint_at(uintptr_t caller_fp, uintptr_t caller_ip) {
         s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Minor, caller_fp, caller_ip);
     }
+}
+
+void Heap::stress_step(uintptr_t caller_fp, uintptr_t caller_ip) {
+    HeapState& s = *s_;
+    ++s.stress_counter;
+    s.trigger = detail::GcTrigger::Stress;
+    if (s.stress == StressMode::Incremental) {
+        MutatorFrame frame(s, caller_fp, caller_ip);
+        Collector::stress_incremental(*this);
+        return;
+    }
+    const bool full = s.stress == StressMode::Full ||
+                      (s.stress == StressMode::Alternate && (s.stress_counter & 7) == 0);
+    collect_at(full ? CollectionKind::Full : CollectionKind::Minor, caller_fp, caller_ip);
 }
 
 void Heap::request_collection(CollectionKind kind) noexcept {

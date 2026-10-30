@@ -2,8 +2,9 @@
 // their draining. The cycle around it (roots, slices, the ephemeron fixpoint,
 // finishing) is heap_mark_incremental.cpp.
 //
-// While it runs the young generation is empty (heap_collect.cpp), so marking
-// moves nothing, allocates nothing and writes no slot: it sets mark bits (a
+// It traces the old generation only (young referents are the minor
+// collections'), so marking moves nothing, allocates nothing and writes no
+// slot: it sets mark bits (a
 // mature object's in its block's side bitmap, a large object's in its header)
 // and, as each marked object is scanned, the line marks the sweep reclaims
 // by. That makes it safe to spread over several threads: a mark bit is
@@ -118,8 +119,11 @@ void mark_ephemeron(Tracer& t, uint64_t* key, uint64_t* value, uint64_t cleared_
     const uint64_t word = *key;
     const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
     const Heap& heap = w.sh.heap;
-    // A key that is no reference, or names no old object (the young
-    // generation is empty by now), cannot die here.
+    // A key that is no reference, or names no old object, cannot die here.
+    // A young key counts as alive: the marker leaves the young generation to
+    // the minor collections, and the finish's evacuation clears an entry
+    // whose young key dies (its owner names a young object, so its card is
+    // dirty). Its value is kept for this cycle at worst.
     if (a == 0 || !heap.contains(a) || !heap.is_reference_tag(word) || heap.is_young(a) ||
         is_marked(w.sh.s, a)) {
         t.visit(value);

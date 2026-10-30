@@ -111,7 +111,14 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
 
 } // namespace detail
 
-void Heap::remember_interior(uintptr_t address) noexcept {
+void Heap::remember_interior(uintptr_t address, uint64_t value) noexcept {
+    // An old value reaches here only while a cycle is open (the barrier's
+    // value range is the young generation otherwise): it is shaded, and no
+    // card is needed for it.
+    if (!is_young(static_cast<uintptr_t>(value & kAddressMask))) {
+        shade_stored(value);
+        return;
+    }
     HeapState& s = *s_;
     if (s.in_large(address)) {
         // No object search: the page table names the object, and the slot's

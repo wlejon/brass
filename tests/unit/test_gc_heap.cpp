@@ -508,7 +508,7 @@ TEST_CASE("gc::Heap - poison mode overwrites evacuated memory") {
 }
 
 TEST_CASE("gc::Heap - every stress mode keeps a mutating graph intact") {
-    for (StressMode mode : {StressMode::Minor, StressMode::Full, StressMode::Alternate}) {
+    for (StressMode mode : {StressMode::Minor, StressMode::Full, StressMode::Alternate, StressMode::Incremental}) {
         HeapConfig c = small_config();
         c.stress = mode;
         c.verify = mode != StressMode::Full;  // full-stress verification is quadratic; covered below
@@ -527,7 +527,10 @@ TEST_CASE("gc::Heap - every stress mode keeps a mutating graph intact") {
         build_chain(h, &root, 100);
         chain_sum(root, &len);
         CHECK_EQ(len, size_t{250});
-        CHECK(h.collection_count() >= 400);
+        // Incremental: a collection every fourth step, a cycle every eleventh
+        // or so (its start, seven slices, minors among them, its finish).
+        CHECK(h.collection_count() >= (mode == StressMode::Incremental ? 100u : 400u));
+        if (mode == StressMode::Incremental) CHECK(h.stats().full_collections >= 20);
         h.verify();
         h.remove_root(&root);
     }

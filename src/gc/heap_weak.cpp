@@ -11,6 +11,11 @@
 // In a minor collection an old owner of a weak slot or ephemeron that still
 // names a young object afterwards keeps its card dirty, exactly as for a
 // strong slot, so the next minor collection revisits it.
+//
+// While a marking cycle is open a minor collection also meets old targets;
+// an old owner's are handed to the cycle (cycle_note_weak and
+// cycle_note_ephemeron), which settles them at its finish with the ones its
+// marker met.
 
 #include "heap_internal.hpp"
 
@@ -23,6 +28,16 @@ void weak_visit(Tracer& t, uint64_t* slot, uint64_t cleared) {
     }
     GcState& g = *static_cast<GcState*>(t.state());
     if (!g.heap.is_reference_tag(*slot)) return;
+    // A minor collection during a marking cycle meets old targets too (its
+    // range is the heap). It cannot decide them; the cycle does, by its mark
+    // bits at the finish. An old owner's slot goes to the cycle, since its
+    // owner may be one the marker scanned before the slot was written. A
+    // young owner's or a root's is met again (by a later minor collection,
+    // the finish's evacuation or its root visit), so it is left alone.
+    if (g.shade && !g.heap.is_young(static_cast<uintptr_t>(*slot & kAddressMask))) {
+        if (t.owner_old()) cycle_note_weak(g.s, WeakEntry{slot, cleared, t.owner(), true});
+        return;
+    }
     g.weak.push_back(WeakEntry{slot, cleared, t.owner(), t.owner_old()});
 }
 
@@ -38,6 +53,21 @@ void ephemeron_visit(Tracer& t, uint64_t* key, uint64_t* value, uint64_t cleared
     const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
     if (a == 0 || !g.heap.contains(a) || !g.heap.is_reference_tag(word)) {
         t.visit(value);  // not a reference: the key cannot die
+        return;
+    }
+    if (g.shade && !g.heap.is_young(a)) {
+        // An old key during a marking cycle (see weak_visit): marked, it is
+        // alive. Unmarked, an old owner's entry is the cycle's to decide; its
+        // value is traced now only if young, since this collection must move
+        // it either way. A young owner's or a root's entry is met again, so
+        // its value is traced as a minor collection always has (old keys
+        // count as alive), shading it: kept for this cycle at worst.
+        if (!is_marked(g.s, a) && t.owner_old()) {
+            cycle_note_ephemeron(g.s, EphemeronEntry{key, value, cleared_key, cleared_value, t.owner(), true});
+            if (g.heap.holds_young(*value)) t.visit(value);
+            return;
+        }
+        t.visit(value);
         return;
     }
     const uintptr_t live = live_address(g, a);

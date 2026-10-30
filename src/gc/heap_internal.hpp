@@ -5,8 +5,9 @@
 // heap_spaces.cpp (the mature blocks and the large-object space),
 // heap_collect.cpp (the collections), heap_mark.cpp and
 // heap_mark_incremental.cpp (the old generation's marking and its cycle),
-// heap_weak.cpp (weak slots, ephemerons, finalizers) and heap_verify.cpp
-// (verification, walking, poisoning).
+// heap_weak.cpp (weak slots, ephemerons, finalizers), heap_verify.cpp
+// (verification, walking, poisoning) and heap_mark_verify.cpp (a marking
+// cycle's check against a fresh mark).
 
 #include <brass/gc/heap.hpp>
 #include <bit>
@@ -244,10 +245,11 @@ struct HeapState {
     uintptr_t mutator_ip = 0;
 
     // The marking cycle, from start_marking (or a full collection's start)
-    // to its finish. Until the write barrier shades old referents (not yet),
-    // nothing may allocate or collect while one is open: the inline
-    // allocation path is shut (update_fast_limit) and the runtime's paths
-    // stop the process.
+    // to its finish. While it is Marking the mutator runs: the barrier's
+    // value range covers the heap (Heap::set_barrier_marking), minor
+    // collections shade (GcState::shade) and old allocation is grey. It
+    // changes only at a GC point: the cycle's start and finish, each a
+    // collection of its own.
     MarkPhase mark_phase = MarkPhase::Idle;
     std::unique_ptr<MarkCycle, MarkCycleDeleter> cycle;
 
@@ -459,6 +461,11 @@ struct GcState {
     uintptr_t from_top = 0;     // the from-survivor space's top then
     unsigned tenure_age = 1;    // a minor collection promotes survivors that reach this age
     bool survivor_overflow = false;  // a survivor too young to promote did not fit
+    // A minor collection (or a cycle's finishing evacuation) while a marking
+    // cycle is open: its tracer's range is the whole heap, every old object
+    // it reaches or promotes is shaded, and a weak slot or ephemeron of an
+    // old object naming an old target is left to the cycle (heap_weak.cpp).
+    bool shade = false;
     std::vector<uintptr_t> gray;
     std::vector<WeakEntry> weak;
     std::vector<EphemeronEntry> ephemerons;  // keys not (yet) known alive
@@ -514,9 +521,9 @@ private:
 // A full collection's phases around the marking (heap_collect.cpp). Sets up
 // `g` for a collection starting now and marks the heap as collecting:
 void begin_collection(GcState& g);
-// first, the young generation emptied into the old one, every survivor
-// promoted;
-void full_evacuate(GcState& g, PhaseClock& clock);
+// the young generation emptied into the old one, every survivor promoted
+// (`shade`: during an open cycle, shading what it reaches; GcState::shade);
+void full_evacuate(GcState& g, PhaseClock& clock, bool shade);
 // last, with the marking done and its weak slots, dead ephemerons and totals
 // in `g`: weakness settled, hooks run, the old generation swept, the young
 // spaces reset and the next threshold set.
@@ -552,6 +559,30 @@ void log_collection(const GcState& g, uint64_t pause_ns);
 void log_summary(const HeapState& s);
 // heap_verify.cpp
 void verify_heap(Heap& heap, const char* when);
+// heap_mark_verify.cpp: at a cycle's finish, once its marking is done (the
+// young generation empty), marks from the roots afresh into a side set and
+// stops the process if it reaches an object the cycle left unmarked (a store
+// no barrier shaded). Under verification only.
+void verify_cycle_marks(Heap& heap);
+
+// The open marking cycle's side of the mutator and the minor collections
+// (heap_mark_incremental.cpp). Each needs a cycle open (a hard error
+// otherwise) and none collects or allocates on the heap.
+//
+// Marks old object `a` and pushes it grey (the cycle's first worker's
+// stack), unless it is marked already or is no object's start (a value a
+// barrier saw stored in a slot no layout traces). Never while the marker's
+// threads drain: shading runs on the heap's thread between slices, and from
+// minor collections, which never overlap a slice.
+void shade(HeapState& s, uintptr_t a) noexcept;
+// A weak slot or ephemeron of an old object, met by a minor collection
+// during the cycle, whose target is old: decided at the finish by the mark
+// bits, with the ones the marker met (an old object never moves, so the
+// slot is still there then).
+void cycle_note_weak(HeapState& s, const WeakEntry& entry);
+void cycle_note_ephemeron(HeapState& s, const EphemeronEntry& entry);
+// Whether old object `a` is marked by the open cycle (heap_mark.cpp).
+bool is_marked(const HeapState& s, uintptr_t a) noexcept;
 // The payload address of the object whose header or payload holds `a`, or 0.
 // With `accept_forwarded`, also a young object a collection already copied
 // (its header's size is intact): a derived root's base during a collection.
@@ -565,15 +596,29 @@ struct Collector {
     // end_cycle with nothing in between; Heap::start_marking and the rest
     // run the same steps as separate calls.
     static void collect_full(Heap& heap);
-    // The young generation emptied, the roots grey; the cycle is Marking.
-    static void start_cycle(Heap& heap);
+    // The roots' old referents grey; the cycle is Marking, and the mutator
+    // may run until finish_cycle. `evacuate`: the young generation emptied
+    // first, for a cycle run back to back (collect_full), whose finish then
+    // has nothing to evacuate or rescan.
+    static void start_cycle(Heap& heap, bool evacuate);
     // Grey work until it is gone, the ephemerons included, or `deadline_ns`
     // (gc_now_ns) passes. True when it is gone.
     static bool mark_cycle(Heap& heap, uint64_t deadline_ns);
-    // The rest of the grey work, then full_reclaim; the cycle is Idle after.
-    static void finish_cycle(Heap& heap);
+    // `rescan` (a mutator ran since the start): the young generation emptied
+    // by a shading evacuation and the roots visited again. Then the rest of
+    // the grey work and full_reclaim; the cycle is Idle after.
+    static void finish_cycle(Heap& heap, bool rescan);
     // Records the finished cycle (record_collection) and drops its state.
     static void end_cycle(Heap& heap, uint64_t pause_ns, uint64_t longest_ns);
+    // finish_cycle and end_cycle for a cycle a host started, timed as one of
+    // its pauses: finish_marking, and a full collection asked for while the
+    // cycle is open.
+    static void finish_open_cycle(Heap& heap);
+    // An old object the mutator allocated while the cycle is open: grey, and
+    // its card dirty.
+    static void allocated_old(Heap& heap, uintptr_t object) noexcept;
+    // StressMode::Incremental's step at an allocation or safepoint.
+    static void stress_incremental(Heap& heap);
     static HeapState& state(const Heap& heap) noexcept { return *heap.s_; }
     static Heap::AllocationBuffer& buffer(Heap& heap) noexcept { return *heap.alloc_; }
     static size_t max_young_total(const Heap& heap) noexcept { return heap.max_young_total_; }

@@ -17,7 +17,10 @@
 // the old generation is swept: unmarked objects' lines and pages are
 // reclaimed without moving anything. The three run as a marking cycle
 // (heap_mark_incremental.cpp: start, slices, finish), back to back here, or
-// as separate calls through Heap::start_marking and the rest.
+// as separate calls through Heap::start_marking and the rest, with the
+// mutator and minor collections running between them; then the evacuation
+// moves to the finish, and while the cycle is open a minor collection shades
+// every old object it reaches or promotes (GcState::shade).
 //
 // Every phase traces through a Tracer with a mode-specific slow path, and
 // each settles weak slots, ephemerons and finalizers the same way
@@ -69,6 +72,12 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     if (!promoted) bits = static_cast<uint8_t>(bits | (age << kGcAgeShift));
     nh->gc_bits = bits;
     const uintptr_t moved = dest + kHeaderBytes;
+    // Promoted during a marking cycle: marked as it is copied, and grey, not
+    // black. This collection's scan of it shades its old referents, but
+    // through a Minor tracer, and a host's trace function may visit more
+    // for a full collection's (a prototype held through an off-heap shape):
+    // the marker scans it again as a full collection would.
+    if (promoted && g.shade) shade(s, moved);
     if (promoted) {
         g.promoted_bytes += total;
         ++g.promoted_objects;
@@ -95,6 +104,19 @@ void minor_visit(Tracer& t, uint64_t* slot, uint64_t word) {
         const ObjectHeader* h = header_of(a);
         now = h->forwarded() ? *reinterpret_cast<const uintptr_t*>(a) : evacuate_young(g, a);
         *slot = (word & ~kAddressMask) | now;
+    } else if (g.shade && !g.heap.is_young(a)) {
+        // While a cycle is open the range is the heap, and an old object an
+        // old one names is shaded: a dirty card's slot (an unbarriered store
+        // into an object allocated in the cycle, or a bulk copy), which this
+        // collection cleans and the finish then no longer sees, and a
+        // promoted object's. What a root or a young object names is not:
+        // the finish visits every root again and promotes every live young
+        // object grey, so it reaches what they still hold then. Shading it
+        // here would keep alive what they held only for a moment (a
+        // WeakRef's target on the kept-objects list until the job's end,
+        // say), and with a cycle open most of the time, in every cycle.
+        if (t.owner_old()) shade(g.s, a);
+        return;
     }
     if (t.owner_old() && g.heap.is_young(now)) g.s.remember_slot(t.owner(), slot);
 }
@@ -112,8 +134,10 @@ void drain(Tracer& t, GcState& g) {
 // state; its phases are timed into `clock`'s collection.
 void evacuate(GcState& young, PhaseClock& clock) {
     HeapState& s = young.s;
-    Tracer t(young.heap, Tracer::Purpose::Minor, young.heap.young_base(),
-             young.heap.young_base() + young.heap.young_span(), &minor_visit, &weak_visit, &ephemeron_visit,
+    // Shading, old references reach minor_visit too: the range is the heap.
+    const uintptr_t lo = young.shade ? young.heap.reservation_base() : young.heap.young_base();
+    const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
+    Tracer t(young.heap, Tracer::Purpose::Minor, lo, lo + span, &minor_visit, &weak_visit, &ephemeron_visit,
              &young);
     visit_roots(s, t);
     clock.lap(kPhaseRoots);
@@ -153,6 +177,7 @@ void minor(GcState& g) {
     // (HeapState::adapt_eden_limit), and promote_all would tenure them unseen.
     const bool shrunk = s.eden_limit < s.eden_hi;
     g.tenure_age = s.promote_all && !shrunk ? 1u : s.config.tenure_age;
+    g.shade = s.mark_phase == MarkPhase::Marking;
     evacuate(g, clock);
     run_hooks(g);
     clock.lap(kPhaseHooks);
@@ -188,9 +213,10 @@ void minor(GcState& g) {
 
 } // namespace
 
-// A full collection's phase 1: the young generation, emptied into the old
-// one. Phase 2, the marking, is heap_mark_incremental.cpp's cycle.
-void full_evacuate(GcState& g, PhaseClock& clock) {
+// A full collection's young generation, emptied into the old one: at its
+// start when it runs back to back, at its finish when a mutator ran between
+// (heap_mark_incremental.cpp).
+void full_evacuate(GcState& g, PhaseClock& clock, bool shade) {
     HeapState& s = g.s;
     GcState young(s, g.heap, CollectionKind::Minor);
     young.from = g.from;
@@ -198,6 +224,7 @@ void full_evacuate(GcState& g, PhaseClock& clock) {
     young.eden_top = g.eden_top;
     young.from_top = g.from_top;
     young.tenure_age = 1;
+    young.shade = shade;
     evacuate(young, clock);
     g.copied_bytes += young.copied_bytes;
     g.copied_objects += young.copied_objects;
@@ -323,8 +350,8 @@ uintptr_t live_address(const GcState& g, uintptr_t a) noexcept {
         const ObjectHeader* h = header_of(a);
         if (!h->forwarded()) return 0;
         a = *reinterpret_cast<const uintptr_t*>(a);
-        // A full collection promoted it first; whether it lives is the mark
-        // of its old copy.
+        // A full collection promoted it (at its start, or at a cycle's
+        // finish); whether it lives is the mark of its old copy.
         if (g.kind == CollectionKind::Minor || g.heap.is_young(a)) return a;
     }
     if (g.kind == CollectionKind::Minor) return a;
@@ -435,12 +462,16 @@ void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns)
 
 void Collector::collect(Heap& heap, CollectionKind kind) {
     HeapState& s = state(heap);
-    // Until minor collections shade the old objects they reach (and the
-    // barrier the ones stored), a collection inside an open cycle would
-    // leave live old objects white: a hard error, not a lost object.
-    if (s.mark_phase != MarkPhase::Idle) {
-        gc_fatal("a collection while a marking cycle is open (Heap::start_marking): nothing may allocate "
-                 "or collect before finish_marking");
+    // A full collection asked for while a cycle is open finishes the cycle,
+    // which is a full collection. What the cycle marked includes what died
+    // since it started (floating garbage), so a caller that wants that gone
+    // too (collect(Full), an exhausted reservation, stress) then gets a whole
+    // collection; old-generation growth, which only asks for room, does not.
+    if (kind == CollectionKind::Full && s.mark_phase == MarkPhase::Marking) {
+        const GcTrigger why = s.trigger;
+        finish_open_cycle(heap);
+        if (why == GcTrigger::OldGrowth) return;
+        s.trigger = why;
     }
     if (kind == CollectionKind::Full) {
         collect_full(heap);

@@ -1,8 +1,9 @@
 // gc::Heap's marking cycle (start_marking, mark_slice, finish_marking): with
 // no mutator between the steps, a cycle cut into slices of any size marks
 // and sweeps exactly what collect(Full) does, on one thread or several; its
-// slices keep roughly to their budget; and the misuses that would lose
-// objects until the barrier supports a mutator in between stop the process.
+// slices keep roughly to their budget; and slices or a finish with no cycle
+// open stop the process. With a mutator between the steps:
+// test_gc_heap_marking_mutator.cpp.
 
 #include "test_framework.hpp"
 
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -309,7 +311,7 @@ bool aborts(Fn fn) {
 
 } // namespace
 
-TEST_CASE("gc::Heap incremental - misuse outside or inside a cycle is a hard error") {
+TEST_CASE("gc::Heap incremental - slices or a finish outside a cycle are a hard error") {
     CHECK(aborts([] {
         Heap h(cycle_config(1));
         h.mark_slice(1000);  // no cycle open
@@ -321,38 +323,28 @@ TEST_CASE("gc::Heap incremental - misuse outside or inside a cycle is a hard err
     CHECK(aborts([] {
         Heap h(cycle_config(1));
         h.start_marking();
-        h.allocate(16, words_layout());  // nothing allocates black yet
+        h.finish_marking();
+        h.mark_slice(1000);  // the cycle is over
     }));
-    CHECK(aborts([] {
-        Heap h(cycle_config(1));
-        h.start_marking();
-        h.allocate(16, words_layout(), kAllocOld);  // the old slow path too
-    }));
-    CHECK(aborts([] {
-        Heap h(cycle_config(1));
-        h.start_marking();
-        h.collect(CollectionKind::Minor);  // minors do not shade yet
-    }));
-    CHECK(aborts([] {
-        Heap h(cycle_config(1));
-        h.start_marking();
-        h.collect(CollectionKind::Full);
-    }));
-    // The inline bump path is shut while a cycle is open.
+    // The inline bump path stays open while a cycle is open.
     {
         Heap h(cycle_config(1));
         REQUIRE(h.start_marking());
-        CHECK_EQ(h.try_allocate_young(16, words_layout()), uintptr_t{0});
+        CHECK(h.try_allocate_young(16, words_layout()) != 0);
         h.finish_marking();
         CHECK(h.try_allocate_young(16, words_layout()) != 0);
     }
-    // The control: the same steps in order do not abort.
+    // Allocation and collections of either kind inside a cycle are allowed.
     CHECK_FALSE(aborts([] {
         Heap h(cycle_config(1));
         h.start_marking();
+        h.allocate(16, words_layout());
+        h.allocate(16, words_layout(), kAllocOld);
+        h.collect(CollectionKind::Minor);
         while (!h.mark_slice(0)) {
         }
-        h.finish_marking();
+        h.collect(CollectionKind::Full);  // finishes the cycle
+        if (h.marking()) std::abort();
         h.allocate(16, words_layout());
     }));
 }

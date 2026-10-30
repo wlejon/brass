@@ -37,6 +37,10 @@ enum class StressMode : uint8_t {
     Minor,      // a minor collection at every allocation and safepoint
     Full,       // a full collection at every allocation and safepoint
     Alternate,  // minor collections, every eighth one full
+    // A marking cycle always open: started when none is, then at each
+    // allocation and safepoint a tiny mark slice (every fourth one a minor
+    // collection instead), the cycle finished every eighth slice.
+    Incremental,
 };
 
 // Allocation flags.
@@ -116,7 +120,7 @@ struct HeapConfig {
     // compiled frames on the way by their unwind data on Windows x64 and by
     // their frame pointers elsewhere, where that code must keep them.
     bool walk_stack_on_host_collection = false;
-    // BRASS_GC_STRESS (minor|full|alternate|1), BRASS_GC_VERIFY=1,
+    // BRASS_GC_STRESS (minor|full|alternate|incremental|1), BRASS_GC_VERIFY=1,
     // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_FIXED_EDEN=1,
     // BRASS_GC_MARK_THREADS=n and
     // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
@@ -265,18 +269,21 @@ public:
 
     // ---- Marking cycle -----------------------------------------------------
     // A full collection split into steps a host can spread out: start (the
-    // young generation emptied into the old one, the roots made grey), mark
-    // slices of about a budget each, finish (weak slots, ephemerons,
+    // roots' old referents made grey), mark slices of about a budget each,
+    // finish (the young generation emptied into the old one, the roots
+    // again, the rest of the grey work, then weak slots, ephemerons,
     // finalizers, hooks, sweep). collect(Full) is the same steps back to
     // back. Each step is a pause of its own; the collection is counted and
     // logged once, at finish, its pauses together in full_pause_ns_total and
     // the longest one in full_pause_ns_max and last_pause_ns.
     //
-    // NOT YET SAFE WITH A MUTATOR IN BETWEEN: the write barrier does not
-    // shade old referents and minor collections do not mark what they
-    // promote, so between start_marking and finish_marking nothing may store
-    // into the heap, allocate or collect. Allocating or collecting then
-    // stops the process (docs/gc_contract.md, "Marking Cycle").
+    // The mutator runs between the steps: it may store, allocate and
+    // collect. The write barrier shades the old references it stores, minor
+    // collections shade the old objects they reach and promote, and old
+    // allocation is grey, so finish never sweeps what is live
+    // (docs/gc_contract.md, "Marking Cycle"). A full collection asked for
+    // while a cycle is open finishes it (and, unless old-generation growth
+    // asked, then runs a whole one).
     //
     // Starts a cycle: false, doing nothing, if one is already open.
     bool start_marking();
@@ -295,11 +302,20 @@ public:
     // the object whose layout traces the slot written, `value` the word
     // stored. Stores into an object allocated young since the last GC point
     // may skip it (MIR's WriteBarrierElimination relies on this).
+    //
+    // The value is filtered by its own range (barrier_lo_ / barrier_span_):
+    // the young generation while no marking cycle is open, so the barrier is
+    // the same two range checks and tag check it always was, and the whole
+    // heap while one is, so an old object's store of an old reference also
+    // reaches the slow path, which shades the value (marks it grey) instead
+    // of dirtying a card (docs/gc_contract.md, "Marking Cycle"). The range
+    // changes only at a GC point (the cycle's start and finish).
     void write_barrier(uintptr_t object, uint64_t value) noexcept {
         if (object - old_lo_ < old_span_ &&
-            (static_cast<uintptr_t>(value & kAddressMask) - young_lo_) < young_span_ &&
+            (static_cast<uintptr_t>(value & kAddressMask) - barrier_lo_) < barrier_span_ &&
             is_reference_tag(value)) {
-            dirty_card(object);
+            if (is_young(static_cast<uintptr_t>(value & kAddressMask))) dirty_card(object);
+            else shade_stored(value);
         }
     }
     // The barrier for a store through `address`, any address inside an object
@@ -309,9 +325,9 @@ public:
     // card holding the slot.
     void write_barrier_interior(uintptr_t address, uint64_t value) noexcept {
         if (address - old_lo_ < old_span_ &&
-            (static_cast<uintptr_t>(value & kAddressMask) - young_lo_) < young_span_ &&
+            (static_cast<uintptr_t>(value & kAddressMask) - barrier_lo_) < barrier_span_ &&
             is_reference_tag(value)) {
-            remember_interior(address);
+            remember_interior(address, value);
         }
     }
     // The barrier for a bulk write (a memcpy of many words) into `object`,
@@ -325,6 +341,16 @@ public:
     // large object has only the cards covering the range rescanned.
     void remember_range(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept {
         if (object - old_lo_ < old_span_) remember_range_old(object, begin, end);
+    }
+    // The barrier for an edge the collector reaches only through a host's
+    // trace function in a full collection (an object's prototype held by its
+    // off-heap shape, say), made when that edge is: while a marking cycle is
+    // open, an old object `word` names is shaded, since the object holding
+    // the edge may already be marked. Nothing otherwise (a young referent is
+    // traced by the finish's evacuation, and no cycle needs anything).
+    void shade_reference(uint64_t word) noexcept {
+        const auto a = static_cast<uintptr_t>(word & kAddressMask);
+        if (a - barrier_lo_ < barrier_span_ && !is_young(a) && is_reference_tag(word)) shade_stored(word);
     }
     // Payload word `index` of `object`, and a store to it with its barrier.
     [[nodiscard]] static uint64_t load(uintptr_t object, size_t index) noexcept {
@@ -372,6 +398,10 @@ public:
     [[nodiscard]] uintptr_t old_base() const noexcept { return old_lo_; }
     [[nodiscard]] uintptr_t young_base() const noexcept { return young_lo_; }
     [[nodiscard]] size_t young_span() const noexcept { return young_span_; }
+    // The range of stored values the barrier takes its slow path for: the
+    // young generation, or the whole heap while a marking cycle is open.
+    [[nodiscard]] uintptr_t barrier_value_base() const noexcept { return barrier_lo_; }
+    [[nodiscard]] size_t barrier_value_span() const noexcept { return barrier_span_; }
 
     // ---- Roots -------------------------------------------------------------
     // A slot outside the heap holding a word (a gcref or tagged reference),
@@ -465,10 +495,22 @@ private:
     friend struct detail::Collector;
     friend struct detail::HeapState;
 
-    void remember_interior(uintptr_t address) noexcept;
+    // The barrier's slow path: a young value dirties the slot's card, an old
+    // one (only while marking) is shaded.
+    void remember_interior(uintptr_t address, uint64_t value) noexcept;
+    // Shades old reference `value` stored while a marking cycle is open
+    // (heap_mark_incremental.cpp). Never collects or allocates on the heap.
+    void shade_stored(uint64_t value) noexcept;
+    // Sets the barrier's value range for the marking phase (at a GC point).
+    void set_barrier_marking(bool marking) noexcept {
+        barrier_lo_ = marking ? heap_lo_ : young_lo_;
+        barrier_span_ = marking ? heap_span_ : young_span_;
+    }
     // Runs the finalizers collections have queued (after collect_at and
     // finish_marking), unless a batch is already running.
     void run_pending_finalizers();
+    // What the stress mode does at an allocation or safepoint.
+    void stress_step(uintptr_t caller_fp, uintptr_t caller_ip);
     void remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept;
     // Dirties the card of old address `a` and marks its region (kCardRegionShift).
     void dirty_card(uintptr_t a) noexcept {
@@ -480,8 +522,11 @@ private:
     AllocationBuffer own_alloc_;
     AllocationBuffer* alloc_ = &own_alloc_;
     size_t max_young_total_ = 0;
-    uintptr_t young_lo_ = 0;
-    uintptr_t young_span_ = 0;
+    // The barrier's fields first, in one cache line: the value range where
+    // the young range sat before it had its own, so the barrier's loads are
+    // at the offsets they always were.
+    uintptr_t barrier_lo_ = 0;
+    uintptr_t barrier_span_ = 0;
     uintptr_t old_lo_ = 0;
     uintptr_t old_span_ = 0;
     uintptr_t heap_lo_ = 0;
@@ -490,6 +535,8 @@ private:
     uint8_t* regions_ = nullptr;
     const uint64_t* ref_tags_ = nullptr;
     uint64_t raw_address_tag_ = 0;
+    uintptr_t young_lo_ = 0;
+    uintptr_t young_span_ = 0;
     std::unique_ptr<detail::HeapState> s_;
 };
 

@@ -226,8 +226,9 @@ void brass_heap_write_barrier(brass_heap_t* heap, uintptr_t object, uint64_t val
 void brass_heap_set_stress(brass_heap_t* heap, int mode) {
     if (!heap) return;
     using brass::gc::StressMode;
-    const StressMode modes[] = {StressMode::None, StressMode::Minor, StressMode::Full, StressMode::Alternate};
-    heap->heap.set_stress(mode >= 0 && mode <= 3 ? modes[mode] : StressMode::None);
+    const StressMode modes[] = {StressMode::None, StressMode::Minor, StressMode::Full, StressMode::Alternate,
+                                StressMode::Incremental};
+    heap->heap.set_stress(mode >= 0 && mode <= 4 ? modes[mode] : StressMode::None);
 }
 
 int brass_heap_get_stress(const brass_heap_t* heap) {
@@ -236,6 +237,7 @@ int brass_heap_get_stress(const brass_heap_t* heap) {
         case brass::gc::StressMode::Minor: return 1;
         case brass::gc::StressMode::Full: return 2;
         case brass::gc::StressMode::Alternate: return 3;
+        case brass::gc::StressMode::Incremental: return 4;
         default: return 0;
     }
 }
