@@ -49,10 +49,12 @@ bool AArch64ISel::is_value_dead_after(
 
 // Which instructions the selector does not lower on their own.
 //
-// Only two kinds are skipped, and for both the one consumer that absorbs
-// them decides unconditionally, so this analysis cannot disagree with it:
+// Only three kinds are skipped, and for each the consumers that absorb them
+// decide unconditionally, so this analysis cannot disagree with them:
 //   - a comparison (and an `and` it tests against zero) whose only use is
 //     the br_if / guard / select right after it in the same block;
+//   - a comparison whose every use is the condition of a br_if / guard /
+//     select, in any block, each of which recomputes it (find_remat_compares);
 //   - an address `add` whose every use is a memory operation that folds it.
 // Constants and loads an instruction may fold as an operand are always
 // lowered; when the consumer did fold them their definitions are left
@@ -62,6 +64,7 @@ bool AArch64ISel::is_value_dead_after(
 void AArch64ISel::analyze_function(const Function& mir_fn) {
     use_count_.clear();
     skipped_insts_.clear();
+    remat_cmps_.clear();
 
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
@@ -115,6 +118,10 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
             }
         }
     }
+
+    // A comparison every use of which is a condition, recomputed at each user
+    // (aarch64_isel_fused_cmp.cpp).
+    find_remat_compares(mir_fn);
 
     // An address computation folded into a memory operation is read by that
     // operation through the folded operand only. Only the memory operation's

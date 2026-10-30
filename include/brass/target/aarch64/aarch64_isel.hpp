@@ -47,6 +47,10 @@ private:
     std::unordered_map<const Value*, VRegPair> val_to_vreg_pair_;
     std::unordered_map<const Value*, uint32_t> use_count_;
     std::unordered_set<const Instruction*> skipped_insts_;
+    // Comparisons recomputed at each of their users, in whatever block, in
+    // place of one materialized 0/1 (aarch64_isel_fused_cmp.cpp,
+    // find_remat_compares). Each is also in skipped_insts_.
+    std::unordered_set<const Instruction*> remat_cmps_;
     // LIR the selector may delete once selection is done if nothing reads
     // what it defines (see eliminate_dead_materializations).
     std::unordered_set<const codegen::LirInst*> elidable_insts_;
@@ -99,6 +103,11 @@ private:
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, x64::Condition cond, x64::Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);
     x64::Condition emit_fused_compare(const Instruction& cmp_inst, codegen::LirBlock& lir_bb);
+    void find_remat_compares(const Function& mir_fn);
+    // Whether `cmp` is fused into the br_if, select or guard `user` lowers: a
+    // single-use comparison of the user's block, or a rematerialized one
+    // (remat_cmps_), from any block.
+    bool fused_into(const Instruction* cmp, const Instruction& user) const;
     void lower_pinned_tls_read(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_pinned_tls_write(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_read_sp(const Instruction& inst, codegen::LirBlock& lir_bb);

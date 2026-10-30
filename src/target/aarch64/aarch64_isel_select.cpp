@@ -137,7 +137,7 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     }
 
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) && skipped_insts_.count(cmp_inst);
+    bool is_fused_cmp = fused_into(cmp_inst, inst);
 
     LirCond select_cond = LirCond::NE;
 

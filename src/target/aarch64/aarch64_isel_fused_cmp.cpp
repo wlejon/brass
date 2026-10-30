@@ -1,9 +1,82 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include "aarch64_isel_conditions.hpp"
+#include <cstdlib>
+#include <unordered_map>
 
 namespace brass::aarch64 {
 
 using namespace brass::codegen;
+
+// COMPARE REMATERIALIZATION, the AArch64 half of x64_isel_cmp.cpp's. GVN
+// shares a comparison between every block it dominates (a guard's "is this
+// an object" test in the hot block and the same test in the miss path's cache
+// lookup become one value); with two users analyze_function's single-use rule
+// cannot fuse it into either, so the hot block computes it as a 0/1 (cset),
+// keeps the register alive into the miss path and tests it again at each user
+// (cbnz / tst + csel). Flags never live across blocks, so the comparison is
+// worth more as one cmp per user than as one register.
+//
+// A comparison qualifies when EVERY use of it is the condition of a br_if,
+// guard or select. Each such user then emits it itself with
+// emit_fused_compare, exactly as a single-use same-block one is emitted. That
+// reads the same two SSA operands, which dominate every user because the
+// comparison does, so it computes the same answer. emit_fused_compare never
+// folds a load (it reads registers and immediates only), so no memory is
+// re-read later. Excluded, as on x64:
+//   - a GC root operand (gcref / tagged) can be relocated by a moving
+//     collection between the definition and a later user, which rewrites the
+//     root and not a non-root copy of it; only eq / ne of a root against an
+//     immediate is kept, which relocation cannot change (an object stays an
+//     object, its tag bits stay);
+//   - float compares (the unordered cases are not every user's to handle),
+//     vector compares, and narrow ones (widened first by the unfused
+//     lowering only);
+//   - two constant operands (the folder's to decide).
+// An `and` under a rematerialized `== 0` is not fused into it: the single-use
+// rule skips an `and` only beside a comparison it skipped itself, so here the
+// `and` is lowered and its register tested at each user.
+//
+// BRASS_NO_CMP_REMAT=1 turns it off (the A/B seam, shared with x64).
+void AArch64ISel::find_remat_compares(const Function& mir_fn) {
+    remat_cmps_.clear();
+    static const bool off = std::getenv("BRASS_NO_CMP_REMAT") != nullptr;
+    if (off) return;
+    std::unordered_map<const Value*, uint32_t> consumer_uses;
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            const Opcode op = inst->opcode();
+            if (op != Opcode::br_if && op != Opcode::guard && op != Opcode::select) continue;
+            const Value* cond = inst->operand(0);
+            if (cond && cond->is_instruction()) ++consumer_uses[cond];
+        }
+    }
+    for (const auto& [v, n] : consumer_uses) {
+        const Instruction* def = v->defining_instruction();
+        if (!def || skipped_insts_.count(def) || !is_comparison(def->opcode()) || narrow_compare(*def)) continue;
+        if (def->operand_count() < 2) continue;
+        const auto it = use_count_.find(v);
+        if (it == use_count_.end() || it->second != n) continue;
+        const Value* lhs = def->operand(0);
+        const Value* rhs = def->operand(1);
+        if (!lhs || !rhs) continue;
+        if (lhs->type().is_float() || rhs->type().is_float() || lhs->type().is_vector() || rhs->type().is_vector()) {
+            continue;
+        }
+        const bool lhs_imm = get_imm_int_info(lhs).is_imm;
+        const bool rhs_imm = get_imm_int_info(rhs).is_imm;
+        if (lhs_imm && rhs_imm) continue;
+        const bool equality = def->opcode() == Opcode::eq || def->opcode() == Opcode::ne;
+        if (lhs->type().is_gc_root() && !(equality && rhs_imm)) continue;
+        if (rhs->type().is_gc_root() && !(equality && lhs_imm)) continue;
+        remat_cmps_.insert(def);
+        skipped_insts_.insert(def);
+    }
+}
+
+bool AArch64ISel::fused_into(const Instruction* cmp, const Instruction& user) const {
+    if (!cmp || !is_comparison(cmp->opcode()) || !skipped_insts_.count(cmp)) return false;
+    return cmp->parent() == user.parent() || remat_cmps_.count(cmp) != 0;
+}
 
 // Sets the flags for a comparison consumed by the br_if / select / guard
 // after it and returns the condition under which the comparison is true.
