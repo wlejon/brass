@@ -207,17 +207,20 @@ Id SpirvISel::Intrinsics::image_coord(SpirvISel& isel, const brass::Instruction&
     return isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(integer ? isel.t_u32() : isel.t_f32(), n), parts);
 }
 
-// Constant operands [first, first + n) as a constant integer vector (a
-// texel offset).
+// Constant operands [first, first + n) as a signed constant integer vector (a
+// texel offset). Signed OpTypeInt (signedness 1) is required by Vulkan's
+// VUID-RuntimeSpirv-OpImageSample-06435/06436 so negative offsets are not
+// checked as unsigned against maxTexelOffset.
 Id SpirvISel::Intrinsics::image_const_offset(SpirvISel& isel, const brass::Instruction& inst, size_t first, uint32_t n) {
+    Id i32 = isel.m_.t_int(32, 1);
     std::vector<Id> parts;
     for (uint32_t i = 0; i < n; ++i) {
         int64_t v = 0;
         if (!isel.const_int(inst.operand(first + i), &v)) isel.fail(std::string(inst.symbol()) + " requires constant offsets");
-        parts.push_back(isel.m_.c_int(32, static_cast<uint32_t>(static_cast<int32_t>(v))));
+        parts.push_back(isel.m_.c_sint(32, static_cast<int32_t>(v)));
     }
     if (n == 1) return parts[0];
-    return isel.m_.c_composite(isel.m_.t_vector(isel.t_u32(), n), parts);
+    return isel.m_.c_composite(isel.m_.t_vector(i32, n), parts);
 }
 
 // spirv_tex_sample(img, coords..., lod, grad, offset):

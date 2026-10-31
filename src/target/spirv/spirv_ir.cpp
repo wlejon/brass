@@ -154,10 +154,10 @@ Id Module::t_bool() {
     return intern(Inst(spv::OpTypeBool), &ti);
 }
 
-Id Module::t_int(uint32_t width) {
+Id Module::t_int(uint32_t width, uint32_t signedness) {
     if (width == 64) add_capability(spv::CapabilityInt64);
     TypeInfo ti{spv::OpTypeInt, width};
-    return intern(Inst(spv::OpTypeInt).lit(width).lit(0), &ti);
+    return intern(Inst(spv::OpTypeInt).lit(width).lit(signedness), &ti);
 }
 
 Id Module::t_float(uint32_t width) {
@@ -250,6 +250,14 @@ const TypeInfo* Module::type_info(Id type) const {
 
 Id Module::c_int(uint32_t width, uint64_t bits) {
     Inst inst(spv::OpConstant, t_int(width));
+    if (width == 64) inst.lit(static_cast<uint32_t>(bits)).lit(static_cast<uint32_t>(bits >> 32));
+    else inst.lit(static_cast<uint32_t>(bits & (width == 32 ? 0xFFFFFFFFull : ((1ull << width) - 1))));
+    return intern(std::move(inst), nullptr);
+}
+
+Id Module::c_sint(uint32_t width, int64_t v) {
+    uint64_t bits = static_cast<uint64_t>(v);
+    Inst inst(spv::OpConstant, t_int(width, 1));
     if (width == 64) inst.lit(static_cast<uint32_t>(bits)).lit(static_cast<uint32_t>(bits >> 32));
     else inst.lit(static_cast<uint32_t>(bits & (width == 32 ? 0xFFFFFFFFull : ((1ull << width) - 1))));
     return intern(std::move(inst), nullptr);

@@ -227,7 +227,7 @@ TEST_CASE("SPIR-V Textures - arrays, cubes, shadows, separate samplers, fetch, s
     std::string dis = dump_of(*fn, opts);
     for (const char* op : {"OpImageSampleImplicitLod", "OpImageSampleDrefExplicitLod", "OpImageSampleDrefImplicitLod",
                            "OpImageFetch", "OpImageGather", "OpImageQuerySizeLod", "OpImageQueryLevels",
-                           "OpSampledImage", "OpTypeSampler"}) {
+                           "OpSampledImage", "OpTypeSampler", "OpTypeInt 32 1"}) {
         if (!has(dis, op)) std::cerr << "missing " << op << "\n";
         CHECK(has(dis, op));
     }

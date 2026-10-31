@@ -117,7 +117,7 @@ public:
     // ---- types (deduplicated, except structs and runtime arrays) -----------
     Id t_void();
     Id t_bool();
-    Id t_int(uint32_t width);   // signedness 0; signed ops choose the opcode
+    Id t_int(uint32_t width, uint32_t signedness = 0); // signedness 0 (default) or 1 (signed, e.g. ConstOffset)
     Id t_float(uint32_t width);
     Id t_vector(Id elem, uint32_t count);
     Id t_matrix(Id col_type, uint32_t cols);
@@ -136,6 +136,7 @@ public:
 
     // ---- constants (deduplicated) ----------------------------------------
     Id c_int(uint32_t width, uint64_t bits);
+    Id c_sint(uint32_t width, int64_t v);
     Id c_u32(uint32_t v) { return c_int(32, v); }
     Id c_f32(float v);
     Id c_f64(double v);
