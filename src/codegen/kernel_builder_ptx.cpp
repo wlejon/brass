@@ -321,31 +321,44 @@ Value* KernelBuilder::frag_coord_z()   { return b_.build_call("spirv_frag_coord_
 Value* KernelBuilder::frag_coord_w()   { return b_.build_call("spirv_frag_coord_w", Type::f32()); }
 Value* KernelBuilder::frag_coord_vec4() { return b_.build_call("spirv_frag_coord_vec4", Type::f32x4()); }
 
-Value* KernelBuilder::stage_input_f32(uint32_t location, uint32_t component) {
-    return b_.build_call("spirv_stage_input_f32", Type::f32(),
-                         {const_i32(static_cast<int32_t>(location)), const_i32(static_cast<int32_t>(component))});
+Value* KernelBuilder::stage_input(uint32_t location, uint32_t lanes, uint32_t lane, bool integer, uint32_t interp) {
+    uint32_t desc = lanes | interp | (integer ? target::kSpirvStageInt : 0u);
+    return b_.build_call("spirv_stage_in", integer ? Type::i32() : Type::f32(),
+                         {const_i32(static_cast<int32_t>(location)), const_i32(static_cast<int32_t>(desc)),
+                          const_i32(static_cast<int32_t>(lane))});
 }
 
-Value* KernelBuilder::stage_input_vec4(uint32_t location) {
-    return b_.build_call("spirv_stage_input_vec4", Type::f32x4(),
-                         {const_i32(static_cast<int32_t>(location))});
-}
-
-Instruction* KernelBuilder::stage_output_f32(uint32_t location, uint32_t component, Value* val) {
-    b_.build_call("spirv_stage_output_f32", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(location)), const_i32(static_cast<int32_t>(component)), val});
+Instruction* KernelBuilder::stage_output(uint32_t location, const std::vector<Value*>& lanes) {
+    bool integer = !lanes.empty() && lanes[0]->type() == Type::i32();
+    uint32_t desc = static_cast<uint32_t>(lanes.size()) | (integer ? target::kSpirvStageInt : 0u);
+    std::vector<Value*> ops {const_i32(static_cast<int32_t>(location)), const_i32(static_cast<int32_t>(desc))};
+    ops.insert(ops.end(), lanes.begin(), lanes.end());
+    b_.build_call("spirv_stage_out", Type::void_type(), ops);
     return b_.current_block()->tail();
 }
 
-Instruction* KernelBuilder::stage_output_vec4(uint32_t location, Value* x, Value* y, Value* z, Value* w) {
-    b_.build_call("spirv_stage_output_vec4", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(location)), x, y, z, w});
+Instruction* KernelBuilder::set_frag_color_vec4(uint32_t location, Value* rgba) {
+    std::vector<Value*> lanes;
+    for (uint32_t i = 0; i < 4; ++i) lanes.push_back(b_.build_vextract_lane(rgba, i));
+    return stage_output(location, lanes);
+}
+
+Instruction* KernelBuilder::set_frag_depth(Value* depth) {
+    b_.build_call("spirv_set_frag_depth", Type::void_type(), {depth});
     return b_.current_block()->tail();
 }
 
-Instruction* KernelBuilder::stage_output_vec4(uint32_t location, Value* xyzw) {
-    b_.build_call("spirv_stage_output_vec4", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(location)), xyzw});
+Value* KernelBuilder::buffer_load(uint32_t set, uint32_t binding, uint32_t uniform_bytes, Value* offset, Type type) {
+    int32_t desc = uniform_bytes ? static_cast<int32_t>(((uniform_bytes + 15) / 16) << 1) : 1;
+    return b_.build_call("spirv_buffer_load", type,
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)),
+                          const_i32(desc), offset});
+}
+
+Instruction* KernelBuilder::buffer_store(uint32_t set, uint32_t binding, Value* offset, Value* value) {
+    b_.build_call("spirv_buffer_store", Type::void_type(),
+                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), const_i32(1),
+                   offset, value});
     return b_.current_block()->tail();
 }
 

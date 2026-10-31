@@ -121,6 +121,9 @@ public:
     Id t_float(uint32_t width);
     Id t_vector(Id elem, uint32_t count);
     Id t_array(Id elem, uint32_t length);
+    // Always fresh ids (aggregates may repeat), for an ArrayStride decoration.
+    Id t_array_fresh(Id elem, uint32_t length);
+    Id t_runtime_array(Id elem);
     Id t_struct(const std::vector<Id>& members); // always a fresh id (structs get decorated)
     Id t_pointer(spv::StorageClass sc, Id pointee);
     Id t_image(Id sampled_type, spv::Dim dim, uint32_t depth, uint32_t arrayed, uint32_t ms,

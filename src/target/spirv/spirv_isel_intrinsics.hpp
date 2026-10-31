@@ -128,10 +128,17 @@ struct SpirvISel::Intrinsics {
     static void frag_coord_vec4(SpirvISel& isel, const brass::Instruction& inst) {
         isel.define(inst.result(), isel.builtin_fvec4(spv::BuiltInFragCoord));
     }
-    static void stage_input_f32(SpirvISel& isel, const brass::Instruction& inst);
-    static void stage_input_vec4(SpirvISel& isel, const brass::Instruction& inst);
-    static void stage_output_f32(SpirvISel& isel, const brass::Instruction& inst);
-    static void stage_output_vec4(SpirvISel& isel, const brass::Instruction& inst);
+    struct StageVar {
+        uint32_t location = 0, lanes = 1, interp = 0;
+        bool integer = false;
+    };
+    static StageVar stage_var(SpirvISel& isel, const brass::Instruction& inst);
+    static void stage_in(SpirvISel& isel, const brass::Instruction& inst);
+    static void stage_out(SpirvISel& isel, const brass::Instruction& inst);
+    static void set_frag_depth(SpirvISel& isel, const brass::Instruction& inst);
+    static Id buffer_word(SpirvISel& isel, const brass::Instruction& inst, bool store);   // a pointer to the word
+    static void buffer_load(SpirvISel& isel, const brass::Instruction& inst);
+    static void buffer_store(SpirvISel& isel, const brass::Instruction& inst);
     static void set_vertex_position(SpirvISel& isel, const brass::Instruction& inst);
     static void require_fragment(SpirvISel& isel, const brass::Instruction& inst);
     template <spv::Op O>

@@ -124,8 +124,11 @@ private:
     Id workgroup_size(uint32_t component);
     // The variable of a descriptor (made once a set and binding; a second
     // use as another image fails).
-    Id descriptor_var(const target::SpirvDescriptorBinding& db, Id handle_type);
-    Id stage_io_var(spv::StorageClass sc, uint32_t location); // Input/Output vec4 variable at Location
+    Id descriptor_var(const target::SpirvDescriptorBinding& db, Id handle_type,
+                      spv::StorageClass sc = spv::StorageClassUniformConstant);
+    // The Input/Output variable at a Location, of `type`; `interp`
+    // (target::kSpirvStageFlat / NoPerspective) decorates a fragment input.
+    Id stage_io_var(spv::StorageClass sc, uint32_t location, Id type, uint32_t interp);
 
     // ---- types and values -------------------------------------------------------
     Id t_u32() { return m_.t_int(32); }

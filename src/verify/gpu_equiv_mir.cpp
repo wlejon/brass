@@ -589,27 +589,20 @@ GpuExecTrace execute_gpu_mir(
                            sym == "spirv_frag_coord_z" || sym == "spirv_frag_coord_w") {
                     uint32_t c = sym.ends_with("_x") ? 0u : sym.ends_with("_y") ? 1u : sym.ends_with("_z") ? 2u : 3u;
                     res = env.eval_uf(ctx, "spirv_frag_coord", {bv_const(ctx, 32, c)}, 32, true);
-                } else if (sym == "spirv_stage_input_f32") {
+                } else if (sym == "spirv_stage_in") {
                     res = env.eval_uf(ctx, "spirv_stage_in", {
                         gpu_coerce_width(ctx, get_v(inst->operand(0)), 32),
-                        gpu_coerce_width(ctx, get_v(inst->operand(1)), 32)}, 32, true);
+                        gpu_coerce_width(ctx, get_v(inst->operand(2)), 32)}, 32, inst->type().is_float());
                 } else if (sym == "spirv_set_vertex_position" && inst->operand_count() == 4) {
                     for (uint32_t c = 0; c < 4; ++c) {
                         BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(c)), 32);
                         trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, 0x6000000000000000ULL + c * 4), 4, cv});
                     }
-                } else if (sym == "spirv_stage_output_f32" && inst->operand_count() >= 3) {
-                    BVNodeId loc_n = get_v(inst->operand(0));
-                    BVNodeId comp_n = get_v(inst->operand(1));
-                    uint64_t loc = (bv_node(ctx, loc_n).op == BVOp::Const) ? bv_node(ctx, loc_n).imm : 0;
-                    uint64_t comp = (bv_node(ctx, comp_n).op == BVOp::Const) ? bv_node(ctx, comp_n).imm : 0;
-                    BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(2)), 32);
-                    trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, 0x6000000000001000ULL + loc * 16 + comp * 4), 4, cv});
-                } else if (sym == "spirv_stage_output_vec4" && inst->operand_count() == 5) {
+                } else if (sym == "spirv_stage_out" && inst->operand_count() >= 3) {
                     BVNodeId loc_n = get_v(inst->operand(0));
                     uint64_t loc = (bv_node(ctx, loc_n).op == BVOp::Const) ? bv_node(ctx, loc_n).imm : 0;
-                    for (uint32_t c = 0; c < 4; ++c) {
-                        BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(1 + c)), 32);
+                    for (uint32_t c = 0; c + 2 < inst->operand_count(); ++c) {
+                        BVNodeId cv = gpu_coerce_width(ctx, get_v(inst->operand(2 + c)), 32);
                         trace.global_stores.push_back({cur.cond, bv_const(ctx, 64, 0x6000000000001000ULL + loc * 16 + c * 4), 4, cv});
                     }
                 } else {

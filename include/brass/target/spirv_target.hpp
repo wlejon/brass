@@ -30,20 +30,28 @@ enum class SpirvStage : uint8_t {
     Fragment = 2,
 };
 
-// A descriptor a kernel or stage reads (KernelBuilder's texture and image
-// calls): a combined image sampler, an image sampled through a separate
-// sampler, that sampler, or a storage image.
+// A descriptor a kernel or stage reads (KernelBuilder's texture, image and
+// buffer calls): a combined image sampler, an image sampled through a
+// separate sampler, that sampler, a storage image, a uniform buffer or a
+// storage buffer.
 enum class SpirvDescriptorKind : uint8_t {
     CombinedImageSampler = 0,
     SampledImage = 1,
     Sampler = 2,
     StorageImage = 3,
+    UniformBuffer = 4,
+    StorageBuffer = 5,
 };
 
 // An image's shape (SPIR-V Dim; a cube's coordinates are a direction).
 enum class SpirvImageDim : uint8_t { D1 = 0, D2 = 1, D3 = 2, Cube = 3 };
 // What its texels read as: f32 lanes, or u32 / i32 lanes of an integer format.
 enum class SpirvImageScalar : uint8_t { F32 = 0, U32 = 1, I32 = 2 };
+
+// A stage input's or output's description (spirv_stage_in / _out): its
+// lanes (1..4) in bits 0-3, its interpolation as a fragment input, and
+// whether its lanes are 32-bit integers rather than f32.
+constexpr uint32_t kSpirvStageFlat = 0x10, kSpirvStageNoPerspective = 0x20, kSpirvStageInt = 0x100;
 
 struct SpirvDescriptorBinding {
     uint32_t set = 0;
@@ -55,10 +63,11 @@ struct SpirvDescriptorBinding {
     bool depth = false;                       // compared against (a shadow map)
     SpirvImageScalar scalar = SpirvImageScalar::F32;
     uint32_t format = 0;                      // a storage image's spv::ImageFormat; 0 (Unknown) when sampled
+    uint32_t bytes = 0;                       // a uniform buffer's block size (a storage buffer's is unbounded)
 
     bool operator==(const SpirvDescriptorBinding& o) const noexcept {
         return set == o.set && binding == o.binding && kind == o.kind && dim == o.dim && arrayed == o.arrayed &&
-               depth == o.depth && scalar == o.scalar && format == o.format;
+               depth == o.depth && scalar == o.scalar && format == o.format && bytes == o.bytes;
     }
 };
 

@@ -12,6 +12,7 @@
 #include <brass/target/spirv/spirv_relaxed_precision.hpp>
 
 #include <algorithm>
+#include <sstream>
 
 using namespace brass;
 using brass::codegen::KernelBuilder;
@@ -236,7 +237,7 @@ TEST_CASE("SPIR-V Descriptor Images & Samplers - conflicting descriptor binding 
     kb.image_store(img3, {ix, ix, ix}, v);
     b.build_ret_void();
 
-    require_diagnostic(*fn, {"used as two different images"});
+    require_diagnostic(*fn, {"used as two different descriptors"});
 }
 
 // ---------------------------------------------------------------------------
@@ -254,20 +255,21 @@ TEST_CASE("SPIR-V Graphics Stages - Vertex shader with VertexIndex, Location I/O
 
     Value* vidx = kb.vertex_index();
     Value* iidx = kb.instance_index();
-    Value* in_x = kb.stage_input_f32(0, 0);
-    Value* in_y = kb.stage_input_f32(0, 1);
-    Value* in_z = kb.stage_input_f32(0, 2);
-    Value* uv_u = kb.stage_input_f32(1, 0);
-    Value* uv_v = kb.stage_input_f32(1, 1);
+    Value* in_x = kb.stage_input(0, 3, 0);
+    Value* in_y = kb.stage_input(0, 3, 1);
+    Value* in_z = kb.stage_input(0, 3, 2);
+    Value* uv_u = kb.stage_input(1, 2, 0);
+    Value* uv_v = kb.stage_input(1, 2, 1);
+    Value* id = kb.stage_input(2, 1, 0, true);
 
     Value* inst_off = kb.mul(kb.i32_to_f32(b.build_add(vidx, iidx)), kb.const_f32(0.01f));
     Value* px = kb.fma(in_x, scale, inst_off);
     Value* py = kb.mul(in_y, scale);
 
     kb.set_vertex_position(px, py, in_z, kb.const_f32(1.0f));
-    kb.stage_output_f32(0, 0, uv_u);
-    kb.stage_output_f32(0, 1, uv_v);
-    kb.stage_output_vec4(1, px, py, in_z, kb.const_f32(1.0f));
+    kb.stage_output(0, {uv_u, uv_v});
+    kb.stage_output(1, {px, py, in_z, kb.const_f32(1.0f)});
+    kb.stage_output(2, {id});
     b.build_ret_void();
 
     target::SpirvOptions opts;
@@ -300,17 +302,28 @@ TEST_CASE("SPIR-V Graphics Stages - Fragment shader with OriginUpperLeft, FragCo
 
     Value* fcx = kb.frag_coord_x();
     Value* fcy = kb.frag_coord_y();
-    Value* u = kb.stage_input_f32(0, 0);
-    Value* v = kb.stage_input_f32(0, 1);
+    Value* u = kb.stage_input(0, 2, 0);
+    Value* v = kb.stage_input(0, 2, 1);
+    Value* id = kb.stage_input(1, 1, 0, true);
+    Value* w = kb.stage_input(2, 1, 0, false, target::kSpirvStageFlat);
 
     KernelBuilder::ImageRef tex {0, 0, target::SpirvImageDim::D2};
     Value* tex_r = b.build_vextract_lane(kb.texture_sample_lod(tex, {u, v}, kb.const_f32(0.0f)), 0);
     Value* vig = kb.mul(kb.add(fcx, fcy), kb.const_f32(0.0005f));
-    Value* r = kb.mul(tex_r, exposure);
+    // A uniform block of 64 bytes (its word at byte 20, dynamically indexed
+    // by the id too) and a storage buffer read and written.
+    Value* gain = kb.buffer_load(1, 0, 64, b.build_iconst_i32(20), Type::f32());
+    Value* row = kb.buffer_load(1, 0, 64, b.build_add(b.build_mul(id, b.build_iconst_i32(16)), b.build_iconst_i32(4)),
+                                Type::f32());
+    Value* count = kb.buffer_load(1, 1, 0, b.build_mul(id, b.build_iconst_i32(4)), Type::i32());
+    kb.buffer_store(1, 1, b.build_iconst_i32(0), b.build_add(count, b.build_iconst_i32(1)));
+    Value* r = kb.mul(kb.mul(tex_r, exposure), kb.add(gain, row));
     Value* g = kb.clamp_f32(u, kb.const_f32(0.0f), kb.const_f32(1.0f));
     Value* bl = kb.clamp_f32(b.build_sub(v, vig), kb.const_f32(0.0f), kb.const_f32(1.0f));
 
-    kb.set_frag_color(0, r, g, bl, kb.const_f32(1.0f));
+    kb.set_frag_color(0, r, g, bl, w);
+    kb.stage_output(1, {r});
+    kb.set_frag_depth(kb.mul(fcy, kb.const_f32(0.001f)));
     b.build_ret_void();
 
     target::SpirvOptions opts;
@@ -318,12 +331,29 @@ TEST_CASE("SPIR-V Graphics Stages - Fragment shader with OriginUpperLeft, FragCo
     target::SpirvKernel k = compile_checked(*fn, opts);
 
     CHECK(k.stage == target::SpirvStage::Fragment);
-    REQUIRE_EQ(k.descriptors.size(), 1u);
+    REQUIRE_EQ(k.descriptors.size(), 3u);
     CHECK(k.descriptors[0].kind == target::SpirvDescriptorKind::CombinedImageSampler);
+    CHECK(k.descriptors[1].kind == target::SpirvDescriptorKind::UniformBuffer);
+    CHECK_EQ(k.descriptors[1].bytes, 64u);
+    CHECK(k.descriptors[2].kind == target::SpirvDescriptorKind::StorageBuffer);
 
     std::string dump_txt = dump_of(*fn, opts);
     CHECK(has(dump_txt, "OpEntryPoint Fragment"));
     CHECK(!has(dump_txt, "LocalSize"));
+    // A line "<op> %id <value>" (decorations and modes print as numbers).
+    auto has_line = [&](const std::string& op, const std::string& value) {
+        std::istringstream lines(dump_txt);
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (line.rfind(op + " %", 0) == 0 && line.size() > value.size() &&
+                line.compare(line.size() - value.size() - 1, std::string::npos, " " + value) == 0)
+                return true;
+        }
+        return false;
+    };
+    CHECK(has_line("OpExecutionMode", "12"));   // DepthReplacing
+    CHECK(has_line("OpDecorate", "14"));        // Flat
+    CHECK(has(dump_txt, "OpTypeRuntimeArray"));
 
     spirv::Module parsed;
     std::string err;

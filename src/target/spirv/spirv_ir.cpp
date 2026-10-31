@@ -177,6 +177,21 @@ Id Module::t_array(Id elem, uint32_t length) {
     return intern(Inst(spv::OpTypeArray).id(elem).id(len), &ti);
 }
 
+Id Module::t_array_fresh(Id elem, uint32_t length) {
+    Id id = new_id();
+    Id len = c_u32(length);
+    types_[id] = TypeInfo{spv::OpTypeArray, length, elem};
+    globals.push_back(Inst(spv::OpTypeArray, 0, id).id(elem).id(len));
+    return id;
+}
+
+Id Module::t_runtime_array(Id elem) {
+    Id id = new_id();
+    types_[id] = TypeInfo{spv::OpTypeRuntimeArray, 0, elem};
+    globals.push_back(Inst(spv::OpTypeRuntimeArray, 0, id).id(elem));
+    return id;
+}
+
 Id Module::t_struct(const std::vector<Id>& members) {
     Id id = new_id();
     Inst inst(spv::OpTypeStruct, 0, id);

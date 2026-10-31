@@ -444,19 +444,25 @@ public:
     Value* frag_coord_w();
     Value* frag_coord_vec4();
 
-    Value* stage_input_f32(uint32_t location, uint32_t component = 0);
-    Value* stage_input_vec4(uint32_t location);
-    Instruction* stage_output_f32(uint32_t location, uint32_t component, Value* val);
-    Instruction* stage_output_vec4(uint32_t location, Value* x, Value* y, Value* z, Value* w);
-    Instruction* stage_output_vec4(uint32_t location, Value* xyzw);
+    // A stage input's lane, and a stage output's lanes, at a location: `lanes`
+    // f32 or i32 (`integer`) of a scalar or vector variable, a fragment
+    // input interpolated as `interp` (target::kSpirvStageFlat /
+    // NoPerspective; an integer input is flat).
+    Value* stage_input(uint32_t location, uint32_t lanes, uint32_t lane, bool integer = false, uint32_t interp = 0);
+    Instruction* stage_output(uint32_t location, const std::vector<Value*>& lanes);
     Instruction* set_vertex_position(Value* x, Value* y, Value* z, Value* w);
     Instruction* set_vertex_position_vec4(Value* xyzw);
     Instruction* set_frag_color(uint32_t location, Value* r, Value* g, Value* b, Value* a) {
-        return stage_output_vec4(location, r, g, b, a);
+        return stage_output(location, {r, g, b, a});
     }
-    Instruction* set_frag_color_vec4(uint32_t location, Value* rgba) {
-        return stage_output_vec4(location, rgba);
-    }
+    Instruction* set_frag_color_vec4(uint32_t location, Value* rgba);
+    Instruction* set_frag_depth(Value* depth);   // BuiltIn FragDepth
+
+    // A 32-bit word (`type` f32 or i32) of a buffer at a descriptor, at a
+    // byte offset its layout gives: a uniform buffer (std140) of `uniform_bytes`,
+    // or a storage buffer (std430) when that is 0.
+    Value* buffer_load(uint32_t set, uint32_t binding, uint32_t uniform_bytes, Value* offset, Type type);
+    Instruction* buffer_store(uint32_t set, uint32_t binding, Value* offset, Value* value);   // a storage buffer
 
     // Structured control flow. All leave the builder positioned in the
     // join/exit block they create. `body` receives the induction variable

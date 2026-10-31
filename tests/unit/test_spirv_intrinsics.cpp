@@ -27,7 +27,7 @@ enum class Sig {
     // textures and images (a 2D image unless named; KernelBuilder::ImageRef)
     tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
     tex_compare, tex_compare_lod, tex_fetch, tex_gather, tex_size, tex_levels, img_load, img_store, img_size,
-    vert_i32, vert_pos, frag_f32, frag_v4, stage_in_f32, stage_in_v4, stage_out_f32, stage_out_v4,
+    vert_i32, vert_pos, frag_f32, frag_v4, stage_in, stage_out, frag_depth, buf_load, buf_store,
     frag_f32_f32, frag_i32, frag_void, i32_i32,
 };
 
@@ -128,10 +128,11 @@ const std::map<std::string, Sig>& signatures() {
         {"spirv_frag_coord_z", Sig::frag_f32},
         {"spirv_frag_coord_w", Sig::frag_f32},
         {"spirv_frag_coord_vec4", Sig::frag_v4},
-        {"spirv_stage_input_f32", Sig::stage_in_f32},
-        {"spirv_stage_input_vec4", Sig::stage_in_v4},
-        {"spirv_stage_output_f32", Sig::stage_out_f32},
-        {"spirv_stage_output_vec4", Sig::stage_out_v4},
+        {"spirv_stage_in", Sig::stage_in},
+        {"spirv_stage_out", Sig::stage_out},
+        {"spirv_set_frag_depth", Sig::frag_depth},
+        {"spirv_buffer_load", Sig::buf_load},
+        {"spirv_buffer_store", Sig::buf_store},
         {"spirv_front_facing", Sig::frag_i32}, {"spirv_demote_to_helper", Sig::frag_void},
         {"spirv_subgroup_all", Sig::i32_i32}, {"spirv_subgroup_any", Sig::i32_i32},
         {"spirv_dpdx_f32", Sig::frag_f32_f32}, {"spirv_dpdy_f32", Sig::frag_f32_f32},
@@ -250,10 +251,19 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::vert_pos: b.build_call(name, Type::void_type(), {x, x, x, x}); break;
         case Sig::frag_f32: r = b.build_call(name, Type::f32()); break;
         case Sig::frag_v4: r = b.build_call(name, Type::f32x4()); break;
-        case Sig::stage_in_f32: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0)}); break;
-        case Sig::stage_in_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0)}); break;
-        case Sig::stage_out_f32: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x}); break;
-        case Sig::stage_out_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), x, x, x, x}); break;
+        case Sig::stage_in:   // location 0, a vec2's lane 1
+            r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(2), b.build_iconst_i32(1)});
+            break;
+        case Sig::stage_out: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(2), x, x}); break;
+        case Sig::frag_depth: b.build_call(name, Type::void_type(), {x}); break;
+        case Sig::buf_load:   // a 32-byte uniform block's word at byte 8
+            r = b.build_call(name, Type::f32(),
+                             {b.build_iconst_i32(0), b.build_iconst_i32(0), b.build_iconst_i32(4), b.build_iconst_i32(8)});
+            break;
+        case Sig::buf_store:
+            b.build_call(name, Type::void_type(),
+                         {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1), b.build_iconst_i32(8), x});
+            break;
         case Sig::frag_f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
         case Sig::frag_i32: r = b.build_call(name, Type::i32()); break;
         case Sig::frag_void: b.build_call(name, Type::void_type()); break;
@@ -274,8 +284,7 @@ std::vector<uint32_t> intrinsic_words(const std::string& name, Sig sig, std::str
     if (sig == Sig::vert_i32 || sig == Sig::vert_pos) {
         opts.stage = target::SpirvStage::Vertex;
     } else if (sig == Sig::frag_f32 || sig == Sig::frag_v4 ||
-               sig == Sig::stage_in_f32 || sig == Sig::stage_in_v4 ||
-               sig == Sig::stage_out_f32 || sig == Sig::stage_out_v4 ||
+               sig == Sig::stage_in || sig == Sig::stage_out || sig == Sig::frag_depth ||
                sig == Sig::frag_f32_f32 || sig == Sig::frag_i32 || sig == Sig::frag_void ||
                sig == Sig::tex_sample || sig == Sig::tex_sample_offset || sig == Sig::tex_compare) {
         opts.stage = target::SpirvStage::Fragment;

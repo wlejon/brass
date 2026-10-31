@@ -41,12 +41,12 @@ Id SpirvISel::builtin_fvec4_component(spv::BuiltIn b, uint32_t component) {
     });
 }
 
-Id SpirvISel::descriptor_var(const target::SpirvDescriptorBinding& db, Id handle_type) {
+Id SpirvISel::descriptor_var(const target::SpirvDescriptorBinding& db, Id handle_type, spv::StorageClass sc) {
     std::string key = "desc." + std::to_string(db.set) + "." + std::to_string(db.binding);
     Id& var = m_.cached(key);
     if (!var) {
-        Id ptr_t = m_.t_pointer(spv::StorageClassUniformConstant, handle_type);
-        var = m_.variable(ptr_t, spv::StorageClassUniformConstant);
+        Id ptr_t = m_.t_pointer(sc, handle_type);
+        var = m_.variable(ptr_t, sc);
         m_.decorate(var, spv::DecorationDescriptorSet, {db.set});
         m_.decorate(var, spv::DecorationBinding, {db.binding});
         m_.set_name(var, "desc_s" + std::to_string(db.set) + "_b" + std::to_string(db.binding));
@@ -57,7 +57,7 @@ Id SpirvISel::descriptor_var(const target::SpirvDescriptorBinding& db, Id handle
         });
         if (it == descriptors_.end() || !(*it == db)) {
             fail("descriptor (set=" + std::to_string(db.set) + ", binding=" + std::to_string(db.binding) +
-                 ") used as two different images");
+                 ") used as two different descriptors");
         }
     }
     Id vid = var;
@@ -65,15 +65,25 @@ Id SpirvISel::descriptor_var(const target::SpirvDescriptorBinding& db, Id handle
     return vid;
 }
 
-Id SpirvISel::stage_io_var(spv::StorageClass sc, uint32_t location) {
+Id SpirvISel::stage_io_var(spv::StorageClass sc, uint32_t location, Id type, uint32_t interp) {
     std::string key = std::string(sc == spv::StorageClassInput ? "stage_in." : "stage_out.") +
                       std::to_string(location);
     Id& var = m_.cached(key);
-    Id v4 = m_.t_vector(t_f32(), 4);
+    Id& var_type = m_.cached(key + ".type");
     if (!var) {
-        var = m_.variable(m_.t_pointer(sc, v4), sc);
+        var = m_.variable(m_.t_pointer(sc, type), sc);
+        var_type = type;
         m_.decorate(var, spv::DecorationLocation, {location});
+        // Interpolation is the fragment input's: a vertex stage's outputs and
+        // inputs (attributes) carry none.
+        if (sc == spv::StorageClassInput && opts_.stage == target::SpirvStage::Fragment) {
+            if (interp & target::kSpirvStageFlat) m_.decorate(var, spv::DecorationFlat);
+            else if (interp & target::kSpirvStageNoPerspective) m_.decorate(var, spv::DecorationNoPerspective);
+        }
         m_.set_name(var, (sc == spv::StorageClassInput ? "in_loc" : "out_loc") + std::to_string(location));
+    } else if (var_type != type) {
+        fail(std::string(sc == spv::StorageClassInput ? "stage input" : "stage output") + " at location " +
+             std::to_string(location) + " used as two different types");
     }
     Id vid = var;
     use_global(vid);
@@ -368,81 +378,156 @@ void SpirvISel::Intrinsics::img_store(SpirvISel& isel, const brass::Instruction&
 }
 
 // ---------------------------------------------------------------------------
+// Buffers at descriptors: a 32-bit word at a byte offset
+// ---------------------------------------------------------------------------
+// spirv_buffer_load(set, binding, desc, offset) -> f32 | i32 and
+// spirv_buffer_store(set, binding, desc, offset, value). desc's bit 0 makes it
+// a storage buffer (otherwise uniform) and its bits 1 up a uniform block's
+// size in 16-byte units. The block is words a layout above lays its data on
+// (std140 for a uniform buffer, std430 for storage): a uniform buffer is
+// uvec4 data[size / 16], a storage buffer uint data[], and the offset (a
+// multiple of 4) picks a word, which an f32 reads as its bits.
+
+Id SpirvISel::Intrinsics::buffer_word(SpirvISel& isel, const brass::Instruction& inst, bool store) {
+    int64_t set = 0, binding = 0, desc = 0;
+    if (!isel.const_int(inst.operand(0), &set) || !isel.const_int(inst.operand(1), &binding) ||
+        !isel.const_int(inst.operand(2), &desc) || set < 0 || binding < 0) {
+        isel.fail(std::string(inst.symbol()) + " requires a constant set, binding and description");
+    }
+    Module& m = isel.m_;
+    const bool storage = (desc & 1) != 0;
+    target::SpirvDescriptorBinding db;
+    db.set = static_cast<uint32_t>(set);
+    db.binding = static_cast<uint32_t>(binding);
+    db.kind = storage ? target::SpirvDescriptorKind::StorageBuffer : target::SpirvDescriptorKind::UniformBuffer;
+    db.bytes = storage ? 0 : static_cast<uint32_t>(desc >> 1) * 16;
+    if (store && !storage) isel.fail(std::string(inst.symbol()) + ": a uniform buffer is read-only");
+    if (!storage && db.bytes == 0) isel.fail(std::string(inst.symbol()) + ": a uniform block needs a size");
+    const spv::StorageClass sc = storage ? spv::StorageClassStorageBuffer : spv::StorageClassUniform;
+    Id u32 = isel.t_u32();
+    std::string key = "buffer_block." + std::to_string(db.set) + "." + std::to_string(db.binding);
+    Id& block = m.cached(key);
+    if (!block) {
+        Id arr = 0;
+        if (storage) {
+            arr = m.t_runtime_array(u32);
+            m.decorate(arr, spv::DecorationArrayStride, {4});
+        } else {
+            arr = m.t_array_fresh(m.t_vector(u32, 4), db.bytes / 16);
+            m.decorate(arr, spv::DecorationArrayStride, {16});
+        }
+        block = m.t_struct({arr});
+        m.decorate(block, spv::DecorationBlock);
+        m.member_decorate(block, 0, spv::DecorationOffset, {0});
+    }
+    Id var = isel.descriptor_var(db, block, sc);
+    Id offset = isel.as_u32(inst.operand(3), "byte offset");
+    Id ptr = m.t_pointer(sc, u32);
+    if (storage) {
+        Id word = isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(2)});
+        return isel.op(spv::OpAccessChain, ptr, {var, m.c_u32(0), word});
+    }
+    Id row = isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(4)});
+    Id lane = isel.op(spv::OpBitwiseAnd, u32, {isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(2)}), m.c_u32(3)});
+    return isel.op(spv::OpAccessChain, ptr, {var, m.c_u32(0), row, lane});
+}
+
+void SpirvISel::Intrinsics::buffer_load(SpirvISel& isel, const brass::Instruction& inst) {
+    Id ptr = buffer_word(isel, inst, false);
+    Id word = isel.op(spv::OpLoad, isel.t_u32(), {ptr});
+    if (inst.type() == Type::f32()) word = isel.op(spv::OpBitcast, isel.t_f32(), {word});
+    else if (inst.type() != Type::i32()) isel.malformed(inst, "spirv_buffer_load gives an f32 or an i32");
+    isel.define(inst.result(), word);
+}
+
+void SpirvISel::Intrinsics::buffer_store(SpirvISel& isel, const brass::Instruction& inst) {
+    Id ptr = buffer_word(isel, inst, true);
+    const Value* v = inst.operand(4);
+    if (!v || (v->type() != Type::f32() && v->type() != Type::i32())) {
+        isel.malformed(inst, "spirv_buffer_store stores an f32 or an i32");
+    }
+    Id word = v->type() == Type::f32() ? isel.op(spv::OpBitcast, isel.t_u32(), {isel.id_of(v, "value")})
+                                       : isel.as_u32(v, "value");
+    isel.emit(Inst(spv::OpStore).id(ptr).id(word));
+}
+
+// ---------------------------------------------------------------------------
 // Graphics Stage Inputs & Outputs (Location-decorated and BuiltIn::Position)
 // ---------------------------------------------------------------------------
 
-void SpirvISel::Intrinsics::stage_input_f32(SpirvISel& isel, const brass::Instruction& inst) {
-    int64_t loc = 0, comp = 0;
-    if (!isel.const_int(inst.operand(0), &loc) || loc < 0) {
-        isel.fail("spirv_stage_input_f32 requires a non-negative constant location");
+// A stage variable's (location, desc), desc as target::kSpirvStage*: its
+// type is the scalar or the vector of its lanes.
+SpirvISel::Intrinsics::StageVar SpirvISel::Intrinsics::stage_var(SpirvISel& isel, const brass::Instruction& inst) {
+    int64_t loc = 0, desc = 0;
+    if (!isel.const_int(inst.operand(0), &loc) || loc < 0 || !isel.const_int(inst.operand(1), &desc)) {
+        isel.fail(std::string(inst.symbol()) + " requires a constant location and description");
     }
-    if (!isel.const_int(inst.operand(1), &comp) || comp < 0 || comp >= 4) {
-        isel.fail("spirv_stage_input_f32 requires a constant component in 0..3");
+    StageVar v;
+    v.location = static_cast<uint32_t>(loc);
+    v.lanes = static_cast<uint32_t>(desc) & 0xf;
+    v.interp = static_cast<uint32_t>(desc) & (target::kSpirvStageFlat | target::kSpirvStageNoPerspective);
+    v.integer = (desc & target::kSpirvStageInt) != 0;
+    if (v.lanes < 1 || v.lanes > 4) isel.fail(std::string(inst.symbol()) + ": a stage variable has 1 to 4 lanes");
+    return v;
+}
+
+// spirv_stage_in(location, desc, lane): one lane of the stage input, the
+// whole variable loaded once in the prologue. A fragment stage's integer
+// input is flat, as Vulkan requires.
+void SpirvISel::Intrinsics::stage_in(SpirvISel& isel, const brass::Instruction& inst) {
+    StageVar v = stage_var(isel, inst);
+    int64_t lane = 0;
+    if (!isel.const_int(inst.operand(2), &lane) || lane < 0 || lane >= static_cast<int64_t>(v.lanes)) {
+        isel.fail("spirv_stage_in requires a constant lane of the variable");
     }
-    auto uloc = static_cast<uint32_t>(loc);
-    auto ucomp = static_cast<uint32_t>(comp);
-    Id var = isel.stage_io_var(spv::StorageClassInput, uloc);
-    Id v4 = isel.m_.t_vector(isel.t_f32(), 4);
-    std::string key = "stage_in." + std::to_string(uloc);
-    Id vec = isel.prologue_value(key, [&] { return isel.op(spv::OpLoad, v4, {var}); });
-    Id val = isel.prologue_value(key + "." + std::to_string(ucomp), [&] {
+    Id scalar = v.integer ? isel.t_u32() : isel.t_f32();
+    Id type = v.lanes == 1 ? scalar : isel.m_.t_vector(scalar, v.lanes);
+    if (v.integer) v.interp = target::kSpirvStageFlat;
+    Id var = isel.stage_io_var(spv::StorageClassInput, v.location, type, v.interp);
+    std::string key = "stage_in." + std::to_string(v.location);
+    Id whole = isel.prologue_value(key, [&] { return isel.op(spv::OpLoad, type, {var}); });
+    if (v.lanes == 1) {
+        isel.define(inst.result(), whole);
+        return;
+    }
+    auto ulane = static_cast<uint32_t>(lane);
+    isel.define(inst.result(), isel.prologue_value(key + "." + std::to_string(ulane), [&] {
         Id r = isel.m_.new_id();
-        isel.emit(Inst(spv::OpCompositeExtract, isel.t_f32(), r).id(vec).lit(ucomp));
+        isel.emit(Inst(spv::OpCompositeExtract, scalar, r).id(whole).lit(ulane));
         return r;
-    });
-    isel.define(inst.result(), val);
+    }));
 }
 
-void SpirvISel::Intrinsics::stage_input_vec4(SpirvISel& isel, const brass::Instruction& inst) {
-    int64_t loc = 0;
-    if (!isel.const_int(inst.operand(0), &loc) || loc < 0) {
-        isel.fail("spirv_stage_input_vec4 requires a non-negative constant location");
+// spirv_stage_out(location, desc, lane values...): the whole variable stored.
+void SpirvISel::Intrinsics::stage_out(SpirvISel& isel, const brass::Instruction& inst) {
+    StageVar v = stage_var(isel, inst);
+    if (inst.operand_count() != 2 + v.lanes) isel.malformed(inst, "spirv_stage_out expects one value per lane");
+    Id scalar = v.integer ? isel.t_u32() : isel.t_f32();
+    Id type = v.lanes == 1 ? scalar : isel.m_.t_vector(scalar, v.lanes);
+    Id var = isel.stage_io_var(spv::StorageClassOutput, v.location, type, 0);
+    std::vector<Id> parts;
+    for (uint32_t i = 0; i < v.lanes; ++i) {
+        parts.push_back(v.integer ? isel.as_u32(inst.operand(2 + i), "stage output lane")
+                                  : isel.id_of(inst.operand(2 + i), "stage output lane"));
     }
-    auto uloc = static_cast<uint32_t>(loc);
-    Id var = isel.stage_io_var(spv::StorageClassInput, uloc);
-    Id v4 = isel.m_.t_vector(isel.t_f32(), 4);
-    std::string key = "stage_in." + std::to_string(uloc);
-    Id vec = isel.prologue_value(key, [&] { return isel.op(spv::OpLoad, v4, {var}); });
-    isel.define(inst.result(), vec);
+    Id value = v.lanes == 1 ? parts[0] : isel.op(spv::OpCompositeConstruct, type, parts);
+    isel.emit(Inst(spv::OpStore).id(var).id(value));
 }
 
-void SpirvISel::Intrinsics::stage_output_f32(SpirvISel& isel, const brass::Instruction& inst) {
-    int64_t loc = 0, comp = 0;
-    if (!isel.const_int(inst.operand(0), &loc) || loc < 0) {
-        isel.fail("spirv_stage_output_f32 requires a non-negative constant location");
+// spirv_set_frag_depth(depth): BuiltIn FragDepth, the entry DepthReplacing.
+void SpirvISel::Intrinsics::set_frag_depth(SpirvISel& isel, const brass::Instruction& inst) {
+    require_fragment(isel, inst);
+    Module& m = isel.m_;
+    Id& var = m.cached("builtin.frag_depth");
+    if (!var) {
+        var = m.variable(m.t_pointer(spv::StorageClassOutput, isel.t_f32()), spv::StorageClassOutput);
+        m.decorate(var, spv::DecorationBuiltIn, {static_cast<uint32_t>(spv::BuiltInFragDepth)});
+        m.set_name(var, "gl_FragDepth");
+        m.add_execution_mode(isel.fn().id, spv::ExecutionModeDepthReplacing, {});
     }
-    if (!isel.const_int(inst.operand(1), &comp) || comp < 0 || comp >= 4) {
-        isel.fail("spirv_stage_output_f32 requires a constant component in 0..3");
-    }
-    auto uloc = static_cast<uint32_t>(loc);
-    auto ucomp = static_cast<uint32_t>(comp);
-    Id var = isel.stage_io_var(spv::StorageClassOutput, uloc);
-    Id ptr_f32 = isel.m_.t_pointer(spv::StorageClassOutput, isel.t_f32());
-    Id elem_ptr = isel.op(spv::OpAccessChain, ptr_f32, {var, isel.m_.c_u32(ucomp)});
-    isel.emit(Inst(spv::OpStore).id(elem_ptr).id(isel.id_of(inst.operand(2), "stage output value")));
-}
-
-void SpirvISel::Intrinsics::stage_output_vec4(SpirvISel& isel, const brass::Instruction& inst) {
-    int64_t loc = 0;
-    if (!isel.const_int(inst.operand(0), &loc) || loc < 0) {
-        isel.fail("spirv_stage_output_vec4 requires a non-negative constant location");
-    }
-    auto uloc = static_cast<uint32_t>(loc);
-    Id var = isel.stage_io_var(spv::StorageClassOutput, uloc);
-    Id v4 = isel.m_.t_vector(isel.t_f32(), 4);
-    Id vec = 0;
-    if (inst.operand_count() == 2) {
-        vec = isel.id_of(inst.operand(1), "stage output vec4");
-    } else if (inst.operand_count() == 5) {
-        vec = isel.op(spv::OpCompositeConstruct, v4,
-                      {isel.id_of(inst.operand(1), "x"),
-                       isel.id_of(inst.operand(2), "y"),
-                       isel.id_of(inst.operand(3), "z"),
-                       isel.id_of(inst.operand(4), "w")});
-    } else {
-        isel.malformed(inst, "spirv_stage_output_vec4 expects (loc, vec4) or (loc, x, y, z, w)");
-    }
-    isel.emit(Inst(spv::OpStore).id(var).id(vec));
+    Id vid = var;
+    isel.use_global(vid);
+    isel.emit(Inst(spv::OpStore).id(vid).id(isel.id_of(inst.operand(0), "depth")));
 }
 
 void SpirvISel::Intrinsics::set_vertex_position(SpirvISel& isel, const brass::Instruction& inst) {
