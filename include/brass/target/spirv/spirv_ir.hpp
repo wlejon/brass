@@ -126,6 +126,7 @@ public:
     Id t_image(Id sampled_type, spv::Dim dim, uint32_t depth, uint32_t arrayed, uint32_t ms,
                uint32_t sampled, spv::ImageFormat format);
     Id t_sampled_image(Id image_type);
+    Id t_sampler();
     Id t_function(Id ret, const std::vector<Id>& params);
     const TypeInfo* type_info(Id type) const; // nullptr when `type` is not a type
 

@@ -110,6 +110,7 @@ private:
     Block& block();
     Inst& emit(Inst inst);
     Id op(spv::Op o, Id type, std::initializer_list<Id> ids);
+    Id op(spv::Op o, Id type, const std::vector<Id>& ids);
     Id ext(uint32_t glsl_inst, Id type, std::initializer_list<Id> ids); // GLSL.std.450
     void use_global(Id var);
     // A value computed once per kernel in the prologue (builtin reads); `make`
@@ -121,7 +122,9 @@ private:
     Id builtin_fvec4(spv::BuiltIn b);                               // vec4 float builtin
     Id builtin_scalar(spv::BuiltIn b);                        // u32 builtin
     Id workgroup_size(uint32_t component);
-    Id descriptor_var(uint32_t set, uint32_t binding, target::SpirvDescriptorKind kind, Id handle_type);
+    // The variable of a descriptor (made once a set and binding; a second
+    // use as another image fails).
+    Id descriptor_var(const target::SpirvDescriptorBinding& db, Id handle_type);
     Id stage_io_var(spv::StorageClass sc, uint32_t location); // Input/Output vec4 variable at Location
 
     // ---- types and values -------------------------------------------------------

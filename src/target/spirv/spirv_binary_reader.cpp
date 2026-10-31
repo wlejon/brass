@@ -151,6 +151,8 @@ void classify_operands(spv::Op op, std::span<const uint32_t> raw,
             }
             return;
 
+        case spv::OpImageSampleDrefImplicitLod:
+        case spv::OpImageSampleDrefExplicitLod:
         case spv::OpImageWrite:
             for (size_t i = 0; i < raw.size(); ++i) {
                 if (i == 3) inst.lit(raw[i]);

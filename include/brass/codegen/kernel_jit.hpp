@@ -1,6 +1,7 @@
 #pragma once
 
 #include <brass/target/target.hpp>
+#include <brass/target/spirv_target.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
@@ -390,29 +391,47 @@ public:
     Value* atom_exch_f32(Value* ptr, Value* val);
 
     // ------------------------------------------------------------------
-    // SPIR-V descriptor-bound 2D/3D storage images & sampled textures
+    // SPIR-V descriptor-bound textures and storage images
     // ------------------------------------------------------------------
-    Value* image2d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy);
-    Instruction* image2d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* val);
-    Value* image3d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz);
-    Instruction* image3d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* val);
-
-    Value* image2d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy);
-    Instruction* image2d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* rgba);
-    Value* image3d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz);
-    Instruction* image3d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* rgba);
-
-    Value* sampler2d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod = nullptr);
-    Value* sampler3d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod = nullptr);
-    Value* sampler2d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod = nullptr);
-    Value* sampler3d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod = nullptr);
-
-    Value* image2d_load(uint32_t set, uint32_t binding, Value* ix, Value* iy) { return image2d_load_r32f(set, binding, ix, iy); }
-    Instruction* image2d_store(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* val) { return image2d_store_r32f(set, binding, ix, iy, val); }
-    Value* image3d_load(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz) { return image3d_load_r32f(set, binding, ix, iy, iz); }
-    Instruction* image3d_store(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* val) { return image3d_store_r32f(set, binding, ix, iy, iz, val); }
-    Value* sampler2d_lod(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod = nullptr) { return sampler2d_lod_r32f(set, binding, u, v, lod); }
-    Value* sampler3d_lod(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod = nullptr) { return sampler3d_lod_r32f(set, binding, u, v, w, lod); }
+    // The image a call reads or writes: its descriptor, shape and texel
+    // scalar, a storage image's spv::ImageFormat, and for a texture read
+    // through a separate sampler, that sampler's descriptor (sampler_set < 0:
+    // the image is a combined image sampler). Coordinates are the image's
+    // dimensions (a cube's: a direction, three), then the layer when arrayed;
+    // f32 for a sample, i32 for a fetch or a storage image. A texel is an
+    // f32x4, or an i32x4 holding u32 lanes for a U32 image.
+    struct ImageRef {
+        uint32_t set = 0, binding = 0;
+        target::SpirvImageDim dim = target::SpirvImageDim::D2;
+        bool arrayed = false;
+        bool depth = false;   // a depth image: sampled by comparison
+        target::SpirvImageScalar scalar = target::SpirvImageScalar::F32;
+        uint32_t format = 0;
+        int32_t sampler_set = -1, sampler_binding = -1;
+    };
+    // Filtered: at the implicit LOD (a fragment stage), at `lod`, or with
+    // gradients (`dx`, `dy`: a value each of the image's dimensions, no
+    // layer); `offset`, if any, constant texels each of its dimensions.
+    Value* texture_sample(const ImageRef& img, const std::vector<Value*>& coords,
+                          const std::vector<Value*>& offset = {});
+    Value* texture_sample_lod(const ImageRef& img, const std::vector<Value*>& coords, Value* lod,
+                              const std::vector<Value*>& offset = {});
+    Value* texture_sample_grad(const ImageRef& img, const std::vector<Value*>& coords, const std::vector<Value*>& dx,
+                               const std::vector<Value*>& dy, const std::vector<Value*>& offset = {});
+    // A depth image compared against `ref` (an f32: the share of the
+    // filter's texels that pass); `lod` null for the implicit LOD.
+    Value* texture_compare(const ImageRef& img, const std::vector<Value*>& coords, Value* ref, Value* lod = nullptr);
+    Value* texture_fetch(const ImageRef& img, const std::vector<Value*>& coords, Value* lod);
+    // Component 0..3 of the four texels a bilinear sample blends (a depth
+    // image: `ref` compared, in place of the component).
+    Value* texture_gather(const ImageRef& img, const std::vector<Value*>& coords, Value* component_or_ref);
+    // Size at a mip level, an i32x4 with lanes past the coordinate count 0;
+    // the mip count.
+    Value* texture_size(const ImageRef& img, Value* lod);
+    Value* texture_levels(const ImageRef& img);
+    Value* image_load(const ImageRef& img, const std::vector<Value*>& coords);
+    Instruction* image_store(const ImageRef& img, const std::vector<Value*>& coords, Value* texel);
+    Value* image_size(const ImageRef& img);
 
     // ------------------------------------------------------------------
     // SPIR-V graphics rendering stages (Vertex & Fragment)

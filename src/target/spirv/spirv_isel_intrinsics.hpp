@@ -90,12 +90,32 @@ struct SpirvISel::Intrinsics {
 
     // ---- descriptor images, samplers, graphics stages (spirv_isel_graphics.cpp)
     static void parse_set_binding(SpirvISel& isel, const brass::Instruction& inst, uint32_t& out_set, uint32_t& out_binding);
-    template <spv::Dim Dim, bool Vec4>
-    static void image_load(SpirvISel& isel, const brass::Instruction& inst);
-    template <spv::Dim Dim, bool Vec4>
-    static void image_store(SpirvISel& isel, const brass::Instruction& inst);
-    template <spv::Dim Dim, bool Vec4>
-    static void sampler_lod(SpirvISel& isel, const brass::Instruction& inst);
+    // A texture or image call's image (image_call reads its leading operands).
+    struct ImageCall {
+        uint32_t set = 0, binding = 0;
+        target::SpirvImageDim dim = target::SpirvImageDim::D2;
+        bool arrayed = false, depth = false;
+        target::SpirvImageScalar scalar = target::SpirvImageScalar::F32;
+        uint32_t format = 0;
+        Id texel_scalar = 0, texel_type = 0, image_type = 0;
+        Id image = 0;     // the OpTypeImage value
+        Id sampled = 0;   // the OpTypeSampledImage value (none for a storage image)
+        uint32_t coords() const;
+    };
+    static ImageCall image_call(SpirvISel& isel, const brass::Instruction& inst, bool storage, size_t own_operands);
+    static Id image_coord(SpirvISel& isel, const brass::Instruction& inst, size_t first, uint32_t n, bool integer);
+    static Id image_const_offset(SpirvISel& isel, const brass::Instruction& inst, size_t first, uint32_t n);
+    static constexpr int kOffsetBit = 4;
+    static constexpr int kDrefBit = 8;
+    template <int Op>
+    static void tex_sample(SpirvISel& isel, const brass::Instruction& inst);
+    static void tex_fetch(SpirvISel& isel, const brass::Instruction& inst);
+    static void tex_gather(SpirvISel& isel, const brass::Instruction& inst);
+    template <bool Storage>
+    static void tex_size(SpirvISel& isel, const brass::Instruction& inst);
+    static void tex_levels(SpirvISel& isel, const brass::Instruction& inst);
+    static void img_load(SpirvISel& isel, const brass::Instruction& inst);
+    static void img_store(SpirvISel& isel, const brass::Instruction& inst);
 
     template <spv::BuiltIn B>
     static void builtin_scalar_in(SpirvISel& isel, const brass::Instruction& inst) {

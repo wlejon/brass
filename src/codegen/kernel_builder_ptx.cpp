@@ -211,72 +211,102 @@ Value* KernelBuilder::atom_exch_f32(Value* ptr, Value* val) { return b_.build_ca
 // SPIR-V descriptor-bound images & samplers
 // ---------------------------------------------------------------------------
 
-Value* KernelBuilder::image2d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy) {
-    return b_.build_call("spirv_image2d_load_r32f", Type::f32(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy});
+namespace {
+
+// A call's leading operands: the image's set, binding and packed
+// description, then its sampler's set and binding (spirv_isel_graphics.cpp
+// image_call reads them back).
+std::vector<Value*> image_operands(KernelBuilder& kb, const KernelBuilder::ImageRef& img) {
+    int32_t desc = static_cast<int32_t>(img.dim) | (img.arrayed ? 4 : 0) | (img.depth ? 8 : 0) |
+                   (static_cast<int32_t>(img.scalar) << 4) | static_cast<int32_t>((img.format & 0xff) << 8);
+    return {kb.const_i32(static_cast<int32_t>(img.set)), kb.const_i32(static_cast<int32_t>(img.binding)),
+            kb.const_i32(desc), kb.const_i32(img.sampler_set), kb.const_i32(img.sampler_binding)};
 }
 
-Instruction* KernelBuilder::image2d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* val) {
-    b_.build_call("spirv_image2d_store_r32f", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, val});
+Type texel_type(const KernelBuilder::ImageRef& img) {
+    return img.scalar == target::SpirvImageScalar::F32 ? Type::f32x4() : Type::i32x4();
+}
+
+void append(std::vector<Value*>& ops, const std::vector<Value*>& more) { ops.insert(ops.end(), more.begin(), more.end()); }
+
+} // namespace
+
+Value* KernelBuilder::texture_sample(const ImageRef& img, const std::vector<Value*>& coords,
+                                     const std::vector<Value*>& offset) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    append(ops, offset);
+    return b_.build_call(offset.empty() ? "spirv_tex_sample" : "spirv_tex_sample_offset", texel_type(img), ops);
+}
+
+Value* KernelBuilder::texture_sample_lod(const ImageRef& img, const std::vector<Value*>& coords, Value* lod,
+                                         const std::vector<Value*>& offset) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    ops.push_back(lod);
+    append(ops, offset);
+    return b_.build_call(offset.empty() ? "spirv_tex_sample_lod" : "spirv_tex_sample_lod_offset", texel_type(img), ops);
+}
+
+Value* KernelBuilder::texture_sample_grad(const ImageRef& img, const std::vector<Value*>& coords,
+                                          const std::vector<Value*>& dx, const std::vector<Value*>& dy,
+                                          const std::vector<Value*>& offset) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    append(ops, dx);
+    append(ops, dy);
+    append(ops, offset);
+    return b_.build_call(offset.empty() ? "spirv_tex_sample_grad" : "spirv_tex_sample_grad_offset", texel_type(img), ops);
+}
+
+Value* KernelBuilder::texture_compare(const ImageRef& img, const std::vector<Value*>& coords, Value* ref, Value* lod) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    ops.push_back(ref);
+    if (lod) ops.push_back(lod);
+    return b_.build_call(lod ? "spirv_tex_sample_compare_lod" : "spirv_tex_sample_compare", Type::f32(), ops);
+}
+
+Value* KernelBuilder::texture_fetch(const ImageRef& img, const std::vector<Value*>& coords, Value* lod) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    ops.push_back(lod);
+    return b_.build_call("spirv_tex_fetch", texel_type(img), ops);
+}
+
+Value* KernelBuilder::texture_gather(const ImageRef& img, const std::vector<Value*>& coords, Value* component_or_ref) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    ops.push_back(component_or_ref);
+    return b_.build_call("spirv_tex_gather", texel_type(img), ops);
+}
+
+Value* KernelBuilder::texture_size(const ImageRef& img, Value* lod) {
+    auto ops = image_operands(*this, img);
+    ops.push_back(lod);
+    return b_.build_call("spirv_tex_size", Type::i32x4(), ops);
+}
+
+Value* KernelBuilder::texture_levels(const ImageRef& img) {
+    return b_.build_call("spirv_tex_levels", Type::i32(), image_operands(*this, img));
+}
+
+Value* KernelBuilder::image_load(const ImageRef& img, const std::vector<Value*>& coords) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    return b_.build_call("spirv_img_load", texel_type(img), ops);
+}
+
+Instruction* KernelBuilder::image_store(const ImageRef& img, const std::vector<Value*>& coords, Value* texel) {
+    auto ops = image_operands(*this, img);
+    append(ops, coords);
+    ops.push_back(texel);
+    b_.build_call("spirv_img_store", Type::void_type(), ops);
     return b_.current_block()->tail();
 }
 
-Value* KernelBuilder::image3d_load_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz) {
-    return b_.build_call("spirv_image3d_load_r32f", Type::f32(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz});
-}
-
-Instruction* KernelBuilder::image3d_store_r32f(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* val) {
-    b_.build_call("spirv_image3d_store_r32f", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz, val});
-    return b_.current_block()->tail();
-}
-
-Value* KernelBuilder::image2d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy) {
-    return b_.build_call("spirv_image2d_load_vec4", Type::f32x4(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy});
-}
-
-Instruction* KernelBuilder::image2d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* rgba) {
-    b_.build_call("spirv_image2d_store_vec4", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, rgba});
-    return b_.current_block()->tail();
-}
-
-Value* KernelBuilder::image3d_load_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz) {
-    return b_.build_call("spirv_image3d_load_vec4", Type::f32x4(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz});
-}
-
-Instruction* KernelBuilder::image3d_store_vec4(uint32_t set, uint32_t binding, Value* ix, Value* iy, Value* iz, Value* rgba) {
-    b_.build_call("spirv_image3d_store_vec4", Type::void_type(),
-                  {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), ix, iy, iz, rgba});
-    return b_.current_block()->tail();
-}
-
-Value* KernelBuilder::sampler2d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod) {
-    if (!lod) lod = const_f32(0.0f);
-    return b_.build_call("spirv_sampler2d_lod_r32f", Type::f32(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, lod});
-}
-
-Value* KernelBuilder::sampler3d_lod_r32f(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod) {
-    if (!lod) lod = const_f32(0.0f);
-    return b_.build_call("spirv_sampler3d_lod_r32f", Type::f32(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, w, lod});
-}
-
-Value* KernelBuilder::sampler2d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* lod) {
-    if (!lod) lod = const_f32(0.0f);
-    return b_.build_call("spirv_sampler2d_lod_vec4", Type::f32x4(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, lod});
-}
-
-Value* KernelBuilder::sampler3d_lod_vec4(uint32_t set, uint32_t binding, Value* u, Value* v, Value* w, Value* lod) {
-    if (!lod) lod = const_f32(0.0f);
-    return b_.build_call("spirv_sampler3d_lod_vec4", Type::f32x4(),
-                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), u, v, w, lod});
+Value* KernelBuilder::image_size(const ImageRef& img) {
+    return b_.build_call("spirv_img_size", Type::i32x4(), image_operands(*this, img));
 }
 
 // ---------------------------------------------------------------------------

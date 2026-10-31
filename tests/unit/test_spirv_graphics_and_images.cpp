@@ -56,15 +56,25 @@ TEST_CASE("SPIR-V Descriptor Images & Samplers - 2D/3D storage images and sample
     Value* v = kb.mul(fy, inv_dim);
     Value* w = kb.mul(fz, inv_dim);
 
-    Value* tex2d = kb.sampler2d_lod_r32f(0, 0, u, v, kb.const_f32(0.0f));
-    Value* prev2d = kb.image2d_load_r32f(0, 1, ix, iy);
-    Value* out2d = kb.fma(tex2d, gain, prev2d);
-    kb.image2d_store_r32f(0, 1, ix, iy, out2d);
+    using target::SpirvImageDim;
+    const uint32_t r32f = spv::ImageFormatR32f;
+    KernelBuilder::ImageRef tex2 {0, 0, SpirvImageDim::D2};
+    KernelBuilder::ImageRef img2 {0, 1, SpirvImageDim::D2};
+    img2.format = r32f;
+    KernelBuilder::ImageRef tex3 {1, 0, SpirvImageDim::D3};
+    KernelBuilder::ImageRef img3 {1, 1, SpirvImageDim::D3};
+    img3.format = r32f;
+    auto red = [&](Value* texel) { return b.build_vextract_lane(texel, 0); };
 
-    Value* tex3d = kb.sampler3d_lod_r32f(1, 0, u, v, w, kb.const_f32(0.0f));
-    Value* prev3d = kb.image3d_load_r32f(1, 1, ix, iy, iz);
+    Value* tex2d = red(kb.texture_sample_lod(tex2, {u, v}, kb.const_f32(0.0f)));
+    Value* prev2d = red(kb.image_load(img2, {ix, iy}));
+    Value* out2d = kb.fma(tex2d, gain, prev2d);
+    kb.image_store(img2, {ix, iy}, b.build_vbroadcast(Type::f32x4(), out2d));
+
+    Value* tex3d = red(kb.texture_sample_lod(tex3, {u, v, w}, kb.const_f32(0.0f)));
+    Value* prev3d = red(kb.image_load(img3, {ix, iy, iz}));
     Value* out3d = kb.add(prev3d, tex3d);
-    kb.image3d_store_r32f(1, 1, ix, iy, iz, out3d);
+    kb.image_store(img3, {ix, iy, iz}, b.build_vbroadcast(Type::f32x4(), out3d));
     b.build_ret_void();
 
     target::SpirvOptions opts;
@@ -77,19 +87,23 @@ TEST_CASE("SPIR-V Descriptor Images & Samplers - 2D/3D storage images and sample
     REQUIRE_EQ(k.descriptors.size(), 4u);
     CHECK_EQ(k.descriptors[0].set, 0u);
     CHECK_EQ(k.descriptors[0].binding, 0u);
-    CHECK(k.descriptors[0].kind == target::SpirvDescriptorKind::SampledImage2D);
+    CHECK(k.descriptors[0].kind == target::SpirvDescriptorKind::CombinedImageSampler);
+    CHECK(k.descriptors[0].dim == SpirvImageDim::D2);
 
     CHECK_EQ(k.descriptors[1].set, 0u);
     CHECK_EQ(k.descriptors[1].binding, 1u);
-    CHECK(k.descriptors[1].kind == target::SpirvDescriptorKind::StorageImage2D);
+    CHECK(k.descriptors[1].kind == target::SpirvDescriptorKind::StorageImage);
+    CHECK_EQ(k.descriptors[1].format, r32f);
 
     CHECK_EQ(k.descriptors[2].set, 1u);
     CHECK_EQ(k.descriptors[2].binding, 0u);
-    CHECK(k.descriptors[2].kind == target::SpirvDescriptorKind::SampledImage3D);
+    CHECK(k.descriptors[2].kind == target::SpirvDescriptorKind::CombinedImageSampler);
+    CHECK(k.descriptors[2].dim == SpirvImageDim::D3);
 
     CHECK_EQ(k.descriptors[3].set, 1u);
     CHECK_EQ(k.descriptors[3].binding, 1u);
-    CHECK(k.descriptors[3].kind == target::SpirvDescriptorKind::StorageImage3D);
+    CHECK(k.descriptors[3].kind == target::SpirvDescriptorKind::StorageImage);
+    CHECK(k.descriptors[3].dim == SpirvImageDim::D3);
 
     std::string dump_txt = dump_of(*fn, opts);
     CHECK(has(dump_txt, "OpTypeImage"));
@@ -124,18 +138,84 @@ TEST_CASE("SPIR-V Descriptor Images & Samplers - vec4 RGBA storage images and sa
     Value* v = kb.i32_to_f32(iy);
     Value* w = kb.i32_to_f32(iz);
 
-    Value* s2 = kb.sampler2d_lod_vec4(0, 0, u, v);
-    Value* ld2 = kb.image2d_load_vec4(0, 1, ix, iy);
-    kb.image2d_store_vec4(0, 1, ix, iy, kb.vadd(s2, ld2));
+    using target::SpirvImageDim;
+    KernelBuilder::ImageRef tex2 {0, 0, SpirvImageDim::D2};
+    KernelBuilder::ImageRef img2 {0, 1, SpirvImageDim::D2};
+    img2.format = spv::ImageFormatRgba16f;
+    KernelBuilder::ImageRef tex3 {0, 2, SpirvImageDim::D3};
+    KernelBuilder::ImageRef img3 {0, 3, SpirvImageDim::D3};
+    img3.format = spv::ImageFormatRgba32f;
 
-    Value* s3 = kb.sampler3d_lod_vec4(0, 2, u, v, w);
-    Value* ld3 = kb.image3d_load_vec4(0, 3, ix, iy, iz);
-    kb.image3d_store_vec4(0, 3, ix, iy, iz, kb.vmul(s3, ld3));
+    Value* s2 = kb.texture_sample_lod(tex2, {u, v}, kb.const_f32(0.0f));
+    Value* ld2 = kb.image_load(img2, {ix, iy});
+    kb.image_store(img2, {ix, iy}, kb.vadd(s2, ld2));
+
+    Value* s3 = kb.texture_sample_lod(tex3, {u, v, w}, kb.const_f32(0.0f));
+    Value* ld3 = kb.image_load(img3, {ix, iy, iz});
+    kb.image_store(img3, {ix, iy, iz}, kb.vmul(s3, ld3));
     b.build_ret_void();
 
     target::SpirvKernel k = compile_checked(*fn);
     REQUIRE_EQ(k.descriptors.size(), 4u);
+    CHECK_EQ(k.descriptors[1].format, static_cast<uint32_t>(spv::ImageFormatRgba16f));
     CHECK(spirv::audit_compute_shader_binary(k.words).ok());
+}
+
+// Arrays, cubes, depth comparison through a separate sampler, fetches, sizes,
+// gathers, gradients and offsets, in a fragment stage: each validates.
+TEST_CASE("SPIR-V Textures - arrays, cubes, shadows, separate samplers, fetch, size, gather") {
+    Module mod("tex_kinds");
+    Function* fn = mod.create_function("fs_kinds", Type::void_type(), {Type::f32()});
+    KernelBuilder kb(mod, fn);
+    Builder& b = kb.builder();
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* k = b.add_block_param(entry, Type::f32());
+    using target::SpirvImageDim;
+
+    KernelBuilder::ImageRef arr {0, 0, SpirvImageDim::D2};
+    arr.arrayed = true;
+    KernelBuilder::ImageRef cube {0, 1, SpirvImageDim::Cube};
+    KernelBuilder::ImageRef shadow {0, 2, SpirvImageDim::D2};
+    shadow.depth = true;
+    shadow.sampler_set = 0;
+    shadow.sampler_binding = 3;
+    KernelBuilder::ImageRef plain {0, 4, SpirvImageDim::D2};
+
+    Value* u = kb.frag_coord_x();
+    Value* v = kb.frag_coord_y();
+    Value* a = kb.texture_sample(arr, {u, v, kb.const_f32(2.0f)});
+    Value* c = kb.texture_sample_lod(cube, {u, v, k}, kb.const_f32(1.0f));
+    Value* s = kb.texture_compare(shadow, {u, v}, k, kb.const_f32(0.0f));
+    Value* s2 = kb.texture_compare(shadow, {u, v}, k);
+    Value* f = kb.texture_fetch(plain, {kb.const_i32(3), kb.const_i32(4)}, kb.const_i32(0));
+    Value* g = kb.texture_gather(plain, {u, v}, kb.const_i32(1));
+    Value* gr = kb.texture_sample_grad(plain, {u, v}, {k, k}, {k, k}, {kb.const_i32(1), kb.const_i32(-1)});
+    Value* o = kb.texture_sample(plain, {u, v}, {kb.const_i32(-2), kb.const_i32(0)});
+    Value* size = kb.texture_size(cube, kb.const_i32(0));
+    Value* levels = kb.texture_levels(plain);
+    Value* sum = kb.vadd(kb.vadd(kb.vadd(a, c), kb.vadd(f, g)), kb.vadd(gr, o));
+    Value* extra = kb.add(kb.add(s, s2), kb.i32_to_f32(b.build_add(b.build_vextract_lane(size, 1), levels)));
+    kb.set_frag_color_vec4(0, kb.vadd(sum, b.build_vbroadcast(Type::f32x4(), extra)));
+    b.build_ret_void();
+
+    target::SpirvOptions opts;
+    opts.stage = target::SpirvStage::Fragment;
+    target::SpirvKernel kern = compile_checked(*fn, opts);
+    REQUIRE_EQ(kern.descriptors.size(), 5u);
+    CHECK(kern.descriptors[0].arrayed);
+    CHECK(kern.descriptors[1].dim == SpirvImageDim::Cube);
+    CHECK(kern.descriptors[2].kind == target::SpirvDescriptorKind::SampledImage);
+    CHECK(kern.descriptors[2].depth);
+    CHECK(kern.descriptors[3].kind == target::SpirvDescriptorKind::Sampler);
+    CHECK_EQ(kern.descriptors[3].binding, 3u);
+    std::string dis = dump_of(*fn, opts);
+    for (const char* op : {"OpImageSampleImplicitLod", "OpImageSampleDrefExplicitLod", "OpImageSampleDrefImplicitLod",
+                           "OpImageFetch", "OpImageGather", "OpImageQuerySizeLod", "OpImageQueryLevels",
+                           "OpSampledImage", "OpTypeSampler"}) {
+        if (!has(dis, op)) std::cerr << "missing " << op << "\n";
+        CHECK(has(dis, op));
+    }
 }
 
 TEST_CASE("SPIR-V Descriptor Images & Samplers - conflicting descriptor binding kind is rejected") {
@@ -147,12 +227,16 @@ TEST_CASE("SPIR-V Descriptor Images & Samplers - conflicting descriptor binding 
     b.position_at_end(entry);
 
     Value* ix = kb.tid_x();
-    Value* v = kb.image2d_load_r32f(0, 0, ix, ix);
+    KernelBuilder::ImageRef img2 {0, 0, target::SpirvImageDim::D2};
+    img2.format = spv::ImageFormatR32f;
+    KernelBuilder::ImageRef img3 = img2;
+    img3.dim = target::SpirvImageDim::D3;
+    Value* v = kb.image_load(img2, {ix, ix});
     // Same (set=0, binding=0) used as a 3D storage image:
-    kb.image3d_store_r32f(0, 0, ix, ix, ix, v);
+    kb.image_store(img3, {ix, ix, ix}, v);
     b.build_ret_void();
 
-    require_diagnostic(*fn, {"conflicting descriptor kinds"});
+    require_diagnostic(*fn, {"used as two different images"});
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +303,8 @@ TEST_CASE("SPIR-V Graphics Stages - Fragment shader with OriginUpperLeft, FragCo
     Value* u = kb.stage_input_f32(0, 0);
     Value* v = kb.stage_input_f32(0, 1);
 
-    Value* tex_r = kb.sampler2d_lod_r32f(0, 0, u, v, kb.const_f32(0.0f));
+    KernelBuilder::ImageRef tex {0, 0, target::SpirvImageDim::D2};
+    Value* tex_r = b.build_vextract_lane(kb.texture_sample_lod(tex, {u, v}, kb.const_f32(0.0f)), 0);
     Value* vig = kb.mul(kb.add(fcx, fcy), kb.const_f32(0.0005f));
     Value* r = kb.mul(tex_r, exposure);
     Value* g = kb.clamp_f32(u, kb.const_f32(0.0f), kb.const_f32(1.0f));
@@ -234,7 +319,7 @@ TEST_CASE("SPIR-V Graphics Stages - Fragment shader with OriginUpperLeft, FragCo
 
     CHECK(k.stage == target::SpirvStage::Fragment);
     REQUIRE_EQ(k.descriptors.size(), 1u);
-    CHECK(k.descriptors[0].kind == target::SpirvDescriptorKind::SampledImage2D);
+    CHECK(k.descriptors[0].kind == target::SpirvDescriptorKind::CombinedImageSampler);
 
     std::string dump_txt = dump_of(*fn, opts);
     CHECK(has(dump_txt, "OpEntryPoint Fragment"));

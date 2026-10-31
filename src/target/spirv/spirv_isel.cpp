@@ -436,7 +436,9 @@ Inst& SpirvISel::emit(Inst inst) {
     return block().insts.back();
 }
 
-Id SpirvISel::op(spv::Op o, Id type, std::initializer_list<Id> ids) {
+Id SpirvISel::op(spv::Op o, Id type, std::initializer_list<Id> ids) { return op(o, type, std::vector<Id>(ids)); }
+
+Id SpirvISel::op(spv::Op o, Id type, const std::vector<Id>& ids) {
     Id r = m_.new_id();
     Inst inst(o, type, r);
     for (Id i : ids) inst.id(i);

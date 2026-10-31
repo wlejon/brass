@@ -210,6 +210,11 @@ Id Module::t_sampled_image(Id image_type) {
     return intern(Inst(spv::OpTypeSampledImage).id(image_type), &ti);
 }
 
+Id Module::t_sampler() {
+    TypeInfo ti{spv::OpTypeSampler, 0};
+    return intern(Inst(spv::OpTypeSampler), &ti);
+}
+
 Id Module::t_function(Id ret, const std::vector<Id>& params) {
     Inst inst(spv::OpTypeFunction);
     inst.id(ret);

@@ -41,30 +41,27 @@ Id SpirvISel::builtin_fvec4_component(spv::BuiltIn b, uint32_t component) {
     });
 }
 
-Id SpirvISel::descriptor_var(uint32_t set, uint32_t binding, target::SpirvDescriptorKind kind, Id handle_type) {
-    std::string key = "desc." + std::to_string(set) + "." + std::to_string(binding);
-    std::string kind_key = "desc_kind." + std::to_string(set) + "." + std::to_string(binding);
+Id SpirvISel::descriptor_var(const target::SpirvDescriptorBinding& db, Id handle_type) {
+    std::string key = "desc." + std::to_string(db.set) + "." + std::to_string(db.binding);
     Id& var = m_.cached(key);
-    Id& cached_kind = m_.cached(kind_key);
-    auto kind_tag = static_cast<Id>(kind) + 1;
     if (!var) {
         Id ptr_t = m_.t_pointer(spv::StorageClassUniformConstant, handle_type);
         var = m_.variable(ptr_t, spv::StorageClassUniformConstant);
-        m_.decorate(var, spv::DecorationDescriptorSet, {set});
-        m_.decorate(var, spv::DecorationBinding, {binding});
-        m_.set_name(var, "desc_s" + std::to_string(set) + "_b" + std::to_string(binding));
-        cached_kind = kind_tag;
-    } else if (cached_kind != kind_tag) {
-        fail("descriptor (set=" + std::to_string(set) + ", binding=" + std::to_string(binding) +
-             ") used with conflicting descriptor kinds");
+        m_.decorate(var, spv::DecorationDescriptorSet, {db.set});
+        m_.decorate(var, spv::DecorationBinding, {db.binding});
+        m_.set_name(var, "desc_s" + std::to_string(db.set) + "_b" + std::to_string(db.binding));
+        descriptors_.push_back(db);
+    } else {
+        auto it = std::find_if(descriptors_.begin(), descriptors_.end(), [&](const target::SpirvDescriptorBinding& d) {
+            return d.set == db.set && d.binding == db.binding;
+        });
+        if (it == descriptors_.end() || !(*it == db)) {
+            fail("descriptor (set=" + std::to_string(db.set) + ", binding=" + std::to_string(db.binding) +
+                 ") used as two different images");
+        }
     }
     Id vid = var;
     use_global(vid);
-
-    target::SpirvDescriptorBinding db{set, binding, kind};
-    if (std::find(descriptors_.begin(), descriptors_.end(), db) == descriptors_.end()) {
-        descriptors_.push_back(db);
-    }
     return vid;
 }
 
@@ -84,21 +81,8 @@ Id SpirvISel::stage_io_var(spv::StorageClass sc, uint32_t location) {
 }
 
 // ---------------------------------------------------------------------------
-// 2D and 3D Storage Images (OpTypeImage, OpImageRead, OpImageWrite)
+// Textures and storage images (OpTypeImage, OpTypeSampledImage, OpTypeSampler)
 // ---------------------------------------------------------------------------
-
-namespace {
-
-Id storage_image_handle_type(Module& m, spv::Dim dim, bool vec4, Id existing_var) {
-    if (existing_var != 0) {
-        const TypeInfo* pti = m.type_info(m.type_of_value(existing_var));
-        if (pti && pti->op == spv::OpTypePointer && pti->elem != 0) return pti->elem;
-    }
-    return m.t_image(m.t_float(32), dim, 0, 0, 0, 2,
-                     vec4 ? spv::ImageFormatRgba32f : spv::ImageFormatR32f);
-}
-
-} // namespace
 
 void SpirvISel::Intrinsics::parse_set_binding(SpirvISel& isel, const brass::Instruction& inst,
                                               uint32_t& out_set, uint32_t& out_binding) {
@@ -113,143 +97,275 @@ void SpirvISel::Intrinsics::parse_set_binding(SpirvISel& isel, const brass::Inst
     out_binding = static_cast<uint32_t>(b);
 }
 
-template <spv::Dim Dim, bool Vec4>
-void SpirvISel::Intrinsics::image_load(SpirvISel& isel, const brass::Instruction& inst) {
-    constexpr size_t expected_ops = (Dim == spv::Dim3D) ? 5 : 4;
-    if (inst.operand_count() < expected_ops) isel.malformed(inst, "missing image_load operand");
-    uint32_t set = 0, binding = 0;
-    parse_set_binding(isel, inst, set, binding);
+// A texture or image call's operands open with the image's set and binding,
+// its description (KernelBuilder::ImageRef, packed by image_desc: dim in bits
+// 0-1, arrayed bit 2, depth bit 3, scalar bits 4-5, a storage image's
+// spv::ImageFormat in bits 8-15), and a separate sampler's set and binding
+// (-1 for a combined image sampler); the call's own operands follow from 5.
+SpirvISel::Intrinsics::ImageCall SpirvISel::Intrinsics::image_call(SpirvISel& isel, const brass::Instruction& inst,
+                                                                   bool storage, size_t own_operands) {
+    if (inst.operand_count() < 5 + own_operands) isel.malformed(inst, "missing image operand");
+    ImageCall c;
+    parse_set_binding(isel, inst, c.set, c.binding);
+    int64_t desc = 0, sset = 0, sbind = 0;
+    if (!isel.const_int(inst.operand(2), &desc) || !isel.const_int(inst.operand(3), &sset) ||
+        !isel.const_int(inst.operand(4), &sbind)) {
+        isel.fail(std::string(inst.symbol()) + " requires a constant image description and sampler binding");
+    }
+    c.dim = static_cast<target::SpirvImageDim>(desc & 3);
+    c.arrayed = (desc & 4) != 0;
+    c.depth = (desc & 8) != 0;
+    c.scalar = static_cast<target::SpirvImageScalar>((desc >> 4) & 3);
+    c.format = static_cast<uint32_t>((desc >> 8) & 0xff);
+    if (c.scalar == target::SpirvImageScalar::I32) isel.fail(std::string(inst.symbol()) + ": i32 images are not supported");
+    if (storage && c.format == 0) isel.fail(std::string(inst.symbol()) + " requires a storage image format");
+    if (storage && (c.depth || c.dim == target::SpirvImageDim::Cube)) {
+        isel.fail(std::string(inst.symbol()) + ": a storage image is neither a depth image nor a cube");
+    }
 
     Module& m = isel.m_;
-    auto kind = (Dim == spv::Dim3D) ? target::SpirvDescriptorKind::StorageImage3D
-                                    : target::SpirvDescriptorKind::StorageImage2D;
-    Id existing = m.cached("desc." + std::to_string(set) + "." + std::to_string(binding));
-    Id img_t = storage_image_handle_type(m, Dim, Vec4, existing);
-    Id var = isel.descriptor_var(set, binding, kind, img_t);
-    Id img = isel.op(spv::OpLoad, img_t, {var});
+    static constexpr spv::Dim kDims[] = {spv::Dim1D, spv::Dim2D, spv::Dim3D, spv::DimCube};
+    spv::Dim dim = kDims[static_cast<int>(c.dim)];
+    if (c.dim == target::SpirvImageDim::D1) m.add_capability(storage ? spv::CapabilityImage1D : spv::CapabilitySampled1D);
+    if (c.dim == target::SpirvImageDim::Cube && c.arrayed) m.add_capability(spv::CapabilitySampledCubeArray);
+    if (storage) {
+        switch (static_cast<spv::ImageFormat>(c.format)) {
+        case spv::ImageFormatRgba32f: case spv::ImageFormatRgba16f: case spv::ImageFormatR32f:
+        case spv::ImageFormatRgba8: case spv::ImageFormatRgba8Snorm: case spv::ImageFormatRgba32ui:
+        case spv::ImageFormatRgba16ui: case spv::ImageFormatRgba8ui: case spv::ImageFormatR32ui:
+            break;
+        default:
+            m.add_capability(spv::CapabilityStorageImageExtendedFormats);
+        }
+    }
+    c.texel_scalar = c.scalar == target::SpirvImageScalar::F32 ? isel.t_f32() : isel.t_u32();
+    c.texel_type = m.t_vector(c.texel_scalar, 4);
+    c.image_type = m.t_image(c.texel_scalar, dim, c.depth ? 1 : 0, c.arrayed ? 1 : 0, 0, storage ? 2 : 1,
+                             static_cast<spv::ImageFormat>(storage ? c.format : 0));
 
+    target::SpirvDescriptorBinding db;
+    db.set = c.set;
+    db.binding = c.binding;
+    db.dim = c.dim;
+    db.arrayed = c.arrayed;
+    db.depth = c.depth;
+    db.scalar = c.scalar;
+    db.format = storage ? c.format : 0;
+    if (storage) {
+        db.kind = target::SpirvDescriptorKind::StorageImage;
+        c.image = isel.op(spv::OpLoad, c.image_type, {isel.descriptor_var(db, c.image_type)});
+        return c;
+    }
+    Id sampled_t = m.t_sampled_image(c.image_type);
+    if (sset < 0) {
+        db.kind = target::SpirvDescriptorKind::CombinedImageSampler;
+        c.sampled = isel.op(spv::OpLoad, sampled_t, {isel.descriptor_var(db, sampled_t)});
+        c.image = isel.op(spv::OpImage, c.image_type, {c.sampled});
+        return c;
+    }
+    db.kind = target::SpirvDescriptorKind::SampledImage;
+    c.image = isel.op(spv::OpLoad, c.image_type, {isel.descriptor_var(db, c.image_type)});
+    target::SpirvDescriptorBinding sb;
+    sb.set = static_cast<uint32_t>(sset);
+    sb.binding = static_cast<uint32_t>(sbind);
+    sb.kind = target::SpirvDescriptorKind::Sampler;
+    Id sampler_t = m.t_sampler();
+    Id sampler = isel.op(spv::OpLoad, sampler_t, {isel.descriptor_var(sb, sampler_t)});
+    c.sampled = isel.op(spv::OpSampledImage, sampled_t, {c.image, sampler});
+    return c;
+}
+
+// The image's coordinate count: its dimensions, a cube's direction three, and
+// the layer after them when arrayed.
+uint32_t SpirvISel::Intrinsics::ImageCall::coords() const {
+    uint32_t n = dim == target::SpirvImageDim::D1 ? 1 : (dim == target::SpirvImageDim::D2 ? 2 : 3);
+    return n + (arrayed ? 1 : 0);
+}
+
+// Operands [first, first + n) as one coordinate: a scalar or a vector of f32,
+// or of u32 (`integer`: i32 / i64 operands, truncated).
+Id SpirvISel::Intrinsics::image_coord(SpirvISel& isel, const brass::Instruction& inst, size_t first, uint32_t n,
+                                      bool integer) {
+    std::vector<Id> parts;
+    for (uint32_t i = 0; i < n; ++i) {
+        parts.push_back(integer ? isel.as_u32(inst.operand(first + i), "coordinate")
+                                : isel.id_of(inst.operand(first + i), "coordinate"));
+    }
+    if (n == 1) return parts[0];
+    return isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(integer ? isel.t_u32() : isel.t_f32(), n), parts);
+}
+
+// Constant operands [first, first + n) as a constant integer vector (a
+// texel offset).
+Id SpirvISel::Intrinsics::image_const_offset(SpirvISel& isel, const brass::Instruction& inst, size_t first, uint32_t n) {
+    std::vector<Id> parts;
+    for (uint32_t i = 0; i < n; ++i) {
+        int64_t v = 0;
+        if (!isel.const_int(inst.operand(first + i), &v)) isel.fail(std::string(inst.symbol()) + " requires constant offsets");
+        parts.push_back(isel.m_.c_int(32, static_cast<uint32_t>(static_cast<int32_t>(v))));
+    }
+    if (n == 1) return parts[0];
+    return isel.m_.c_composite(isel.m_.t_vector(isel.t_u32(), n), parts);
+}
+
+// spirv_tex_sample(img, coords..., lod, grad, offset):
+//   Op 0 implicit LOD (fragment), 1 explicit `lod`, 2 gradients (dx then dy, a
+//   value each of the image's dimensions), each optionally with a constant
+//   offset (OffsetBit) per dimension at the end. A depth image's call takes
+//   its reference after the coordinates and gives an f32 (DrefBit).
+template <int Op>
+void SpirvISel::Intrinsics::tex_sample(SpirvISel& isel, const brass::Instruction& inst) {
+    constexpr int kind = Op & 3;
+    constexpr bool offset = (Op & kOffsetBit) != 0;
+    constexpr bool dref = (Op & kDrefBit) != 0;
+    if constexpr (kind == 0) require_fragment(isel, inst);
+    ImageCall c = image_call(isel, inst, false, 0);
+    if (dref != c.depth) isel.fail(std::string(inst.symbol()) + ": a reference value is given for, and only for, a depth image");
+    uint32_t n = c.coords();
+    uint32_t space = n - (c.arrayed ? 1 : 0);   // a gradient's and an offset's components
+    size_t at = 5;
+    Id coord = image_coord(isel, inst, at, n, false);
+    at += n;
+    Id ref = 0;
+    if (dref) ref = isel.id_of(inst.operand(at++), "reference");
+    uint32_t mask = 0;
+    std::vector<Id> extra;
+    if constexpr (kind == 1) {
+        mask |= spv::ImageOperandsLodMask;
+        extra.push_back(isel.id_of(inst.operand(at++), "lod"));
+    } else if constexpr (kind == 2) {
+        mask |= spv::ImageOperandsGradMask;
+        extra.push_back(image_coord(isel, inst, at, space, false));
+        at += space;
+        extra.push_back(image_coord(isel, inst, at, space, false));
+        at += space;
+    }
+    if (offset) {
+        if (c.dim == target::SpirvImageDim::Cube) isel.fail(std::string(inst.symbol()) + ": a cube takes no offset");
+        mask |= spv::ImageOperandsConstOffsetMask;
+        extra.push_back(image_const_offset(isel, inst, at, space));
+        at += space;
+    }
+    if (inst.operand_count() != at) isel.malformed(inst, "wrong operand count for the image's shape");
+    spv::Op op = dref ? (kind == 0 ? spv::OpImageSampleDrefImplicitLod : spv::OpImageSampleDrefExplicitLod)
+                      : (kind == 0 ? spv::OpImageSampleImplicitLod : spv::OpImageSampleExplicitLod);
+    Id r = isel.m_.new_id();
+    Inst in = Inst(op, dref ? c.texel_scalar : c.texel_type, r).id(c.sampled).id(coord);
+    if (dref) in.id(ref);
+    if (mask) {
+        in.lit(mask);
+        for (Id e : extra) in.id(e);
+    }
+    isel.emit(std::move(in));
+    isel.define(inst.result(), r);
+}
+template void SpirvISel::Intrinsics::tex_sample<0>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<1>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<2>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<0 | SpirvISel::Intrinsics::kOffsetBit>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<1 | SpirvISel::Intrinsics::kOffsetBit>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<2 | SpirvISel::Intrinsics::kOffsetBit>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<0 | SpirvISel::Intrinsics::kDrefBit>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_sample<1 | SpirvISel::Intrinsics::kDrefBit>(SpirvISel&, const brass::Instruction&);
+
+// spirv_tex_fetch(img, icoords..., lod): one texel, unfiltered.
+void SpirvISel::Intrinsics::tex_fetch(SpirvISel& isel, const brass::Instruction& inst) {
+    ImageCall c = image_call(isel, inst, false, 0);
+    if (c.dim == target::SpirvImageDim::Cube) isel.fail(std::string(inst.symbol()) + ": a cube is not fetched");
+    uint32_t n = c.coords();
+    if (inst.operand_count() != 5 + n + 1) isel.malformed(inst, "wrong operand count for the image's shape");
+    Id coord = image_coord(isel, inst, 5, n, true);
+    Id lod = isel.as_u32(inst.operand(5 + n), "lod");
+    Id r = isel.m_.new_id();
+    isel.emit(Inst(spv::OpImageFetch, c.texel_type, r).id(c.image).id(coord)
+                  .lit(static_cast<uint32_t>(spv::ImageOperandsLodMask)).id(lod));
+    isel.define(inst.result(), r);
+}
+
+// spirv_tex_gather(img, coords..., component): the component of the four
+// texels a bilinear sample would blend (a depth image's: its reference
+// after the coordinates, compared, in place of the component).
+void SpirvISel::Intrinsics::tex_gather(SpirvISel& isel, const brass::Instruction& inst) {
+    ImageCall c = image_call(isel, inst, false, 0);
+    if (c.dim == target::SpirvImageDim::D1 || c.dim == target::SpirvImageDim::D3) {
+        isel.fail(std::string(inst.symbol()) + ": only 2D and cube images gather");
+    }
+    uint32_t n = c.coords();
+    if (inst.operand_count() != 5 + n + 1) isel.malformed(inst, "wrong operand count for the image's shape");
+    Id coord = image_coord(isel, inst, 5, n, false);
+    Id r = isel.m_.new_id();
+    if (c.depth) {
+        isel.emit(Inst(spv::OpImageDrefGather, c.texel_type, r).id(c.sampled).id(coord)
+                      .id(isel.id_of(inst.operand(5 + n), "reference")));
+    } else {
+        int64_t comp = 0;
+        if (!isel.const_int(inst.operand(5 + n), &comp) || comp < 0 || comp > 3) {
+            isel.fail(std::string(inst.symbol()) + " requires a constant component in 0..3");
+        }
+        isel.emit(Inst(spv::OpImageGather, c.texel_type, r).id(c.sampled).id(coord)
+                      .id(isel.m_.c_u32(static_cast<uint32_t>(comp))));
+    }
+    isel.define(inst.result(), r);
+}
+
+// spirv_tex_size(img, lod) / spirv_img_size(img): the image's size at a mip
+// level (a storage image's has one), as an i32x4 (lanes past its coordinate
+// count 0); spirv_tex_levels(img): its mip count.
+template <bool Storage>
+void SpirvISel::Intrinsics::tex_size(SpirvISel& isel, const brass::Instruction& inst) {
+    ImageCall c = image_call(isel, inst, Storage, 0);
+    isel.m_.add_capability(spv::CapabilityImageQuery);
+    uint32_t n = c.dim == target::SpirvImageDim::Cube ? 2 + (c.arrayed ? 1 : 0) : c.coords();
     Id u32 = isel.t_u32();
-    Id coord = 0;
-    if constexpr (Dim == spv::Dim2D) {
-        coord = isel.op(spv::OpCompositeConstruct, m.t_vector(u32, 2),
-                        {isel.as_u32(inst.operand(2), "ix"), isel.as_u32(inst.operand(3), "iy")});
+    Id size_t_ = n == 1 ? u32 : isel.m_.t_vector(u32, n);
+    Id size = 0;
+    if (Storage) {
+        if (inst.operand_count() != 5) isel.malformed(inst, "spirv_img_size takes the image alone");
+        size = isel.op(spv::OpImageQuerySize, size_t_, {c.image});
     } else {
-        coord = isel.op(spv::OpCompositeConstruct, m.t_vector(u32, 3),
-                        {isel.as_u32(inst.operand(2), "ix"),
-                         isel.as_u32(inst.operand(3), "iy"),
-                         isel.as_u32(inst.operand(4), "iz")});
+        if (inst.operand_count() != 6) isel.malformed(inst, "spirv_tex_size takes the image and a lod");
+        size = isel.op(spv::OpImageQuerySizeLod, size_t_, {c.image, isel.as_u32(inst.operand(5), "lod")});
     }
-
-    Id v4f32 = m.t_vector(isel.t_f32(), 4);
-    Id texel = isel.op(spv::OpImageRead, v4f32, {img, coord});
-    if constexpr (Vec4) {
-        isel.define(inst.result(), texel);
-    } else {
-        Id r = m.new_id();
-        isel.emit(Inst(spv::OpCompositeExtract, isel.t_f32(), r).id(texel).lit(0));
-        isel.define(inst.result(), r);
+    std::vector<Id> lanes;
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (i >= n) {
+            lanes.push_back(isel.m_.c_u32(0));
+        } else if (n == 1) {
+            lanes.push_back(size);
+        } else {
+            Id l = isel.m_.new_id();
+            isel.emit(Inst(spv::OpCompositeExtract, u32, l).id(size).lit(i));
+            lanes.push_back(l);
+        }
     }
+    isel.define(inst.result(), isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(u32, 4), lanes));
 }
-template void SpirvISel::Intrinsics::image_load<spv::Dim2D, false>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::image_load<spv::Dim3D, false>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::image_load<spv::Dim2D, true>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::image_load<spv::Dim3D, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_size<false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::tex_size<true>(SpirvISel&, const brass::Instruction&);
 
-template <spv::Dim Dim, bool Vec4>
-void SpirvISel::Intrinsics::image_store(SpirvISel& isel, const brass::Instruction& inst) {
-    constexpr size_t val_idx = (Dim == spv::Dim3D) ? 5 : 4;
-    if (inst.operand_count() <= val_idx) isel.malformed(inst, "missing image_store operand");
-    uint32_t set = 0, binding = 0;
-    parse_set_binding(isel, inst, set, binding);
-
-    Module& m = isel.m_;
-    auto kind = (Dim == spv::Dim3D) ? target::SpirvDescriptorKind::StorageImage3D
-                                    : target::SpirvDescriptorKind::StorageImage2D;
-    Id existing = m.cached("desc." + std::to_string(set) + "." + std::to_string(binding));
-    Id img_t = storage_image_handle_type(m, Dim, Vec4, existing);
-    Id var = isel.descriptor_var(set, binding, kind, img_t);
-    Id img = isel.op(spv::OpLoad, img_t, {var});
-
-    Id u32 = isel.t_u32();
-    Id coord = 0;
-    if constexpr (Dim == spv::Dim2D) {
-        coord = isel.op(spv::OpCompositeConstruct, m.t_vector(u32, 2),
-                        {isel.as_u32(inst.operand(2), "ix"), isel.as_u32(inst.operand(3), "iy")});
-    } else {
-        coord = isel.op(spv::OpCompositeConstruct, m.t_vector(u32, 3),
-                        {isel.as_u32(inst.operand(2), "ix"),
-                         isel.as_u32(inst.operand(3), "iy"),
-                         isel.as_u32(inst.operand(4), "iz")});
-    }
-
-    Id v4f32 = m.t_vector(isel.t_f32(), 4);
-    Id texel = 0;
-    if constexpr (Vec4) {
-        texel = isel.id_of(inst.operand(val_idx), "texel");
-    } else {
-        Id zero = m.c_f32(0.0f);
-        texel = isel.op(spv::OpCompositeConstruct, v4f32,
-                        {isel.id_of(inst.operand(val_idx), "value"), zero, zero, zero});
-    }
-    isel.emit(Inst(spv::OpImageWrite).id(img).id(coord).id(texel));
+void SpirvISel::Intrinsics::tex_levels(SpirvISel& isel, const brass::Instruction& inst) {
+    ImageCall c = image_call(isel, inst, false, 0);
+    isel.m_.add_capability(spv::CapabilityImageQuery);
+    if (inst.operand_count() != 5) isel.malformed(inst, "spirv_tex_levels takes the image alone");
+    isel.define(inst.result(), isel.op(spv::OpImageQueryLevels, isel.t_u32(), {c.image}));
 }
-template void SpirvISel::Intrinsics::image_store<spv::Dim2D, false>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::image_store<spv::Dim3D, false>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::image_store<spv::Dim2D, true>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::image_store<spv::Dim3D, true>(SpirvISel&, const brass::Instruction&);
 
-// ---------------------------------------------------------------------------
-// 2D and 3D Sampled Textures (OpTypeSampledImage, OpImageSampleExplicitLod)
-// ---------------------------------------------------------------------------
-
-template <spv::Dim Dim, bool Vec4>
-void SpirvISel::Intrinsics::sampler_lod(SpirvISel& isel, const brass::Instruction& inst) {
-    constexpr size_t lod_idx = (Dim == spv::Dim3D) ? 5 : 4;
-    if (inst.operand_count() <= lod_idx) isel.malformed(inst, "missing sampler_lod operand");
-    uint32_t set = 0, binding = 0;
-    parse_set_binding(isel, inst, set, binding);
-
-    Module& m = isel.m_;
-    Id f32 = isel.t_f32();
-    Id img_t = m.t_image(f32, Dim, 0, 0, 0, 1, spv::ImageFormatUnknown);
-    Id sampled_img_t = m.t_sampled_image(img_t);
-    auto kind = (Dim == spv::Dim3D) ? target::SpirvDescriptorKind::SampledImage3D
-                                    : target::SpirvDescriptorKind::SampledImage2D;
-    Id var = isel.descriptor_var(set, binding, kind, sampled_img_t);
-    Id sampled_img = isel.op(spv::OpLoad, sampled_img_t, {var});
-
-    Id coord = 0;
-    if constexpr (Dim == spv::Dim2D) {
-        coord = isel.op(spv::OpCompositeConstruct, m.t_vector(f32, 2),
-                        {isel.id_of(inst.operand(2), "u"), isel.id_of(inst.operand(3), "v")});
-    } else {
-        coord = isel.op(spv::OpCompositeConstruct, m.t_vector(f32, 3),
-                        {isel.id_of(inst.operand(2), "u"),
-                         isel.id_of(inst.operand(3), "v"),
-                         isel.id_of(inst.operand(4), "w")});
-    }
-    Id lod = isel.id_of(inst.operand(lod_idx), "lod");
-
-    Id v4f32 = m.t_vector(f32, 4);
-    Id texel = m.new_id();
-    isel.emit(Inst(spv::OpImageSampleExplicitLod, v4f32, texel)
-                  .id(sampled_img)
-                  .id(coord)
-                  .lit(static_cast<uint32_t>(spv::ImageOperandsLodMask))
-                  .id(lod));
-
-    if constexpr (Vec4) {
-        isel.define(inst.result(), texel);
-    } else {
-        Id r = m.new_id();
-        isel.emit(Inst(spv::OpCompositeExtract, f32, r).id(texel).lit(0));
-        isel.define(inst.result(), r);
-    }
+// spirv_img_load(img, icoords...) / spirv_img_store(img, icoords..., texel):
+// a storage image's texel, as four lanes of its scalar.
+void SpirvISel::Intrinsics::img_load(SpirvISel& isel, const brass::Instruction& inst) {
+    ImageCall c = image_call(isel, inst, true, 0);
+    uint32_t n = c.coords();
+    if (inst.operand_count() != 5 + n) isel.malformed(inst, "wrong operand count for the image's shape");
+    isel.define(inst.result(), isel.op(spv::OpImageRead, c.texel_type, {c.image, image_coord(isel, inst, 5, n, true)}));
 }
-template void SpirvISel::Intrinsics::sampler_lod<spv::Dim2D, false>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::sampler_lod<spv::Dim3D, false>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::sampler_lod<spv::Dim2D, true>(SpirvISel&, const brass::Instruction&);
-template void SpirvISel::Intrinsics::sampler_lod<spv::Dim3D, true>(SpirvISel&, const brass::Instruction&);
+
+void SpirvISel::Intrinsics::img_store(SpirvISel& isel, const brass::Instruction& inst) {
+    ImageCall c = image_call(isel, inst, true, 0);
+    uint32_t n = c.coords();
+    if (inst.operand_count() != 5 + n + 1) isel.malformed(inst, "wrong operand count for the image's shape");
+    Id coord = image_coord(isel, inst, 5, n, true);
+    isel.emit(Inst(spv::OpImageWrite).id(c.image).id(coord).id(isel.id_of(inst.operand(5 + n), "texel")));
+}
 
 // ---------------------------------------------------------------------------
 // Graphics Stage Inputs & Outputs (Location-decorated and BuiltIn::Position)

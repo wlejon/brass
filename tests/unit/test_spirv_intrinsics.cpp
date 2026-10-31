@@ -24,9 +24,9 @@ enum class Sig {
     i32i32_i64, i32i32_i32, i32x3_i32, shared_alloc,
     shared_ld, shared_ldx, shared_st, shared_stx, // element type from the name's suffix
     load_narrow, store_narrow,
-    img2d_ld_r32f, img2d_st_r32f, img3d_ld_r32f, img3d_st_r32f,
-    img2d_ld_v4, img2d_st_v4, img3d_ld_v4, img3d_st_v4,
-    samp2d_r32f, samp3d_r32f, samp2d_v4, samp3d_v4,
+    // textures and images (a 2D image unless named; KernelBuilder::ImageRef)
+    tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
+    tex_compare, tex_compare_lod, tex_fetch, tex_gather, tex_size, tex_levels, img_load, img_store, img_size,
     vert_i32, vert_pos, frag_f32, frag_v4, stage_in_f32, stage_in_v4, stage_out_f32, stage_out_v4,
     frag_f32_f32, frag_i32, frag_void, i32_i32,
 };
@@ -101,18 +101,24 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_load_u16", Sig::load_narrow}, {"ptx_load_s16", Sig::load_narrow},
         {"ptx_store_u8", Sig::store_narrow}, {"ptx_store_u16", Sig::store_narrow},
 
-        {"spirv_image2d_load_r32f", Sig::img2d_ld_r32f},
-        {"spirv_image2d_store_r32f", Sig::img2d_st_r32f},
-        {"spirv_image3d_load_r32f", Sig::img3d_ld_r32f},
-        {"spirv_image3d_store_r32f", Sig::img3d_st_r32f},
-        {"spirv_image2d_load_vec4", Sig::img2d_ld_v4},
-        {"spirv_image2d_store_vec4", Sig::img2d_st_v4},
-        {"spirv_image3d_load_vec4", Sig::img3d_ld_v4},
-        {"spirv_image3d_store_vec4", Sig::img3d_st_v4},
-        {"spirv_sampler2d_lod_r32f", Sig::samp2d_r32f},
-        {"spirv_sampler3d_lod_r32f", Sig::samp3d_r32f},
-        {"spirv_sampler2d_lod_vec4", Sig::samp2d_v4},
-        {"spirv_sampler3d_lod_vec4", Sig::samp3d_v4},
+        {"tanf", Sig::f32_f32}, {"asinf", Sig::f32_f32}, {"acosf", Sig::f32_f32}, {"atanf", Sig::f32_f32},
+        {"sinhf", Sig::f32_f32}, {"coshf", Sig::f32_f32}, {"atan2f", Sig::f32f32_f32}, {"powf", Sig::f32f32_f32},
+
+        {"spirv_tex_sample", Sig::tex_sample},
+        {"spirv_tex_sample_lod", Sig::tex_sample_lod},
+        {"spirv_tex_sample_grad", Sig::tex_sample_grad},
+        {"spirv_tex_sample_offset", Sig::tex_sample_offset},
+        {"spirv_tex_sample_lod_offset", Sig::tex_sample_lod_offset},
+        {"spirv_tex_sample_grad_offset", Sig::tex_sample_grad_offset},
+        {"spirv_tex_sample_compare", Sig::tex_compare},
+        {"spirv_tex_sample_compare_lod", Sig::tex_compare_lod},
+        {"spirv_tex_fetch", Sig::tex_fetch},
+        {"spirv_tex_gather", Sig::tex_gather},
+        {"spirv_tex_size", Sig::tex_size},
+        {"spirv_tex_levels", Sig::tex_levels},
+        {"spirv_img_load", Sig::img_load},
+        {"spirv_img_store", Sig::img_store},
+        {"spirv_img_size", Sig::img_size},
 
         {"spirv_vertex_index", Sig::vert_i32},
         {"spirv_instance_index", Sig::vert_i32},
@@ -170,6 +176,17 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
                       : t == Type::i32() ? "ptx_shared_alloc_i32" : "ptx_shared_alloc_f32";
         return b.build_call(n, Type::ptr(), {b.build_iconst_i32(64)});
     };
+    // A texture or image call's operands: the image (set 0, binding 0) of
+    // packed description `desc`, its sampler (set 0, binding `sampler`; -1
+    // combined), then `rest`.
+    Value* c1 = b.build_iconst_i32(1);
+    Value* cm1 = b.build_iconst_i32(-1);
+    auto img = [&](int32_t desc, std::vector<Value*> rest, int32_t sampler = -1) {
+        std::vector<Value*> ops = {b.build_iconst_i32(0), b.build_iconst_i32(0), b.build_iconst_i32(desc),
+                                   b.build_iconst_i32(sampler < 0 ? -1 : 0), b.build_iconst_i32(sampler)};
+        ops.insert(ops.end(), rest.begin(), rest.end());
+        return ops;
+    };
     Type st = shared_type(name);
     Value* sval = st == Type::f64() ? d : st == Type::i64() ? l : st == Type::i32() ? i : x;
 
@@ -214,18 +231,21 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::shared_stx: b.build_call(name, Type::void_type(), {alloc(st), c8, sval}); break;
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, b.build_iconst_i32(3)}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
-        case Sig::img2d_ld_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i}); break;
-        case Sig::img2d_st_r32f: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, x}); break;
-        case Sig::img3d_ld_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i}); break;
-        case Sig::img3d_st_r32f: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i, x}); break;
-        case Sig::img2d_ld_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i}); break;
-        case Sig::img2d_st_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, b.build_vbroadcast(Type::f32x4(), x)}); break;
-        case Sig::img3d_ld_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i}); break;
-        case Sig::img3d_st_v4: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0), b.build_iconst_i32(0), i, i, i, b.build_vbroadcast(Type::f32x4(), x)}); break;
-        case Sig::samp2d_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x}); break;
-        case Sig::samp3d_r32f: r = b.build_call(name, Type::f32(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x, x}); break;
-        case Sig::samp2d_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x}); break;
-        case Sig::samp3d_v4: r = b.build_call(name, Type::f32x4(), {b.build_iconst_i32(0), b.build_iconst_i32(0), x, x, x, x}); break;
+        case Sig::tex_sample: r = b.build_call(name, Type::f32x4(), img(1, {x, x})); break;
+        case Sig::tex_sample_lod: r = b.build_call(name, Type::f32x4(), img(1, {x, x, x})); break;
+        case Sig::tex_sample_grad: r = b.build_call(name, Type::f32x4(), img(1, {x, x, x, x, x, x})); break;
+        case Sig::tex_sample_offset: r = b.build_call(name, Type::f32x4(), img(1, {x, x, c1, cm1})); break;
+        case Sig::tex_sample_lod_offset: r = b.build_call(name, Type::f32x4(), img(1, {x, x, x, c1, cm1})); break;
+        case Sig::tex_sample_grad_offset: r = b.build_call(name, Type::f32x4(), img(1, {x, x, x, x, x, x, c1, cm1})); break;
+        case Sig::tex_compare: r = b.build_call(name, Type::f32(), img(1 | 8, {x, x, x})); break;
+        case Sig::tex_compare_lod: r = b.build_call(name, Type::f32(), img(1 | 8, {x, x, x, x}, 1)); break;
+        case Sig::tex_fetch: r = b.build_call(name, Type::f32x4(), img(1, {i, i, i})); break;
+        case Sig::tex_gather: r = b.build_call(name, Type::f32x4(), img(1, {x, x, b.build_iconst_i32(2)})); break;
+        case Sig::tex_size: r = b.build_call(name, Type::i32x4(), img(1, {i})); break;
+        case Sig::tex_levels: r = b.build_call(name, Type::i32(), img(1, {})); break;
+        case Sig::img_load: r = b.build_call(name, Type::f32x4(), img(1 | (2 << 8), {i, i})); break;   // rgba16f
+        case Sig::img_store: b.build_call(name, Type::void_type(), img(1 | (2 << 8), {i, i, b.build_vbroadcast(Type::f32x4(), x)})); break;
+        case Sig::img_size: r = b.build_call(name, Type::i32x4(), img(1 | (2 << 8), {})); break;
         case Sig::vert_i32: r = b.build_call(name, Type::i32()); break;
         case Sig::vert_pos: b.build_call(name, Type::void_type(), {x, x, x, x}); break;
         case Sig::frag_f32: r = b.build_call(name, Type::f32()); break;
@@ -256,7 +276,8 @@ std::vector<uint32_t> intrinsic_words(const std::string& name, Sig sig, std::str
     } else if (sig == Sig::frag_f32 || sig == Sig::frag_v4 ||
                sig == Sig::stage_in_f32 || sig == Sig::stage_in_v4 ||
                sig == Sig::stage_out_f32 || sig == Sig::stage_out_v4 ||
-               sig == Sig::frag_f32_f32 || sig == Sig::frag_i32 || sig == Sig::frag_void) {
+               sig == Sig::frag_f32_f32 || sig == Sig::frag_i32 || sig == Sig::frag_void ||
+               sig == Sig::tex_sample || sig == Sig::tex_sample_offset || sig == Sig::tex_compare) {
         opts.stage = target::SpirvStage::Fragment;
     }
     target::SpirvKernel k = compile_checked(*f, opts);

@@ -30,20 +30,35 @@ enum class SpirvStage : uint8_t {
     Fragment = 2,
 };
 
+// A descriptor a kernel or stage reads (KernelBuilder's texture and image
+// calls): a combined image sampler, an image sampled through a separate
+// sampler, that sampler, or a storage image.
 enum class SpirvDescriptorKind : uint8_t {
-    StorageImage2D = 0,
-    StorageImage3D = 1,
-    SampledImage2D = 2,
-    SampledImage3D = 3,
+    CombinedImageSampler = 0,
+    SampledImage = 1,
+    Sampler = 2,
+    StorageImage = 3,
 };
+
+// An image's shape (SPIR-V Dim; a cube's coordinates are a direction).
+enum class SpirvImageDim : uint8_t { D1 = 0, D2 = 1, D3 = 2, Cube = 3 };
+// What its texels read as: f32 lanes, or u32 / i32 lanes of an integer format.
+enum class SpirvImageScalar : uint8_t { F32 = 0, U32 = 1, I32 = 2 };
 
 struct SpirvDescriptorBinding {
     uint32_t set = 0;
     uint32_t binding = 0;
-    SpirvDescriptorKind kind = SpirvDescriptorKind::StorageImage2D;
+    SpirvDescriptorKind kind = SpirvDescriptorKind::StorageImage;
+    // The image's (none for a Sampler).
+    SpirvImageDim dim = SpirvImageDim::D2;
+    bool arrayed = false;
+    bool depth = false;                       // compared against (a shadow map)
+    SpirvImageScalar scalar = SpirvImageScalar::F32;
+    uint32_t format = 0;                      // a storage image's spv::ImageFormat; 0 (Unknown) when sampled
 
     bool operator==(const SpirvDescriptorBinding& o) const noexcept {
-        return set == o.set && binding == o.binding && kind == o.kind;
+        return set == o.set && binding == o.binding && kind == o.kind && dim == o.dim && arrayed == o.arrayed &&
+               depth == o.depth && scalar == o.scalar && format == o.format;
     }
 };
 
