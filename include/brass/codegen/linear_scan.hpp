@@ -256,12 +256,22 @@ private:
     void emit_moves(std::vector<PendingMove>& moves, std::vector<std::unique_ptr<LirInst>>& out);
     void split_critical_edges();
 
+    // On x64, the use positions the emitter can read from a spill slot in
+    // place (slot_fold_width) are marked as needing no register, so a value
+    // read only there costs nothing to leave in its slot (linear_scan.cpp).
+    void mark_folded_uses();
+
     void rewrite_instructions();
     // Fill live_gcrefs of every call and safepoint with the gcref vregs live
     // across it (live after the site and not defined by it).
     void record_live_gcrefs();
     void clear_dead_callee_gprs_at_calls(uint32_t final_callee_gprs);
 };
+
+// The width (8, or 4 for a 32-bit form) at which the x64 emitters encode
+// `op`'s last use as an r/m operand, which a spilled value is then read from
+// its slot in place (linear_scan_rewrite.cpp), else 0.
+uint8_t slot_fold_width(LirOpcode op);
 
 void run_linear_scan_regalloc(
     LirFunction& fn,

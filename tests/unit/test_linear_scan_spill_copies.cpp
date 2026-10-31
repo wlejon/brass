@@ -1,6 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/branch_threading.hpp>
@@ -10,8 +11,9 @@
 // What the allocator makes of a value in its spill slot: a copy to or from the
 // slot is the load or the store itself, a value only on its way into a block
 // parameter is the one to give its register up, an x64 ALU source left in its
-// slot is read from it in place, and a loop-free function's joins are not
-// padded as loop heads.
+// slot is read from it in place (and such a read of a value the loop does not
+// define takes no register), and a loop-free function's joins are not padded
+// as loop heads.
 
 using namespace brass;
 using namespace brass::codegen;
@@ -296,6 +298,137 @@ TEST_CASE("Linear Scan - an x64 ALU source in its spill slot is read in place") 
     }
     for (int i = 0; i < 14; ++i) x += words[13 - i];
     CHECK_EQ(static_cast<uint64_t>(fn(words)), x);
+}
+
+namespace {
+
+// A loop reading %k (defined before it) and %acc (carried round it) as xor
+// sources, and %i as a multiply's: only %k's read is one the allocator may
+// leave to the slot for free. %acc's slot would be stored every iteration,
+// and a multiply's operand is never read from memory (linear_scan.cpp
+// mark_folded_uses). Many values live through the body, so some of them do
+// wait in slots.
+std::string folded_loop_text() {
+    // %k is a constant too wide for an immediate, made once before the loop,
+    // as a tag mask is (bronze's 0xfff1 << 48).
+    std::string s = "module @m\n\nfunc @lx(%q: ptr, %n: i64) -> i64 {\nentry:\n";
+    s += "  %k = iconst.i64 -4222124650659840\n  %z = iconst.i64 0\n  br head(%z, %z)\n";
+    s += "head(%i: i64, %acc: i64):\n  %c = slt.i64 %i, %n\n  br_if %c, body, done\n";
+    s += "body:\n";
+    for (int j = 0; j < 14; ++j) {
+        s += "  %w" + std::to_string(j) + " = load.i64 %q, " + std::to_string(j * 8) + "\n";
+    }
+    // %s is computed, not loaded, so no operand below is a folded load.
+    // %s dies at the xor, so it is the operand the xor writes and %k the one
+    // it reads (the isel copies an operand still live after into the result).
+    s += "  %s = add.i64 %w0, %i\n  %x = xor.i64 %s, %k\n  %y = xor.i64 %x, %acc\n  %m0 = mul.i64 %y, %i\n";
+    for (int j = 1; j < 13; ++j) {
+        s += "  %m" + std::to_string(j) + " = mul.i64 %m" + std::to_string(j - 1) + ", %w" + std::to_string(j) + "\n";
+    }
+    s += "  %t = add.i64 %m12, %w13\n  %one = iconst.i64 1\n  %i2 = add.i64 %i, %one\n  br head(%i2, %t)\n";
+    s += "done:\n  ret %acc\n}\n";
+    return s;
+}
+
+int64_t folded_loop_ref(const uint64_t* q, int64_t n) {
+    const uint64_t k = 0xfff1000000000000ull;
+    uint64_t acc = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        const uint64_t s = q[0] + static_cast<uint64_t>(i);
+        uint64_t m = ((s ^ k) ^ acc) * static_cast<uint64_t>(i);
+        for (int j = 1; j < 13; ++j) m *= q[j];
+        acc = m + q[13];
+    }
+    return static_cast<int64_t>(acc);
+}
+
+// Per Xor / Imul of `fn` before allocation: its id and its last use's vreg.
+struct LastUse {
+    uint32_t id;
+    VReg v;
+    LirOpcode op;
+};
+std::vector<LastUse> g_last_uses;
+void record_last_uses(LirFunction& fn) {
+    g_last_uses.clear();
+    for (const auto& b : fn.blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->opcode != LirOpcode::Xor && inst->opcode != LirOpcode::Imul) continue;
+            if (inst->uses.empty() || !inst->uses.back().is_vreg()) continue;
+            g_last_uses.push_back(LastUse{inst->id, inst->uses.back().vreg_val, inst->opcode});
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("Linear Scan - an x64 ALU source read from its slot in place takes no register") {
+    auto mod = parse_module(folded_loop_text().c_str());
+    REQUIRE(mod != nullptr);
+    Function* f = mod->get_function("lx");
+    REQUIRE(f != nullptr);
+    f->rebuild_cfg_predecessors();
+    for (bool x64 : {true, false}) {
+        std::unique_ptr<LirFunction> lir;
+        CallingConvention cc = x64 ? CallingConvention::sysv64() : CallingConvention::aapcs64();
+        if (x64) {
+            X64ISel isel(Target::x64_linux(), cc);
+            lir = isel.lower(*f);
+        } else {
+            brass::aarch64::AArch64ISel isel(Target::aarch64_linux(), cc);
+            lir = isel.lower(*f);
+        }
+        REQUIRE(lir != nullptr);
+        lir->sort_blocks_rpo();
+        LivenessAnalysis liveness(*lir);
+        liveness.run();
+        record_last_uses(*lir);
+        LinearScanAllocator regalloc(*lir, liveness, cc);
+        regalloc.allocate();
+
+        // Per last use: whether it was left needing no register; and whether
+        // its value is defined only outside the loop it is read in.
+        size_t free_reads = 0, xor_reads = 0, mul_reads = 0;
+        for (const LastUse& lu : g_last_uses) {
+            const LiveInterval* iv = liveness.get_interval(lu.v);
+            REQUIRE(iv != nullptr);
+            const uint32_t depth = liveness.get_loop_depth_at(lu.id);
+            bool invariant = true;
+            bool needs_reg = true;
+            for (const UsePosition& u : iv->use_positions) {
+                if (u.is_def && liveness.get_loop_depth_at(u.inst_id) >= depth) invariant = false;
+                if (u.inst_id == lu.id && !u.is_def) needs_reg = u.requires_reg;
+            }
+            if (lu.op == LirOpcode::Xor) ++xor_reads;
+            if (lu.op == LirOpcode::Imul) ++mul_reads;
+            if (!needs_reg) {
+                ++free_reads;
+                // Only an x64 xor's source, of a value the loop does not define.
+                CHECK(x64);
+                CHECK(lu.op == LirOpcode::Xor);
+                CHECK(invariant);
+            } else if (x64 && lu.op == LirOpcode::Xor && invariant && depth > 0) {
+                CHECK(!"an x64 xor's loop-invariant source still wants a register");
+            }
+        }
+        if (x64) {
+            CHECK(xor_reads >= 2u);
+            CHECK(mul_reads >= 1u);
+        }
+        CHECK_EQ(free_reads, x64 ? size_t(1) : size_t(0));  // %k's, in the body
+    }
+
+    JitExecutionEngine jit;
+    auto run = parse_module(folded_loop_text().c_str());
+    REQUIRE(run != nullptr);
+    REQUIRE(jit.compile_and_load(*run));
+    auto fn = jit.get_function_ptr<int64_t (*)(uint64_t*, int64_t)>("lx");
+    REQUIRE(fn != nullptr);
+    uint64_t q[14];
+    for (int i = 0; i < 14; ++i) q[i] = 0x9e3779b97f4a7c15ull * static_cast<uint64_t>(i + 3) | 1;
+    for (int64_t n : {int64_t{0}, int64_t{1}, int64_t{7}, int64_t{100}}) {
+        CHECK_EQ(fn(q, n), folded_loop_ref(q, n));
+    }
 }
 
 namespace {

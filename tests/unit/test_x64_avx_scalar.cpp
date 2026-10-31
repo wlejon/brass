@@ -242,10 +242,13 @@ TEST_CASE("Linear Scan - a value defined twice is not stored back to the slot it
     const std::string text = param_text();
     for (bool avx : {false, true}) {
         Lowered l = lower_and_allocate(text, "param", avx);
+        // Reads of a value from its slot: a reload, or an add or a multiply
+        // reading its source there in place (slot_fold_width).
         size_t reloads = 0;
         for (const auto& b : l.lir->blocks) {
             for (const auto& inst : b->instructions) {
                 if (inst->opcode == LirOpcode::Movsd && inst->defs[0].is_preg() && inst->uses[0].is_spill_slot()) ++reloads;
+                if (inst->opcode != LirOpcode::Movsd && !inst->uses.empty() && inst->uses.back().is_spill_slot()) ++reloads;
             }
         }
         CHECK(reloads >= 4u);  // the pressure this is about is there

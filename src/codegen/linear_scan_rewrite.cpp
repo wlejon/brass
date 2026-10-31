@@ -83,12 +83,8 @@ static void note_aarch64_emitter_scratch(LirInst& inst) {
 // no scratch: a guard's spilled tag constant is `xor slot, r`, not a reload
 // into R10 and `xor r10, r`. Only the last use, which is the one operand
 // those encodings take from memory, and only at the slot's own width.
-static bool reads_last_use_from_slot(const LirInst& inst) {
-    if (inst.uses.empty()) return false;
-    const LirOperand& src = inst.uses.back();
-    if (!src.is_spill_slot()) return false;
-    uint8_t want = 8;
-    switch (inst.opcode) {
+uint8_t slot_fold_width(LirOpcode op) {
+    switch (op) {
         case LirOpcode::Add:
         case LirOpcode::Sub:
         case LirOpcode::And:
@@ -99,19 +95,25 @@ static bool reads_last_use_from_slot(const LirInst& inst) {
         case LirOpcode::Subsd:
         case LirOpcode::Mulsd:
         case LirOpcode::Divsd:
-            break;
+            return 8;
         case LirOpcode::Add32:
         case LirOpcode::Sub32:
         case LirOpcode::And32:
         case LirOpcode::Or32:
         case LirOpcode::Xor32:
         case LirOpcode::Cmp32:
-            want = 4;  // the slot's low half: the whole slot is written at every spill
-            break;
+            return 4;  // the slot's low half: the whole slot is written at every spill
         default:
-            return false;
+            return 0;
     }
-    if (src.size != want) return false;
+}
+
+static bool reads_last_use_from_slot(const LirInst& inst) {
+    if (inst.uses.empty()) return false;
+    const LirOperand& src = inst.uses.back();
+    if (!src.is_spill_slot()) return false;
+    const uint8_t want = slot_fold_width(inst.opcode);
+    if (want == 0 || src.size != want) return false;
     // One memory operand an instruction: every other operand is a register
     // or an immediate by the time this is asked.
     for (size_t i = 0; i + 1 < inst.uses.size(); ++i) {

@@ -1,6 +1,8 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <algorithm>
 #include <bit>
+#include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -364,6 +366,81 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
     }
 }
 
+// An operand the x64 emitter reads straight from a spill slot costs no reload
+// when its value is spilled: `xor slot, r` is the load a reload would make,
+// in the same instruction. Counted as a register read, it made a value read
+// mostly that way look as dear to evict as one read as an address register,
+// which no instruction takes from memory: a loop of instanced_mesh_churn
+// (built with an experimental shape memo, ledger chunk 18) gave RBX to the
+// pointer tag its 56 xors read and reloaded the static-area index of 47
+// addresses from its slot instead, 37 instructions an iteration more.
+// Marking such a use as needing no register leaves every decision to the
+// reads that do (next uses, eviction and split costs), and its weight leaves
+// the value's spill weight, which alone decides for a value that keeps one
+// location for its whole life (the tag did). The rewrite still
+// reloads the operand into a scratch register when another operand of the
+// instruction is in memory too, which is no worse than before. Only the last
+// use (the one operand those encodings take from memory), only at the slot's
+// width, and not one the instruction also reads elsewhere or with a fixed
+// register. And in a loop only for a value defined outside the innermost
+// loop around the use (every definition at a lesser depth): its slot is
+// written before the loop and only read in it, while a value the loop
+// defines would be stored there every iteration for its read to wait on.
+// BRASS_NO_FOLDED_USE=1 is the seam: every read wants a register.
+void LinearScanAllocator::mark_folded_uses() {
+    static const bool off = std::getenv("BRASS_NO_FOLDED_USE") != nullptr;
+    if (off || !cc_.target().is_x64()) return;
+    const auto& guard_exits = liveness_.guard_exits();
+    for (const auto& block : fn_.blocks) {
+        if (guard_exits.count(block->id)) continue;
+        for (const auto& inst : block->instructions) {
+            const uint8_t width = slot_fold_width(inst->opcode);
+            if (width == 0 || inst->uses.empty()) continue;
+            const LirOperand& src = inst->uses.back();
+            if (!src.is_vreg() || !src.vreg_val.is_valid() || src.size != width) continue;
+            bool alone = true;
+            for (size_t i = 0; alone && i + 1 < inst->uses.size(); ++i) {
+                const LirOperand& u = inst->uses[i];
+                if (u.is_mem() || (u.is_vreg() && u.vreg_val == src.vreg_val)) alone = false;
+            }
+            for (const auto& d : inst->defs) {
+                if (d.is_mem() || (d.is_vreg() && d.vreg_val == src.vreg_val)) alone = false;
+            }
+            const size_t last = inst->uses.size() - 1;
+            if (last < inst->use_constraints.size() && inst->use_constraints[last].fixed_preg.is_valid()) {
+                alone = false;
+            }
+            if (!alone) continue;
+            LiveInterval* iv = liveness_.get_interval(src.vreg_val);
+            if (iv == nullptr) continue;
+            auto& uses = iv->use_positions;
+            const uint32_t use_depth = liveness_.get_loop_depth_at(inst->id);
+            bool invariant = true;
+            for (const UsePosition& u : uses) {
+                if (use_depth == 0) break;  // no loop: each store and read runs once
+                if (u.is_def && liveness_.get_loop_depth_at(u.inst_id) >= use_depth) {
+                    invariant = false;
+                    break;
+                }
+            }
+            if (!invariant) continue;
+            auto it = std::lower_bound(uses.begin(), uses.end(), inst->id,
+                [](const UsePosition& u, uint32_t v) { return u.inst_id < v; });
+            // A value that keeps one location for its whole life is weighed
+            // by its spill weight alone (allocate_blocked): the read leaves
+            // it as it leaves the reads above, at its weight in
+            // compute_spill_weights.
+            const float len = static_cast<float>(iv->end_id - iv->start_id + 1);
+            for (; it != uses.end() && it->inst_id == inst->id; ++it) {
+                if (it->is_def || it->fixed_reg.is_valid() || !it->requires_reg) continue;
+                it->requires_reg = false;
+                iv->spill_weight -= std::pow(8.0f, static_cast<float>(use_depth)) / len;
+            }
+            if (iv->spill_weight < 0.0f) iv->spill_weight = 0.0f;
+        }
+    }
+}
+
 void LinearScanAllocator::allocate() {
     // 0. Build coalescing hints & detect calls
     build_coalesce_hints();
@@ -392,6 +469,7 @@ void LinearScanAllocator::allocate() {
     for (size_t id = 0; id < num_vregs; ++id) {
         if (fn_.vreg_table[id].vreg.is_gcref) unsplittable_[id] = 1;
     }
+    mark_folded_uses();
     def_pos_.assign(num_vregs, UINT32_MAX);
     only_copied_.assign(num_vregs, 0);
     for (const auto& interval : liveness_.intervals()) {

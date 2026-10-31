@@ -444,7 +444,9 @@ TEST_CASE("Linear Scan - GPR 3 Spilled Operands Distinct Scratch Registers") {
     }
 
     VReg res = fn.allocate_vreg(RegClass::GPR, 8);
-    auto ternary_inst = std::make_unique<LirInst>(LirOpcode::Add);
+    // Imul, not Add: an Add's last operand is one x64 reads from its slot in
+    // place (slot_fold_width), which needs no scratch register at all.
+    auto ternary_inst = std::make_unique<LirInst>(LirOpcode::Imul);
     ternary_inst->add_def(LirOperand::vreg(res));
     ternary_inst->add_use(LirOperand::vreg(vars[0]));
     ternary_inst->add_use(LirOperand::vreg(vars[1]));
@@ -473,7 +475,7 @@ TEST_CASE("Linear Scan - GPR 3 Spilled Operands Distinct Scratch Registers") {
     // Verify all 3 uses on the ternary instruction have distinct physical registers
     LirInst* rewritten_ternary = nullptr;
     for (const auto& inst : entry->instructions) {
-        if (inst->opcode == LirOpcode::Add && inst->uses.size() == 3) {
+        if (inst->opcode == LirOpcode::Imul && inst->uses.size() == 3) {
             rewritten_ternary = inst.get();
             break;
         }
