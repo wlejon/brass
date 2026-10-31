@@ -92,6 +92,14 @@ public:
     Tracer(const Tracer&) = delete;
     Tracer& operator=(const Tracer&) = delete;
 
+    // The addresses whose slots reach the slow paths from now on: a marking
+    // cycle's in-place finish widens its marker's range to the young
+    // generation for that pause.
+    void set_range(uintptr_t lo, uintptr_t hi) noexcept {
+        range_lo_ = lo;
+        range_span_ = hi - lo;
+    }
+
     // The object whose slots are being visited (0 for a root), and whether it
     // lives in the old generation: a minor collection re-dirties its card
     // when a slot still names a young object afterwards.

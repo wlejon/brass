@@ -46,11 +46,16 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
     const bool minor = g.kind == CollectionKind::Minor;
     // A full collection's cycle: its start (and of that, the last cycle's
     // lazy sweep it finished), mark slices and finish pauses.
-    char cycle[128] = "";
+    // The finish's own split (young generation, roots again, the drain, the
+    // settling) follows it.
+    char cycle[224] = "";
     if (!minor) {
-        std::snprintf(cycle, sizeof cycle, " | start %.3f (sweep %.3f) mark %.3f/%llu finish %.3f", ms(g.start_ns),
-                      ms(g.start_sweep_ns), ms(g.mark_ns), static_cast<unsigned long long>(g.slices),
-                      ms(g.finish_ns));
+        std::snprintf(cycle, sizeof cycle,
+                      " | start %.3f (sweep %.3f) mark %.3f/%llu finish %.3f (young %.3f roots %.3f drain %.3f "
+                      "settle %.3f)",
+                      ms(g.start_ns), ms(g.start_sweep_ns), ms(g.mark_ns), static_cast<unsigned long long>(g.slices),
+                      ms(g.finish_ns), ms(g.finish_young_ns), ms(g.finish_roots_ns), ms(g.finish_drain_ns),
+                      ms(g.finish_settle_ns));
     }
     std::fprintf(stderr,
                  "[brass gc %p] #%llu %s (%s) %.3f ms | roots %.3f cards %.3f trace %.3f weak %.3f hooks %.3f "

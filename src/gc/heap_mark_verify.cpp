@@ -7,9 +7,11 @@
 // before anything is swept.
 //
 // The fresh mark sees what the cycle's marker sees: a Full tracer over the
-// old generation (the young one is empty by now: the finish evacuated it),
-// weak slots holding nothing, and an ephemeron's value reached only once its
-// key is.
+// old generation, weak slots holding nothing, and an ephemeron's value
+// reached only once its key is. The young generation is empty by now when
+// the finish evacuated it; when it marked it in place, the fresh mark goes
+// through young objects too, and a young object it reaches must carry its
+// young mark, or full_reclaim would drop it as dead.
 
 #include "heap_mark.hpp"
 
@@ -31,10 +33,12 @@ struct FreshMark {
 
 FreshMark& fresh(Tracer& t) noexcept { return *static_cast<FreshMark*>(t.state()); }
 
+// A reference the cycle decides: an old object, or a young one at an
+// in-place finish.
 bool old_reference(const HeapState& s, uint64_t word, uintptr_t& a) noexcept {
     if (!s.heap.is_reference_tag(word)) return false;
     a = static_cast<uintptr_t>(word & kAddressMask);
-    return s.heap.is_old(a);
+    return s.heap.is_old(a) || (s.young_in_place && s.heap.is_young(a));
 }
 
 void fresh_visit(Tracer& t, uint64_t* slot, uint64_t word) {
@@ -61,7 +65,7 @@ void drain(FreshMark& m, Tracer& t) {
     while (!m.stack.empty()) {
         const uintptr_t o = m.stack.back();
         m.stack.pop_back();
-        scan_object(t, o, true);
+        scan_object(t, o, !m.s.heap.is_young(o));
     }
 }
 
@@ -82,7 +86,8 @@ void drain(FreshMark& m, Tracer& t) {
 void verify_cycle_marks(Heap& heap) {
     HeapState& s = Collector::state(heap);
     FreshMark m{s, {}, {}, {}};
-    Tracer t(heap, Tracer::Purpose::Full, s.mature_lo, s.large_lo + s.large_reserve, &fresh_visit, &fresh_weak,
+    const uintptr_t lo = s.young_in_place ? s.base : s.mature_lo;
+    Tracer t(heap, Tracer::Purpose::Full, lo, s.large_lo + s.large_reserve, &fresh_visit, &fresh_weak,
              &fresh_ephemeron, &m);
     visit_roots(s, t);
     for (;;) {

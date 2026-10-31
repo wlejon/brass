@@ -16,12 +16,12 @@
 // are visited, so the cost follows the remembered set rather than the size of
 // the old generation: the walk reads one byte per region, eight at a time.
 //
-// While the last cycle's sweep is pending, a dirty card never covers a dead
-// object's slots: every card was cleaned at the cycle's finish and nothing
-// stores into a dead object, but a mature card is shared by the objects
-// starting in it, so an unswept block's dead starts are masked off by its
-// marks. A dead large object (unswept, not yet freed) has cards of its own,
-// all clean.
+// While the last cycle's sweep is pending, a dead object's slots are never
+// scanned: a mature card may still be dirty from before the cycle's finish
+// (an in-place finish leaves the cards as they were, promote-all cleans them)
+// and is shared by the objects starting in it, so an unswept block's dead
+// starts are masked off by its marks. A dead large object (unswept, not yet
+// freed) has cards of its own, which either finish cleans.
 //
 // A parallel minor collection (heap_minor_parallel.cpp) gathers the dirty
 // cards into a list of pieces first, cleaning them, and its threads scan the
@@ -91,21 +91,26 @@ void scan_mature_cards(Tracer& t, GcState& g) {
 // Walked region by region in address order, so an object's first card (whose
 // kCardDirty means the whole object, and whose region its whole-object mark
 // sets) is met before any other card of it.
-void gather_large_ranges(GcState& g, std::vector<CardRange>& out) {
+// `clean` false (a marking cycle's in-place finish, collect_dirty_cards): the
+// cards and regions are left as they are, and the rest of an object whose
+// whole was asked for is skipped rather than cleaned.
+void gather_large_ranges(GcState& g, std::vector<CardRange>& out, bool clean = true) {
     HeapState& s = g.s;
     constexpr size_t kCardsPerPage = kPageBytes / kCardBytes;
     constexpr size_t kCardsPerRegion = (size_t{1} << kCardRegionShift) / kCardBytes;
     constexpr size_t kPagesPerRegion = (size_t{1} << kCardRegionShift) / kPageBytes;
     uint8_t* regions = s.regions + ((s.large_lo - s.mature_lo) >> kCardRegionShift);
     const size_t region_count = (static_cast<size_t>(s.large_frontier) + kPagesPerRegion - 1) / kPagesPerRegion;
+    uintptr_t whole_end = 0;  // not cleaning: the end of the last object gathered whole
     for (size_t r = 0; r < region_count; ++r) {
         if (regions[r] == 0) continue;
-        regions[r] = 0;
+        if (clean) regions[r] = 0;
         const uintptr_t region_lo = s.large_lo + (static_cast<uintptr_t>(r) << kCardRegionShift);
         uint8_t* cards = s.card_of(region_lo);
         for (size_t c = 0; c < kCardsPerRegion; ++c) {
             if (cards[c] == kCardClean) continue;
             const uintptr_t card_lo = region_lo + c * kCardBytes;
+            if (card_lo < whole_end) continue;
             const size_t page = (card_lo - s.large_lo) / kPageBytes;
             const uint32_t head_plus_one = page < s.large_page_head.size() ? s.large_page_head[page] : 0;
             if (head_plus_one == 0) {  // a card left behind by a freed object
@@ -120,12 +125,13 @@ void gather_large_ranges(GcState& g, std::vector<CardRange>& out) {
             if (*first == kCardDirty) {
                 const auto it = s.large_objects.find(head);
                 const size_t pages = it != s.large_objects.end() ? it->second : 0;
-                std::memset(first, kCardClean, pages * kCardsPerPage);
+                if (clean) std::memset(first, kCardClean, pages * kCardsPerPage);
+                else whole_end = header + pages * kPageBytes;
                 ++g.dirty_cards;
                 out.push_back(CardRange{object, 0, size});
                 continue;
             }
-            cards[c] = kCardClean;
+            if (clean) cards[c] = kCardClean;
             ++g.dirty_cards;
             const uintptr_t lo = std::max(card_lo, object);
             const uintptr_t hi = std::min(card_lo + kCardBytes, object + size);
@@ -148,8 +154,8 @@ bool scans_ranges(const LayoutDescriptor& d) noexcept {
 
 // The mature half of gather_dirty_cards: scan_mature_cards' walk, recording
 // each dirty card's starts instead of scanning them. No promotion runs yet,
-// so no block can be swept under the walk.
-void gather_mature_cards(GcState& g, std::vector<CardWork>& out) {
+// so no block can be swept under the walk. `clean` as for gather_large_ranges.
+void gather_mature_cards(GcState& g, std::vector<CardWork>& out, bool clean) {
     HeapState& s = g.s;
     const size_t count = s.blocks.size();
     uint8_t* regions = s.regions;
@@ -163,7 +169,7 @@ void gather_mature_cards(GcState& g, std::vector<CardWork>& out) {
             }
         }
         if (regions[i] == 0) continue;
-        regions[i] = 0;
+        if (clean) regions[i] = 0;
         BlockMeta& meta = *s.blocks[i];
         if (!meta.in_use) continue;
         const uintptr_t lo = s.block_base(static_cast<uint32_t>(i));
@@ -171,7 +177,7 @@ void gather_mature_cards(GcState& g, std::vector<CardWork>& out) {
         const bool unswept = s.block_unswept(meta);
         for (size_t c = 0; c < kCardsPerBlock; ++c) {
             if (cards[c] != kCardDirty) continue;
-            cards[c] = kCardClean;
+            if (clean) cards[c] = kCardClean;
             ++g.dirty_cards;
             uint64_t starts = meta.starts[c];
             if (unswept) starts &= meta.marks[c];  // only the last cycle's live (scan_mature_cards)
@@ -180,12 +186,12 @@ void gather_mature_cards(GcState& g, std::vector<CardWork>& out) {
     }
 }
 
-} // namespace
-
-void gather_dirty_cards(GcState& g, std::vector<CardWork>& out) {
-    gather_mature_cards(g, out);
+// gather_dirty_cards and collect_dirty_cards: the pieces, the cards cleaned
+// or not.
+void gather_card_work(GcState& g, std::vector<CardWork>& out, bool clean) {
+    gather_mature_cards(g, out, clean);
     std::vector<CardRange> ranges;
-    gather_large_ranges(g, ranges);
+    gather_large_ranges(g, ranges, clean);
     for (size_t i = 0; i < ranges.size(); ++i) {
         const uintptr_t object = ranges[i].object;
         const size_t size = header_of(object)->size;
@@ -211,6 +217,12 @@ void gather_dirty_cards(GcState& g, std::vector<CardWork>& out) {
         }
     }
 }
+
+} // namespace
+
+void gather_dirty_cards(GcState& g, std::vector<CardWork>& out) { gather_card_work(g, out, true); }
+
+void collect_dirty_cards(GcState& g, std::vector<CardWork>& out) { gather_card_work(g, out, false); }
 
 void scan_card_work(Tracer& t, const CardWork& w) {
     if (w.starts != 0) {

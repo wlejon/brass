@@ -135,7 +135,9 @@ bool ephemeron_round(MarkCycle& c) {
     for (const EphemeronEntry& e : pending) {
         const uint64_t word = *e.key;
         const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
-        if (heap.is_reference_tag(word) && heap.is_old(a) && !is_marked(s, a)) {
+        // At an in-place finish a young key, too, lives by its mark.
+        const bool decided = heap.is_old(a) || (s.young_in_place && heap.is_young(a));
+        if (heap.is_reference_tag(word) && decided && !is_marked(s, a)) {
             main.ephemerons.push_back(e);
             continue;
         }
@@ -161,6 +163,51 @@ bool run_slice(MarkCycle& c, uint64_t deadline) {
         if (!ephemeron_round(c)) return true;
         if (deadline != kNoDeadline && gc_now_ns() >= deadline) return false;
     }
+}
+
+void clear_young_marks(HeapState& s, uintptr_t lo, uintptr_t hi) noexcept {
+    if (hi <= lo) return;
+    const size_t first = s.young_bit(lo) >> 6;
+    const size_t last = std::min((s.young_bit(hi) + 63) >> 6, s.young_marks.size());
+    std::fill(s.young_marks.begin() + static_cast<std::ptrdiff_t>(first),
+              s.young_marks.begin() + static_cast<std::ptrdiff_t>(last), uint64_t{0});
+}
+
+// The finish's young half when it leaves the young generation in place
+// (HeapConfig::finish_promote_all false): the marker marks young objects as
+// it marks old ones, from the roots (visited next) and the dirty cards, and
+// the young objects it reaches it scans with its Full tracer, so their old
+// referents are marked too. Nothing moves, so it all runs on the marker's
+// threads; what the young objects held is decided with the old generation,
+// and settled by full_reclaim from young_marks.
+//
+// Why this is all the finish needs: an old object the cycle has not marked
+// but that is live is named by a root, a grey object, a slot behind a dirty
+// card (a bulk copy, an unbarriered store into an object allocated in the
+// cycle), or a young object (stores into young objects carry no barrier).
+// The roots and the dirty cards are visited here; every young object the
+// program can reach is reached from a root, a dirty card (an old object that
+// names a young one has its card dirty) or another young object, and is
+// scanned. A dirty card's slots matter only in a live owner: a marked one is
+// scanned again (it may be black, scanned before the store), and a live
+// unmarked one is reached by the drain and scanned whole, with the young
+// range already in place; a dead one's slots must not be traced, or what they
+// name floats a cycle. The cards stay dirty: the young objects they name stay
+// young.
+void mark_young_in_place(MarkCycle& c, PhaseClock& clock) {
+    GcState& g = c.g;
+    HeapState& s = g.s;
+    // Eden's start bits need not be synced first: full_reclaim makes the
+    // young start bits the marks (every marked address is an object's).
+    clear_young_marks(s, s.eden_lo, g.eden_top);
+    clear_young_marks(s, s.survivor_lo[g.from], g.from_top);
+    s.young_in_place = true;
+    set_young_range(c.sh, c.workers, true);
+    std::vector<CardWork> cards;
+    collect_dirty_cards(g, cards);
+    push_card_rescans(c.workers, cards);
+    c.grey_empty = false;
+    clock.lap(kPhaseCards);
 }
 
 } // namespace
@@ -278,26 +325,37 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
     s.mark_phase = MarkPhase::Finishing;
     s.collecting = true;
     if (rescan) {
-        // The young generation, emptied by a minor collection that shades:
-        // every survivor is promoted grey (the marker then scans what it
-        // names) and every dirty card shades the old objects it names. Then the
-        // roots again through the marker's tracer: a full collection's view
-        // of them, which a minor's root sources do not give.
         begin_collection(g);
         PhaseClock clock(g);
-        full_evacuate(g, clock, true);
+        if (s.config.finish_promote_all) {
+            // The young generation, emptied by a minor collection that
+            // shades: every survivor is promoted grey (the marker then scans
+            // what it names) and every dirty card shades the old objects it
+            // names.
+            full_evacuate(g, clock, true);
+        } else {
+            mark_young_in_place(c, clock);
+        }
+        const uint64_t t1 = gc_now_ns();
+        g.finish_young_ns = t1 - t0;
+        // The roots again through the marker's tracer: a full collection's
+        // view of them, which a minor's root sources do not give.
         visit_roots(s, c.workers[0]->tracer);
         clock.lap(kPhaseRoots);
+        g.finish_roots_ns = gc_now_ns() - t1;
     }
     // The rest of the grey work and the ephemeron fixpoint: what the rescan
     // shaded, what the slices left, and ephemerons whose keys were marked
     // since the last round. Back to back, nothing ran since the last slice
     // reported it all gone, so there is none.
     if (rescan || !c.grey_empty) {
+        const uint64_t t2 = gc_now_ns();
         PhaseClock clock(g);
         c.grey_empty = run_slice(c, kNoDeadline);
         clock.lap(kPhaseTrace);
+        g.finish_drain_ns = gc_now_ns() - t2;
     }
+    const uint64_t t3 = gc_now_ns();
     // Marking is over: no store needs shading from here (a hook's store, say).
     heap.set_barrier_marking(false);
     if (s.verify) verify_cycle_marks(heap);
@@ -311,12 +369,15 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
 
     PhaseClock clock(g);
     full_reclaim(g, clock);
+    s.young_in_place = false;
     s.collecting = false;
     s.old_critical = s.old_in_reserve_swept();
     s.mark_phase = MarkPhase::Idle;
     s.update_fast_limit();
     if (s.verify) verify_heap(heap, "after a collection");
-    g.finish_ns = gc_now_ns() - t0;
+    const uint64_t t4 = gc_now_ns();
+    g.finish_settle_ns = t4 - t3;
+    g.finish_ns = t4 - t0;
 }
 
 void Collector::end_cycle(Heap& heap, uint64_t pause_ns, uint64_t longest_ns) {

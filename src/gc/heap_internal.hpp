@@ -255,6 +255,14 @@ struct HeapState {
     size_t survivor_bytes = 0;
     int from_survivor = 0;          // holds last minor collection's survivors
     std::vector<uint64_t> young_starts;  // by payload granule from young_lo
+    // A marking cycle's in-place finish (HeapConfig::finish_promote_all
+    // false): the young objects it found reachable, by the same bits as
+    // young_starts. While `young_in_place` is set (from the finish's root
+    // visit to the end of its settling) the marker marks young objects here as
+    // it marks old ones in theirs, and liveness of a young address is this
+    // bit (live_address, is_marked). Meaningless otherwise.
+    std::vector<uint64_t> young_marks;
+    bool young_in_place = false;
     uintptr_t eden_synced = 0;      // eden objects below here have their start bits
     uint64_t eden_bytes_retired = 0;// eden bytes allocated in earlier cycles
 
@@ -394,6 +402,10 @@ struct HeapState {
     [[nodiscard]] bool young_start(uintptr_t payload) const noexcept {
         const size_t bit = young_bit(payload);
         return ((young_starts[bit >> 6] >> (bit & 63)) & 1) != 0;
+    }
+    [[nodiscard]] bool young_marked(uintptr_t payload) const noexcept {
+        const size_t bit = young_bit(payload);
+        return ((young_marks[bit >> 6] >> (bit & 63)) & 1) != 0;
     }
     void clear_young_starts(uintptr_t lo, uintptr_t hi) noexcept;
     // Sets the start bits of eden objects allocated since the last sync.
@@ -643,6 +655,13 @@ struct GcState {
     uint64_t start_sweep_ns = 0;  // of start_ns: the last cycle's sweep, finished first
     uint64_t mark_ns = 0;
     uint64_t finish_ns = 0;
+    // Of finish_ns, for the log: the young generation's part (an evacuation,
+    // or its scan in place), the roots visited again, the grey work drained,
+    // and the settling after (weakness, hooks, the sweep's setup).
+    uint64_t finish_young_ns = 0;
+    uint64_t finish_roots_ns = 0;
+    uint64_t finish_drain_ns = 0;
+    uint64_t finish_settle_ns = 0;
     uint64_t slices = 0;
 
     GcState(HeapState& state, Heap& h, CollectionKind k) : s(state), heap(h), kind(k) {}
@@ -715,6 +734,10 @@ struct CardWork {
 // objects whose layout scans ranges, which are cut into pieces of
 // kCardWorkSliceBytes at most so that threads share a large array.
 void gather_dirty_cards(GcState& g, std::vector<CardWork>& out);
+// The same pieces for a marking cycle's in-place finish, with every card left
+// dirty: the young objects the slots name stay young, so the cards must go on
+// remembering them.
+void collect_dirty_cards(GcState& g, std::vector<CardWork>& out);
 void scan_card_work(Tracer& tracer, const CardWork& work);
 // heap_minor_parallel.cpp: how many threads the young generation's
 // evacuation `g` (a Minor state, begun) copies on: 1 below the thresholds

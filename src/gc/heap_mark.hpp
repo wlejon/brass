@@ -63,7 +63,19 @@ MarkWorkers make_mark_workers(MarkShared& sh, unsigned threads);
 // (1, or all the workers) until it is gone or sh.deadline passes. True when
 // it is gone; the ephemerons met are left in the workers.
 bool mark_drain(MarkShared& sh, MarkWorkers& workers, unsigned run);
-// Whether old object `a` is marked (anything else counts as marked).
+// Whether old object `a` is marked (anything else counts as marked); at an
+// in-place finish (HeapState::young_in_place) a young object's young mark.
 bool is_marked(const HeapState& s, uintptr_t a) noexcept;
+// A cycle's in-place finish: the workers' tracers cover the young generation
+// as well (`young`), so roots and scanned objects reach young objects and
+// mark them; or the old generation only again.
+void set_young_range(MarkShared& sh, MarkWorkers& workers, bool young);
+// The marked objects behind dirty cards (collect_dirty_cards), as grey
+// entries the drain scans again although marked, without counting them as
+// marked (an unmarked one is dead or scanned whole when the drain reaches
+// it): a mature card's objects, the marker's slices of a large object
+// that hold its dirty ranges (all of an object that cannot be sliced). Dealt
+// out over the workers' stacks.
+void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work);
 
 } // namespace brass::gc::detail

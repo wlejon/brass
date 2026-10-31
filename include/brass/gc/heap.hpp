@@ -130,6 +130,13 @@ struct HeapConfig {
     // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy
     // Sweep"). false (or BRASS_GC_EAGER_SWEEP=1): swept inside the pause.
     bool lazy_sweep = true;
+    // A marking cycle's finish (finish_marking, or a full collection asked
+    // for while one is open) leaves the young generation where it is and
+    // marks it in place with the old one, so young objects live on and only
+    // the dead ones are dropped (docs/gc_contract.md, "Marking Cycle"). true
+    // (or BRASS_GC_FINISH_PROMOTE_ALL=1): the finish evacuates the young
+    // generation, promoting every survivor, as before.
+    bool finish_promote_all = false;
     StressMode stress = StressMode::None;
     bool verify = false;  // verify the heap before and after every collection
     bool poison = false;  // overwrite freed memory with 0xDB after every collection

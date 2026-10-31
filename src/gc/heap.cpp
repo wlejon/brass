@@ -74,6 +74,10 @@ void apply_environment(HeapConfig& config) {
     // full collection's pause.
     const std::string eager_sweep = env_value("BRASS_GC_EAGER_SWEEP");
     if (!eager_sweep.empty() && eager_sweep != "0") config.lazy_sweep = false;
+    // The A/B switch for the in-place finish: a cycle's finish evacuates the
+    // young generation, promoting every survivor.
+    const std::string promote_all = env_value("BRASS_GC_FINISH_PROMOTE_ALL");
+    if (!promote_all.empty() && promote_all != "0") config.finish_promote_all = true;
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
     // The A/B switch for the parked marker threads: created and joined by
@@ -123,6 +127,7 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.survivor_top[1] = s.survivor_lo[1];
     detail::vm_commit(reinterpret_cast<void*>(s.base), young);
     s.young_starts.assign(young / kGranuleBytes / 64, 0);
+    s.young_marks.assign(s.young_starts.size(), 0);
 
     s.mature_lo = s.base + young;
     s.mature_reserve = mature;

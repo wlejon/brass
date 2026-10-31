@@ -19,9 +19,11 @@
 // reclaimed without moving anything. The three run as a marking cycle
 // (heap_mark_incremental.cpp: start, slices, finish), back to back here, or
 // as separate calls through Heap::start_marking and the rest, with the
-// mutator and minor collections running between them; then the evacuation
-// moves to the finish, and while the cycle is open a minor collection shades
-// every old object it reaches or promotes (GcState::shade).
+// mutator and minor collections running between them; then the young
+// generation is not emptied at all but marked where it is at the finish
+// (HeapConfig::finish_promote_all evacuates it there instead), and while the
+// cycle is open a minor collection shades every old object it reaches or
+// promotes (GcState::shade).
 //
 // Every phase traces through a Tracer with a mode-specific slow path, and
 // each settles weak slots, ephemerons and finalizers the same way
@@ -114,8 +116,8 @@ void minor_visit(Tracer& t, uint64_t* slot, uint64_t word) {
         // into an object allocated in the cycle, or a bulk copy), which this
         // collection cleans and the finish then no longer sees, and a
         // promoted object's. What a root or a young object names is not:
-        // the finish visits every root again and promotes every live young
-        // object grey, so it reaches what they still hold then. Shading it
+        // the finish visits every root again and scans every live young
+        // object, so it reaches what they still hold then. Shading it
         // here would keep alive what they held only for a moment (a
         // WeakRef's target on the kept-objects list until the job's end,
         // say), and with a cycle open most of the time, in every cycle.
@@ -172,6 +174,35 @@ void clean_all_cards(HeapState& s) {
         if (s.card_pages_committed[p]) std::memset(s.cards + p * page, kCardClean, page);
     }
     std::fill(s.region_bytes.begin(), s.region_bytes.end(), uint8_t{0});
+}
+
+// After an in-place finish's marking: the cards of every large object it
+// left unmarked, which the sweep frees (every large object is marked or dead
+// then: a pending sweep was completed at the cycle's start).
+void clean_dead_large_cards(HeapState& s) {
+    constexpr size_t kCardsPerPage = kPageBytes / kCardBytes;
+    for (const auto& [head, pages] : s.large_objects) {
+        const uintptr_t object = s.large_object_at(head);
+        if (header_of(object)->gc_bits & kGcLargeMarked) continue;
+        std::memset(s.card_of(object - kHeaderBytes), kCardClean, static_cast<size_t>(pages) * kCardsPerPage);
+    }
+}
+
+// The start bits of the young objects in [lo, hi) after an in-place finish:
+// the ones it marked, and no others. A dead one is named by nothing
+// reachable, and a lookup by address (containing_object) must not find it,
+// since its old referents may be swept. Every marked address is an object's
+// start, so the marks are the start bits whether or not eden's were synced
+// (HeapState::sync_eden_starts), and the dead objects above the sync point
+// are never walked: eden counts as synced to `hi`.
+void drop_dead_young_starts(HeapState& s, uintptr_t lo, uintptr_t hi) {
+    if (hi <= lo) return;
+    const size_t first = s.young_bit(lo) >> 6;
+    const size_t last = std::min((s.young_bit(hi) + 63) >> 6, s.young_starts.size());
+    std::copy(s.young_marks.begin() + static_cast<std::ptrdiff_t>(first),
+              s.young_marks.begin() + static_cast<std::ptrdiff_t>(last),
+              s.young_starts.begin() + static_cast<std::ptrdiff_t>(first));
+    if (s.in_eden(lo)) s.eden_synced = std::max(s.eden_synced, hi);
 }
 
 void poison_evacuated(HeapState& s, const GcState& g) {
@@ -264,18 +295,33 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     clock.lap(kPhaseHooks);
 
     // Liveness is settled: the old generation's memory is freed by the lazy
-    // sweep from here (all of it now with HeapConfig::lazy_sweep off). A dead
-    // object's card may be dirty; cleaning every card here means no card
-    // names a dead object afterwards, since nothing stores into one.
-    s.begin_sweep(g.marked_bytes);
-    clean_all_cards(s);
-    poison_evacuated(s, g);
-    std::fill(s.young_starts.begin(), s.young_starts.end(), 0);
-    s.survivor_top[0] = s.survivor_lo[0];
-    s.survivor_top[1] = s.survivor_lo[1];
-    s.survivor_slack[0] = 0;
-    s.survivor_slack[1] = 0;
-    s.eden_bytes_retired += g.eden_top - s.eden_lo;
+    // sweep from here (all of it now with HeapConfig::lazy_sweep off).
+    if (s.young_in_place) {
+        // The young generation stays (a cycle's in-place finish), and so do
+        // the cards that remember it. A dirty card of a dead mature object is
+        // harmless: the card scan reads an unswept block's starts through its
+        // marks, and a swept one's dead starts are gone. A dead large object
+        // has cards of its own, which the scan would read it through, so
+        // they are cleaned; and a dead young object stops being an object,
+        // so that nothing finds it again (a conservative root, verification).
+        clean_dead_large_cards(s);
+        s.begin_sweep(g.marked_bytes);
+        drop_dead_young_starts(s, s.eden_lo, g.eden_top);
+        drop_dead_young_starts(s, s.survivor_lo[g.from], g.from_top);
+    } else {
+        // A dead object's card may be dirty; cleaning every card here means
+        // no card names a dead object afterwards, since nothing stores into
+        // one.
+        s.begin_sweep(g.marked_bytes);
+        clean_all_cards(s);
+        poison_evacuated(s, g);
+        std::fill(s.young_starts.begin(), s.young_starts.end(), 0);
+        s.survivor_top[0] = s.survivor_lo[0];
+        s.survivor_top[1] = s.survivor_lo[1];
+        s.survivor_slack[0] = 0;
+        s.survivor_slack[1] = 0;
+        s.eden_bytes_retired += g.eden_top - s.eden_lo;
+    }
     // The adaptive eden goes back to the whole of it when most of what the
     // old generation gained since the last full collection is dead: the
     // program is not building data, so a shrunk eden may be promoting a
@@ -294,7 +340,9 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
         s.reset_eden_limit();
         s.promote_all = false;
     }
-    s.reset_eden();
+    // Eden still holds the young objects an in-place finish kept.
+    if (s.young_in_place) s.update_fast_limit();
+    else s.reset_eden();
 
     const double grown = static_cast<double>(g.marked_bytes) * s.config.growth_factor;
     s.full_threshold = std::max<uint64_t>(s.config.min_full_threshold_bytes, static_cast<uint64_t>(grown));
@@ -374,6 +422,8 @@ void scan_object(Tracer& t, uintptr_t object, bool old) {
 uintptr_t live_address(const GcState& g, uintptr_t a) noexcept {
     const HeapState& s = g.s;
     if (g.heap.is_young(a)) {
+        // A cycle's in-place finish moved nothing and marked what it reached.
+        if (s.young_in_place) return s.young_marked(a) ? a : 0;
         if (!g.in_from(a)) return a;
         const ObjectHeader* h = header_of(a);
         if (!h->forwarded()) return 0;

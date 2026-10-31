@@ -106,6 +106,12 @@ void mark_visit(Tracer& t, uint64_t* slot, uint64_t word) {
         if (claim<Parallel>(meta.marks[granule >> 6], uint64_t{1} << (granule & 63))) w.stack.push_back(a);
     } else if (s.in_large(a)) {
         if (claim_large<Parallel>(header_of(a)->gc_bits)) w.stack.push_back(a);
+    } else if (s.young_in_place) {
+        // A cycle's in-place finish: the range covers the young generation
+        // too (set_young_range), and a young object is marked in young_marks
+        // and scanned like an old one. Nothing young reaches here otherwise.
+        const size_t bit = s.young_bit(a);
+        if (claim<Parallel>(s.young_marks[bit >> 6], uint64_t{1} << (bit & 63))) w.stack.push_back(a);
     }
 }
 
@@ -124,8 +130,9 @@ void mark_ephemeron(Tracer& t, uint64_t* key, uint64_t* value, uint64_t cleared_
     // A young key counts as alive: the marker leaves the young generation to
     // the minor collections, and the finish's evacuation clears an entry
     // whose young key dies (its owner names a young object, so its card is
-    // dirty). Its value is kept for this cycle at worst.
-    if (a == 0 || !heap.contains(a) || !heap.is_reference_tag(word) || heap.is_young(a) ||
+    // dirty). Its value is kept for this cycle at worst. At an in-place
+    // finish a young key is decided like an old one, by its mark.
+    if (a == 0 || !heap.contains(a) || !heap.is_reference_tag(word) || (heap.is_young(a) && !w.sh.s.young_in_place) ||
         is_marked(w.sh.s, a)) {
         t.visit(value);
         return;
@@ -135,13 +142,17 @@ void mark_ephemeron(Tracer& t, uint64_t* key, uint64_t* value, uint64_t cleared_
 
 // A scanned object's lines and bytes: recorded when it is scanned rather than
 // when it is marked, since its header is in cache only then.
+// A young object (an in-place finish) is no part of the old generation's
+// live bytes, and has no lines.
 template <bool Parallel>
 void account(MarkWorker& w, uintptr_t object) noexcept {
     HeapState& s = w.sh.s;
+    const bool mature = s.in_mature(object);
+    if (!mature && !s.in_large(object)) return;
     const size_t total = kHeaderBytes + header_of(object)->size;
     w.marked_bytes += total;
     ++w.marked_objects;
-    if (!s.in_mature(object)) return;
+    if (!mature) return;
     const uint32_t index = s.block_index(object);
     BlockMeta& meta = *s.blocks[index];
     const uintptr_t lo = s.block_base(index);
@@ -220,6 +231,11 @@ bool acquire(MarkWorker& w) {
 // trace visits outside the payload (object.hpp, TraceRangeFn).
 constexpr size_t kSliceBytes = 16 * 1024;
 constexpr unsigned kSliceShift = 48;
+// An entry whose slice number is this is a dirty card's marked object at an
+// in-place finish (push_card_rescans), scanned again although marked and not
+// accounted: its first slice for a sliced large object, else all of it.
+// A real slice number is at most 65534 (slice_bytes_for).
+constexpr size_t kRescanSlice = 0xFFFF;
 
 size_t slice_bytes_for(size_t size) noexcept {
     // At most 65535 slices, however large the object.
@@ -239,6 +255,15 @@ size_t scan_entry(MarkWorker& w, uintptr_t entry) {
     const size_t size = header_of(o)->size;
     const size_t slice = entry >> kSliceShift;
     if (slice != 0) {
+        if (slice == kRescanSlice) {
+            if (size <= kSliceBytes || !sliceable(layout_descriptor(header_of(o)->layout))) {
+                scan_object(w.tracer, o, true);
+                return size;
+            }
+            const size_t bytes = std::min(size, slice_bytes_for(size));
+            scan_object_range(w.tracer, o, 0, bytes);
+            return bytes;
+        }
         const size_t bytes = slice_bytes_for(size);
         const size_t begin = slice * bytes;
         const size_t end = std::min(size, begin + bytes);
@@ -247,7 +272,8 @@ size_t scan_entry(MarkWorker& w, uintptr_t entry) {
     }
     account<Parallel>(w, o);
     if (size <= kSliceBytes || !sliceable(layout_descriptor(header_of(o)->layout))) {
-        scan_object(w.tracer, o, true);
+        // Young only at an in-place finish: a young owner then.
+        scan_object(w.tracer, o, !w.sh.heap.is_young(o));
         return size;
     }
     const size_t bytes = slice_bytes_for(size);
@@ -337,6 +363,12 @@ bool is_marked(const HeapState& s, uintptr_t a) noexcept {
         const uint8_t bits = AtomicRef<uint8_t>(header_of(a)->gc_bits).load(std::memory_order_relaxed);
         return (bits & kGcLargeMarked) != 0;
     }
+    if (s.young_in_place && s.heap.is_young(a)) {
+        const size_t bit = s.young_bit(a);
+        const uint64_t word =
+            AtomicRef<uint64_t>(const_cast<uint64_t&>(s.young_marks[bit >> 6])).load(std::memory_order_relaxed);
+        return ((word >> (bit & 63)) & 1) != 0;
+    }
     return true;
 }
 
@@ -397,6 +429,66 @@ MarkWorkers make_mark_workers(MarkShared& sh, unsigned threads) {
     }
     workers[0]->stack.reserve(4096);
     return workers;
+}
+
+void set_young_range(MarkShared& sh, MarkWorkers& workers, bool young) {
+    const uintptr_t lo = young ? sh.s.base : sh.s.mature_lo;
+    const uintptr_t hi = sh.s.large_lo + sh.s.large_reserve;
+    for (auto& w : workers) w->tracer.set_range(lo, hi);
+}
+
+void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work) {
+    // Dealt out in runs, so each thread starts with work of its own and the
+    // entries of one card stay together.
+    constexpr size_t kRun = 64;
+    size_t pushed = 0;
+    auto push = [&](uintptr_t entry) {
+        workers[(pushed++ / kRun) % workers.size()]->stack.push_back(entry);
+    };
+    const uintptr_t rescan = static_cast<uintptr_t>(kRescanSlice) << kSliceShift;
+    // A large object's pieces follow one another (gather_card_work), so the
+    // last entry pushed for it says what is already covered.
+    uintptr_t last_object = 0;
+    size_t last_slice = 0;
+    // Only the marked owners. An unmarked one is dead, or the drain reaches
+    // it later and scans all of it, with the young range in place: either
+    // way a rescan adds nothing for it, and for a dead one it marked what its
+    // slots name, which then floated a cycle (bronze's eval_gc_cycle_test
+    // kept a dead dynamic module). A marked one may be black, scanned before
+    // a young or unbarriered old value was stored behind the card, so it is
+    // scanned again. Everything this cycle shaded, allocated old or promoted
+    // is marked by now; the marks are this cycle's alone (the last sweep was
+    // completed at its start).
+    const HeapState& s = workers[0]->sh.s;
+    for (const CardWork& c : work) {
+        if (c.starts != 0) {
+            uint64_t starts = c.starts;
+            while (starts) {
+                const unsigned bit = ctz64(starts);
+                starts &= starts - 1;
+                const uintptr_t object = c.object + bit * kGranuleBytes;
+                if (is_marked(s, object)) push(object | rescan);
+            }
+            continue;
+        }
+        if (!is_marked(s, c.object)) continue;
+        const size_t size = header_of(c.object)->size;
+        if (size <= kSliceBytes || !sliceable(layout_descriptor(header_of(c.object)->layout))) {
+            // One entry scans all of it, whatever its dirty ranges.
+            if (c.object != last_object) push(c.object | rescan);
+            last_object = c.object;
+            last_slice = SIZE_MAX;
+            continue;
+        }
+        // The marker's slices of it that hold the dirty range.
+        const size_t bytes = slice_bytes_for(size);
+        for (size_t i = c.begin / bytes; i * bytes < c.end; ++i) {
+            if (c.object == last_object && i <= last_slice) continue;
+            last_object = c.object;
+            last_slice = i;
+            push(i == 0 ? (c.object | rescan) : (c.object | (static_cast<uintptr_t>(i) << kSliceShift)));
+        }
+    }
 }
 
 bool mark_drain(MarkShared& sh, MarkWorkers& workers, unsigned run) {
