@@ -527,6 +527,52 @@ void SpirvISel::Intrinsics::buffer_store(SpirvISel& isel, const brass::Instructi
     isel.emit(Inst(spv::OpStore).id(ptr).id(word));
 }
 
+template <SpirvISel::Intrinsics::Atom A>
+void SpirvISel::Intrinsics::buffer_atomic(SpirvISel& isel, const brass::Instruction& inst) {
+    Id ptr = buffer_word(isel, inst, true);
+    const Value* cmp = A == Atom::cas ? inst.operand(4) : nullptr;
+    const Value* v = inst.operand(A == Atom::cas ? 5 : 4);
+    if (!v || (A == Atom::cas && !cmp)) isel.malformed(inst, "missing buffer atomic argument");
+    Module& m = isel.m_;
+    Id u32 = isel.t_u32();
+    Id scope = m.c_u32(spv::ScopeDevice);
+    Id sem = m.c_u32(spv::MemorySemanticsMaskNone);
+    if constexpr (A == Atom::cas) {
+        Id r = isel.op(spv::OpAtomicCompareExchange, u32,
+                       {ptr, scope, sem, sem, isel.as_u32(v, "value"), isel.as_u32(cmp, "comparator")});
+        isel.define(inst.result(), r);
+        return;
+    }
+    if constexpr (A == Atom::exch) {
+        Id val = v->type() == Type::f32() ? isel.op(spv::OpBitcast, u32, {isel.id_of(v, "value")})
+                                          : isel.as_u32(v, "value");
+        Id r = isel.op(spv::OpAtomicExchange, u32, {ptr, scope, sem, val});
+        if (inst.type() == Type::f32()) r = isel.op(spv::OpBitcast, isel.t_f32(), {r});
+        isel.define(inst.result(), r);
+        return;
+    }
+    spv::Op o = spv::OpAtomicIAdd;
+    if constexpr (A == Atom::min) o = spv::OpAtomicSMin;
+    else if constexpr (A == Atom::umin) o = spv::OpAtomicUMin;
+    else if constexpr (A == Atom::max) o = spv::OpAtomicSMax;
+    else if constexpr (A == Atom::umax) o = spv::OpAtomicUMax;
+    else if constexpr (A == Atom::and_) o = spv::OpAtomicAnd;
+    else if constexpr (A == Atom::or_) o = spv::OpAtomicOr;
+    else if constexpr (A == Atom::xor_) o = spv::OpAtomicXor;
+    Id r = isel.op(o, u32, {ptr, scope, sem, isel.as_u32(v, "value")});
+    isel.define(inst.result(), r);
+}
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::add>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::min>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::umin>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::max>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::umax>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::exch>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::and_>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::or_>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::xor_>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::buffer_atomic<SpirvISel::Intrinsics::Atom::cas>(SpirvISel&, const brass::Instruction&);
+
 // ---------------------------------------------------------------------------
 // Graphics Stage Inputs & Outputs (Location-decorated and BuiltIn::Position)
 // ---------------------------------------------------------------------------

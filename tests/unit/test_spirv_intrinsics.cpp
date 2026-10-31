@@ -20,7 +20,8 @@ namespace {
 
 enum class Sig {
     void_i32, void_i64, f32_f32, f32f32_f32, f32x3_f32, f64_f64, i32_f32, i64_f32, f32_i32, f32_f64, f64_f32,
-    shfl_f32, shfl_i32, shfl_sync_f32, bar, bar_id, atom_f32, atom_i32, atom_i64, atom_shared_f32, atom_shared_i32,
+    shfl_f32, shfl_i32, shfl_sync_f32, bar, bar_id, atom_f32, atom_i32, atom_i64, atom_cas_i32,
+    atom_shared_f32, atom_shared_i32, atom_shared_cas_i32,
     i32i32_i64, i32i32_i32, i32x3_i32, shared_alloc,
     shared_ld, shared_ldx, shared_st, shared_stx, // element type from the name's suffix
     load_narrow, store_narrow,
@@ -28,6 +29,7 @@ enum class Sig {
     tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
     tex_compare, tex_compare_lod, tex_fetch, tex_gather, tex_size, tex_levels, img_load, img_store, img_size,
     vert_i32, vert_pos, frag_f32, frag_v4, stage_in, stage_out, frag_depth, buf_load, buf_store, buf_len,
+    buf_atom_i32, buf_atom_f32, buf_atom_cas_i32,
     frag_f32_f32, frag_i32, frag_void, i32_i32,
 };
 
@@ -81,7 +83,20 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_atom_add_i64", Sig::atom_i64}, {"ptx_atom_min_i32", Sig::atom_i32}, {"ptx_atom_min_u32", Sig::atom_i32},
         {"ptx_atom_max_i32", Sig::atom_i32}, {"ptx_atom_max_u32", Sig::atom_i32},
         {"ptx_atom_exch_i32", Sig::atom_i32}, {"ptx_atom_exch_u32", Sig::atom_i32}, {"ptx_atom_exch_f32", Sig::atom_f32},
+        {"ptx_atom_and_i32", Sig::atom_i32}, {"ptx_atom_and_u32", Sig::atom_i32},
+        {"ptx_atom_or_i32", Sig::atom_i32}, {"ptx_atom_or_u32", Sig::atom_i32},
+        {"ptx_atom_xor_i32", Sig::atom_i32}, {"ptx_atom_xor_u32", Sig::atom_i32},
+        {"ptx_atom_cas_i32", Sig::atom_cas_i32}, {"ptx_atom_cas_u32", Sig::atom_cas_i32},
         {"ptx_atom_shared_add_f32", Sig::atom_shared_f32}, {"ptx_atom_shared_add_i32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_add_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_min_i32", Sig::atom_shared_i32}, {"ptx_atom_shared_min_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_max_i32", Sig::atom_shared_i32}, {"ptx_atom_shared_max_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_exch_i32", Sig::atom_shared_i32}, {"ptx_atom_shared_exch_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_exch_f32", Sig::atom_shared_f32},
+        {"ptx_atom_shared_and_i32", Sig::atom_shared_i32}, {"ptx_atom_shared_and_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_or_i32", Sig::atom_shared_i32}, {"ptx_atom_shared_or_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_xor_i32", Sig::atom_shared_i32}, {"ptx_atom_shared_xor_u32", Sig::atom_shared_i32},
+        {"ptx_atom_shared_cas_i32", Sig::atom_shared_cas_i32}, {"ptx_atom_shared_cas_u32", Sig::atom_shared_cas_i32},
 
         {"ptx_mul_wide_u32", Sig::i32i32_i64}, {"ptx_mul_wide_s32", Sig::i32i32_i64},
         {"ptx_mul_hi_u32", Sig::i32i32_i32}, {"ptx_mad_lo_u32", Sig::i32x3_i32},
@@ -134,6 +149,15 @@ const std::map<std::string, Sig>& signatures() {
         {"spirv_buffer_load", Sig::buf_load},
         {"spirv_buffer_store", Sig::buf_store},
         {"spirv_buffer_length", Sig::buf_len},
+        {"spirv_buffer_atomic_add_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_add_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_min_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_min_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_max_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_max_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_exch_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_exch_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_exch_f32", Sig::buf_atom_f32},
+        {"spirv_buffer_atomic_and_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_and_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_or_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_or_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_xor_i32", Sig::buf_atom_i32}, {"spirv_buffer_atomic_xor_u32", Sig::buf_atom_i32},
+        {"spirv_buffer_atomic_cas_i32", Sig::buf_atom_cas_i32}, {"spirv_buffer_atomic_cas_u32", Sig::buf_atom_cas_i32},
         {"spirv_front_facing", Sig::frag_i32}, {"spirv_demote_to_helper", Sig::frag_void},
         {"spirv_subgroup_all", Sig::i32_i32}, {"spirv_subgroup_any", Sig::i32_i32},
         {"spirv_dpdx_f32", Sig::frag_f32_f32}, {"spirv_dpdy_f32", Sig::frag_f32_f32},
@@ -213,8 +237,10 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::atom_f32: r = b.build_call(name, Type::f32(), {p, x}); break;
         case Sig::atom_i32: r = b.build_call(name, Type::i32(), {p, i}); break;
         case Sig::atom_i64: r = b.build_call(name, Type::i64(), {p, l}); break;
+        case Sig::atom_cas_i32: r = b.build_call(name, Type::i32(), {p, i, i}); break;
         case Sig::atom_shared_f32: r = b.build_call(name, Type::f32(), {alloc(Type::f32()), x}); break;
         case Sig::atom_shared_i32: r = b.build_call(name, Type::i32(), {alloc(Type::i32()), i}); break;
+        case Sig::atom_shared_cas_i32: r = b.build_call(name, Type::i32(), {alloc(Type::i32()), i, i}); break;
         case Sig::i32i32_i64: r = b.build_call(name, Type::i64(), {i, i}); break;
         case Sig::i32i32_i32: r = b.build_call(name, Type::i32(), {i, i}); break;
         case Sig::i32x3_i32: r = b.build_call(name, Type::i32(), {i, i, i}); break;
@@ -267,6 +293,18 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
             break;
         case Sig::buf_len:
             r = b.build_call(name, Type::i32(), {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1)});
+            break;
+        case Sig::buf_atom_i32:
+            r = b.build_call(name, Type::i32(),
+                             {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1), b.build_iconst_i32(8), i});
+            break;
+        case Sig::buf_atom_f32:
+            r = b.build_call(name, Type::f32(),
+                             {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1), b.build_iconst_i32(8), x});
+            break;
+        case Sig::buf_atom_cas_i32:
+            r = b.build_call(name, Type::i32(),
+                             {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1), b.build_iconst_i32(8), i, i});
             break;
         case Sig::frag_f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
         case Sig::frag_i32: r = b.build_call(name, Type::i32()); break;

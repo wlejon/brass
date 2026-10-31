@@ -176,6 +176,13 @@ struct VulkanModuleOptions {
     uint32_t subgroup_size = 32;
 };
 
+struct VulkanDescriptorBuffer {
+    uint32_t set = 0;
+    uint32_t binding = 0;
+    uint64_t buffer = 0;   // VkBuffer (VulkanBuffer::handle())
+    size_t size = 0;       // byte size (0 = whole buffer)
+};
+
 struct VulkanDispatch {
     uint32_t grid[3] = {1, 1, 1};
     uint32_t block[3] = {256, 1, 1};   // spec constants 0..2 (must match a fixed LocalSize)
@@ -185,6 +192,9 @@ struct VulkanDispatch {
     // When set, receives the GPU time of all `repeat` dispatches in
     // milliseconds (timestamp queries), or -1 without timestamp support.
     double* gpu_ms = nullptr;
+    // Optional descriptor-bound storage/uniform buffers for kernels that use
+    // SpirvKernel::descriptors.
+    std::vector<VulkanDescriptorBuffer> descriptors;
 };
 
 // A SpirvKernel as a compute pipeline (one per distinct workgroup size,

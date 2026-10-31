@@ -77,12 +77,27 @@ template void PtxISel::Intrinsics::shfl<ShflMode::idx>(PtxISel&, const brass::In
 
 template <AtomOp A, StateSpace S, bool Unsigned>
 void PtxISel::Intrinsics::atom(PtxISel& isel, const brass::Instruction& inst) {
+    if constexpr (A == AtomOp::cas) {
+        const Value* cmp = inst.operand(1);
+        const Value* value = inst.operand(2);
+        if (!inst.operand(0) || !cmp || !value) isel.malformed(inst, "missing argument");
+        brass::Type vt = value->type();
+        if (is_float(type_for(vt))) isel.malformed(inst, "only atom.add and atom.exch support float values");
+        Type t = bit_type_for(vt);
+        isel.emit(Inst::make(Opcode::atom, t).space(S).atom(A)
+                      .dst(isel.result_reg(inst))
+                      .src(Operand::addr(isel.reg_of(inst.operand(0), "pointer"), 0))
+                      .src(isel.operand_of(cmp, Opcode::atom, 1, t, "compare"))
+                      .src(isel.operand_of(value, Opcode::atom, 2, t, "value")));
+        return;
+    }
     const Value* value = inst.operand(1);
     if (!inst.operand(0) || !value) isel.malformed(inst, "missing argument");
     brass::Type vt = value->type();
+    constexpr bool is_bit_op = A == AtomOp::exch || A == AtomOp::and_ || A == AtomOp::or_ || A == AtomOp::xor_;
     Type t = ((A == AtomOp::min || A == AtomOp::max) && !Unsigned) ? signed_type_for(vt)
-           : (A == AtomOp::exch && is_float(type_for(vt)))           ? (bit_width(type_for(vt)) == 64 ? Type::b64 : Type::b32)
-           : (A == AtomOp::exch)                                   ? bit_type_for(vt)
+           : (A == AtomOp::exch && is_float(type_for(vt)))         ? (bit_width(type_for(vt)) == 64 ? Type::b64 : Type::b32)
+           : is_bit_op                                             ? bit_type_for(vt)
                                                                    : type_for(vt);
     if constexpr (A != AtomOp::add && A != AtomOp::exch) {
         if (is_float(type_for(vt))) isel.malformed(inst, "only atom.add and atom.exch support float values");
@@ -98,7 +113,20 @@ template void PtxISel::Intrinsics::atom<AtomOp::min, StateSpace::global, true>(P
 template void PtxISel::Intrinsics::atom<AtomOp::max, StateSpace::global>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::max, StateSpace::global, true>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::exch, StateSpace::global>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::and_, StateSpace::global>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::or_, StateSpace::global>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::xor_, StateSpace::global>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::cas, StateSpace::global>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::atom<AtomOp::add, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::min, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::min, StateSpace::shared, true>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::max, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::max, StateSpace::shared, true>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::exch, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::and_, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::or_, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::xor_, StateSpace::shared>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::atom<AtomOp::cas, StateSpace::shared>(PtxISel&, const brass::Instruction&);
 
 // ---------------------------------------------------------------------------
 // Wide and fused integer multiplies

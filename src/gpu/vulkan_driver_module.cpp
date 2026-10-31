@@ -95,6 +95,7 @@ struct VulkanModule::State {
     brass::target::SpirvKernel kernel;
     uint32_t subgroup_size = 0;
     VkShaderModule shader = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSetLayout> set_layouts;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     mutable std::mutex mutex;
     mutable std::map<std::array<uint32_t, 3>, VkPipeline> pipelines;
@@ -104,6 +105,8 @@ struct VulkanModule::State {
         if (!r) return;
         for (auto& [key, p] : pipelines) r->vkDestroyPipeline(r->device, p, nullptr);
         if (layout) r->vkDestroyPipelineLayout(r->device, layout, nullptr);
+        for (VkDescriptorSetLayout dsl : set_layouts)
+            if (dsl) r->vkDestroyDescriptorSetLayout(r->device, dsl, nullptr);
         if (shader) r->vkDestroyShaderModule(r->device, shader, nullptr);
     }
 
@@ -185,8 +188,41 @@ VulkanModule VulkanModule::load(const brass::target::SpirvKernel& kernel, std::s
     if (r->vkCreateShaderModule(r->device, &smi, nullptr, &s->shader) != VK_SUCCESS)
         return fail("vkCreateShaderModule failed for '" + kernel.entry + "'");
 
+    if (!kernel.descriptors.empty()) {
+        uint32_t max_set = 0;
+        for (const auto& db : kernel.descriptors) {
+            if (db.kind != brass::target::SpirvDescriptorKind::StorageBuffer &&
+                db.kind != brass::target::SpirvDescriptorKind::UniformBuffer) {
+                return fail("kernel '" + kernel.entry + "' uses non-buffer descriptor bindings not supported by VulkanModule");
+            }
+            if (db.set > max_set) max_set = db.set;
+        }
+        s->set_layouts.resize(max_set + 1, VK_NULL_HANDLE);
+        for (uint32_t set_idx = 0; set_idx <= max_set; ++set_idx) {
+            std::vector<VkDescriptorSetLayoutBinding> bindings;
+            for (const auto& db : kernel.descriptors) {
+                if (db.set != set_idx) continue;
+                VkDescriptorSetLayoutBinding b{};
+                b.binding = db.binding;
+                b.descriptorType = db.kind == brass::target::SpirvDescriptorKind::UniformBuffer
+                                       ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                       : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                b.descriptorCount = 1;
+                b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+                bindings.push_back(b);
+            }
+            auto slci = vk::make<VkDescriptorSetLayoutCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
+            slci.bindingCount = static_cast<uint32_t>(bindings.size());
+            slci.pBindings = bindings.empty() ? nullptr : bindings.data();
+            if (r->vkCreateDescriptorSetLayout(r->device, &slci, nullptr, &s->set_layouts[set_idx]) != VK_SUCCESS)
+                return fail("vkCreateDescriptorSetLayout failed for '" + kernel.entry + "'");
+        }
+    }
+
     VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, kernel.push_constant_bytes};
     auto lci = vk::make<VkPipelineLayoutCreateInfo>(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+    lci.setLayoutCount = static_cast<uint32_t>(s->set_layouts.size());
+    lci.pSetLayouts = s->set_layouts.empty() ? nullptr : s->set_layouts.data();
     lci.pushConstantRangeCount = kernel.push_constant_bytes ? 1u : 0u;
     lci.pPushConstantRanges = &range;
     if (r->vkCreatePipelineLayout(r->device, &lci, nullptr, &s->layout) != VK_SUCCESS)
@@ -226,17 +262,86 @@ bool VulkanModule::launch(const VulkanDispatch& d, const std::vector<VulkanArg>&
     VkPipeline pipe = s_->pipeline(*r, d.block, err);
     if (!pipe) return fail(err);
 
+    VkDescriptorPool desc_pool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> desc_sets;
+    if (!s_->set_layouts.empty()) {
+        uint32_t ubo_count = 0, ssbo_count = 0;
+        for (const auto& db : k.descriptors) {
+            if (db.kind == brass::target::SpirvDescriptorKind::UniformBuffer) ++ubo_count;
+            else ++ssbo_count;
+        }
+        std::vector<VkDescriptorPoolSize> pool_sizes;
+        if (ubo_count) pool_sizes.push_back({VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ubo_count});
+        if (ssbo_count) pool_sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, ssbo_count});
+        if (pool_sizes.empty()) pool_sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1});
+        auto dpci = vk::make<VkDescriptorPoolCreateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
+        dpci.maxSets = static_cast<uint32_t>(s_->set_layouts.size());
+        dpci.poolSizeCount = static_cast<uint32_t>(pool_sizes.size());
+        dpci.pPoolSizes = pool_sizes.data();
+        if (r->vkCreateDescriptorPool(r->device, &dpci, nullptr, &desc_pool) != VK_SUCCESS)
+            return fail("vkCreateDescriptorPool failed");
+        desc_sets.resize(s_->set_layouts.size(), VK_NULL_HANDLE);
+        auto dsai = vk::make<VkDescriptorSetAllocateInfo>(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO);
+        dsai.descriptorPool = desc_pool;
+        dsai.descriptorSetCount = static_cast<uint32_t>(s_->set_layouts.size());
+        dsai.pSetLayouts = s_->set_layouts.data();
+        if (r->vkAllocateDescriptorSets(r->device, &dsai, desc_sets.data()) != VK_SUCCESS) {
+            r->vkDestroyDescriptorPool(r->device, desc_pool, nullptr);
+            return fail("vkAllocateDescriptorSets failed");
+        }
+        std::vector<VkDescriptorBufferInfo> buf_infos(k.descriptors.size());
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(k.descriptors.size());
+        for (size_t i = 0; i < k.descriptors.size(); ++i) {
+            const auto& db = k.descriptors[i];
+            const VulkanDescriptorBuffer* found = nullptr;
+            for (const auto& bound : d.descriptors) {
+                if (bound.set == db.set && bound.binding == db.binding) {
+                    found = &bound;
+                    break;
+                }
+            }
+            if (!found || !found->buffer) {
+                r->vkDestroyDescriptorPool(r->device, desc_pool, nullptr);
+                return fail("kernel '" + k.entry + "' missing descriptor buffer for set " + std::to_string(db.set) +
+                            " binding " + std::to_string(db.binding));
+            }
+            buf_infos[i].buffer = vk::as_buffer(found->buffer);
+            buf_infos[i].offset = 0;
+            buf_infos[i].range = found->size ? found->size : VK_WHOLE_SIZE;
+            auto w = vk::make<VkWriteDescriptorSet>(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET);
+            w.dstSet = desc_sets[db.set];
+            w.dstBinding = db.binding;
+            w.descriptorCount = 1;
+            w.descriptorType = db.kind == brass::target::SpirvDescriptorKind::UniformBuffer
+                                   ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                   : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.pBufferInfo = &buf_infos[i];
+            writes.push_back(w);
+        }
+        if (!writes.empty()) {
+            r->vkUpdateDescriptorSets(r->device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        }
+    }
+
     const bool timed = d.gpu_ms && r->caps.timestamp_period_ns > 0.0;
     VkQueryPool qp = VK_NULL_HANDLE;
     if (timed) {
         auto qci = vk::make<VkQueryPoolCreateInfo>(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO);
         qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
         qci.queryCount = 2;
-        if (r->vkCreateQueryPool(r->device, &qci, nullptr, &qp) != VK_SUCCESS) return fail("vkCreateQueryPool failed");
+        if (r->vkCreateQueryPool(r->device, &qci, nullptr, &qp) != VK_SUCCESS) {
+            if (desc_pool) r->vkDestroyDescriptorPool(r->device, desc_pool, nullptr);
+            return fail("vkCreateQueryPool failed");
+        }
     }
     uint32_t repeat = d.repeat ? d.repeat : 1;
     bool ok = r->submit([&](VkCommandBuffer cb) {
         r->vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        if (!desc_sets.empty()) {
+            r->vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, s_->layout, 0,
+                                       static_cast<uint32_t>(desc_sets.size()), desc_sets.data(), 0, nullptr);
+        }
         if (!block.empty())
             r->vkCmdPushConstants(cb, s_->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, static_cast<uint32_t>(block.size()),
                                   block.data());
@@ -256,6 +361,7 @@ bool VulkanModule::launch(const VulkanDispatch& d, const std::vector<VulkanArg>&
         }
         if (timed) r->vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qp, 1);
     });
+    if (desc_pool) r->vkDestroyDescriptorPool(r->device, desc_pool, nullptr);
     if (timed) {
         uint64_t ts[2] = {0, 0};
         if (ok && r->vkGetQueryPoolResults(r->device, qp, 0, 2, sizeof(ts), ts, 8,

@@ -206,6 +206,33 @@ Value* KernelBuilder::atom_max_u32(Value* ptr, Value* val)  { return b_.build_ca
 Value* KernelBuilder::atom_exch_i32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_exch_i32", Type::i32(), {ptr, val}); }
 Value* KernelBuilder::atom_exch_u32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_exch_u32", Type::i32(), {ptr, val}); }
 Value* KernelBuilder::atom_exch_f32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_exch_f32", Type::f32(), {ptr, val}); }
+Value* KernelBuilder::atom_and_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_and_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_and_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_and_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_or_i32(Value* ptr, Value* val)   { return b_.build_call("ptx_atom_or_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_or_u32(Value* ptr, Value* val)   { return b_.build_call("ptx_atom_or_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_xor_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_xor_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_xor_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_xor_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_cas_i32(Value* ptr, Value* cmp, Value* val) { return b_.build_call("ptx_atom_cas_i32", Type::i32(), {ptr, cmp, val}); }
+Value* KernelBuilder::atom_cas_u32(Value* ptr, Value* cmp, Value* val) { return b_.build_call("ptx_atom_cas_u32", Type::i32(), {ptr, cmp, val}); }
+
+Value* KernelBuilder::atom_shared_add_f32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_add_f32", Type::f32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_add_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_add_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_add_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_add_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_min_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_min_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_min_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_min_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_max_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_max_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_max_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_max_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_exch_i32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_shared_exch_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_exch_u32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_shared_exch_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_exch_f32(Value* ptr, Value* val) { return b_.build_call("ptx_atom_shared_exch_f32", Type::f32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_and_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_and_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_and_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_and_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_or_i32(Value* ptr, Value* val)   { return b_.build_call("ptx_atom_shared_or_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_or_u32(Value* ptr, Value* val)   { return b_.build_call("ptx_atom_shared_or_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_xor_i32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_xor_i32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_xor_u32(Value* ptr, Value* val)  { return b_.build_call("ptx_atom_shared_xor_u32", Type::i32(), {ptr, val}); }
+Value* KernelBuilder::atom_shared_cas_i32(Value* ptr, Value* cmp, Value* val) { return b_.build_call("ptx_atom_shared_cas_i32", Type::i32(), {ptr, cmp, val}); }
+Value* KernelBuilder::atom_shared_cas_u32(Value* ptr, Value* cmp, Value* val) { return b_.build_call("ptx_atom_shared_cas_u32", Type::i32(), {ptr, cmp, val}); }
 
 // ---------------------------------------------------------------------------
 // SPIR-V descriptor-bound images & samplers
@@ -365,6 +392,41 @@ Instruction* KernelBuilder::buffer_store(uint32_t set, uint32_t binding, Value* 
 Value* KernelBuilder::buffer_length(uint32_t set, uint32_t binding) {
     return b_.build_call("spirv_buffer_length", Type::i32(),
                          {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), const_i32(1)});
+}
+
+#define BRASS_KB_BUF_ATOMIC(fn, sym, ret)                                                                             \
+    Value* KernelBuilder::fn(uint32_t set, uint32_t binding, Value* offset, Value* value) {                           \
+        return b_.build_call(sym, ret,                                                                                \
+                             {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)),         \
+                              const_i32(1), offset, value});                                                          \
+    }
+BRASS_KB_BUF_ATOMIC(buffer_atomic_add_i32,  "spirv_buffer_atomic_add_i32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_add_u32,  "spirv_buffer_atomic_add_u32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_min_i32,  "spirv_buffer_atomic_min_i32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_min_u32,  "spirv_buffer_atomic_min_u32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_max_i32,  "spirv_buffer_atomic_max_i32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_max_u32,  "spirv_buffer_atomic_max_u32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_exch_i32, "spirv_buffer_atomic_exch_i32", Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_exch_u32, "spirv_buffer_atomic_exch_u32", Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_exch_f32, "spirv_buffer_atomic_exch_f32", Type::f32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_and_i32,  "spirv_buffer_atomic_and_i32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_and_u32,  "spirv_buffer_atomic_and_u32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_or_i32,   "spirv_buffer_atomic_or_i32",   Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_or_u32,   "spirv_buffer_atomic_or_u32",   Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_xor_i32,  "spirv_buffer_atomic_xor_i32",  Type::i32())
+BRASS_KB_BUF_ATOMIC(buffer_atomic_xor_u32,  "spirv_buffer_atomic_xor_u32",  Type::i32())
+#undef BRASS_KB_BUF_ATOMIC
+
+Value* KernelBuilder::buffer_atomic_cas_i32(uint32_t set, uint32_t binding, Value* offset, Value* cmp, Value* value) {
+    return b_.build_call("spirv_buffer_atomic_cas_i32", Type::i32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), const_i32(1),
+                          offset, cmp, value});
+}
+
+Value* KernelBuilder::buffer_atomic_cas_u32(uint32_t set, uint32_t binding, Value* offset, Value* cmp, Value* value) {
+    return b_.build_call("spirv_buffer_atomic_cas_u32", Type::i32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), const_i32(1),
+                          offset, cmp, value});
 }
 
 Instruction* KernelBuilder::set_vertex_position(Value* x, Value* y, Value* z, Value* w) {

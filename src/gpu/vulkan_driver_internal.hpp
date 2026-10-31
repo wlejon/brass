@@ -71,6 +71,13 @@ namespace brass::gpu::vk {
     X(vkCmdPipelineBarrier)             \
     X(vkCreateShaderModule)             \
     X(vkDestroyShaderModule)            \
+    X(vkCreateDescriptorSetLayout)      \
+    X(vkDestroyDescriptorSetLayout)     \
+    X(vkCreateDescriptorPool)           \
+    X(vkDestroyDescriptorPool)          \
+    X(vkAllocateDescriptorSets)         \
+    X(vkUpdateDescriptorSets)           \
+    X(vkCmdBindDescriptorSets)          \
     X(vkCreatePipelineLayout)           \
     X(vkDestroyPipelineLayout)          \
     X(vkCreateComputePipelines)         \

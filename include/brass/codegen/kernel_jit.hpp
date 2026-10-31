@@ -389,6 +389,34 @@ public:
     Value* atom_exch_i32(Value* ptr, Value* val);
     Value* atom_exch_u32(Value* ptr, Value* val);
     Value* atom_exch_f32(Value* ptr, Value* val);
+    Value* atom_and_i32(Value* ptr, Value* val);
+    Value* atom_and_u32(Value* ptr, Value* val);
+    Value* atom_or_i32(Value* ptr, Value* val);
+    Value* atom_or_u32(Value* ptr, Value* val);
+    Value* atom_xor_i32(Value* ptr, Value* val);
+    Value* atom_xor_u32(Value* ptr, Value* val);
+    Value* atom_cas_i32(Value* ptr, Value* cmp, Value* val);
+    Value* atom_cas_u32(Value* ptr, Value* cmp, Value* val);
+
+    // Atomics (shared memory; return the previous value)
+    Value* atom_shared_add_f32(Value* ptr, Value* val);
+    Value* atom_shared_add_i32(Value* ptr, Value* val);
+    Value* atom_shared_add_u32(Value* ptr, Value* val);
+    Value* atom_shared_min_i32(Value* ptr, Value* val);
+    Value* atom_shared_min_u32(Value* ptr, Value* val);
+    Value* atom_shared_max_i32(Value* ptr, Value* val);
+    Value* atom_shared_max_u32(Value* ptr, Value* val);
+    Value* atom_shared_exch_i32(Value* ptr, Value* val);
+    Value* atom_shared_exch_u32(Value* ptr, Value* val);
+    Value* atom_shared_exch_f32(Value* ptr, Value* val);
+    Value* atom_shared_and_i32(Value* ptr, Value* val);
+    Value* atom_shared_and_u32(Value* ptr, Value* val);
+    Value* atom_shared_or_i32(Value* ptr, Value* val);
+    Value* atom_shared_or_u32(Value* ptr, Value* val);
+    Value* atom_shared_xor_i32(Value* ptr, Value* val);
+    Value* atom_shared_xor_u32(Value* ptr, Value* val);
+    Value* atom_shared_cas_i32(Value* ptr, Value* cmp, Value* val);
+    Value* atom_shared_cas_u32(Value* ptr, Value* cmp, Value* val);
 
     // ------------------------------------------------------------------
     // SPIR-V descriptor-bound textures and storage images
@@ -465,6 +493,23 @@ public:
     Value* buffer_load(uint32_t set, uint32_t binding, uint32_t uniform_bytes, Value* offset, Type type);
     Instruction* buffer_store(uint32_t set, uint32_t binding, Value* offset, Value* value);   // a storage buffer
     Value* buffer_length(uint32_t set, uint32_t binding);   // a storage buffer's 32-bit words (i32)
+    Value* buffer_atomic_add_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_add_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_min_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_min_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_max_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_max_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_exch_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_exch_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_exch_f32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_and_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_and_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_or_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_or_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_xor_i32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_xor_u32(uint32_t set, uint32_t binding, Value* offset, Value* value);
+    Value* buffer_atomic_cas_i32(uint32_t set, uint32_t binding, Value* offset, Value* cmp, Value* value);
+    Value* buffer_atomic_cas_u32(uint32_t set, uint32_t binding, Value* offset, Value* cmp, Value* value);
 
     // Structured control flow. All leave the builder positioned in the
     // join/exit block they create. `body` receives the induction variable

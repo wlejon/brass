@@ -61,7 +61,7 @@ struct SpirvISel::Intrinsics {
     template <Shfl M>
     static void shfl(SpirvISel& isel, const brass::Instruction& inst);
     static void shfl_down_sync_f32(SpirvISel& isel, const brass::Instruction& inst);
-    enum class Atom { add, min, umin, max, umax, exch };
+    enum class Atom { add, min, umin, max, umax, exch, and_, or_, xor_, cas };
     template <Atom A, bool Shared>
     static void atom(SpirvISel& isel, const brass::Instruction& inst);
     template <bool Signed>
@@ -141,6 +141,8 @@ struct SpirvISel::Intrinsics {
     static void buffer_length(SpirvISel& isel, const brass::Instruction& inst);
     static void buffer_load(SpirvISel& isel, const brass::Instruction& inst);
     static void buffer_store(SpirvISel& isel, const brass::Instruction& inst);
+    template <Atom A>
+    static void buffer_atomic(SpirvISel& isel, const brass::Instruction& inst);
     static void set_vertex_position(SpirvISel& isel, const brass::Instruction& inst);
     static void require_fragment(SpirvISel& isel, const brass::Instruction& inst);
     template <spv::Op O>

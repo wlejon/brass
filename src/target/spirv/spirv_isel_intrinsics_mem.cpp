@@ -110,8 +110,9 @@ void SpirvISel::Intrinsics::shfl_down_sync_f32(SpirvISel& isel, const brass::Ins
 
 template <SpirvISel::Intrinsics::Atom A, bool Shared>
 void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst) {
-    const Value* value = inst.operand(1);
-    if (!inst.operand(0) || !value) isel.malformed(inst, "missing argument");
+    const Value* cmp = A == Atom::cas ? inst.operand(1) : nullptr;
+    const Value* value = inst.operand(A == Atom::cas ? 2 : 1);
+    if (!inst.operand(0) || !value || (A == Atom::cas && !cmp)) isel.malformed(inst, "missing argument");
     Module& m = isel.m_;
     Type vt = value->type();
     Id t = isel.scalar_type(vt);
@@ -121,12 +122,30 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
     if (vt.size_in_bytes() == 8) m.add_capability(spv::CapabilityInt64Atomics);
 
     Id ptr = 0;
+    Id elem_t = t;
     spv::Scope scope = spv::ScopeDevice;
     if constexpr (Shared) {
-        ptr = isel.shared_element_pointer(isel.shared_ref(inst.operand(0), "atomic pointer"), nullptr, false, vt);
+        const SharedRef& ref = isel.shared_ref(inst.operand(0), "atomic pointer");
+        ptr = isel.shared_element_pointer(ref, nullptr, false, vt);
+        elem_t = isel.scalar_type(ref.elem);
         scope = spv::ScopeWorkgroup;
     } else {
         ptr = isel.op(spv::OpConvertUToPtr, isel.psb_pointer(t), {isel.id_of(inst.operand(0), "atomic pointer")});
+    }
+
+    if constexpr (A == Atom::cas) {
+        Id val_id = isel.id_of(value, "atomic value");
+        Id cmp_id = isel.id_of(cmp, "atomic comparator");
+        if (elem_t != t) {
+            val_id = isel.op(spv::OpBitcast, elem_t, {val_id});
+            cmp_id = isel.op(spv::OpBitcast, elem_t, {cmp_id});
+        }
+        Id r = isel.op(spv::OpAtomicCompareExchange, elem_t,
+                       {ptr, m.c_u32(scope), m.c_u32(spv::MemorySemanticsMaskNone),
+                        m.c_u32(spv::MemorySemanticsMaskNone), val_id, cmp_id});
+        if (elem_t != t) r = isel.op(spv::OpBitcast, t, {r});
+        isel.define(inst.result(), r);
+        return;
     }
 
     spv::Op o = spv::OpAtomicIAdd;
@@ -147,9 +166,18 @@ void SpirvISel::Intrinsics::atom(SpirvISel& isel, const brass::Instruction& inst
         o = spv::OpAtomicUMax;
     } else if constexpr (A == Atom::exch) {
         o = spv::OpAtomicExchange;
+    } else if constexpr (A == Atom::and_) {
+        o = spv::OpAtomicAnd;
+    } else if constexpr (A == Atom::or_) {
+        o = spv::OpAtomicOr;
+    } else if constexpr (A == Atom::xor_) {
+        o = spv::OpAtomicXor;
     }
-    isel.define(inst.result(), isel.op(o, t, {ptr, m.c_u32(scope), m.c_u32(spv::MemorySemanticsMaskNone),
-                                              isel.id_of(value, "atomic value")}));
+    Id val_id = isel.id_of(value, "atomic value");
+    if (elem_t != t) val_id = isel.op(spv::OpBitcast, elem_t, {val_id});
+    Id r = isel.op(o, elem_t, {ptr, m.c_u32(scope), m.c_u32(spv::MemorySemanticsMaskNone), val_id});
+    if (elem_t != t) r = isel.op(spv::OpBitcast, t, {r});
+    isel.define(inst.result(), r);
 }
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::add, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::min, false>(SpirvISel&, const brass::Instruction&);
@@ -157,7 +185,20 @@ template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::umin, fal
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::max, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::umax, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::exch, false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::and_, false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::or_, false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::xor_, false>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::cas, false>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::add, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::min, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::umin, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::max, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::umax, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::exch, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::and_, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::or_, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::xor_, true>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::atom<SpirvISel::Intrinsics::Atom::cas, true>(SpirvISel&, const brass::Instruction&);
 
 // ---------------------------------------------------------------------------
 // Wide and fused integer multiplies
