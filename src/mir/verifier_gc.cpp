@@ -49,8 +49,10 @@ bool may_trigger_gc(const Instruction& inst) noexcept {
     const Opcode op = inst.opcode();
     if (op == Opcode::safepoint || is_coro_op(op)) return true;
     if (!is_call(op)) return false;
-    // A declared-pure runtime function never allocates.
-    return !callee_has_role(inst, SymbolRole::Pure);
+    // A declared-pure runtime function never allocates, and a `nocollect` one
+    // never reaches a GC point by its contract (the object writer already
+    // records neither as one).
+    return !callee_has_role(inst, SymbolRole::Pure) && !callee_has_role(inst, SymbolRole::NoCollect);
 }
 
 void verify_derived_gcrefs(

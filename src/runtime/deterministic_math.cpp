@@ -816,6 +816,7 @@ extern "C" {
 
 double brass_det_sin(double x) { return brass::math::det_sin(x); }
 double brass_det_cos(double x) { return brass::math::det_cos(x); }
+void brass_det_sincos(double x, double* out) { brass::math::det_sincos(x, out); }
 double brass_det_tan(double x) { return brass::math::det_tan(x); }
 double brass_det_asin(double x) { return brass::math::det_asin(x); }
 double brass_det_acos(double x) { return brass::math::det_acos(x); }

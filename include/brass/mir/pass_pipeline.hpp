@@ -33,6 +33,8 @@ struct PassPipelineOptions {
     bool enable_wbe = true;
     // The inline integer path of `frem` calls (float_rem_inline.hpp).
     bool enable_float_rem_inline = true;
+    // A sine and a cosine of one value as one call (sincos_fuse.hpp).
+    bool enable_sincos_fuse = true;
     bool dump_wbe_stats = false;
     bool dump_range_stats = false;
     GvnPreStats* pre_stats = nullptr;

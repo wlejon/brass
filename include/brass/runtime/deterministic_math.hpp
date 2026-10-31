@@ -20,6 +20,8 @@ BRASS_API uint64_t canonical_f64_bits(double x) noexcept;
 // x86_64 and AArch64 across Linux, Windows, and macOS.
 BRASS_API double det_sin(double x) noexcept;
 BRASS_API double det_cos(double x) noexcept;
+// out[0] = det_sin(x), out[1] = det_cos(x), bit for bit, from one reduction.
+BRASS_API void det_sincos(double x, double* out) noexcept;
 BRASS_API double det_tan(double x) noexcept;
 BRASS_API double det_asin(double x) noexcept;
 BRASS_API double det_acos(double x) noexcept;
@@ -43,6 +45,7 @@ extern "C" {
 
 BRASS_API double brass_det_sin(double x);
 BRASS_API double brass_det_cos(double x);
+BRASS_API void brass_det_sincos(double x, double* out);
 BRASS_API double brass_det_tan(double x);
 BRASS_API double brass_det_asin(double x);
 BRASS_API double brass_det_acos(double x);

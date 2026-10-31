@@ -346,3 +346,37 @@ TEST_CASE("GVN - Dead Store Elimination Within a Block and Across Simple CFGs") 
     CHECK_EQ(stats2.dead_stores_eliminated, 1ULL);
     CHECK_EQ(count_opcodes(*fn2, Opcode::store), 1ULL);
 }
+
+TEST_CASE("GVN - float divisions merge, an integer division by a variable does not") {
+    // x / y twice in f64 (setFromEuler's `x / 2` per call): one division is
+    // left. The i64 pair divides by a parameter, which may be zero, so it is
+    // left alone (merging is sound there too, but hoisting is not, and the
+    // predicate serves both).
+    Module mod("test_fdiv_gvn");
+    Builder b(mod);
+    Function* fn = mod.create_function("fdiv", Type::f64(), {Type::f64(), Type::f64(), Type::i64(), Type::i64()});
+    b.set_function(fn);
+    BasicBlock* b0 = b.append_block("entry");
+    b.position_at_end(b0);
+    Value* x = b.add_block_param(b0, Type::f64());
+    Value* y = b.add_block_param(b0, Type::f64());
+    Value* p = b.add_block_param(b0, Type::i64());
+    Value* q = b.add_block_param(b0, Type::i64());
+    Value* d1 = b.build_sdiv(x, y);
+    Value* d2 = b.build_sdiv(x, y);
+    Value* i1 = b.build_sdiv(p, q);
+    Value* i2 = b.build_sdiv(p, q);
+    Value* isum = b.build_sitofp_f64_i64(b.build_add(i1, i2));
+    b.build_ret(b.build_add(b.build_mul(d1, d2), isum));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    CHECK_EQ(count_opcodes(*fn, Opcode::sdiv), 4ULL);
+    gvn_function(*fn);
+    REQUIRE(verify_function(*fn));
+    CHECK_EQ(count_opcodes(*fn, Opcode::sdiv), 3ULL);
+
+    Interpreter interp;
+    RuntimeValue v = interp.run(mod, "fdiv", {RuntimeValue::from_f64(3.0), RuntimeValue::from_f64(4.0),
+                                              RuntimeValue::from_i64(9), RuntimeValue::from_i64(2)});
+    CHECK_EQ(v.as_f64(), 0.75 * 0.75 + 8.0);
+}

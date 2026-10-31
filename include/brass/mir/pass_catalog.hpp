@@ -54,6 +54,9 @@ PassStep unbox_double_params();
 // Every function: the integer path of each remaining `frem` call
 // (float_rem_inline.hpp).
 PassStep float_rem_inline();
+// Every function: a sine and a cosine of one value as one call
+// (sincos_fuse.hpp).
+PassStep sincos_fuse();
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------
 PassStep f64_demote(DemoteStats* stats);

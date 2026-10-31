@@ -67,6 +67,9 @@ public:
     bool has_symbol_role(std::string_view sym, SymbolRole role) const noexcept;
     // Every role declared on `sym`, in kAllSymbolRoles order.
     std::vector<SymbolRole> symbol_roles(std::string_view sym) const;
+    // A symbol declared with `role` (the least by name if several are), or
+    // empty if none is.
+    std::string_view symbol_with_role(SymbolRole role) const noexcept;
 
     // add_symbol_role(sym, SymbolRole::Allocator): calls to `sym` return a
     // fresh object no other pointer refers to, and touch no memory the

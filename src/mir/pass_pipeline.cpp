@@ -35,6 +35,9 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     // After the loop stage, whose f64 demotion turns a proven-integral
     // `frem` into an `smod` the expansion would only get in the way of.
     if (options.enable_float_rem_inline) p.add(passes::float_rem_inline());
+    // Late: GVN has merged equal operands and LICM moved invariant calls, and
+    // the fused call, which writes its slot, is no pure call they could move.
+    if (options.enable_sincos_fuse) p.add(passes::sincos_fuse());
     if (options.enable_wbe) p.add(passes::write_barrier_elim(options.dump_wbe_stats));
     return p;
 }

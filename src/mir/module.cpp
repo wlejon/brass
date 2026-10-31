@@ -340,6 +340,17 @@ std::vector<SymbolRole> Module::symbol_roles(std::string_view sym) const {
     return roles;
 }
 
+std::string_view Module::symbol_with_role(SymbolRole role) const noexcept {
+    // The least name, not the map's first: the answer must not depend on
+    // hashing order when more than one symbol is declared with `role`.
+    std::string_view best;
+    for (const auto& [sym, bits] : symbol_roles_) {
+        if ((bits & role_bit(role)) == 0) continue;
+        if (best.empty() || sym < best) best = sym;
+    }
+    return best;
+}
+
 void Module::add_allocation_function(std::string_view sym) {
     add_symbol_role(sym, SymbolRole::Allocator);
 }
