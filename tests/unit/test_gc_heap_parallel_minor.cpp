@@ -65,10 +65,10 @@ LayoutId ephemeron_table_layout() {
     return id;
 }
 
-HeapConfig config(ParallelMinor mode, unsigned threads) {
+HeapConfig config(ParallelMinor mode, unsigned threads, size_t survivor_bytes = size_t{128} << 10) {
     HeapConfig c;
     c.eden_bytes = size_t{1} << 20;
-    c.survivor_bytes = size_t{128} << 10;  // small: some rounds overflow it
+    c.survivor_bytes = survivor_bytes;  // 128 KB by default, small: some rounds overflow it
     c.mature_reserve_bytes = size_t{256} << 20;
     c.large_reserve_bytes = size_t{256} << 20;
     c.large_object_bytes = 16 * 1024;
@@ -86,6 +86,14 @@ struct Options {
     bool cycle = false;  // a marking cycle open through the rounds
     bool lazy = false;   // the old generation's sweep pending at the first round
     bool weak = false;   // weak cells, ephemeron tables, finalizers
+    // Room for every survivor when nonzero. An overflowing survivor space
+    // promotes what is copied once it is full, and which objects that is
+    // depends on the order of the copy, which threads change: a weak cell
+    // whose young target overflowed into the old generation keeps it until
+    // the full collection, where the serial copy kept the target young and
+    // cleared the cell at the next minor. The graph from the roots is the
+    // same either way; what weak cells and ephemerons name is not.
+    size_t survivor_bytes = 0;
     int rounds = 8;
 };
 
@@ -288,7 +296,7 @@ private:
 };
 
 Outcome run(ParallelMinor mode, unsigned threads, uint32_t seed, const Options& o) {
-    World w(config(mode, threads), seed);
+    World w(o.survivor_bytes ? config(mode, threads, o.survivor_bytes) : config(mode, threads), seed);
     w.build_old(o.lazy);
     w.swept_pending_at_first = w.h.sweeping();
     if (o.cycle) REQUIRE(w.h.start_marking());
@@ -350,6 +358,7 @@ TEST_CASE("gc::Heap parallel minor - inside a marking cycle") {
 TEST_CASE("gc::Heap parallel minor - weak slots, ephemerons and finalizers settle as on one thread") {
     Options o;
     o.weak = true;
+    o.survivor_bytes = size_t{1} << 20;  // the eden's size: nothing promoted but by age, size or pretenuring
     for (uint32_t seed = 1; seed <= 2; ++seed) {
         const Outcome serial = run(ParallelMinor::Off, 1, seed, o);
         // Something died and something lived, or the comparison says little.
