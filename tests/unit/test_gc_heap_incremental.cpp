@@ -350,3 +350,42 @@ TEST_CASE("gc::Heap incremental - slices or a finish outside a cycle are a hard 
 }
 
 #endif
+
+// HeapConfig::cycle_headroom: while a cycle marks, old-generation growth
+// finishes it only past the threshold plus the headroom (which pressure()
+// reports as the threshold meanwhile); outside a cycle, and with no headroom,
+// the threshold runs a full collection as always.
+TEST_CASE("gc::Heap incremental - an open cycle has headroom past the threshold") {
+    constexpr size_t kThreshold = size_t{4} << 20;
+    constexpr size_t kChunkWords = 1024;  // 8 KB old objects
+    for (double headroom : {0.5, 0.0}) {
+        HeapConfig c = cycle_config(1);
+        c.min_full_threshold_bytes = kThreshold;
+        c.cycle_headroom = headroom;
+        Heap h(c);
+        CHECK_EQ(h.pressure().full_threshold, uint64_t{kThreshold});
+        REQUIRE(h.start_marking());
+        const uint64_t limit = h.pressure().full_threshold;
+        CHECK_EQ(limit, static_cast<uint64_t>(static_cast<double>(kThreshold) * (1.0 + headroom)));
+        const uint64_t fulls = h.stats().full_collections;
+        // Old garbage until the cycle is finished by the growth: at the
+        // allocation that would take it past the limit, not before.
+        uint64_t growth = 0;
+        while (h.marking()) {
+            growth = h.pressure().old_growth;
+            REQUIRE(growth <= limit);
+            h.allocate(kChunkWords * 8, words_layout(), kAllocOld);
+        }
+        CHECK(growth + kChunkWords * 8 + 64 > limit);
+        if (headroom > 0.0) CHECK(growth > kThreshold);  // it outlived the plain threshold
+        CHECK_EQ(h.stats().full_collections, fulls + 1);
+        // No cycle open: the threshold is the plain one again (what the
+        // finish set), and the next cycle has its headroom on top of it.
+        const uint64_t base = h.pressure().full_threshold;
+        REQUIRE(h.start_marking());
+        CHECK_EQ(h.pressure().full_threshold,
+                 base + static_cast<uint64_t>(static_cast<double>(base) * headroom));
+        h.finish_marking();
+        CHECK_FALSE(h.marking());
+    }
+}

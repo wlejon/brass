@@ -100,6 +100,16 @@ struct HeapConfig {
     // this and `growth_factor` times the live old bytes after the last one.
     size_t min_full_threshold_bytes = size_t{32} << 20;
     double growth_factor = 1.0;
+    // While a marking cycle is open (start_marking), the growth that
+    // finishes it at an allocation is the threshold times 1 + this. A cycle
+    // marks while the program promotes, and one started on a threshold left
+    // from a heap built faster than it was collected (a boot that built 1 GB
+    // in one turn, last collected at 556 MB) cannot mark it all at a host's
+    // sub-millisecond slices before the plain threshold: the heap then
+    // finished it in one pause of whatever marking was left (32 ms). The
+    // headroom is memory a cycle that falls behind may use, not where cycles
+    // are paced to finish. 0 (or BRASS_GC_CYCLE_HEADROOM=0): the threshold.
+    double cycle_headroom = 0.25;
     // Threads that mark the old generation in a full collection (the
     // collecting thread among them) once it holds at least
     // `parallel_mark_bytes`; smaller old generations are marked by the
@@ -130,6 +140,12 @@ struct HeapConfig {
     // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy
     // Sweep"). false (or BRASS_GC_EAGER_SWEEP=1): swept inside the pause.
     bool lazy_sweep = true;
+    // The most mature blocks (32 KB each) the lazy sweep's release decommits
+    // in one step, between looks at the slice's clock: a cycle that freed much
+    // of a large heap leaves free runs of hundreds of MB, and one decommit of
+    // such a run took a slice past any budget (4.1 ms for 263 MB). 64 blocks
+    // is about 30 us. 0 (or BRASS_GC_RELEASE_RUN_BLOCKS=0): a whole run at once.
+    size_t release_run_blocks = 64;
     // A marking cycle's finish (finish_marking, or a full collection asked
     // for while one is open) leaves the young generation where it is and
     // marks it in place with the old one, so young objects live on and only
@@ -137,6 +153,10 @@ struct HeapConfig {
     // (or BRASS_GC_FINISH_PROMOTE_ALL=1): the finish evacuates the young
     // generation, promoting every survivor, as before.
     bool finish_promote_all = false;
+    // The in-place finish rescans a large object's dirty cards by their own
+    // ranges, as a minor collection does. false (or
+    // BRASS_GC_RESCAN_RANGES=0): by the marker's 16 KB slices that hold them.
+    bool rescan_card_ranges = true;
     StressMode stress = StressMode::None;
     bool verify = false;  // verify the heap before and after every collection
     bool poison = false;  // overwrite freed memory with 0xDB after every collection
@@ -160,7 +180,8 @@ struct HeapConfig {
     bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|incremental|1), BRASS_GC_VERIFY=1,
     // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_FIXED_EDEN=1,
-    // BRASS_GC_EAGER_SWEEP=1, BRASS_GC_MARK_THREADS=n,
+    // BRASS_GC_EAGER_SWEEP=1, BRASS_GC_RELEASE_RUN_BLOCKS=n, BRASS_GC_CYCLE_HEADROOM=f,
+    // BRASS_GC_RESCAN_RANGES=0, BRASS_GC_MARK_THREADS=n,
     // BRASS_GC_PARALLEL_MINOR=0|1|always, BRASS_GC_MINOR_THREADS=n and
     // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
     // above when set.
@@ -197,7 +218,9 @@ struct HeapPressure {
     // (HeapConfig::adaptive_eden), at most the eden reserved.
     size_t eden_capacity = 0;
     uint64_t old_growth = 0;      // old-generation bytes added since the last full collection
-    uint64_t full_threshold = 0;  // the growth that runs a full collection
+    // The growth that runs a full collection, or finishes an open marking
+    // cycle (the threshold plus HeapConfig::cycle_headroom while one marks).
+    uint64_t full_threshold = 0;
     // The last full collection's sweep still to do (Heap::sweep_slice): the
     // mature blocks not yet swept (about a microsecond each), and whether
     // anything at all is left (large objects, memory to hand back).

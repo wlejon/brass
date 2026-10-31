@@ -173,6 +173,20 @@ void clear_young_marks(HeapState& s, uintptr_t lo, uintptr_t hi) noexcept {
               s.young_marks.begin() + static_cast<std::ptrdiff_t>(last), uint64_t{0});
 }
 
+uint64_t popcount_range(const HeapState& s, uintptr_t lo, uintptr_t hi) noexcept {
+    if (hi <= lo) return 0;
+    const size_t first = s.young_bit(lo) >> 6;
+    const size_t last = std::min((s.young_bit(hi) + 63) >> 6, s.young_marks.size());
+    uint64_t n = 0;
+    for (size_t i = first; i < last; ++i) n += popcount64(s.young_marks[i]);
+    return n;
+}
+
+// The young objects an in-place finish marked (for the log).
+uint64_t count_young_marks(const HeapState& s, const GcState& g) noexcept {
+    return popcount_range(s, s.eden_lo, g.eden_top) + popcount_range(s, s.survivor_lo[g.from], g.from_top);
+}
+
 // The finish's young half when it leaves the young generation in place
 // (HeapConfig::finish_promote_all false): the marker marks young objects as
 // it marks old ones, from the roots (visited next) and the dirty cards, and
@@ -205,7 +219,7 @@ void mark_young_in_place(MarkCycle& c, PhaseClock& clock) {
     set_young_range(c.sh, c.workers, true);
     std::vector<CardWork> cards;
     collect_dirty_cards(g, cards);
-    push_card_rescans(c.workers, cards);
+    g.finish_rescans = push_card_rescans(c.workers, cards);
     c.grey_empty = false;
     clock.lap(kPhaseCards);
 }
@@ -324,6 +338,11 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
     if (s.coro_frames) coro_lock.emplace(*s.coro_frames);
     s.mark_phase = MarkPhase::Finishing;
     s.collecting = true;
+    uint64_t marked_before = 0;
+    if (s.log) {
+        g.finish_grey = grey_count(c.sh, c.workers);
+        for (const auto& w : c.workers) marked_before += w->marked_objects;
+    }
     if (rescan) {
         begin_collection(g);
         PhaseClock clock(g);
@@ -354,6 +373,12 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
         c.grey_empty = run_slice(c, kNoDeadline);
         clock.lap(kPhaseTrace);
         g.finish_drain_ns = gc_now_ns() - t2;
+    }
+    if (s.log) {
+        uint64_t marked_after = 0;
+        for (const auto& w : c.workers) marked_after += w->marked_objects;
+        g.finish_old_marked = marked_after - marked_before;
+        if (s.young_in_place) g.finish_young_marked = count_young_marks(s, g);
     }
     const uint64_t t3 = gc_now_ns();
     // Marking is over: no store needs shading from here (a hook's store, say).

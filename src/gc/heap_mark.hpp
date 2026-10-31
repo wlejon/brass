@@ -48,6 +48,10 @@ struct MarkShared {
     // pass: every worker then stops at its next look at the clock.
     uint64_t deadline = kNoDeadline;
     std::atomic<bool> stop{false};
+    // The dirty ranges of large objects an in-place finish rescans
+    // (push_card_rescans), named by index from their grey entries; read-only
+    // while the drain runs.
+    std::vector<CardWork> rescan_ranges;
 
     MarkShared(HeapState& state, Heap& h) : s(state), heap(h) {}
 };
@@ -73,9 +77,12 @@ void set_young_range(MarkShared& sh, MarkWorkers& workers, bool young);
 // The marked objects behind dirty cards (collect_dirty_cards), as grey
 // entries the drain scans again although marked, without counting them as
 // marked (an unmarked one is dead or scanned whole when the drain reaches
-// it): a mature card's objects, the marker's slices of a large object
-// that hold its dirty ranges (all of an object that cannot be sliced). Dealt
-// out over the workers' stacks.
-void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work);
+// it): a mature card's objects, a large object's dirty ranges (the marker's
+// slices that hold them under HeapConfig::rescan_card_ranges false; all of
+// an object that cannot be sliced). Dealt
+// out over the workers' stacks. Returns the entries pushed.
+size_t push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work);
+// The grey entries waiting: every worker's stack and the pool's chunks.
+size_t grey_count(const MarkShared& sh, const MarkWorkers& workers);
 
 } // namespace brass::gc::detail

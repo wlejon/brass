@@ -194,8 +194,11 @@ bool release_step(HeapState& s) {
         if (!releasable(high)) continue;
         uint32_t low = high;
         s.blocks[low]->committed = false;
-        while (w.release_next < w.release_list.size() && low > 0 && w.release_list[w.release_next] == low - 1 &&
-               releasable(low - 1)) {
+        // HeapConfig::release_run_blocks: a run of hundreds of MB decommitted
+        // by one call was a slice of its own past any budget.
+        const size_t most = s.config.release_run_blocks ? s.config.release_run_blocks : SIZE_MAX;
+        while (w.release_next < w.release_list.size() && low > 0 && high - low + 1 < most &&
+               w.release_list[w.release_next] == low - 1 && releasable(low - 1)) {
             ++w.release_next;
             --low;
             s.blocks[low]->committed = false;

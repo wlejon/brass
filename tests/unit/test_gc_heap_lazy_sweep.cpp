@@ -469,32 +469,43 @@ TEST_CASE("gc::Heap lazy sweep - finalizers, weak slots and hooks settle at the 
     for (uint64_t* r : {&cell_live, &cell_dead, &target}) h.remove_root(r);
 }
 
+// The release decommits at most HeapConfig::release_run_blocks blocks a step
+// (0: each free run whole), so a run of many MB takes many zero-budget
+// slices rather than one past any budget.
 TEST_CASE("gc::Heap lazy sweep - excess free blocks go back to the OS in the sweep's slices") {
-    HeapConfig c = config();
-    c.verify = false;
-    c.min_full_threshold_bytes = size_t{1} << 20;  // retained: 64 free blocks, not 32 MB
-    Heap h(c);
-    // ~15 MB live in a chain (word 1 links the one before), collected while
-    // live so the threshold grows past it, then dropped: one collection
-    // leaves it all dead in unswept blocks.
-    uint64_t chain = 0;
-    h.add_root(&chain);
-    for (size_t i = 0; i < 60000; ++i) {
-        const uintptr_t o = h.allocate(30 * 8, words_layout(), kAllocOld);
-        *slot_of(o, 1) = chain;
-        chain = o;
-    }
-    h.collect(CollectionKind::Full);
-    sweep_all(h);
-    chain = 0;
-    h.collect(CollectionKind::Full);
-    REQUIRE(h.sweeping());
-    const size_t before = h.committed_bytes();
-    uint64_t slices = 0;
-    while (!h.sweep_slice(0)) ++slices;
-    CHECK(slices > 1);
-    CHECK(h.committed_bytes() + (size_t{8} << 20) < before);
-    h.remove_root(&chain);
+    const auto slices_to_release = [](size_t run_blocks) {
+        HeapConfig c = config();
+        c.verify = false;
+        c.min_full_threshold_bytes = size_t{1} << 20;  // retained: 64 free blocks, not 32 MB
+        c.release_run_blocks = run_blocks;
+        Heap h(c);
+        // ~15 MB live in a chain (word 1 links the one before), collected while
+        // live so the threshold grows past it, then dropped: one collection
+        // leaves it all dead in unswept blocks.
+        uint64_t chain = 0;
+        h.add_root(&chain);
+        for (size_t i = 0; i < 60000; ++i) {
+            const uintptr_t o = h.allocate(30 * 8, words_layout(), kAllocOld);
+            *slot_of(o, 1) = chain;
+            chain = o;
+        }
+        h.collect(CollectionKind::Full);
+        sweep_all(h);
+        chain = 0;
+        h.collect(CollectionKind::Full);
+        REQUIRE(h.sweeping());
+        const size_t before = h.committed_bytes();
+        uint64_t slices = 0;
+        while (!h.sweep_slice(0)) ++slices;
+        CHECK(slices > 1);
+        CHECK(h.committed_bytes() + (size_t{8} << 20) < before);
+        h.remove_root(&chain);
+        return slices;
+    };
+    const uint64_t whole = slices_to_release(0);
+    slices_to_release(64);
+    // Over 300 blocks released four at a time: a slice each.
+    CHECK(slices_to_release(4) >= whole + 50);
 }
 
 TEST_CASE("gc::Heap lazy sweep - an old space near its end finishes the sweep instead of collecting again") {

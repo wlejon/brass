@@ -78,6 +78,22 @@ void apply_environment(HeapConfig& config) {
     // young generation, promoting every survivor.
     const std::string promote_all = env_value("BRASS_GC_FINISH_PROMOTE_ALL");
     if (!promote_all.empty() && promote_all != "0") config.finish_promote_all = true;
+    const std::string release_run = env_value("BRASS_GC_RELEASE_RUN_BLOCKS");
+    if (!release_run.empty()) {
+        config.release_run_blocks = static_cast<size_t>(std::strtoull(release_run.c_str(), nullptr, 10));
+    }
+    // The A/B switch for the in-place finish's range rescans of large objects.
+    if (env_value("BRASS_GC_RESCAN_RANGES") == "0") config.rescan_card_ranges = false;
+    // The open cycle's headroom over the threshold, a fraction (0: none).
+    const std::string headroom = env_value("BRASS_GC_CYCLE_HEADROOM");
+    if (!headroom.empty()) {
+        char* end = nullptr;
+        const double h = std::strtod(headroom.c_str(), &end);
+        if (end == headroom.c_str() || *end != '\0' || !(h >= 0.0 && h <= 4.0)) {
+            detail::gc_fatal("BRASS_GC_CYCLE_HEADROOM is not a number in [0, 4]");
+        }
+        config.cycle_headroom = h;
+    }
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
     // The A/B switch for the parked marker threads: created and joined by
@@ -424,7 +440,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
 
     const bool old =(flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
     if (old) {
-        if (s.old_allocated_since_full + total > s.full_threshold) {
+        if (s.old_allocated_since_full + total > s.growth_limit()) {
             s.trigger = detail::GcTrigger::OldGrowth;
             collect_at(CollectionKind::Full, 0, 0);
         }
@@ -692,7 +708,7 @@ size_t Heap::young_used_bytes() const noexcept {
 
 HeapPressure Heap::pressure() const noexcept {
     const HeapState& s = *s_;
-    return {alloc_->top - s.eden_lo, s.eden_limit - s.eden_lo, s.old_allocated_since_full, s.full_threshold,
+    return {alloc_->top - s.eden_lo, s.eden_limit - s.eden_lo, s.old_allocated_since_full, s.growth_limit(),
             s.sweep.unswept_blocks, s.sweep.active};
 }
 

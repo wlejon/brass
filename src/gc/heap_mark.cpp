@@ -236,6 +236,15 @@ constexpr unsigned kSliceShift = 48;
 // accounted: its first slice for a sliced large object, else all of it.
 // A real slice number is at most 65534 (slice_bytes_for).
 constexpr size_t kRescanSlice = 0xFFFF;
+// A kRescanSlice entry with its low bit set (an object's address never has
+// it) is no address but an index into MarkShared::rescan_ranges, shifted up
+// one: the dirty range of a large object, scanned again on its own. A store
+// into a large array dirties one 512-byte card; rescanning the marker's 16 KB
+// slice around it instead made every finish rescan nearly all of an array the
+// program writes a few hundred random slots of a frame (bigheap's 3 MB one:
+// 394k slots, most of a 1 GB heap's finish).
+// HeapConfig::rescan_card_ranges false: by those slices, as before.
+constexpr uintptr_t kRangeEntry = 1;
 
 size_t slice_bytes_for(size_t size) noexcept {
     // At most 65535 slices, however large the object.
@@ -252,8 +261,13 @@ bool sliceable(const LayoutDescriptor& d) noexcept {
 template <bool Parallel>
 size_t scan_entry(MarkWorker& w, uintptr_t entry) {
     const uintptr_t o = entry & kAddressMask;
-    const size_t size = header_of(o)->size;
     const size_t slice = entry >> kSliceShift;
+    if (slice == kRescanSlice && (o & kRangeEntry) != 0) {
+        const CardWork& r = w.sh.rescan_ranges[o >> 1];
+        scan_object_range(w.tracer, r.object, r.begin, r.end);
+        return r.end - r.begin;
+    }
+    const size_t size = header_of(o)->size;
     if (slice != 0) {
         if (slice == kRescanSlice) {
             if (size <= kSliceBytes || !sliceable(layout_descriptor(header_of(o)->layout))) {
@@ -297,7 +311,7 @@ void drain(MarkWorker& w) {
         while (count < kRing && !w.stack.empty()) {
             const uintptr_t o = w.stack.back();
             w.stack.pop_back();
-            prefetch(reinterpret_cast<const void*>((o & kAddressMask) - kHeaderBytes));
+            if ((o & kRangeEntry) == 0) prefetch(reinterpret_cast<const void*>((o & kAddressMask) - kHeaderBytes));
             ring[(head + count) % kRing] = o;
             ++count;
         }
@@ -432,7 +446,14 @@ void set_young_range(MarkShared& sh, MarkWorkers& workers, bool young) {
     for (auto& w : workers) w->tracer.set_range(lo, hi);
 }
 
-void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work) {
+size_t grey_count(const MarkShared& sh, const MarkWorkers& workers) {
+    size_t n = 0;
+    for (const auto& w : workers) n += w->stack.size();
+    for (const std::vector<uintptr_t>& chunk : sh.pool) n += chunk.size();
+    return n;
+}
+
+size_t push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work) {
     // Dealt out in runs, so each thread starts with work of its own and the
     // entries of one card stay together.
     constexpr size_t kRun = 64;
@@ -454,7 +475,10 @@ void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work) 
     // scanned again. Everything this cycle shaded, allocated old or promoted
     // is marked by now; the marks are this cycle's alone (the last sweep was
     // completed at its start).
-    const HeapState& s = workers[0]->sh.s;
+    MarkShared& sh = workers[0]->sh;
+    const HeapState& s = sh.s;
+    const bool ranges = s.config.rescan_card_ranges;
+    sh.rescan_ranges.clear();
     for (const CardWork& c : work) {
         if (c.starts != 0) {
             uint64_t starts = c.starts;
@@ -468,7 +492,16 @@ void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work) 
         }
         if (!is_marked(s, c.object)) continue;
         const size_t size = header_of(c.object)->size;
-        if (size <= kSliceBytes || !sliceable(layout_descriptor(header_of(c.object)->layout))) {
+        const bool sliced = size > kSliceBytes && sliceable(layout_descriptor(header_of(c.object)->layout));
+        if (sliced && ranges && !(c.begin == 0 && c.end == size)) {
+            // Its dirty range alone (kRangeEntry). gather_card_work cut it
+            // into pieces of at most kCardWorkSliceBytes, so the threads
+            // share a long one; the whole of an object is still its slices.
+            sh.rescan_ranges.push_back(c);
+            push(rescan | ((sh.rescan_ranges.size() - 1) << 1) | kRangeEntry);
+            continue;
+        }
+        if (!sliced) {
             // One entry scans all of it, whatever its dirty ranges.
             if (c.object != last_object) push(c.object | rescan);
             last_object = c.object;
@@ -484,6 +517,7 @@ void push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work) 
             push(i == 0 ? (c.object | rescan) : (c.object | (static_cast<uintptr_t>(i) << kSliceShift)));
         }
     }
+    return pushed;
 }
 
 bool mark_drain(MarkShared& sh, MarkWorkers& workers, unsigned run) {

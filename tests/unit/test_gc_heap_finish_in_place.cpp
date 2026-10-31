@@ -16,6 +16,7 @@
 #include <brass/gc/heap.hpp>
 
 #include <cstdint>
+#include <iterator>
 #include <random>
 #include <unordered_set>
 #include <vector>
@@ -237,6 +238,53 @@ TEST_CASE("gc::Heap finish in place - a live owner the marker has not reached ye
         CHECK_EQ(Heap::load(static_cast<uintptr_t>(Heap::load(owner, 0)), 0), uint64_t{z});
         CHECK_EQ(Heap::load(static_cast<uintptr_t>(Heap::load(large, 3000)), 0), uint64_t{large_z});
         h.remove_root(&root);
+    }
+}
+
+// HeapConfig::rescan_card_ranges: a black large array's dirty cards are
+// rescanned by their own ranges (or by the marker's 16 KB slices holding
+// them), and every young object stored behind them, at the first card, in the
+// middle, across a card boundary and at the last slot, keeps the old object
+// it alone names.
+TEST_CASE("gc::Heap finish in place - a black large array's dirty ranges are rescanned") {
+    constexpr size_t kWords = 8192;  // 64 KB: four of the marker's slices
+    constexpr size_t kSlots[] = {1, 2500, 2559, 2560, 5000, kWords - 1};
+    for (ParallelMinor mode : kModes) {
+        for (bool ranges : {true, false}) {
+            HeapConfig c = config(mode);
+            c.rescan_card_ranges = ranges;
+            Heap h(c);
+            uint64_t root = 0;
+            h.add_root(&root);
+            root = old_words(h, kWords);
+            const auto large = static_cast<uintptr_t>(root);
+            std::vector<uintptr_t> targets;
+            for (size_t i = 0; i < std::size(kSlots); ++i) targets.push_back(old_words(h, 1));
+            REQUIRE(h.start_marking());
+            drain(h);  // the array black, the targets white and unreachable
+            for (size_t i = 0; i < std::size(kSlots); ++i) {
+                const uintptr_t y = young_words(h, 1);
+                *slot_of(y, 0) = targets[i];  // a young object's store: no barrier
+                h.store(large, kSlots[i], y);
+            }
+            h.finish_marking();
+            for (size_t i = 0; i < std::size(kSlots); ++i) {
+                CHECK(h.is_valid_object(targets[i]));
+                const auto y = static_cast<uintptr_t>(Heap::load(large, kSlots[i]));
+                CHECK(h.is_young(y));
+                CHECK(h.is_valid_object(y));
+            }
+            h.collect(CollectionKind::Minor);
+            for (size_t i = 0; i < std::size(kSlots); ++i) {
+                const auto y = static_cast<uintptr_t>(Heap::load(large, kSlots[i]));
+                CHECK_EQ(Heap::load(y, 0), uint64_t{targets[i]});
+            }
+            // Dropped from the array, the next cycle frees them.
+            for (size_t slot : kSlots) h.store(large, slot, 0);
+            cycle(h);
+            for (uintptr_t t : targets) CHECK_FALSE(h.is_valid_object(t));
+            h.remove_root(&root);
+        }
     }
 }
 

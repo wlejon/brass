@@ -251,7 +251,7 @@ void minor(GcState& g) {
     s.adapt_eden_limit(sample);
     s.reset_eden();
     s.minor_requested = false;
-    if (s.old_allocated_since_full > s.full_threshold) s.full_requested = true;
+    if (s.old_allocated_since_full > s.growth_limit()) s.full_requested = true;
     // Promote everything next time while survival stays high: after an
     // overflow, and for as long as half or more of the young data survives
     // each promote-all collection. Short-lived data that merely happens to

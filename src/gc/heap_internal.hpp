@@ -319,6 +319,14 @@ struct HeapState {
     // Policy.
     uint64_t old_allocated_since_full = 0;
     uint64_t full_threshold = 0;
+    // The growth that runs a full collection (or finishes an open cycle):
+    // the threshold, with HeapConfig::cycle_headroom on top while a cycle
+    // marks, so a cycle the host paces has room to finish at its slices
+    // rather than in one pause at whichever allocation reached the threshold.
+    [[nodiscard]] uint64_t growth_limit() const noexcept {
+        if (mark_phase != MarkPhase::Marking) return full_threshold;
+        return full_threshold + static_cast<uint64_t>(static_cast<double>(full_threshold) * config.cycle_headroom);
+    }
     bool minor_requested = false;
     bool full_requested = false;
     uint64_t stress_counter = 0;
@@ -662,6 +670,13 @@ struct GcState {
     uint64_t finish_roots_ns = 0;
     uint64_t finish_drain_ns = 0;
     uint64_t finish_settle_ns = 0;
+    // What the finish's drain had to do, for the log: grey entries left when
+    // it began (shaded since the last slice), the dirty cards' rescans it
+    // pushed, and the old and young objects it marked.
+    uint64_t finish_grey = 0;
+    uint64_t finish_rescans = 0;
+    uint64_t finish_old_marked = 0;
+    uint64_t finish_young_marked = 0;
     uint64_t slices = 0;
 
     GcState(HeapState& state, Heap& h, CollectionKind k) : s(state), heap(h), kind(k) {}
