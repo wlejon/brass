@@ -464,6 +464,7 @@ public:
     // or a storage buffer (std430) when that is 0.
     Value* buffer_load(uint32_t set, uint32_t binding, uint32_t uniform_bytes, Value* offset, Type type);
     Instruction* buffer_store(uint32_t set, uint32_t binding, Value* offset, Value* value);   // a storage buffer
+    Value* buffer_length(uint32_t set, uint32_t binding);   // a storage buffer's 32-bit words (i32)
 
     // Structured control flow. All leave the builder positioned in the
     // join/exit block they create. `body` receives the induction variable

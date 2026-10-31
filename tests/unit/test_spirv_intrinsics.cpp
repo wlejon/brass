@@ -27,7 +27,7 @@ enum class Sig {
     // textures and images (a 2D image unless named; KernelBuilder::ImageRef)
     tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
     tex_compare, tex_compare_lod, tex_fetch, tex_gather, tex_size, tex_levels, img_load, img_store, img_size,
-    vert_i32, vert_pos, frag_f32, frag_v4, stage_in, stage_out, frag_depth, buf_load, buf_store,
+    vert_i32, vert_pos, frag_f32, frag_v4, stage_in, stage_out, frag_depth, buf_load, buf_store, buf_len,
     frag_f32_f32, frag_i32, frag_void, i32_i32,
 };
 
@@ -133,6 +133,7 @@ const std::map<std::string, Sig>& signatures() {
         {"spirv_set_frag_depth", Sig::frag_depth},
         {"spirv_buffer_load", Sig::buf_load},
         {"spirv_buffer_store", Sig::buf_store},
+        {"spirv_buffer_length", Sig::buf_len},
         {"spirv_front_facing", Sig::frag_i32}, {"spirv_demote_to_helper", Sig::frag_void},
         {"spirv_subgroup_all", Sig::i32_i32}, {"spirv_subgroup_any", Sig::i32_i32},
         {"spirv_dpdx_f32", Sig::frag_f32_f32}, {"spirv_dpdy_f32", Sig::frag_f32_f32},
@@ -263,6 +264,9 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::buf_store:
             b.build_call(name, Type::void_type(),
                          {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1), b.build_iconst_i32(8), x});
+            break;
+        case Sig::buf_len:
+            r = b.build_call(name, Type::i32(), {b.build_iconst_i32(0), b.build_iconst_i32(1), b.build_iconst_i32(1)});
             break;
         case Sig::frag_f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
         case Sig::frag_i32: r = b.build_call(name, Type::i32()); break;

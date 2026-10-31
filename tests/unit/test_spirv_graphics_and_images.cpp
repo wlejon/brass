@@ -330,7 +330,7 @@ TEST_CASE("SPIR-V Graphics Stages - Fragment shader with OriginUpperLeft, FragCo
     Value* row = kb.buffer_load(1, 0, 64, b.build_add(b.build_mul(id, b.build_iconst_i32(16)), b.build_iconst_i32(4)),
                                 Type::f32());
     Value* count = kb.buffer_load(1, 1, 0, b.build_mul(id, b.build_iconst_i32(4)), Type::i32());
-    kb.buffer_store(1, 1, b.build_iconst_i32(0), b.build_add(count, b.build_iconst_i32(1)));
+    kb.buffer_store(1, 1, b.build_iconst_i32(0), b.build_add(count, kb.buffer_length(1, 1)));
     Value* r = kb.mul(kb.mul(tex_r, exposure), kb.add(gain, row));
     Value* g = kb.clamp_f32(u, kb.const_f32(0.0f), kb.const_f32(1.0f));
     Value* bl = kb.clamp_f32(b.build_sub(v, vig), kb.const_f32(0.0f), kb.const_f32(1.0f));

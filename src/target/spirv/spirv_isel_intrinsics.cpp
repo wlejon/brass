@@ -318,6 +318,7 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "spirv_set_frag_depth",      &set_frag_depth },
         { "spirv_buffer_load",         &buffer_load },
         { "spirv_buffer_store",        &buffer_store },
+        { "spirv_buffer_length",       &buffer_length },
         { "spirv_set_vertex_position", &set_vertex_position },
         { "spirv_front_facing",        &front_facing },
         { "spirv_demote_to_helper",    &demote_to_helper },

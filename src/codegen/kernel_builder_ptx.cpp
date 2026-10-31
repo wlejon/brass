@@ -362,6 +362,11 @@ Instruction* KernelBuilder::buffer_store(uint32_t set, uint32_t binding, Value* 
     return b_.current_block()->tail();
 }
 
+Value* KernelBuilder::buffer_length(uint32_t set, uint32_t binding) {
+    return b_.build_call("spirv_buffer_length", Type::i32(),
+                         {const_i32(static_cast<int32_t>(set)), const_i32(static_cast<int32_t>(binding)), const_i32(1)});
+}
+
 Instruction* KernelBuilder::set_vertex_position(Value* x, Value* y, Value* z, Value* w) {
     b_.build_call("spirv_set_vertex_position", Type::void_type(), {x, y, z, w});
     return b_.current_block()->tail();

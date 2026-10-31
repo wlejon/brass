@@ -121,6 +121,7 @@ void classify_operands(spv::Op op, std::span<const uint32_t> raw,
             return;
 
         case spv::OpCompositeExtract:
+        case spv::OpArrayLength:   // the structure, then its member's index
             if (raw.size() >= 1) inst.id(raw[0]);
             for (size_t i = 1; i < raw.size(); ++i) inst.lit(raw[i]);
             return;
