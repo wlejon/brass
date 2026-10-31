@@ -313,6 +313,17 @@ public:
     // collection, eden is all of it). Returns the bytes released. Not during
     // a collection.
     size_t release_unused_young() noexcept;
+    // Creates the parked helper threads the parallel marker and parallel
+    // minor collections share (HeapConfig::mark_threads, minor_threads), as
+    // many as the larger of the two asks for, so that the first collection
+    // to want them does not create them inside its pause: about 0.1 ms a
+    // thread. Otherwise the first use creates them. For a host that knows a
+    // moment when that costs nothing (after its boot, before its first
+    // frame); a heap that never collects in parallel (a small worker's)
+    // never needs them, which is why it is not a HeapConfig flag. Returns
+    // how many helpers exist (0: neither path runs on them). Not during a
+    // collection.
+    unsigned start_helper_threads();
 
     // ---- Marking cycle -----------------------------------------------------
     // A full collection split into steps a host can spread out: start (the

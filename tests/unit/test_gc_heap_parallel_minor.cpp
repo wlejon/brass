@@ -5,7 +5,8 @@
 // medium and large promotions, a pending lazy sweep and a marking cycle open;
 // weak slots, ephemerons and finalizers settle as on one thread; one young
 // object named from thousands of cards scanned by different threads is copied
-// once; and the automatic policy copies small collections on one thread.
+// once; the automatic policy copies small collections on one thread; and
+// start_helper_threads creates the helpers both parallel paths share.
 
 #include "test_framework.hpp"
 
@@ -450,4 +451,46 @@ TEST_CASE("gc::Heap parallel minor - the automatic policy copies small collectio
         h.collect(CollectionKind::Minor);
     }
     CHECK_EQ(h.stats().parallel_evacuations, before);
+}
+
+TEST_CASE("gc::Heap parallel minor - start_helper_threads creates the pool both paths use") {
+    {
+        // The larger of the two paths' counts, less the collecting thread;
+        // then the collections run on them and none are added.
+        HeapConfig c = config(ParallelMinor::Always, 4);
+        c.mark_threads = 6;
+        Heap h(c);
+        CHECK_EQ(h.start_helper_threads(), 5u);
+        std::vector<uint64_t> keep(2000, 0);
+        for (uint64_t& r : keep) h.add_root(&r);
+        for (int i = 0; i < 4; ++i) {
+            for (uint64_t& r : keep) r = h.allocate(48, words_layout());
+            h.collect(CollectionKind::Minor);
+        }
+        h.collect(CollectionKind::Full);
+        CHECK(h.stats().parallel_evacuations >= 4);
+        CHECK_EQ(h.start_helper_threads(), 5u);
+        for (uint64_t r : keep) CHECK(h.is_valid_object(static_cast<uintptr_t>(r)));
+    }
+    {
+        // The marker off the pool: the minor collection's count alone.
+        HeapConfig c = config(ParallelMinor::Auto, 3);
+        c.mark_threads = 8;
+        c.mark_thread_pool = false;
+        Heap h(c);
+        CHECK_EQ(h.start_helper_threads(), 2u);
+    }
+    {
+        // Neither path on the pool: no helpers.
+        HeapConfig c = config(ParallelMinor::Off, 4);
+        c.mark_thread_pool = false;
+        Heap h(c);
+        CHECK_EQ(h.start_helper_threads(), 0u);
+    }
+    {
+        // One thread each: no helpers either.
+        HeapConfig c = config(ParallelMinor::Auto, 1);
+        Heap h(c);
+        CHECK_EQ(h.start_helper_threads(), 0u);
+    }
 }

@@ -718,11 +718,7 @@ unsigned parallel_minor_threads(GcState& g) {
     HeapState& s = g.s;
     const HeapConfig& c = s.config;
     if (c.parallel_minor == ParallelMinor::Off) return 1;
-    unsigned most = c.minor_threads;
-    // Read once: glibc's hardware_concurrency reads /sys each call, ~20 us
-    // that every quiet minor collection would pay (the planet's measured).
-    static const unsigned hardware = std::thread::hardware_concurrency();
-    if (most == 0) most = std::clamp(hardware / 2, 1u, 8u);
+    const unsigned most = configured_threads(c.minor_threads);
     if (most <= 1) return 1;
     const uint64_t young = (g.eden_top - s.eden_lo) + (g.from_top - s.survivor_lo[g.from]);
     if (c.parallel_minor == ParallelMinor::Auto) {
@@ -774,8 +770,7 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     pm.survivor_end = to_lo + s.survivor_bytes;
     pm.buffer_bytes = std::clamp<size_t>((s.survivor_bytes / 64) & ~(kBufferAlign - 1), kBufferAlign, kBufferBytes);
 
-    if (!s.mark_threads) s.mark_threads.reset(new MarkThreads);
-    MarkThreads& helpers = *s.mark_threads;
+    MarkThreads& helpers = heap_helpers(s);
     const unsigned helper_count = std::min(helpers.ensure(threads - 1), threads - 1);
     pm.threads = helper_count + 1;
     const uintptr_t lo = g.shade ? g.heap.reservation_base() : g.heap.young_base();

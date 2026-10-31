@@ -389,8 +389,7 @@ void helper_drain(void* context, unsigned helper) {
 // mark_drain on the heap's parked helpers (heap_mark_threads.hpp): worker i
 // on helper i - 1, the first on the calling thread.
 bool drain_on_helpers(MarkShared& sh, MarkWorkers& workers, bool timed) {
-    if (!sh.s.mark_threads) sh.s.mark_threads.reset(new MarkThreads);
-    MarkThreads& helpers = *sh.s.mark_threads;
+    MarkThreads& helpers = heap_helpers(sh.s);
     const unsigned wanted = static_cast<unsigned>(workers.size() - 1);
     const unsigned have = std::min(helpers.ensure(wanted), wanted);
     // A worker with no helper would not run; what an earlier slice left on
@@ -410,11 +409,7 @@ bool drain_on_helpers(MarkShared& sh, MarkWorkers& workers, bool timed) {
 
 unsigned mark_thread_count(const HeapState& s) {
     if (s.heap.old_used_bytes() < s.config.parallel_mark_bytes) return 1;
-    unsigned n = s.config.mark_threads;
-    // Read once: glibc's hardware_concurrency reads /sys each call (~20 us).
-    static const unsigned hardware = std::thread::hardware_concurrency();
-    if (n == 0) n = std::clamp(hardware / 2, 1u, 8u);
-    return std::max(n, 1u);
+    return std::max(configured_threads(s.config.mark_threads), 1u);
 }
 
 MarkWorkers make_mark_workers(MarkShared& sh, unsigned threads) {

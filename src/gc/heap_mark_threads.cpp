@@ -2,9 +2,24 @@
 
 #include "heap_internal.hpp"
 
+#include <algorithm>
+
 namespace brass::gc::detail {
 
 void MarkThreadsDeleter::operator()(MarkThreads* threads) const noexcept { delete threads; }
+
+unsigned configured_threads(unsigned configured) {
+    if (configured != 0) return configured;
+    // Read once: glibc's hardware_concurrency reads /sys each call, ~20 us
+    // that every quiet minor collection would pay (the planet's measured).
+    static const unsigned hardware = std::thread::hardware_concurrency();
+    return std::clamp(hardware / 2, 1u, 8u);
+}
+
+MarkThreads& heap_helpers(HeapState& s) {
+    if (!s.mark_threads) s.mark_threads.reset(new MarkThreads);
+    return *s.mark_threads;
+}
 
 MarkThreads::~MarkThreads() {
     {
@@ -68,3 +83,26 @@ void MarkThreads::loop(unsigned helper, uint64_t seen) {
 }
 
 } // namespace brass::gc::detail
+
+namespace brass::gc {
+
+unsigned Heap::start_helper_threads() {
+    detail::HeapState& s = *s_;
+    if (s.collecting) {
+        detail::gc_fatal("start_helper_threads during a collection (a trace function, root "
+                         "source or hook called it)");
+    }
+    // As many as the larger of the two parallel paths that use the pool
+    // would ask for; a path that never runs on it asks for none.
+    unsigned threads = 1;
+    if (s.config.mark_thread_pool) {
+        threads = std::max(threads, detail::configured_threads(s.config.mark_threads));
+    }
+    if (s.config.parallel_minor != ParallelMinor::Off) {
+        threads = std::max(threads, detail::configured_threads(s.config.minor_threads));
+    }
+    if (threads <= 1) return 0;
+    return detail::heap_helpers(s).ensure(threads - 1);
+}
+
+} // namespace brass::gc

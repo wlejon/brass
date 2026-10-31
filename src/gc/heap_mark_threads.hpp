@@ -7,7 +7,13 @@
 // marking some 60 us in, so a 0.4 ms slice on eight threads marked little
 // more than one on a single thread. A parked helper wakes in microseconds.
 // HeapConfig::mark_thread_pool (BRASS_GC_MARK_POOL=0 turns it off) is the
-// A/B switch.
+// A/B switch. The parallel minor collection shares the pool.
+//
+// Creating them is ~0.1 ms a thread, so the collection that first wants them
+// pays most of a millisecond for seven: bro's first parallel minor took 3.9
+// ms on eight threads against 3.0 on one, 0.7 ms of it their creation.
+// Heap::start_helper_threads creates them ahead of time, where the host says
+// that costs nothing.
 
 #include <atomic>
 #include <condition_variable>
@@ -17,6 +23,16 @@
 #include <vector>
 
 namespace brass::gc::detail {
+
+struct HeapState;
+class MarkThreads;
+
+// The threads (the collecting one among them) a HeapConfig field asking for
+// `configured` means: itself, or for 0 half the hardware threads, at most 8.
+unsigned configured_threads(unsigned configured);
+// The heap's helpers, the pool made at first use (by a parallel drain or
+// minor collection, or Heap::start_helper_threads ahead of them).
+MarkThreads& heap_helpers(HeapState& s);
 
 class MarkThreads {
 public:
