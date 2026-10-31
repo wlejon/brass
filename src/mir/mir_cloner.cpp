@@ -213,6 +213,7 @@ std::unique_ptr<Module> clone_function_module(const Module& src, std::string_vie
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst->set_deterministic_fp(src.is_deterministic_fp());
     dst->set_pinned_tls_register(src.pinned_tls_register());
+    dst->set_precise_stack_roots(src.precise_stack_roots());
     dst->copy_declarations_from(src);
     // clone_function keeps each position's file and inlined-scope ids, which
     // index the source's context: the copy carries it, so a host reading the
@@ -232,6 +233,7 @@ std::unique_ptr<Module> clone_module(const Module& src) {
     dst->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst->set_deterministic_fp(src.is_deterministic_fp());
     dst->set_pinned_tls_register(src.pinned_tls_register());
+    dst->set_precise_stack_roots(src.precise_stack_roots());
     dst->copy_declarations_from(src);
     // As clone_function_module: the positions index the source's context.
     dst->debug_context() = src.debug_context();

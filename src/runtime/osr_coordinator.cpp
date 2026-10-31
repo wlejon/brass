@@ -357,6 +357,7 @@ std::unique_ptr<Module> OsrCoordinator::copy_entry(const Function& fn, const Bas
         mod = std::make_unique<Module>(src->name());
         mod->set_allow_fp_reassociation(src->allow_fp_reassociation());
         mod->set_pinned_tls_register(src->pinned_tls_register());
+        mod->set_precise_stack_roots(src->precise_stack_roots());
         mod->copy_declarations_from(*src);
         // The copied positions keep their file and inlined-scope ids, which
         // index the source's context (clone_function_module).

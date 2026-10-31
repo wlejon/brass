@@ -157,6 +157,8 @@ bool Parser::parse_module_attributes(Module& mod) {
             mod.set_deterministic_fp(true);
         } else if (attr == "pinned_tls_register") {
             mod.set_pinned_tls_register(true);
+        } else if (attr == "precise_stack_roots") {
+            mod.set_precise_stack_roots(true);
         } else if (attr == "loop_optimizations") {
             mod.set_has_loop_optimizations(true);
         } else if (attr == "interrupt_poll") {

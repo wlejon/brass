@@ -491,3 +491,73 @@ TEST_CASE("Linear Scan - a call that reaches no GC point clears no dead register
     Allocated no_gc = allocate(kStaleAtCall, "stale", true, mark_last_call_no_gc);
     CHECK_EQ(clears_before_last_call(*no_gc.lir), size_t(0));
 }
+
+namespace {
+
+// kStaleAtCall in a module whose host reads frames only through stack maps
+// (Module::precise_stack_roots): the dead register at the second call is no
+// root to anything, so nothing zeroes it.
+const char* kStaleAtCallPrecise = R"(module @m
+
+attributes precise_stack_roots
+
+func @g(%a: i64) -> i64 {
+entry:
+  %r = add.i64 %a, %a
+  ret %r
+}
+
+func @stale(%a: i64) -> i64 {
+entry:
+  %t = mul.i64 %a, %a
+  %c1 = call.i64 @g(%a)
+  %u = add.i64 %t, %c1
+  %c2 = call.i64 @g(%u)
+  ret %c2
+}
+)";
+
+size_t aarch64_clears_before_last_call(const char* text) {
+    auto mod = parse_module(text);
+    REQUIRE(mod != nullptr);
+    Function* fn = mod->get_function("stale");
+    REQUIRE(fn != nullptr);
+    fn->rebuild_cfg_predecessors();
+    brass::aarch64::AArch64ISel isel(Target::aarch64_linux(), CallingConvention::aapcs64());
+    auto lir = isel.lower(*fn);
+    REQUIRE(lir != nullptr);
+    lir->sort_blocks_rpo();
+    LivenessAnalysis liveness(*lir);
+    liveness.run();
+    LinearScanAllocator regalloc(*lir, liveness, CallingConvention::aapcs64());
+    regalloc.allocate();
+    return clears_before_last_call(*lir);
+}
+
+} // namespace
+
+TEST_CASE("Linear Scan - a precise-roots module clears no dead register at a call") {
+    Allocated precise = allocate(kStaleAtCallPrecise, "stale");
+    CHECK(!precise.lir->clear_dead_roots_at_calls);
+    CHECK_EQ(clears_before_last_call(*precise.lir), size_t(0));
+    Allocated conservative = allocate(kStaleAtCall, "stale");
+    CHECK(conservative.lir->clear_dead_roots_at_calls);
+    CHECK(clears_before_last_call(*conservative.lir) >= 1u);
+    CHECK(aarch64_clears_before_last_call(kStaleAtCall) >= 1u);
+    CHECK_EQ(aarch64_clears_before_last_call(kStaleAtCallPrecise), size_t(0));
+}
+
+TEST_CASE("MIR - precise_stack_roots prints and parses back") {
+    auto mod = parse_module(kStaleAtCallPrecise);
+    REQUIRE(mod != nullptr);
+    CHECK(mod->precise_stack_roots());
+    const std::string text = brass::to_string(*mod);
+    CHECK(text.find("precise_stack_roots") != std::string::npos);
+    auto again = parse_module(text);
+    REQUIRE(again != nullptr);
+    CHECK(again->precise_stack_roots());
+    auto plain = parse_module(kStaleAtCall);
+    REQUIRE(plain != nullptr);
+    CHECK(!plain->precise_stack_roots());
+    CHECK(brass::to_string(*plain).find("precise_stack_roots") == std::string::npos);
+}

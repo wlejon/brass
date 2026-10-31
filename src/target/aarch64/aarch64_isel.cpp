@@ -1,6 +1,7 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/module.hpp>
+#include <brass/codegen/precise_roots.hpp>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -33,6 +34,7 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     if (mir_fn.parent() && mir_fn.parent()->pinned_tls_register()) {
         lir_fn_->reserved_gprs |= reg_mask(kPinnedTlsGpr);
     }
+    lir_fn_->clear_dead_roots_at_calls = brass::codegen::clears_dead_roots_at_calls(mir_fn.parent());
 
     const_cast<Function&>(mir_fn).rebuild_cfg_predecessors();
 

@@ -187,6 +187,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             opt_mod = std::make_unique<Module>(mod.name());
             opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
             opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
+            opt_mod->set_precise_stack_roots(mod.precise_stack_roots());
             // Externs with their roles (passes rely on them: a Pure or
             // Allocator callee, Data symbols) and the module's string data.
             opt_mod->copy_declarations_from(mod);
@@ -217,6 +218,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                 opt_mod = std::make_unique<Module>(mod.name());
                 opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
                 opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
+                opt_mod->set_precise_stack_roots(mod.precise_stack_roots());
                 opt_mod->copy_declarations_from(mod);
                 opt_fn_mut = clone_function(*fn, *opt_mod);
                 fn_to_lower = opt_fn_mut;
@@ -232,6 +234,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
                 opt_mod = std::make_unique<Module>(mod.name());
                 opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
                 opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
+                opt_mod->set_precise_stack_roots(mod.precise_stack_roots());
                 opt_mod->copy_declarations_from(mod);
                 opt_fn_mut = clone_function(*fn, *opt_mod);
                 fn_to_lower = opt_fn_mut;

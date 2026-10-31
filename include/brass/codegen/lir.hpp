@@ -589,6 +589,11 @@ public:
     // to get back. Both are x64 GPR masks on x64 and aarch64 GPR masks on aarch64.
     uint32_t reserved_gprs = 0;
     uint32_t forced_saved_gprs = 0;
+    // Whether the allocator zeroes the registers and spill slots dead at each
+    // call (clear_dead_callee_gprs_at_calls). The isel turns it off for a
+    // module with Module::precise_stack_roots, whose host reads only what the
+    // stack maps name; BRASS_NO_PRECISE_ROOTS=1 keeps it on regardless.
+    bool clear_dead_roots_at_calls = true;
     // Set once liveness has given every block its loop depth (zero outside
     // any loop), so a function whose depths are all zero is known loop-free
     // rather than unanalysed.

@@ -596,7 +596,8 @@ void LinearScanAllocator::allocate() {
     // 6. Rewrite all instructions in the function, with the moves between
     // the pieces of split values, and give critical edges their blocks.
     collect_resolution_moves();
-    clear_dead_callee_gprs_at_calls(final_callee_gprs);
+    // Only for a host that may scan the frame conservatively (precise_roots.hpp).
+    if (fn_.clear_dead_roots_at_calls) clear_dead_callee_gprs_at_calls(final_callee_gprs);
     rewrite_instructions();
     split_critical_edges();
     if (emitted_parallel_copy_ && cc_.kind() == CallingConvKind::Win64) {
