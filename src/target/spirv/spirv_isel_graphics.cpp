@@ -111,7 +111,8 @@ void SpirvISel::Intrinsics::parse_set_binding(SpirvISel& isel, const brass::Inst
 // its description (KernelBuilder::ImageRef, packed by image_desc: dim in bits
 // 0-1, arrayed bit 2, depth bit 3, scalar bits 4-5, a storage image's
 // spv::ImageFormat in bits 8-15), and a separate sampler's set and binding
-// (-1 for a combined image sampler); the call's own operands follow from 5.
+// (-1 for a combined image sampler, -2 for a sampled image read without one:
+// a fetch or a query); the call's own operands follow from 5.
 SpirvISel::Intrinsics::ImageCall SpirvISel::Intrinsics::image_call(SpirvISel& isel, const brass::Instruction& inst,
                                                                    bool storage, size_t own_operands) {
     if (inst.operand_count() < 5 + own_operands) isel.malformed(inst, "missing image operand");
@@ -167,7 +168,7 @@ SpirvISel::Intrinsics::ImageCall SpirvISel::Intrinsics::image_call(SpirvISel& is
         return c;
     }
     Id sampled_t = m.t_sampled_image(c.image_type);
-    if (sset < 0) {
+    if (sset == -1) {
         db.kind = target::SpirvDescriptorKind::CombinedImageSampler;
         c.sampled = isel.op(spv::OpLoad, sampled_t, {isel.descriptor_var(db, sampled_t)});
         c.image = isel.op(spv::OpImage, c.image_type, {c.sampled});
@@ -175,6 +176,7 @@ SpirvISel::Intrinsics::ImageCall SpirvISel::Intrinsics::image_call(SpirvISel& is
     }
     db.kind = target::SpirvDescriptorKind::SampledImage;
     c.image = isel.op(spv::OpLoad, c.image_type, {isel.descriptor_var(db, c.image_type)});
+    if (sset < 0) return c;
     target::SpirvDescriptorBinding sb;
     sb.set = static_cast<uint32_t>(sset);
     sb.binding = static_cast<uint32_t>(sbind);
@@ -230,6 +232,7 @@ void SpirvISel::Intrinsics::tex_sample(SpirvISel& isel, const brass::Instruction
     constexpr bool dref = (Op & kDrefBit) != 0;
     if constexpr (kind == 0) require_fragment(isel, inst);
     ImageCall c = image_call(isel, inst, false, 0);
+    if (!c.sampled) isel.fail(std::string(inst.symbol()) + ": a separate image is sampled through a sampler");
     if (dref != c.depth) isel.fail(std::string(inst.symbol()) + ": a reference value is given for, and only for, a depth image");
     uint32_t n = c.coords();
     uint32_t space = n - (c.arrayed ? 1 : 0);   // a gradient's and an offset's components
@@ -297,6 +300,7 @@ void SpirvISel::Intrinsics::tex_fetch(SpirvISel& isel, const brass::Instruction&
 // after the coordinates, compared, in place of the component).
 void SpirvISel::Intrinsics::tex_gather(SpirvISel& isel, const brass::Instruction& inst) {
     ImageCall c = image_call(isel, inst, false, 0);
+    if (!c.sampled) isel.fail(std::string(inst.symbol()) + ": a separate image is sampled through a sampler");
     if (c.dim == target::SpirvImageDim::D1 || c.dim == target::SpirvImageDim::D3) {
         isel.fail(std::string(inst.symbol()) + ": only 2D and cube images gather");
     }

@@ -182,6 +182,13 @@ TEST_CASE("SPIR-V Textures - arrays, cubes, shadows, separate samplers, fetch, s
     shadow.sampler_set = 0;
     shadow.sampler_binding = 3;
     KernelBuilder::ImageRef plain {0, 4, SpirvImageDim::D2};
+    // A separate texture sampled through the shadow's sampler, and fetched
+    // and sized with none.
+    KernelBuilder::ImageRef sep {0, 5, SpirvImageDim::D2};
+    sep.sampler_set = 0;
+    sep.sampler_binding = 3;
+    KernelBuilder::ImageRef sep_bare = sep;
+    sep_bare.sampler_set = sep_bare.sampler_binding = -2;
 
     Value* u = kb.frag_coord_x();
     Value* v = kb.frag_coord_y();
@@ -195,15 +202,22 @@ TEST_CASE("SPIR-V Textures - arrays, cubes, shadows, separate samplers, fetch, s
     Value* o = kb.texture_sample(plain, {u, v}, {kb.const_i32(-2), kb.const_i32(0)});
     Value* size = kb.texture_size(cube, kb.const_i32(0));
     Value* levels = kb.texture_levels(plain);
-    Value* sum = kb.vadd(kb.vadd(kb.vadd(a, c), kb.vadd(f, g)), kb.vadd(gr, o));
-    Value* extra = kb.add(kb.add(s, s2), kb.i32_to_f32(b.build_add(b.build_vextract_lane(size, 1), levels)));
+    Value* ss = kb.texture_sample_lod(sep, {u, v}, kb.const_f32(0.0f));
+    Value* sf = kb.texture_fetch(sep_bare, {kb.const_i32(1), kb.const_i32(2)}, kb.const_i32(0));
+    Value* sl = kb.texture_levels(sep_bare);
+    Value* sum = kb.vadd(kb.vadd(kb.vadd(a, c), kb.vadd(f, g)), kb.vadd(kb.vadd(gr, o), kb.vadd(ss, sf)));
+    Value* extra = kb.add(kb.add(s, s2),
+                          kb.i32_to_f32(b.build_add(b.build_add(b.build_vextract_lane(size, 1), levels), sl)));
     kb.set_frag_color_vec4(0, kb.vadd(sum, b.build_vbroadcast(Type::f32x4(), extra)));
     b.build_ret_void();
 
     target::SpirvOptions opts;
     opts.stage = target::SpirvStage::Fragment;
     target::SpirvKernel kern = compile_checked(*fn, opts);
-    REQUIRE_EQ(kern.descriptors.size(), 5u);
+    REQUIRE_EQ(kern.descriptors.size(), 6u);
+    for (const auto& d : kern.descriptors) {
+        if (d.binding == 5) CHECK(d.kind == target::SpirvDescriptorKind::SampledImage);
+    }
     CHECK(kern.descriptors[0].arrayed);
     CHECK(kern.descriptors[1].dim == SpirvImageDim::Cube);
     CHECK(kern.descriptors[2].kind == target::SpirvDescriptorKind::SampledImage);

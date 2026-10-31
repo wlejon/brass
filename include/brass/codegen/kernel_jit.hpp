@@ -395,8 +395,9 @@ public:
     // ------------------------------------------------------------------
     // The image a call reads or writes: its descriptor, shape and texel
     // scalar, a storage image's spv::ImageFormat, and for a texture read
-    // through a separate sampler, that sampler's descriptor (sampler_set < 0:
-    // the image is a combined image sampler). Coordinates are the image's
+    // through a separate sampler, that sampler's descriptor (sampler_set -1:
+    // the image is a combined image sampler; -2: a sampled image read without
+    // a sampler, by a fetch or a size or level query). Coordinates are the image's
     // dimensions (a cube's: a direction, three), then the layer when arrayed;
     // f32 for a sample, i32 for a fetch or a storage image. A texel is an
     // f32x4, or an i32x4 holding u32 lanes for a U32 image.
