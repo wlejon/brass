@@ -393,34 +393,47 @@ void SpirvISel::Intrinsics::img_store(SpirvISel& isel, const brass::Instruction&
 // multiple of 4) picks a word, which an f32 reads as its bits.
 
 Id SpirvISel::Intrinsics::buffer_word(SpirvISel& isel, const brass::Instruction& inst, bool store) {
-    bool storage = false;
-    Id var = buffer_var(isel, inst, store, storage);
+    bool storage = false, vec4_rows = false;
+    Id var = buffer_var(isel, inst, store, storage, vec4_rows);
     Module& m = isel.m_;
     const spv::StorageClass sc = storage ? spv::StorageClassStorageBuffer : spv::StorageClassUniform;
     Id u32 = isel.t_u32();
-    Id offset = isel.as_u32(inst.operand(3), "byte offset");
     Id ptr = m.t_pointer(sc, u32);
-    if (storage) {
-        Id word = isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(2)});
+    int64_t const_off = 0;
+    const bool is_const = isel.const_int(inst.operand(3), &const_off) && const_off >= 0;
+    if (!vec4_rows) {
+        Id word = is_const ? m.c_u32(static_cast<uint32_t>(const_off) >> 2)
+                           : isel.op(spv::OpShiftRightLogical, u32,
+                                     {isel.as_u32(inst.operand(3), "byte offset"), m.c_u32(2)});
         return isel.op(spv::OpAccessChain, ptr, {var, m.c_u32(0), word});
     }
-    Id row = isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(4)});
-    Id lane = isel.op(spv::OpBitwiseAnd, u32, {isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(2)}), m.c_u32(3)});
+    Id row = 0, lane = 0;
+    if (is_const) {
+        row = m.c_u32(static_cast<uint32_t>(const_off) >> 4);
+        lane = m.c_u32((static_cast<uint32_t>(const_off) >> 2) & 3);
+    } else {
+        Id offset = isel.as_u32(inst.operand(3), "byte offset");
+        row = isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(4)});
+        lane = isel.op(spv::OpBitwiseAnd, u32,
+                       {isel.op(spv::OpShiftRightLogical, u32, {offset, m.c_u32(2)}), m.c_u32(3)});
+    }
     return isel.op(spv::OpAccessChain, ptr, {var, m.c_u32(0), row, lane});
 }
 
 // spirv_buffer_length(set, binding, desc) -> i32: a storage buffer's words.
 void SpirvISel::Intrinsics::buffer_length(SpirvISel& isel, const brass::Instruction& inst) {
-    bool storage = false;
-    Id var = buffer_var(isel, inst, false, storage);
+    bool storage = false, vec4_rows = false;
+    Id var = buffer_var(isel, inst, false, storage, vec4_rows);
     if (!storage) isel.fail(std::string(inst.symbol()) + ": a uniform buffer has a fixed size");
     Id r = isel.m_.new_id();
     isel.emit(Inst(spv::OpArrayLength, isel.t_u32(), r).id(var).lit(0));
+    if (vec4_rows) r = isel.op(spv::OpShiftLeftLogical, isel.t_u32(), {r, isel.m_.c_u32(2)});
     isel.define(inst.result(), r);
 }
 
 // The block variable a buffer call's (set, binding, description) names.
-Id SpirvISel::Intrinsics::buffer_var(SpirvISel& isel, const brass::Instruction& inst, bool store, bool& storage_out) {
+Id SpirvISel::Intrinsics::buffer_var(SpirvISel& isel, const brass::Instruction& inst, bool store, bool& storage_out,
+                                     bool& vec4_rows_out) {
     int64_t set = 0, binding = 0, desc = 0;
     if (!isel.const_int(inst.operand(0), &set) || !isel.const_int(inst.operand(1), &binding) ||
         !isel.const_int(inst.operand(2), &desc) || set < 0 || binding < 0) {
@@ -439,11 +452,31 @@ Id SpirvISel::Intrinsics::buffer_var(SpirvISel& isel, const brass::Instruction& 
     Id u32 = isel.t_u32();
     std::string key = "buffer_block." + std::to_string(db.set) + "." + std::to_string(db.binding);
     Id& block = m.cached(key);
+    Id& vec4_flag = m.cached(key + ".vec4");
     if (!block) {
+        bool vec4_rows = !storage;
+        if (storage && isel.mir_) {
+            for (const BasicBlock* bb : isel.mir_->blocks()) {
+                for (const Instruction* in = bb->head(); in && !vec4_rows; in = in->next()) {
+                    if (in->opcode() == Opcode::call && in->symbol() == "spirv_buffer_load" &&
+                        in->type().is_vector() && in->operand_count() >= 2) {
+                        int64_t iset = -1, ibind = -1;
+                        if (isel.const_int(in->operand(0), &iset) && isel.const_int(in->operand(1), &ibind) &&
+                            iset == set && ibind == binding) {
+                            vec4_rows = true;
+                        }
+                    }
+                }
+            }
+        }
+        vec4_flag = vec4_rows ? 1 : 0;
         Id arr = 0;
-        if (storage) {
+        if (storage && !vec4_rows) {
             arr = m.t_runtime_array(u32);
             m.decorate(arr, spv::DecorationArrayStride, {4});
+        } else if (storage) {
+            arr = m.t_runtime_array(m.t_vector(u32, 4));
+            m.decorate(arr, spv::DecorationArrayStride, {16});
         } else {
             arr = m.t_array_fresh(m.t_vector(u32, 4), db.bytes / 16);
             m.decorate(arr, spv::DecorationArrayStride, {16});
@@ -453,14 +486,33 @@ Id SpirvISel::Intrinsics::buffer_var(SpirvISel& isel, const brass::Instruction& 
         m.member_decorate(block, 0, spv::DecorationOffset, {0});
     }
     storage_out = storage;
+    vec4_rows_out = (vec4_flag != 0);
     return isel.descriptor_var(db, block, sc);
 }
 
 void SpirvISel::Intrinsics::buffer_load(SpirvISel& isel, const brass::Instruction& inst) {
+    if (inst.type() == Type::f32x4() || inst.type() == Type::i32x4()) {
+        bool storage = false, vec4_rows = false;
+        Id var = buffer_var(isel, inst, false, storage, vec4_rows);
+        Module& m = isel.m_;
+        const spv::StorageClass sc = storage ? spv::StorageClassStorageBuffer : spv::StorageClassUniform;
+        Id u32 = isel.t_u32();
+        Id uvec4 = m.t_vector(u32, 4);
+        int64_t const_off = 0;
+        Id row = (isel.const_int(inst.operand(3), &const_off) && const_off >= 0)
+                     ? m.c_u32(static_cast<uint32_t>(const_off) >> 4)
+                     : isel.op(spv::OpShiftRightLogical, u32,
+                               {isel.as_u32(inst.operand(3), "byte offset"), m.c_u32(4)});
+        Id ptr = isel.op(spv::OpAccessChain, m.t_pointer(sc, uvec4), {var, m.c_u32(0), row});
+        Id vec = isel.op(spv::OpLoad, uvec4, {ptr});
+        if (inst.type() == Type::f32x4()) vec = isel.op(spv::OpBitcast, m.t_vector(isel.t_f32(), 4), {vec});
+        isel.define(inst.result(), vec);
+        return;
+    }
     Id ptr = buffer_word(isel, inst, false);
     Id word = isel.op(spv::OpLoad, isel.t_u32(), {ptr});
     if (inst.type() == Type::f32()) word = isel.op(spv::OpBitcast, isel.t_f32(), {word});
-    else if (inst.type() != Type::i32()) isel.malformed(inst, "spirv_buffer_load gives an f32 or an i32");
+    else if (inst.type() != Type::i32()) isel.malformed(inst, "spirv_buffer_load gives an f32, i32, f32x4 or i32x4");
     isel.define(inst.result(), word);
 }
 

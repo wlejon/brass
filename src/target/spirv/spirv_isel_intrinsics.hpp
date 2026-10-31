@@ -136,7 +136,7 @@ struct SpirvISel::Intrinsics {
     static void stage_in(SpirvISel& isel, const brass::Instruction& inst);
     static void stage_out(SpirvISel& isel, const brass::Instruction& inst);
     static void set_frag_depth(SpirvISel& isel, const brass::Instruction& inst);
-    static Id buffer_var(SpirvISel& isel, const brass::Instruction& inst, bool store, bool& storage);
+    static Id buffer_var(SpirvISel& isel, const brass::Instruction& inst, bool store, bool& storage, bool& vec4_rows);
     static Id buffer_word(SpirvISel& isel, const brass::Instruction& inst, bool store);   // a pointer to the word
     static void buffer_length(SpirvISel& isel, const brass::Instruction& inst);
     static void buffer_load(SpirvISel& isel, const brass::Instruction& inst);

@@ -324,11 +324,13 @@ TEST_CASE("SPIR-V Graphics Stages - Fragment shader with OriginUpperLeft, FragCo
     KernelBuilder::ImageRef tex {0, 0, target::SpirvImageDim::D2};
     Value* tex_r = b.build_vextract_lane(kb.texture_sample_lod(tex, {u, v}, kb.const_f32(0.0f)), 0);
     Value* vig = kb.mul(kb.add(fcx, fcy), kb.const_f32(0.0005f));
-    // A uniform block of 64 bytes (its word at byte 20, dynamically indexed
-    // by the id too) and a storage buffer read and written.
+    // A uniform block of 64 bytes (its word at byte 20, a vec4 row at byte 32,
+    // dynamically indexed by the id too) and a storage buffer read and written.
     Value* gain = kb.buffer_load(1, 0, 64, b.build_iconst_i32(20), Type::f32());
+    Value* row4 = kb.buffer_load(1, 0, 64, b.build_iconst_i32(32), Type::f32x4());
     Value* row = kb.buffer_load(1, 0, 64, b.build_add(b.build_mul(id, b.build_iconst_i32(16)), b.build_iconst_i32(4)),
                                 Type::f32());
+    row = kb.add(row, b.build_vextract_lane(row4, 0));
     Value* count = kb.buffer_load(1, 1, 0, b.build_mul(id, b.build_iconst_i32(4)), Type::i32());
     kb.buffer_store(1, 1, b.build_iconst_i32(0), b.build_add(count, kb.buffer_length(1, 1)));
     Value* r = kb.mul(kb.mul(tex_r, exposure), kb.add(gain, row));
