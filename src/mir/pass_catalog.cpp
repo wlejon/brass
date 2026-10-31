@@ -11,6 +11,7 @@
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/float_rem_inline.hpp>
 #include <brass/mir/sincos_fuse.hpp>
+#include <brass/mir/fdiv_pow2.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/gvn_pre.hpp>
@@ -219,6 +220,11 @@ PassStep float_rem_inline() {
 PassStep sincos_fuse() {
     return function_step("sincos_fuse", FunctionFilter::All,
                          [](Function& fn) { return fuse_sincos(fn) != 0; });
+}
+
+PassStep fdiv_pow2() {
+    return function_step("fdiv_pow2", FunctionFilter::All,
+                         [](Function& fn) { return rewrite_fdiv_pow2(fn) != 0; });
 }
 
 PassStep select_opt(std::string name) {

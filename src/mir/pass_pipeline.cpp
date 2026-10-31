@@ -13,6 +13,8 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
         // Inlined bodies bring their allocations into the caller.
         if (options.enable_sroa) p.add(passes::sroa("sroa 2"));
     }
+    // Before GVN, so a rewritten `x / 2` and a written `x * 0.5` merge.
+    if (options.enable_fdiv_pow2) p.add(passes::fdiv_pow2());
     if (options.enable_gvn) p.add(passes::gvn());
     if (options.enable_gvn_pre) p.add(passes::gvn_pre(options.pre_stats));
     if (options.enable_sccp) p.add(passes::sccp(options.enable_guard_elim));

@@ -57,6 +57,9 @@ PassStep float_rem_inline();
 // Every function: a sine and a cosine of one value as one call
 // (sincos_fuse.hpp).
 PassStep sincos_fuse();
+// Every function: a float division by a power of two as the multiplication
+// by its reciprocal (fdiv_pow2.hpp).
+PassStep fdiv_pow2();
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------
 PassStep f64_demote(DemoteStats* stats);

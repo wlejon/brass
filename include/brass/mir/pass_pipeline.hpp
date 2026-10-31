@@ -35,6 +35,8 @@ struct PassPipelineOptions {
     bool enable_float_rem_inline = true;
     // A sine and a cosine of one value as one call (sincos_fuse.hpp).
     bool enable_sincos_fuse = true;
+    // A float division by a power of two as a multiplication (fdiv_pow2.hpp).
+    bool enable_fdiv_pow2 = true;
     bool dump_wbe_stats = false;
     bool dump_range_stats = false;
     GvnPreStats* pre_stats = nullptr;
