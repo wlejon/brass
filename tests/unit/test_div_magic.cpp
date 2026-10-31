@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/codegen/div_magic.hpp>
@@ -93,7 +94,7 @@ std::vector<int64_t> dividends(int64_t d) {
     return out;
 }
 
-bool seam_off() { return std::getenv("BRASS_NO_DIV_MAGIC") != nullptr; }
+bool seam_off() { return !brass::env_value("BRASS_NO_DIV_MAGIC").empty(); }
 
 std::string module_text(int64_t d) {
     std::string ds = std::to_string(d);

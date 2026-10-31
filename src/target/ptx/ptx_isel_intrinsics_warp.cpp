@@ -72,7 +72,7 @@ template void PtxISel::Intrinsics::shfl<ShflMode::idx>(PtxISel&, const brass::In
 // ---------------------------------------------------------------------------
 // Atomics: atom.<space>.<op>.<type> old, [ptr], value. The suffix follows
 // the value type: f32/f64 as is, integers as .u32/.u64 for add, .s32/.s64
-// for min/max and .b32/.b64 for exch.
+// for min/max and .b32/.b64 for exch (a float's too: exch moves bits).
 // ---------------------------------------------------------------------------
 
 template <AtomOp A, StateSpace S, bool Unsigned>
@@ -81,6 +81,7 @@ void PtxISel::Intrinsics::atom(PtxISel& isel, const brass::Instruction& inst) {
     if (!inst.operand(0) || !value) isel.malformed(inst, "missing argument");
     brass::Type vt = value->type();
     Type t = ((A == AtomOp::min || A == AtomOp::max) && !Unsigned) ? signed_type_for(vt)
+           : (A == AtomOp::exch && is_float(type_for(vt)))           ? (bit_width(type_for(vt)) == 64 ? Type::b64 : Type::b32)
            : (A == AtomOp::exch)                                   ? bit_type_for(vt)
                                                                    : type_for(vt);
     if constexpr (A != AtomOp::add && A != AtomOp::exch) {

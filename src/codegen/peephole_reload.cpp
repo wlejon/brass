@@ -31,6 +31,7 @@
 //
 // BRASS_NO_RELOAD_REUSE=1 turns it off (the A/B seam).
 
+#include "brass/core/env.hpp"
 #include <brass/codegen/peephole.hpp>
 #include <brass/target/x64/x64_operands.hpp>
 #include <array>
@@ -46,7 +47,7 @@ namespace {
 using Held = PeepholeOptimizer::ScratchHeld;
 
 bool reload_reuse_disabled() {
-    static const bool off = std::getenv("BRASS_NO_RELOAD_REUSE") != nullptr;
+    static const bool off = !brass::env_value("BRASS_NO_RELOAD_REUSE").empty();
     return off;
 }
 

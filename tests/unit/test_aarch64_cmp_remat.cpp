@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
@@ -83,7 +84,7 @@ size_t count_setcc(const LirFunction& lir) {
 
 TEST_CASE("AArch64 compare remat - a condition used across blocks leaves no cset") {
     // Without the remat the three shared conditions each leave a cset.
-    if (std::getenv("BRASS_NO_CMP_REMAT")) return;
+    if (!brass::env_value("BRASS_NO_CMP_REMAT").empty()) return;
     auto mod = parse_module(kShared);
     REQUIRE(mod != nullptr);
     Function* fn = mod->functions().front();

@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include "aarch64_isel_conditions.hpp"
 #include <cstdlib>
@@ -39,7 +40,7 @@ using namespace brass::codegen;
 // BRASS_NO_CMP_REMAT=1 turns it off (the A/B seam, shared with x64).
 void AArch64ISel::find_remat_compares(const Function& mir_fn) {
     remat_cmps_.clear();
-    static const bool off = std::getenv("BRASS_NO_CMP_REMAT") != nullptr;
+    static const bool off = !brass::env_value("BRASS_NO_CMP_REMAT").empty();
     if (off) return;
     std::unordered_map<const Value*, uint32_t> consumer_uses;
     for (const auto* bb : mir_fn.blocks()) {

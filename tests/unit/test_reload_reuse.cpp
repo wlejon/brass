@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/codegen/peephole.hpp>
 #include <brass/codegen/lir.hpp>
@@ -55,7 +56,7 @@ const PReg kR11 = PReg::gpr(GPR::R11);
 const PReg kRax = PReg::gpr(GPR::RAX);
 const PReg kRcx = PReg::gpr(GPR::RCX);
 
-bool disabled() { return std::getenv("BRASS_NO_RELOAD_REUSE") != nullptr; }
+bool disabled() { return !brass::env_value("BRASS_NO_RELOAD_REUSE").empty(); }
 
 // Two reloads of slot 3 into `r` around `between` (none: nothing between).
 size_t reloads_left(std::unique_ptr<LirInst> between, PReg r = kR10, bool aarch64 = false) {

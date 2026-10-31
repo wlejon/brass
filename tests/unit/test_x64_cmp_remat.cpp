@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/target/x64/x64_isel.hpp>
@@ -60,7 +61,7 @@ int64_t reference(int64_t x, int64_t y, int64_t z) {
 }  // namespace
 
 TEST_CASE("x64 compare remat - a condition used across blocks leaves no setcc") {
-    if (std::getenv("BRASS_NO_CMP_REMAT")) return;
+    if (!brass::env_value("BRASS_NO_CMP_REMAT").empty()) return;
     auto mod = parse_module(kShared);
     REQUIRE(mod != nullptr);
     Function* fn = mod->functions().front();

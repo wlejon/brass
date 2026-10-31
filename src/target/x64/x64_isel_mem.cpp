@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include <brass/target/x64/x64_isel.hpp>
 #include <cstdlib>
 #include <cstring>
@@ -63,7 +64,7 @@ bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* use
 // address still folds everywhere: it is then never computed at all.
 // BRASS_NO_LOCAL_ADDR_FOLD=1 folds across blocks as before (the A/B seam).
 bool X64ISel::fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const {
-    static const bool anywhere = std::getenv("BRASS_NO_LOCAL_ADDR_FOLD") != nullptr;
+    static const bool anywhere = !brass::env_value("BRASS_NO_LOCAL_ADDR_FOLD").empty();
     return anywhere || !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
 }
 

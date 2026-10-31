@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/target/x64/x64_isel.hpp>
@@ -61,7 +62,7 @@ size_t indexed_loads_in_loop(const Lir& lir) {
     return n;
 }
 
-bool seam_off() { return std::getenv("BRASS_NO_LOCAL_ADDR_FOLD") != nullptr; }
+bool seam_off() { return !brass::env_value("BRASS_NO_LOCAL_ADDR_FOLD").empty(); }
 
 }  // namespace
 

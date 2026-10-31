@@ -1,3 +1,4 @@
+#include "brass/core/env.hpp"
 #include <brass/target/x64/x64_isel.hpp>
 #include <cstdlib>
 #include <stdexcept>
@@ -103,7 +104,7 @@ void X64ISel::append_fused_float_compare(const Instruction& cmp, LirBlock& lir_b
 // BRASS_NO_CMP_REMAT=1 turns it off (the A/B seam).
 void X64ISel::find_remat_compares(const Function& mir_fn) {
     remat_cmps_.clear();
-    static const bool off = std::getenv("BRASS_NO_CMP_REMAT") != nullptr;
+    static const bool off = !brass::env_value("BRASS_NO_CMP_REMAT").empty();
     if (off) return;
     std::unordered_map<const Value*, uint32_t> consumer_uses;
     for (const auto* bb : mir_fn.blocks()) {
