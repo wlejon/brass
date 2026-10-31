@@ -79,6 +79,16 @@ void apply_environment(HeapConfig& config) {
     // The A/B switch for the parked marker threads: created and joined by
     // every drain.
     if (env_value("BRASS_GC_MARK_POOL") == "0") config.mark_thread_pool = false;
+    // The A/B switch for the parallel minor collection, and its stress form:
+    // every minor collection on several threads, however small.
+    const std::string parallel_minor = env_value("BRASS_GC_PARALLEL_MINOR");
+    if (parallel_minor == "0") config.parallel_minor = ParallelMinor::Off;
+    else if (parallel_minor == "1") config.parallel_minor = ParallelMinor::Auto;
+    else if (parallel_minor == "always") config.parallel_minor = ParallelMinor::Always;
+    const std::string minor_threads = env_value("BRASS_GC_MINOR_THREADS");
+    if (!minor_threads.empty()) {
+        config.minor_threads = static_cast<unsigned>(std::strtoul(minor_threads.c_str(), nullptr, 10));
+    }
     // Both old spaces' reservations, in MB: a small one makes the
     // out-of-memory path reachable from a test.
     const std::string old_mb = env_value("BRASS_GC_OLD_RESERVE_MB");

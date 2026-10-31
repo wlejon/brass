@@ -4,7 +4,8 @@
 // gc::Heap: heap.cpp (construction, allocation, roots, queries),
 // heap_spaces.cpp (the mature blocks and the large-object space),
 // heap_sweep_lazy.cpp (their sweep after a marking cycle, a piece at a time),
-// heap_collect.cpp (the collections), heap_mark.cpp and
+// heap_collect.cpp (the collections), heap_minor_parallel.cpp (the young
+// generation's evacuation on several threads), heap_mark.cpp and
 // heap_mark_incremental.cpp (the old generation's marking and its cycle),
 // heap_weak.cpp (weak slots, ephemerons, finalizers), heap_verify.cpp
 // (verification, walking, poisoning) and heap_mark_verify.cpp (a marking
@@ -59,6 +60,15 @@ inline unsigned clz_index64(uint64_t word) noexcept {
     return 63u - static_cast<unsigned>(__builtin_clzll(word));
 #endif
 }
+
+// A young object a parallel minor collection's thread is copying
+// (heap_minor_parallel.cpp): claimed with a compare-and-swap of its gc_bits,
+// and kGcForwarded once the copy and the forwarding address are written.
+// Never set outside a parallel minor collection, and only on from-space
+// objects, which are dead once it ends.
+inline constexpr uint8_t kGcBusy = 0x08;
+static_assert((kGcBusy & (kGcForwarded | kGcPinned | kGcLargeMarked | kGcAgeMask)) == 0,
+              "kGcBusy is a gc_bits bit of its own");
 
 inline constexpr size_t kStartWordsPerBlock = kGranulesPerBlock / 64;
 inline constexpr size_t kCardsPerBlock = kBlockBytes / kCardBytes;
@@ -322,6 +332,27 @@ struct HeapState {
     uintptr_t gc_from_top = 0;        // the from-survivor space's top when it started
     uintptr_t mutator_fp = 0;         // the generated frame the running allocation or safepoint came from
     uintptr_t mutator_ip = 0;
+    // A parallel minor collection's threads are promoting
+    // (heap_minor_parallel.cpp): the old spaces' allocators, called under its
+    // lock, take only swept blocks, free page runs and the frontiers and never
+    // sweep, since the other threads read the blocks' starts and marks as a
+    // sweep rewrites them. The collection checked beforehand that the
+    // frontiers have room for everything it could promote.
+    bool parallel_promotion = false;
+    // Bytes of each survivor space below its top that hold no object: the
+    // unused ends of a parallel minor collection's per-thread buffers. The
+    // adaptive eden's survival sample leaves them out.
+    uint64_t survivor_slack[2] = {0, 0};
+    // The last minor collection's bytes copied per young byte it collected:
+    // what the next one is expected to copy (parallel_minor_threads). A
+    // quarter before the first, so that a first collection of a full eden
+    // copies on several threads.
+    double minor_survival = 0.25;
+    // What a minor collection on one thread has been costing, per byte of
+    // copying plus kDirtyRegionBytes per old region with dirty cards (a
+    // running average of the serial ones, parallel_minor_threads): how long
+    // the next would take on one thread.
+    double minor_ns_per_byte = 0.4;  // 0.4 ms per MB until one is measured
 
     // The marking cycle, from start_marking (or a full collection's start)
     // to its finish. While it is Marking the mutator runs: the barrier's
@@ -597,6 +628,12 @@ struct GcState {
     uint64_t promoted_objects = 0;
     uint64_t marked_objects = 0;
     uint64_t dirty_cards = 0;
+    unsigned minor_threads = 1;  // threads the young generation's evacuation copied on
+    // parallel_minor_threads' card work, as bytes of copying (kDirtyRegionBytes
+    // per dirty region), when it chose one thread: the serial cost is
+    // learned per byte of that and of the copying done.
+    uint64_t serial_card_bytes = 0;
+    bool learns_cost = true;  // false for a full collection's evacuation
     uint64_t eden_used = 0;
     uint64_t eden_limit = 0;    // the limit eden_used was allocated under
     uint64_t phase_ns[kGcPhaseCount] = {};
@@ -659,6 +696,39 @@ uintptr_t live_address(const GcState& g, uintptr_t a) noexcept;
 void visit_roots(HeapState& s, Tracer& tracer);
 // Rescans the old generation's dirty cards, cleaning them (heap_cards.cpp).
 void scan_dirty_cards(Tracer& tracer, GcState& g);
+// One piece of a parallel minor collection's card work: a mature card (its
+// first byte at `object`, `starts` the start bits of the objects to scan
+// there, nonzero) or a range [begin, end) of a large object's payload
+// (`starts` 0; the whole object when begin is 0 and end its size).
+inline constexpr size_t kCardWorkSliceBytes = 32 * 1024;
+struct CardWork {
+    uintptr_t object;
+    size_t begin;
+    size_t end;
+    uint64_t starts;
+};
+// Every dirty card, cleaned, as card work: gathered before anything is
+// copied, so the objects a card names are the ones that were there then (a
+// promoted object is scanned once, as grey work, never as well by a card
+// some other thread scans), and no scan has to read starts or marks that a
+// promotion is writing. Each object is in exactly one piece but for large
+// objects whose layout scans ranges, which are cut into pieces of
+// kCardWorkSliceBytes at most so that threads share a large array.
+void gather_dirty_cards(GcState& g, std::vector<CardWork>& out);
+void scan_card_work(Tracer& tracer, const CardWork& work);
+// heap_minor_parallel.cpp: how many threads the young generation's
+// evacuation `g` (a Minor state, begun) copies on: 1 below the thresholds
+// (HeapConfig::parallel_minor), and 1 when the old frontiers lack the room
+// a parallel one's promotion needs without sweeping.
+unsigned parallel_minor_threads(GcState& g);
+// A serial evacuation `g` took `ns`: folded into the cost per byte of work
+// (its copying and GcState::serial_card_bytes) the next estimate uses.
+void note_serial_evacuation(GcState& g, uint64_t ns);
+// The young generation's evacuation (heap_collect.cpp, evacuate) on
+// `threads` threads, the calling one among them: roots on the calling
+// thread, then the card work and the copying shared out, then the
+// ephemeron fixpoint, then weakness settled.
+void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads);
 // Visits the references of the object at `object` (old: it lives in the old generation).
 void scan_object(Tracer& tracer, uintptr_t object, bool old);
 // Visits the references of old object `object` stored in payload bytes
@@ -702,6 +772,10 @@ void shade(HeapState& s, uintptr_t a) noexcept;
 // slot is still there then).
 void cycle_note_weak(HeapState& s, const WeakEntry& entry);
 void cycle_note_ephemeron(HeapState& s, const EphemeronEntry& entry);
+// The objects a parallel minor collection's threads shaded (marked, with an
+// atomic claim, since they shade side by side), pushed grey once they are
+// done: onto the first worker's stack, as shade pushes.
+void cycle_add_grey(HeapState& s, const std::vector<uintptr_t>& grey);
 // Whether old object `a` is marked by the open cycle (heap_mark.cpp).
 bool is_marked(const HeapState& s, uintptr_t a) noexcept;
 // The payload address of the object whose header or payload holds `a`, or 0.

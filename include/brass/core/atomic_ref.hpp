@@ -54,7 +54,23 @@ public:
         }
     }
 
+    bool compare_exchange_weak(T& expected, T desired, std::memory_order success = std::memory_order_seq_cst,
+                               std::memory_order failure = std::memory_order_seq_cst) noexcept {
+        return __atomic_compare_exchange_n(ptr_, &expected, desired, true, gcc_order(success), gcc_order(failure));
+    }
+
 private:
+    static constexpr int gcc_order(std::memory_order order) noexcept {
+        switch (order) {
+            case std::memory_order_relaxed: return __ATOMIC_RELAXED;
+            case std::memory_order_consume: return __ATOMIC_CONSUME;
+            case std::memory_order_acquire: return __ATOMIC_ACQUIRE;
+            case std::memory_order_release: return __ATOMIC_RELEASE;
+            case std::memory_order_acq_rel: return __ATOMIC_ACQ_REL;
+            case std::memory_order_seq_cst: default: return __ATOMIC_SEQ_CST;
+        }
+    }
+
     T* ptr_;
 };
 #else

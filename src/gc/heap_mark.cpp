@@ -379,7 +379,9 @@ bool drain_on_helpers(MarkShared& sh, MarkWorkers& workers, bool timed) {
 unsigned mark_thread_count(const HeapState& s) {
     if (s.heap.old_used_bytes() < s.config.parallel_mark_bytes) return 1;
     unsigned n = s.config.mark_threads;
-    if (n == 0) n = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 8u);
+    // Read once: glibc's hardware_concurrency reads /sys each call (~20 us).
+    static const unsigned hardware = std::thread::hardware_concurrency();
+    if (n == 0) n = std::clamp(hardware / 2, 1u, 8u);
     return std::max(n, 1u);
 }
 

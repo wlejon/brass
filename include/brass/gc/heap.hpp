@@ -43,6 +43,13 @@ enum class StressMode : uint8_t {
     Incremental,
 };
 
+// Whether minor collections copy on several threads (HeapConfig::parallel_minor).
+enum class ParallelMinor : uint8_t {
+    Off,     // always on the collecting thread alone
+    Auto,    // on several when the collection is large enough to pay for it
+    Always,  // on HeapConfig::minor_threads however small (tests, stress)
+};
+
 // Allocation flags.
 inline constexpr uint32_t kAllocOld = 1u << 0;     // allocate in the old generation (pretenure)
 inline constexpr uint32_t kAllocPinned = 1u << 1;  // old, and never moved by any collection
@@ -103,6 +110,21 @@ struct HeapConfig {
     // short slices mark on all of them. false (or BRASS_GC_MARK_POOL=0): each
     // drain creates its threads and joins them.
     bool mark_thread_pool = true;
+    // A minor collection (and a marking cycle's finishing evacuation of the
+    // young generation) copies on several threads, the marker's parked
+    // helpers (docs/gc_contract.md, "Parallel Minor Collection"), when it is
+    // expected to take at least `parallel_minor_ms` on one thread (its
+    // expected copying and card work at what serial ones have cost); shorter
+    // ones copy on the collecting thread alone, since parallel copying costs
+    // the program after it more than it saves them. Off (or
+    // BRASS_GC_PARALLEL_MINOR=0): every minor collection on one thread.
+    // Always (BRASS_GC_PARALLEL_MINOR=always): every one on `minor_threads`
+    // threads, however small, for tests and stress.
+    ParallelMinor parallel_minor = ParallelMinor::Auto;
+    // Threads a parallel minor collection copies with (the collecting
+    // thread among them). 0: half the hardware threads, at most 8.
+    unsigned minor_threads = 0;
+    double parallel_minor_ms = 1.0;
     // A full collection's sweep of the old generation is left for after its
     // pause: done by sweep_slice, by allocation as it needs memory, and
     // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy
@@ -131,7 +153,8 @@ struct HeapConfig {
     bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|incremental|1), BRASS_GC_VERIFY=1,
     // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_FIXED_EDEN=1,
-    // BRASS_GC_EAGER_SWEEP=1, BRASS_GC_MARK_THREADS=n and
+    // BRASS_GC_EAGER_SWEEP=1, BRASS_GC_MARK_THREADS=n,
+    // BRASS_GC_PARALLEL_MINOR=0|1|always, BRASS_GC_MINOR_THREADS=n and
     // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
     // above when set.
     bool read_environment = true;
@@ -148,6 +171,9 @@ struct HeapStats {
     uint64_t promoted_bytes = 0;       // copied into the old generation, all time
     uint64_t last_survived_bytes = 0;  // copied by the last collection
     uint64_t old_live_bytes = 0;       // old generation after the last full collection
+    // Young-generation evacuations (minor collections, and full collections'
+    // and marking cycles' finishing ones) that copied on several threads.
+    uint64_t parallel_evacuations = 0;
     // The finalizers of the objects the last collection found dead, run once
     // it had finished (not part of last_pause_ns), and how long they took.
     uint64_t last_finalizers = 0;

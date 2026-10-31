@@ -4,7 +4,8 @@
 // of the old generation is copied, into the other survivor space while it is
 // younger than the tenure age and into the old generation after; the young
 // spaces are then empty but for the survivors. Its cost is the roots, the
-// dirty cards and the survivors, whatever the old generation's size.
+// dirty cards and the survivors, whatever the old generation's size. A large
+// one runs on several threads (heap_minor_parallel.cpp), deciding the same.
 //
 // Full, in three phases. First the young generation is emptied: an
 // evacuation exactly like a minor collection's, promoting every survivor
@@ -137,6 +138,13 @@ void drain(Tracer& t, GcState& g) {
 // state; its phases are timed into `clock`'s collection.
 void evacuate(GcState& young, PhaseClock& clock) {
     HeapState& s = young.s;
+    // Large enough to pay for the helpers: the same evacuation on several
+    // threads (heap_minor_parallel.cpp).
+    if (const unsigned threads = parallel_minor_threads(young); threads > 1) {
+        evacuate_parallel(young, clock, threads);
+        return;
+    }
+    const uint64_t began = gc_now_ns();
     // Shading, old references reach minor_visit too: the range is the heap.
     const uintptr_t lo = young.shade ? young.heap.reservation_base() : young.heap.young_base();
     const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
@@ -150,6 +158,7 @@ void evacuate(GcState& young, PhaseClock& clock) {
     clock.lap(kPhaseTrace);
     settle_weakness(young);
     clock.lap(kPhaseWeak);
+    note_serial_evacuation(young, gc_now_ns() - began);
 }
 
 void run_hooks(GcState& g) {
@@ -192,10 +201,18 @@ void minor(GcState& g) {
     s.survivor_top[g.from] = s.survivor_lo[g.from];
     s.from_survivor = g.to;
     s.eden_bytes_retired += g.eden_top - s.eden_lo;
+    // A parallel collection's buffers left unused ends (survivor_slack):
+    // the space held that much less.
+    const uint64_t aged = g.from_top - s.survivor_lo[g.from] - s.survivor_slack[g.from];
+    s.survivor_slack[g.from] = 0;
+    const uint64_t young_collected = (g.eden_top - s.eden_lo) + aged;
+    if (young_collected > 0) {
+        s.minor_survival = static_cast<double>(g.copied_bytes) / static_cast<double>(young_collected);
+    }
     MinorSample sample;
     sample.eden_collected = g.eden_top - s.eden_lo;
     sample.copied = g.copied_bytes;
-    sample.aged = g.from_top - s.survivor_lo[g.from];
+    sample.aged = aged;
     sample.tenured = g.tenured_bytes;
     sample.tenure_age = g.tenure_age;
     sample.overflow = g.survivor_overflow;
@@ -209,7 +226,7 @@ void minor(GcState& g) {
     // each promote-all collection. Short-lived data that merely happens to
     // be live at a collection (a batch being built) is a small fraction of
     // a full eden, so it leaves this mode at once rather than being tenured.
-    const uint64_t collected = (g.eden_top - s.eden_lo) + (g.from_top - s.survivor_lo[g.from]);
+    const uint64_t collected = young_collected;
     s.promote_all = g.survivor_overflow || (s.promote_all && g.copied_bytes * 2 >= collected);
     clock.lap(kPhaseSweep);
 }
@@ -228,12 +245,14 @@ void full_evacuate(GcState& g, PhaseClock& clock, bool shade) {
     young.from_top = g.from_top;
     young.tenure_age = 1;
     young.shade = shade;
+    young.learns_cost = false;  // promoting everything, often shading: not a minor collection's cost
     evacuate(young, clock);
     g.copied_bytes += young.copied_bytes;
     g.copied_objects += young.copied_objects;
     g.promoted_bytes += young.promoted_bytes;
     g.promoted_objects += young.promoted_objects;
     g.dirty_cards += young.dirty_cards;
+    g.minor_threads = young.minor_threads;
 }
 
 // Phase 3: weakness, hooks, reclamation.
@@ -254,6 +273,8 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     std::fill(s.young_starts.begin(), s.young_starts.end(), 0);
     s.survivor_top[0] = s.survivor_lo[0];
     s.survivor_top[1] = s.survivor_lo[1];
+    s.survivor_slack[0] = 0;
+    s.survivor_slack[1] = 0;
     s.eden_bytes_retired += g.eden_top - s.eden_lo;
     // The adaptive eden goes back to the whole of it when most of what the
     // old generation gained since the last full collection is dead: the
@@ -454,6 +475,7 @@ void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns)
     st.last_pause_ns = longest_ns;
     st.promoted_bytes += g.promoted_bytes;
     st.last_survived_bytes = g.copied_bytes;
+    if (g.minor_threads > 1) ++st.parallel_evacuations;
     if (g.kind == CollectionKind::Minor) {
         ++st.minor_collections;
         st.minor_pause_ns_total += pause_ns;

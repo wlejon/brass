@@ -55,7 +55,7 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
     std::fprintf(stderr,
                  "[brass gc %p] #%llu %s (%s) %.3f ms | roots %.3f cards %.3f trace %.3f weak %.3f hooks %.3f "
                  "sweep %.3f | eden %.1fM copied %.2fM/%llu promoted %.2fM/%llu marked %.1fM/%llu cards %llu | "
-                 "old %.1fM threshold %.1fM | eden limit %.1fM -> %.1fM%s\n",
+                 "old %.1fM threshold %.1fM | eden limit %.1fM -> %.1fM%s | threads %u\n",
                  static_cast<const void*>(&s.heap), static_cast<unsigned long long>(index),
                  minor ? "minor" : "full", trigger_name(s.trigger), ms(pause_ns), ms(g.phase_ns[kPhaseRoots]),
                  ms(g.phase_ns[kPhaseCards]), ms(g.phase_ns[kPhaseTrace]), ms(g.phase_ns[kPhaseWeak]),
@@ -63,7 +63,8 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
                  static_cast<unsigned long long>(g.copied_objects), mb(g.promoted_bytes),
                  static_cast<unsigned long long>(g.promoted_objects), mb(g.marked_bytes),
                  static_cast<unsigned long long>(g.marked_objects), static_cast<unsigned long long>(g.dirty_cards),
-                 mb(s.heap.old_used_bytes()), mb(s.full_threshold), mb(g.eden_limit), mb(s.eden_limit - s.eden_lo), cycle);
+                 mb(s.heap.old_used_bytes()), mb(s.full_threshold), mb(g.eden_limit), mb(s.eden_limit - s.eden_lo), cycle,
+                 g.minor_threads);
 }
 
 void log_sweep(const HeapState& s) {

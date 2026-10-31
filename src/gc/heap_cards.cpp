@@ -22,6 +22,10 @@
 // starting in it, so an unswept block's dead starts are masked off by its
 // marks. A dead large object (unswept, not yet freed) has cards of its own,
 // all clean.
+//
+// A parallel minor collection (heap_minor_parallel.cpp) gathers the dirty
+// cards into a list of pieces first, cleaning them, and its threads scan the
+// pieces (gather_dirty_cards, scan_card_work).
 
 #include "heap_internal.hpp"
 
@@ -137,7 +141,90 @@ void gather_large_ranges(GcState& g, std::vector<CardRange>& out) {
     }
 }
 
+bool scans_ranges(const LayoutDescriptor& d) noexcept {
+    return d.kind == LayoutKind::Words || d.kind == LayoutKind::Mask || d.kind == LayoutKind::Leaf ||
+           (d.kind == LayoutKind::Custom && d.trace_range != nullptr);
+}
+
+// The mature half of gather_dirty_cards: scan_mature_cards' walk, recording
+// each dirty card's starts instead of scanning them. No promotion runs yet,
+// so no block can be swept under the walk.
+void gather_mature_cards(GcState& g, std::vector<CardWork>& out) {
+    HeapState& s = g.s;
+    const size_t count = s.blocks.size();
+    uint8_t* regions = s.regions;
+    for (size_t i = 0; i < count; ++i) {
+        if ((i & 7) == 0 && i + 8 <= count) {
+            uint64_t eight;
+            std::memcpy(&eight, regions + i, 8);
+            if (eight == 0) {
+                i += 7;
+                continue;
+            }
+        }
+        if (regions[i] == 0) continue;
+        regions[i] = 0;
+        BlockMeta& meta = *s.blocks[i];
+        if (!meta.in_use) continue;
+        const uintptr_t lo = s.block_base(static_cast<uint32_t>(i));
+        uint8_t* cards = s.card_of(lo);
+        const bool unswept = s.block_unswept(meta);
+        for (size_t c = 0; c < kCardsPerBlock; ++c) {
+            if (cards[c] != kCardDirty) continue;
+            cards[c] = kCardClean;
+            ++g.dirty_cards;
+            uint64_t starts = meta.starts[c];
+            if (unswept) starts &= meta.marks[c];  // only the last cycle's live (scan_mature_cards)
+            if (starts != 0) out.push_back(CardWork{lo + c * kCardBytes, 0, 0, starts});
+        }
+    }
+}
+
 } // namespace
+
+void gather_dirty_cards(GcState& g, std::vector<CardWork>& out) {
+    gather_mature_cards(g, out);
+    std::vector<CardRange> ranges;
+    gather_large_ranges(g, ranges);
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const uintptr_t object = ranges[i].object;
+        const size_t size = header_of(object)->size;
+        if (!scans_ranges(layout_descriptor(header_of(object)->layout))) {
+            // Its range scan is its whole trace (scan_object_range): one piece
+            // for all of its dirty cards, which follow one another, or two
+            // threads would trace it at once and write the same slots.
+            while (i + 1 < ranges.size() && ranges[i + 1].object == object) ++i;
+            out.push_back(CardWork{object, 0, size, 0});
+            continue;
+        }
+        // The whole of a Custom object is its full trace, which may visit
+        // slots outside the payload (that is why its first card asked for
+        // all of it: Heap::remember_slot): one piece. A Words or Mask object
+        // has none, so its whole is its ranges.
+        const bool whole = ranges[i].begin == 0 && ranges[i].end == size;
+        if (whole && layout_descriptor(header_of(object)->layout).kind == LayoutKind::Custom) {
+            out.push_back(CardWork{object, 0, size, 0});
+            continue;
+        }
+        for (size_t at = ranges[i].begin; at < ranges[i].end; at += kCardWorkSliceBytes) {
+            out.push_back(CardWork{object, at, std::min(ranges[i].end, at + kCardWorkSliceBytes), 0});
+        }
+    }
+}
+
+void scan_card_work(Tracer& t, const CardWork& w) {
+    if (w.starts != 0) {
+        uint64_t starts = w.starts;
+        while (starts) {
+            const unsigned bit = ctz64(starts);
+            starts &= starts - 1;
+            scan_object(t, w.object + bit * kGranuleBytes, true);
+        }
+        return;
+    }
+    if (w.begin == 0 && w.end == header_of(w.object)->size) scan_object(t, w.object, true);
+    else scan_object_range(t, w.object, w.begin, w.end);
+}
 
 void scan_dirty_cards(Tracer& t, GcState& g) {
     scan_mature_cards(t, g);

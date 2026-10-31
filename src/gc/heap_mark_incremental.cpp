@@ -198,6 +198,14 @@ void cycle_note_ephemeron(HeapState& s, const EphemeronEntry& entry) {
     c.grey_empty = false;
 }
 
+void cycle_add_grey(HeapState& s, const std::vector<uintptr_t>& grey) {
+    if (grey.empty()) return;
+    MarkCycle& c = open_cycle(s, "objects shaded");
+    std::vector<uintptr_t>& stack = c.workers[0]->stack;
+    stack.insert(stack.end(), grey.begin(), grey.end());
+    c.grey_empty = false;
+}
+
 void Collector::allocated_old(Heap& heap, uintptr_t object) noexcept {
     shade(state(heap), object);
     heap.dirty_card(object);

@@ -51,8 +51,9 @@ uint32_t HeapState::acquire_free_block() {
     // ones the eager sweep would have listed: a few are looked at before a
     // fresh block is taken from the frontier, and all of them before the
     // allocation is refused for the promotion reserve or the reservation's
-    // end.
-    if (sweep.low < sweep.high) {
+    // end. A parallel minor collection's promotion never sweeps
+    // (HeapState::parallel_promotion): it takes a free block or the frontier.
+    if (sweep.low < sweep.high && !parallel_promotion) {
         if (free_blocks.empty()) sweep_blocks_for_allocation();
         const bool at_reserve = !collecting && mature_blocks_available() <= reserve_mature_blocks;
         const bool at_end = free_blocks.empty() && (blocks.size() + 1) * kBlockBytes > mature_reserve;
@@ -110,7 +111,10 @@ bool HeapState::refill_region(BumpRegion& region, bool whole_block) {
         // the last cycle's sweep pending, holes may be in unswept blocks:
         // the allocator sweeps a few (a block it takes is always swept, so
         // nothing is allocated over an object the sweep has yet to judge).
-        if (recyclable_blocks.empty() && sweep.low < sweep.high) (void)sweep_blocks_for_allocation();
+        // (Never for a parallel minor collection's promotion: HeapState::parallel_promotion.)
+        if (recyclable_blocks.empty() && sweep.low < sweep.high && !parallel_promotion) {
+            (void)sweep_blocks_for_allocation();
+        }
         if (!recyclable_blocks.empty()) {
             region.block = recyclable_blocks.back();
             recyclable_blocks.pop_back();
@@ -156,7 +160,7 @@ uintptr_t HeapState::large_allocate(size_t total) {
         return !collecting &&
                large_used_bytes + static_cast<size_t>(pages) * kPageBytes + reserve_large_bytes > large_reserve;
     };
-    if (over_reserve() && sweep.large_active) complete_sweep();
+    if (over_reserve() && sweep.large_active && !parallel_promotion) complete_sweep();
     if (over_reserve()) return 0;
     const auto take_run = [&]() -> uint32_t {
         for (auto it = large_free_runs.begin(); it != large_free_runs.end(); ++it) {
@@ -174,8 +178,12 @@ uintptr_t HeapState::large_allocate(size_t total) {
     // No free run fits: the pending sweep may free one (a few objects are
     // looked at) before the frontier grows, and must free what it can before
     // the allocation fails at the reservation's end.
-    if (start == UINT32_MAX && sweep.large_active && sweep_large_for_allocation(pages)) start = take_run();
-    if (start == UINT32_MAX && sweep.large_active &&
+    // A parallel minor collection's promotion never sweeps
+    // (HeapState::parallel_promotion): it takes the frontier.
+    if (start == UINT32_MAX && sweep.large_active && !parallel_promotion && sweep_large_for_allocation(pages)) {
+        start = take_run();
+    }
+    if (start == UINT32_MAX && sweep.large_active && !parallel_promotion &&
         (static_cast<size_t>(large_frontier) + pages) * kPageBytes > large_reserve) {
         complete_sweep();
         start = take_run();
