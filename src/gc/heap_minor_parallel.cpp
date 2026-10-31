@@ -718,9 +718,19 @@ unsigned parallel_minor_threads(GcState& g) {
     HeapState& s = g.s;
     const HeapConfig& c = s.config;
     if (c.parallel_minor == ParallelMinor::Off) return 1;
-    const unsigned most = configured_threads(c.minor_threads);
+    unsigned most = configured_threads(c.minor_threads);
     if (most <= 1) return 1;
     const uint64_t young = (g.eden_top - s.eden_lo) + (g.from_top - s.survivor_lo[g.from]);
+    // A long copy on every core (HeapConfig::large_minor_threads): a thread's
+    // copying is bound by the misses on the objects it claims (eden was
+    // written on the program's core), not by the others, so more threads cut
+    // it about in proportion (bigheap 1 GB, 16 MB eden copying 6.7 MB: p50
+    // 1.02 ms on 8 threads, 0.90 on 16). Judged by the copying alone: the
+    // card work of a shrunk eden's small minor collections, thousands of
+    // cards, is shared well by the usual threads.
+    if (static_cast<double>(young) * s.minor_survival >= static_cast<double>(c.large_minor_copy_bytes)) {
+        most = std::max(most, large_minor_thread_count(c));
+    }
     if (c.parallel_minor == ParallelMinor::Auto) {
         // Parallel only when one thread would pass the pause goal. Shorter
         // collections gain less than parallel copying costs the program

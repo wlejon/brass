@@ -306,6 +306,12 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     }
     clock.lap(kPhaseRoots);
 
+    // The finish judges the growth before this point (full_reclaim). Back
+    // to back nothing grows between.
+    s.cycle_start_growth = s.old_allocated_since_full;
+    // A cycle the program runs inside marks what is promoted meanwhile:
+    // the whole eden promotes the least (HeapConfig::cycle_whole_eden).
+    if (!evacuate && s.config.cycle_whole_eden) s.restore_eden_for_cycle();
     s.collecting = false;
     s.mark_phase = MarkPhase::Marking;
     // From here to the finish the barrier shades old values. A GC point (this

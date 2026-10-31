@@ -16,6 +16,16 @@ unsigned configured_threads(unsigned configured) {
     return std::clamp(hardware / 2, 1u, 8u);
 }
 
+unsigned large_minor_thread_count(const HeapConfig& config) {
+    if (!config.large_minor_threads_on) return 1;
+    if (config.large_minor_threads != 0) return config.large_minor_threads;
+    // A host that set the minor collection's count has said how many cores
+    // it gives the collector; only the default widens.
+    if (config.minor_threads != 0) return 1;
+    static const unsigned hardware = std::thread::hardware_concurrency();
+    return std::max(hardware / 2, 1u);
+}
+
 MarkThreads& heap_helpers(HeapState& s) {
     if (!s.mark_threads) s.mark_threads.reset(new MarkThreads);
     return *s.mark_threads;
@@ -100,6 +110,7 @@ unsigned Heap::start_helper_threads() {
     }
     if (s.config.parallel_minor != ParallelMinor::Off) {
         threads = std::max(threads, detail::configured_threads(s.config.minor_threads));
+        threads = std::max(threads, detail::large_minor_thread_count(s.config));
     }
     if (threads <= 1) return 0;
     return detail::heap_helpers(s).ensure(threads - 1);

@@ -110,6 +110,24 @@ struct HeapConfig {
     // headroom is memory a cycle that falls behind may use, not where cycles
     // are paced to finish. 0 (or BRASS_GC_CYCLE_HEADROOM=0): the threshold.
     double cycle_headroom = 0.25;
+    // The finish of a cycle the program ran inside judges only the growth
+    // before the cycle's start when it decides whether to restore the whole
+    // adaptive eden (the growth since is marked whether live or not). false
+    // (or BRASS_GC_RESTORE_JUDGES_START=0): all of it, as before.
+    bool restore_judges_cycle_start = true;
+    // A marking cycle the program runs inside (Heap::start_marking) gives a
+    // shrunk adaptive eden back whole, as the lifetime test does: everything
+    // promoted while it marks is marked, so a shrunk eden's promotions (four
+    // times the whole one's on bigheap after its boot) are marking work as
+    // well as old growth, and the cycle that started on them fell behind.
+    // false (or BRASS_GC_CYCLE_WHOLE_EDEN=0): eden as the minors left it.
+    bool cycle_whole_eden = true;
+    // At the whole eden, a minor collection that collected under half of it
+    // (one a host ran early) shrinks eden only by overflowing the survivor
+    // space: what it tenures is what the last one aged, measured against
+    // the little it collected. true (or BRASS_GC_PARTIAL_MINOR_SHRINKS=1):
+    // its tenured quarter shrinks eden too, as before.
+    bool partial_minor_shrinks = false;
     // Threads that mark the old generation in a full collection (the
     // collecting thread among them) once it holds at least
     // `parallel_mark_bytes`; smaller old generations are marked by the
@@ -135,6 +153,17 @@ struct HeapConfig {
     // thread among them). 0: half the hardware threads, at most 8.
     unsigned minor_threads = 0;
     double parallel_minor_ms = 1.0;
+    // A parallel minor collection expected to copy at least
+    // `large_minor_copy_bytes` copies on `large_minor_threads` threads
+    // instead: such a copy is long enough (a 16 MB eden two thirds of which
+    // survives) that the threads past minor_threads shorten it more than
+    // waking them costs. 0: half the hardware threads, uncapped (every core
+    // of an SMT machine), unless minor_threads is set: a host's explicit
+    // count stands. BRASS_GC_LARGE_MINOR_THREADS=n sets it; =0 (or
+    // `large_minor_threads_on` false) keeps every one on minor_threads.
+    bool large_minor_threads_on = true;
+    unsigned large_minor_threads = 0;
+    size_t large_minor_copy_bytes = size_t{4} << 20;
     // A full collection's sweep of the old generation is left for after its
     // pause: done by sweep_slice, by allocation as it needs memory, and
     // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy

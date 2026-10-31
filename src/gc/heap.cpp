@@ -94,6 +94,10 @@ void apply_environment(HeapConfig& config) {
         }
         config.cycle_headroom = h;
     }
+    // The A/B switches for the adaptive eden around a marking cycle.
+    if (env_value("BRASS_GC_RESTORE_JUDGES_START") == "0") config.restore_judges_cycle_start = false;
+    if (env_value("BRASS_GC_CYCLE_WHOLE_EDEN") == "0") config.cycle_whole_eden = false;
+    if (env_value("BRASS_GC_PARTIAL_MINOR_SHRINKS") == "1") config.partial_minor_shrinks = true;
     const std::string threads = env_value("BRASS_GC_MARK_THREADS");
     if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
     // The A/B switch for the parked marker threads: created and joined by
@@ -108,6 +112,14 @@ void apply_environment(HeapConfig& config) {
     const std::string minor_threads = env_value("BRASS_GC_MINOR_THREADS");
     if (!minor_threads.empty()) {
         config.minor_threads = static_cast<unsigned>(std::strtoul(minor_threads.c_str(), nullptr, 10));
+    }
+    // The threads of a large parallel minor collection; 0 is the A/B switch
+    // that keeps them on minor_threads.
+    const std::string large_minor = env_value("BRASS_GC_LARGE_MINOR_THREADS");
+    if (large_minor == "0") {
+        config.large_minor_threads_on = false;
+    } else if (!large_minor.empty()) {
+        config.large_minor_threads = static_cast<unsigned>(std::strtoul(large_minor.c_str(), nullptr, 10));
     }
     // Both old spaces' reservations, in MB: a small one makes the
     // out-of-memory path reachable from a test.
@@ -304,6 +316,16 @@ void HeapState::reset_eden_limit() noexcept {
     eden_limit = eden_hi;
 }
 
+void HeapState::restore_eden_for_cycle() noexcept {
+    if (!config.adaptive_eden || eden_limit == eden_hi) return;
+    survival_estimate = 0.0;
+    forget_dying();
+    restored = false;
+    restore_hold = kRestoreHold;
+    promote_all = false;
+    eden_limit = eden_hi;
+}
+
 void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
     if (!config.adaptive_eden) {
         eden_limit = eden_hi;
@@ -349,6 +371,16 @@ void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
             // quarter of what was copied promoted out of it (kept through two
             // collections, not promoted wholesale by promote_all).
             if (m.at_whole_eden && !m.overflow && m.tenured * 4 < m.copied) seen = 0.0;
+            // A collection that ran on part of the whole eden (a host's, before
+            // a cycle's finish) tenures what the last one aged, a full eden's
+            // worth, against the little eden it collected: only an overflow
+            // shows survivors kept there (HeapConfig::partial_minor_shrinks).
+            // bigheap's half-full one before its finish read 2.65 MB tenured
+            // of 6 copied and shrank eden to 1 MB for the cycle after.
+            if (m.at_whole_eden && !m.overflow && !config.partial_minor_shrinks &&
+                m.eden_collected * 2 < eden) {
+                seen = 0.0;
+            }
             if (m.at_whole_eden && restore_hold > 0) {
                 // Just after the lifetime test restored the whole eden, what
                 // the shrunk eden promoted still keeps young objects alive

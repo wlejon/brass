@@ -6,7 +6,8 @@
 // in the survivor space, keeps the whole eden, and one that follows a
 // build-up gets it back as soon as its data starts dying; a full collection
 // that finds the old generation's growth dead restores it, one that finds it
-// live does not; and the switch pins it whole. The limit is
+// live does not; a marking cycle starts on the whole eden; and the switch
+// pins it whole. The limit is
 // what generated code bumps against (the allocation buffer's end), and an
 // empty eden still takes the largest young object.
 
@@ -228,6 +229,118 @@ TEST_CASE("gc::Heap adaptive eden - a full collection restores the whole eden on
     h.collect(CollectionKind::Full);
     CHECK_EQ(eden_capacity(h), full);
     h.remove_root(&keep);
+}
+
+// HeapConfig::restore_judges_cycle_start: a cycle the program runs inside
+// marks all it promotes meanwhile, so a cycle that promotes more than the
+// growth before it would read every cycle as a build-up. The build before the
+// cycle is dead here, and the data the program keeps during it is promoted
+// grey: judged on the growth before its start, the finish restores the whole
+// eden; judged on all of it (the switch off), it keeps eden shrunk.
+TEST_CASE("gc::Heap adaptive eden - a cycle's finish judges the growth before its start") {
+    for (bool judge_start : {true, false}) {
+        HeapConfig c = eden_config();
+        c.restore_judges_cycle_start = judge_start;
+        c.min_full_threshold_bytes = size_t{1} << 30;  // only the test's cycle finishes
+        c.cycle_whole_eden = false;  // eden stays shrunk through the cycle
+        Heap h(c);
+        const size_t full = eden_capacity(h);
+        uint64_t keep = 0;
+        uint64_t during = 0;
+        h.add_root(&keep);
+        h.add_root(&during);
+        shrink_by_spike(h, &keep);
+        for (int i = 0; i < 4; ++i) allocate_until_minor(h, &keep);
+        // The build goes on in another list until the first is all old, so
+        // its death is not seen in the survivor space (which would restore
+        // the whole eden before the cycle).
+        for (int i = 0; i < 3; ++i) allocate_until_minor(h, &during);
+        const uint64_t before = h.pressure().old_growth;
+        REQUIRE(before > 8 * kMB);
+        keep = 0;  // the first build-up dies
+        REQUIRE(eden_capacity(h) < kMB + kMB / 4);
+        REQUIRE(h.start_marking());
+        // Inside the cycle the program keeps more than the build was: the
+        // shrunk eden promotes it, grey.
+        while (h.pressure().old_growth < 2 * before + 2 * kMB) allocate_until_minor(h, &during);
+        REQUIRE(eden_capacity(h) < kMB + kMB / 4);
+        REQUIRE(h.marking());
+        while (!h.mark_slice(0)) {
+        }
+        h.finish_marking();
+        if (judge_start) CHECK_EQ(eden_capacity(h), full);
+        else CHECK(eden_capacity(h) < kMB + kMB / 4);
+        h.remove_root(&during);
+        h.remove_root(&keep);
+    }
+}
+
+// HeapConfig::cycle_whole_eden: a marking cycle started on a shrunk eden
+// gives it back whole, and the next minor collections (restore_hold of them)
+// keep it whole even though the build-up goes on (after them a build that
+// overflows the survivor space is promoted whole, promote_all, as at any
+// whole eden). A full collection (back to back) leaves it as it was, and with
+// the switch off a cycle does too.
+TEST_CASE("gc::Heap adaptive eden - a marking cycle starts on the whole eden") {
+    for (bool whole : {true, false}) {
+        HeapConfig c = eden_config();
+        c.cycle_whole_eden = whole;
+        c.min_full_threshold_bytes = size_t{1} << 30;  // only the test's collections
+        Heap h(c);
+        const size_t full = eden_capacity(h);
+        uint64_t keep = 0;
+        h.add_root(&keep);
+        shrink_by_spike(h, &keep);
+        h.collect(CollectionKind::Full);
+        CHECK(eden_capacity(h) < kMB + kMB / 4);  // the build is live: still shrunk
+        REQUIRE(h.start_marking());
+        if (!whole) {
+            CHECK(eden_capacity(h) < kMB + kMB / 4);
+            h.finish_marking();
+            h.remove_root(&keep);
+            continue;
+        }
+        CHECK_EQ(eden_capacity(h), full);
+        // The build goes on: held whole through its first collections there.
+        for (int i = 0; i < 4; ++i) {
+            allocate_until_minor(h, &keep);
+            CHECK_EQ(eden_capacity(h), full);
+        }
+        CHECK(h.marking());
+        h.finish_marking();
+        h.remove_root(&keep);
+    }
+}
+
+// HeapConfig::partial_minor_shrinks: 6 MB kept through a collection at the
+// whole eden ages in the survivor space; a host's collection after only 2 MB
+// more tenures all of it, which against the 2 MB it collected reads as a
+// build-up. It shrinks eden only with the switch on; a collection that
+// collected half the eden or more tenuring the same shrinks it either way.
+TEST_CASE("gc::Heap adaptive eden - a collection of part of the whole eden shrinks it only by overflowing") {
+    for (int variant = 0; variant < 3; ++variant) {
+        const bool shrinks = variant == 1;
+        const bool half = variant == 2;  // the switch off, the second collection at 9 MB
+        HeapConfig c = eden_config();
+        c.partial_minor_shrinks = shrinks;
+        Heap h(c);
+        const size_t full = eden_capacity(h);
+        uint64_t keep = 0;
+        h.add_root(&keep);
+        const size_t kept_nodes = 6 * kMB / kNodeTotal;
+        for (size_t i = 0; i < kept_nodes; ++i) new_node(h, &keep);
+        allocate_until_minor(h, nullptr);
+        REQUIRE(h.stats().last_survived_bytes > 5 * kMB);
+        REQUIRE(eden_capacity(h) == full);
+        const size_t more = (half ? 9 : 2) * kMB / kNodeTotal;
+        for (size_t i = 0; i < more; ++i) new_node(h, nullptr);
+        const uint64_t before = h.stats().minor_collections;
+        h.collect(CollectionKind::Minor);
+        REQUIRE(h.stats().minor_collections == before + 1);
+        if (shrinks || half) CHECK(eden_capacity(h) < full);
+        else CHECK_EQ(eden_capacity(h), full);
+        h.remove_root(&keep);
+    }
 }
 
 TEST_CASE("gc::Heap adaptive eden - adaptive_eden = false and BRASS_GC_FIXED_EDEN=1 keep the whole eden") {

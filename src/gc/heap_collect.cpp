@@ -328,7 +328,24 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     // working set that the whole eden would let die young (reset_eden_limit).
     // While the live old data grows by half the growth or more, the build-up
     // that shrank eden goes on, and the whole eden would copy it in one go.
-    const uint64_t live_gained = g.marked_bytes > s.stats.old_live_bytes ? g.marked_bytes - s.stats.old_live_bytes : 0;
+    // A cycle the program ran inside marked everything it allocated or
+    // promoted meanwhile, live or not (grey from the start): that growth says
+    // nothing about what lives, and a cycle that promotes fast (a shrunk eden
+    // promotes several times what the whole one would) would always read as
+    // a build-up, keep eden shrunk and so promote as fast through the next
+    // one, each cycle longer than the last (bigheap 1 GB went 1.1, 1.8, 2.5
+    // GB marked, its live data 0.8). So only the growth before the cycle's
+    // start is judged, against what is marked but for the growth since
+    // (HeapConfig::restore_judges_cycle_start). Back to back the two agree.
+    uint64_t marked = g.marked_bytes;
+    uint64_t growth = s.old_allocated_since_full;
+    if (s.config.restore_judges_cycle_start && s.cycle_start_growth <= growth) {
+        const uint64_t during = growth - s.cycle_start_growth;
+        marked = marked > during ? marked - during : 0;
+        growth = s.cycle_start_growth;
+    }
+    s.cycle_start_growth = 0;
+    const uint64_t live_gained = marked > s.stats.old_live_bytes ? marked - s.stats.old_live_bytes : 0;
     // promote_all is otherwise left as the last minor collection set it: a
     // full collection says nothing about how much of the young data
     // survives, and a program still building long-lived data would refill
@@ -336,7 +353,7 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     // When the growth was dead, though, the program has stopped building,
     // and the minor collection at the whole eden must age its survivors to
     // measure whether they are kept, not promote them all.
-    if (live_gained * 2 < s.old_allocated_since_full) {
+    if (live_gained * 2 < growth) {
         s.reset_eden_limit();
         s.promote_all = false;
     }

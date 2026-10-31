@@ -22,6 +22,10 @@
 #include <thread>
 #include <vector>
 
+namespace brass::gc {
+struct HeapConfig;
+}
+
 namespace brass::gc::detail {
 
 struct HeapState;
@@ -30,6 +34,11 @@ class MarkThreads;
 // The threads (the collecting one among them) a HeapConfig field asking for
 // `configured` means: itself, or for 0 half the hardware threads, at most 8.
 unsigned configured_threads(unsigned configured);
+// The threads a large parallel minor collection copies with
+// (HeapConfig::large_minor_threads): itself, or for 0 half the hardware
+// threads, uncapped; 1 when large_minor_threads_on is false, or when it is 0
+// and minor_threads is set (an explicit count is the host's).
+unsigned large_minor_thread_count(const HeapConfig& config);
 // The heap's helpers, the pool made at first use (by a parallel drain or
 // minor collection, or Heap::start_helper_threads ahead of them).
 MarkThreads& heap_helpers(HeapState& s);

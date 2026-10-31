@@ -327,6 +327,11 @@ struct HeapState {
         if (mark_phase != MarkPhase::Marking) return full_threshold;
         return full_threshold + static_cast<uint64_t>(static_cast<double>(full_threshold) * config.cycle_headroom);
     }
+    // old_allocated_since_full when the open cycle started: what it grew by
+    // after that it marks whether live or not (allocated or promoted grey),
+    // so the eden's restore test at its finish (full_reclaim) judges only
+    // the growth before it (HeapConfig::restore_judges_cycle_start).
+    uint64_t cycle_start_growth = 0;
     bool minor_requested = false;
     bool full_requested = false;
     uint64_t stress_counter = 0;
@@ -552,6 +557,13 @@ struct HeapState {
     // has moved from building data to churning a working set does not keep
     // the small eden the build-up called for).
     void reset_eden_limit() noexcept;
+    // A shrunk eden back whole as a marking cycle starts
+    // (HeapConfig::cycle_whole_eden), held there for restore_hold
+    // collections as after the lifetime test, since the survivor space and
+    // the shrunk eden's promotions say little at first; after them the
+    // whole eden judges as always. Not a verdict of that test, so a shrink
+    // then does not lengthen its next one (restored stays false).
+    void restore_eden_for_cycle() noexcept;
     uint64_t old_direct_bytes = 0;  // allocated straight into the old generation
 
     // ---- the promotion reserve (heap_spaces.cpp) ----
