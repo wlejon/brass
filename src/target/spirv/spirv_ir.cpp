@@ -171,6 +171,11 @@ Id Module::t_vector(Id elem, uint32_t count) {
     return intern(Inst(spv::OpTypeVector).id(elem).lit(count), &ti);
 }
 
+Id Module::t_matrix(Id col_type, uint32_t cols) {
+    TypeInfo ti{spv::OpTypeMatrix, cols, col_type};
+    return intern(Inst(spv::OpTypeMatrix).id(col_type).lit(cols), &ti);
+}
+
 Id Module::t_array(Id elem, uint32_t length) {
     Id len = c_u32(length);
     TypeInfo ti{spv::OpTypeArray, length, elem};

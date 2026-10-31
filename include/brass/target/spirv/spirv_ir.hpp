@@ -120,6 +120,7 @@ public:
     Id t_int(uint32_t width);   // signedness 0; signed ops choose the opcode
     Id t_float(uint32_t width);
     Id t_vector(Id elem, uint32_t count);
+    Id t_matrix(Id col_type, uint32_t cols);
     Id t_array(Id elem, uint32_t length);
     // Always fresh ids (aggregates may repeat), for an ArrayStride decoration.
     Id t_array_fresh(Id elem, uint32_t length);

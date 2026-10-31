@@ -729,4 +729,133 @@ void SpirvISel::Intrinsics::front_facing(SpirvISel& isel, const brass::Instructi
     }));
 }
 
+// ---------------------------------------------------------------------------
+// Matrix linear algebra (OpMatrixTimesVector / OpVectorTimesMatrix / OpMatrixTimesMatrix)
+// ---------------------------------------------------------------------------
+
+Id SpirvISel::Intrinsics::find_or_emit_op(SpirvISel& isel, spv::Op op, Id type, const std::vector<Id>& operands) {
+    for (const Inst& prev : isel.block().insts) {
+        if (prev.op != op || prev.type != type || prev.operands.size() != operands.size()) continue;
+        bool same = true;
+        for (size_t i = 0; i < operands.size(); ++i) {
+            if (!prev.operands[i].is_id() || prev.operands[i].value != operands[i]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) return prev.result;
+    }
+    return isel.op(op, type, operands);
+}
+
+Id SpirvISel::Intrinsics::pack_fvec(SpirvISel& isel, const brass::Instruction& inst, size_t at, uint32_t lanes) {
+    if (lanes == 4) {
+        const Value* v0 = inst.operand(at);
+        const brass::Instruction* d0 = (v0 && v0->is_instruction()) ? v0->defining_instruction() : nullptr;
+        if (d0 && d0->opcode() == brass::Opcode::vextract_lane && d0->lane() == 0 &&
+            d0->operand(0) && d0->operand(0)->type() == Type::f32x4()) {
+            const Value* vec = d0->operand(0);
+            bool all_match = true;
+            for (uint32_t i = 1; i < 4; ++i) {
+                const Value* vi = inst.operand(at + i);
+                const brass::Instruction* di = (vi && vi->is_instruction()) ? vi->defining_instruction() : nullptr;
+                if (!di || di->opcode() != brass::Opcode::vextract_lane || di->lane() != i || di->operand(0) != vec) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if (all_match) return isel.id_of(vec, "vector operand");
+        }
+    }
+    std::vector<Id> comps;
+    comps.reserve(lanes);
+    for (uint32_t i = 0; i < lanes; ++i) {
+        comps.push_back(isel.id_of(inst.operand(at + i), "vector component"));
+    }
+    return find_or_emit_op(isel, spv::OpCompositeConstruct, isel.m_.t_vector(isel.t_f32(), lanes), comps);
+}
+
+Id SpirvISel::Intrinsics::pack_fmat(SpirvISel& isel, const brass::Instruction& inst, size_t at, uint32_t cols, uint32_t rows) {
+    Id col_t = isel.m_.t_vector(isel.t_f32(), rows);
+    std::vector<Id> col_ids;
+    col_ids.reserve(cols);
+    for (uint32_t c = 0; c < cols; ++c) {
+        col_ids.push_back(pack_fvec(isel, inst, at + static_cast<size_t>(c) * rows, rows));
+    }
+    return find_or_emit_op(isel, spv::OpCompositeConstruct, isel.m_.t_matrix(col_t, cols), col_ids);
+}
+
+Id SpirvISel::Intrinsics::pad_to_fvec4(SpirvISel& isel, Id vec, uint32_t lanes) {
+    if (lanes == 4) return vec;
+    Id v4_t = isel.m_.t_vector(isel.t_f32(), 4);
+    Id r = isel.m_.new_id();
+    Inst s(spv::OpVectorShuffle, v4_t, r);
+    s.id(vec).id(vec);
+    for (uint32_t i = 0; i < 4; ++i) s.lit(i < lanes ? i : 0u);
+    isel.emit(std::move(s));
+    return r;
+}
+
+void SpirvISel::Intrinsics::matrix_times_vector(SpirvISel& isel, const brass::Instruction& inst) {
+    int64_t cols = 0, rows = 0;
+    if (inst.operand_count() < 2 || !isel.const_int(inst.operand(0), &cols) || !isel.const_int(inst.operand(1), &rows) ||
+        cols < 2 || cols > 4 || rows < 2 || rows > 4) {
+        isel.malformed(inst, "spirv_matrix_times_vector requires constant cols and rows in 2..4");
+    }
+    auto c = static_cast<uint32_t>(cols);
+    auto r = static_cast<uint32_t>(rows);
+    if (inst.operand_count() != 2 + static_cast<size_t>(c) * r + c) {
+        isel.malformed(inst, "spirv_matrix_times_vector operand count mismatch");
+    }
+    Id mat = pack_fmat(isel, inst, 2, c, r);
+    Id vec = pack_fvec(isel, inst, 2 + static_cast<size_t>(c) * r, c);
+    Id res_t = isel.m_.t_vector(isel.t_f32(), r);
+    Id prod = isel.op(spv::OpMatrixTimesVector, res_t, {mat, vec});
+    isel.define(inst.result(), pad_to_fvec4(isel, prod, r));
+}
+
+void SpirvISel::Intrinsics::vector_times_matrix(SpirvISel& isel, const brass::Instruction& inst) {
+    int64_t cols = 0, rows = 0;
+    if (inst.operand_count() < 2 || !isel.const_int(inst.operand(0), &cols) || !isel.const_int(inst.operand(1), &rows) ||
+        cols < 2 || cols > 4 || rows < 2 || rows > 4) {
+        isel.malformed(inst, "spirv_vector_times_matrix requires constant cols and rows in 2..4");
+    }
+    auto c = static_cast<uint32_t>(cols);
+    auto r = static_cast<uint32_t>(rows);
+    if (inst.operand_count() != 2 + r + static_cast<size_t>(c) * r) {
+        isel.malformed(inst, "spirv_vector_times_matrix operand count mismatch");
+    }
+    Id vec = pack_fvec(isel, inst, 2, r);
+    Id mat = pack_fmat(isel, inst, 2 + r, c, r);
+    Id res_t = isel.m_.t_vector(isel.t_f32(), c);
+    Id prod = isel.op(spv::OpVectorTimesMatrix, res_t, {vec, mat});
+    isel.define(inst.result(), pad_to_fvec4(isel, prod, c));
+}
+
+void SpirvISel::Intrinsics::matrix_times_matrix(SpirvISel& isel, const brass::Instruction& inst) {
+    int64_t cols_a = 0, rows_a = 0, cols_b = 0, col_idx = 0;
+    if (inst.operand_count() < 4 || !isel.const_int(inst.operand(0), &cols_a) || !isel.const_int(inst.operand(1), &rows_a) ||
+        !isel.const_int(inst.operand(2), &cols_b) || !isel.const_int(inst.operand(3), &col_idx) ||
+        cols_a < 2 || cols_a > 4 || rows_a < 2 || rows_a > 4 || cols_b < 2 || cols_b > 4 ||
+        col_idx < 0 || col_idx >= cols_b) {
+        isel.malformed(inst, "spirv_matrix_times_matrix requires valid constant dimensions and column index");
+    }
+    auto ca = static_cast<uint32_t>(cols_a);
+    auto ra = static_cast<uint32_t>(rows_a);
+    auto cb = static_cast<uint32_t>(cols_b);
+    size_t n_a = static_cast<size_t>(ca) * ra;
+    size_t n_b = static_cast<size_t>(cb) * ca;
+    if (inst.operand_count() != 4 + n_a + n_b) {
+        isel.malformed(inst, "spirv_matrix_times_matrix operand count mismatch");
+    }
+    Id mat_a = pack_fmat(isel, inst, 4, ca, ra);
+    Id mat_b = pack_fmat(isel, inst, 4 + n_a, cb, ca);
+    Id col_t = isel.m_.t_vector(isel.t_f32(), ra);
+    Id res_mat_t = isel.m_.t_matrix(col_t, cb);
+    Id prod = find_or_emit_op(isel, spv::OpMatrixTimesMatrix, res_mat_t, {mat_a, mat_b});
+    Id col = isel.m_.new_id();
+    isel.emit(Inst(spv::OpCompositeExtract, col_t, col).id(prod).lit(static_cast<uint32_t>(col_idx)));
+    isel.define(inst.result(), pad_to_fvec4(isel, col, ra));
+}
+
 } // namespace brass::spirv

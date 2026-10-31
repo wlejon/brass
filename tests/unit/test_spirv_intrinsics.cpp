@@ -31,6 +31,7 @@ enum class Sig {
     vert_i32, vert_pos, frag_f32, frag_v4, stage_in, stage_out, frag_depth, buf_load, buf_store, buf_len,
     buf_atom_i32, buf_atom_f32, buf_atom_cas_i32,
     frag_f32_f32, frag_i32, frag_void, i32_i32,
+    mat_times_vec, vec_times_mat, mat_times_mat,
 };
 
 const std::map<std::string, Sig>& signatures() {
@@ -162,6 +163,9 @@ const std::map<std::string, Sig>& signatures() {
         {"spirv_subgroup_all", Sig::i32_i32}, {"spirv_subgroup_any", Sig::i32_i32},
         {"spirv_dpdx_f32", Sig::frag_f32_f32}, {"spirv_dpdy_f32", Sig::frag_f32_f32},
         {"spirv_fwidth_f32", Sig::frag_f32_f32},
+        {"spirv_matrix_times_vector", Sig::mat_times_vec},
+        {"spirv_vector_times_matrix", Sig::vec_times_mat},
+        {"spirv_matrix_times_matrix", Sig::mat_times_mat},
 
         {"spirv_subgroup_add_f32", Sig::f32_f32}, {"spirv_subgroup_add_i32", Sig::i32_i32},
         {"spirv_subgroup_min_f32", Sig::f32_f32}, {"spirv_subgroup_min_i32", Sig::i32_i32},
@@ -310,6 +314,21 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::frag_i32: r = b.build_call(name, Type::i32()); break;
         case Sig::frag_void: b.build_call(name, Type::void_type()); break;
         case Sig::i32_i32: r = b.build_call(name, Type::i32(), {i}); break;
+        case Sig::mat_times_vec:
+            r = b.build_call(name, Type::f32x4(),
+                             {b.build_iconst_i32(3), b.build_iconst_i32(3),
+                              x, x, x, x, x, x, x, x, x, x, x, x});
+            break;
+        case Sig::vec_times_mat:
+            r = b.build_call(name, Type::f32x4(),
+                             {b.build_iconst_i32(3), b.build_iconst_i32(3),
+                              x, x, x, x, x, x, x, x, x, x, x, x});
+            break;
+        case Sig::mat_times_mat:
+            r = b.build_call(name, Type::f32x4(),
+                             {b.build_iconst_i32(2), b.build_iconst_i32(2), b.build_iconst_i32(2), b.build_iconst_i32(0),
+                              x, x, x, x, x, x, x, x});
+            break;
     }
     if (r) {
         if (r->type().is_vector()) b.build_vstore(r->type(), p, 0, r);
@@ -426,6 +445,9 @@ TEST_CASE("SPIR-V intrinsics - families lower to the expected SPIR-V (spirv-dis)
         {"spirv_subgroup_size", {"BuiltIn SubgroupSize"}},
         {"spirv_subgroup_any", {"OpGroupNonUniformAny ", "OpCapability GroupNonUniformVote"}},
         {"spirv_demote_to_helper", {"OpDemoteToHelperInvocation", "SPV_EXT_demote_to_helper_invocation"}},
+        {"spirv_matrix_times_vector", {"OpTypeMatrix", "OpMatrixTimesVector"}},
+        {"spirv_vector_times_matrix", {"OpTypeMatrix", "OpVectorTimesMatrix"}},
+        {"spirv_matrix_times_matrix", {"OpTypeMatrix", "OpMatrixTimesMatrix"}},
     };
     for (const Expect& ex : expects) {
         std::string dis;

@@ -149,6 +149,13 @@ struct SpirvISel::Intrinsics {
     static void derivative(SpirvISel& isel, const brass::Instruction& inst);  // f32 -> f32
     static void front_facing(SpirvISel& isel, const brass::Instruction& inst); // -> i32 0/1
     static void demote_to_helper(SpirvISel& isel, const brass::Instruction& inst);
+    static Id find_or_emit_op(SpirvISel& isel, spv::Op op, Id type, const std::vector<Id>& operands);
+    static Id pack_fvec(SpirvISel& isel, const brass::Instruction& inst, size_t at, uint32_t lanes);
+    static Id pack_fmat(SpirvISel& isel, const brass::Instruction& inst, size_t at, uint32_t cols, uint32_t rows);
+    static Id pad_to_fvec4(SpirvISel& isel, Id vec, uint32_t lanes);
+    static void matrix_times_vector(SpirvISel& isel, const brass::Instruction& inst);
+    static void vector_times_matrix(SpirvISel& isel, const brass::Instruction& inst);
+    static void matrix_times_matrix(SpirvISel& isel, const brass::Instruction& inst);
 };
 
 } // namespace brass::spirv

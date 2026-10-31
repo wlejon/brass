@@ -366,6 +366,9 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "spirv_dpdx_f32",            &derivative<spv::OpDPdx> },
         { "spirv_dpdy_f32",            &derivative<spv::OpDPdy> },
         { "spirv_fwidth_f32",          &derivative<spv::OpFwidth> },
+        { "spirv_matrix_times_vector", &matrix_times_vector },
+        { "spirv_vector_times_matrix", &vector_times_matrix },
+        { "spirv_matrix_times_matrix", &matrix_times_matrix },
 
         // Subgroup operations (the whole subgroup)
         { "spirv_subgroup_add_f32",             &subgroup_reduce<Group::add> },
