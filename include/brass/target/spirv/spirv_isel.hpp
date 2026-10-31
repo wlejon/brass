@@ -75,6 +75,18 @@ private:
         Id dyn_off = 0;        // byte offset, dynamic part (u32), 0 for none
     };
 
+    // A pointer into a Function-storage array (the result of Opcode::alloca_,
+    // possibly offset with `add`). When every store to the alloca is a
+    // constant store in the entry block, `const_init` folds them into an
+    // OpConstantComposite initializer on the OpVariable.
+    struct LocalRef {
+        Id var = 0;
+        Type elem;            // f32, i32, f64 or i64
+        int64_t const_off = 0; // byte offset, constant part
+        Id dyn_off = 0;        // byte offset, dynamic part (u32), 0 for none
+        bool const_init = false;
+    };
+
     // ---- state -----------------------------------------------------------------
     Module& m_;
     target::SpirvOptions opts_;
@@ -86,6 +98,8 @@ private:
     std::unordered_map<const Value*, std::vector<Id>> ids_;   // value -> one id per 16-byte part (1 for scalars)
     std::unordered_map<const Value*, Id> bools_;              // comparison result -> bool id
     std::unordered_map<const Value*, SharedRef> shared_;
+    std::unordered_map<const Value*, LocalRef> local_;
+    size_t num_local_vars_ = 0;
     std::unordered_map<const Value*, uint32_t> value_uses_;   // uses other than as a br_if/select condition
     std::unordered_map<std::string, Id> prologue_cache_;      // per-kernel values computed in the prologue
     std::vector<Id> prologue_args_;                           // kernel parameter values when the entry has phis
@@ -165,6 +179,8 @@ private:
     Id indexed_address(const brass::Instruction& inst, const Value* base, const Value* index);
     Id load_global(Id addr, Id type, uint32_t align);
     void store_global(Id addr, Id value, Id type, uint32_t align);
+    void lower_alloca(const brass::Instruction& inst);
+    Id local_element_pointer(const LocalRef& ref, int64_t inst_offset, const Value* index, uint32_t scale, Type access);
     void lower_load(const brass::Instruction& inst);
     void lower_store(const brass::Instruction& inst);
     void lower_vload(const brass::Instruction& inst);

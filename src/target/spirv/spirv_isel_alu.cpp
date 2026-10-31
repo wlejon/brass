@@ -113,9 +113,26 @@ void SpirvISel::lower_convert(const brass::Instruction& inst, spv::Op o, Type ds
     define(inst.result(), op(o, scalar_type(dst), {id_of(src, "operand 0")}));
 }
 
-// `add` with a shared-memory pointer operand: Workgroup arrays have no
-// numeric address, so the byte offset is accumulated on the SharedRef.
+// `add` with a shared-memory or local-alloca pointer operand: Workgroup and
+// Function arrays have no numeric address, so the byte offset is accumulated
+// on the SharedRef / LocalRef.
 void SpirvISel::lower_add_ptr(const brass::Instruction& inst) {
+    if (local_.count(inst.operand(0)) || local_.count(inst.operand(1))) {
+        bool lhs_local = local_.count(inst.operand(0)) != 0;
+        if (lhs_local && local_.count(inst.operand(1))) malformed(inst, "adds two local alloca pointers");
+        const Value* p = lhs_local ? inst.operand(0) : inst.operand(1);
+        const Value* off = lhs_local ? inst.operand(1) : inst.operand(0);
+        LocalRef r = local_.at(p);
+        int64_t c = 0;
+        if (const_int(off, &c)) {
+            r.const_off += c;
+        } else {
+            Id o = as_u32(off, "local pointer offset");
+            r.dyn_off = r.dyn_off ? op(spv::OpIAdd, t_u32(), {r.dyn_off, o}) : o;
+        }
+        local_[inst.result()] = r;
+        return;
+    }
     bool lhs_shared = shared_.count(inst.operand(0)) != 0;
     if (lhs_shared && shared_.count(inst.operand(1))) malformed(inst, "adds two shared-memory pointers");
     const Value* p = lhs_shared ? inst.operand(0) : inst.operand(1);

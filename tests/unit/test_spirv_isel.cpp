@@ -607,6 +607,39 @@ TEST_CASE("SPIR-V ISel - unsupported opcodes, terminators, calls and non-void ke
     }
 }
 
+TEST_CASE("SPIR-V ISel - Function alloca and constant composite arrays") {
+    {
+        Kernel k({Type::ptr(), Type::i32()});
+        Builder& b = k.b;
+        Value* tbl = b.build_alloca(16, 4);
+        b.build_store(Type::f32(), tbl, 0, b.build_fconst_f32(1.0f));
+        b.build_store(Type::f32(), tbl, 4, b.build_fconst_f32(2.0f));
+        b.build_store(Type::f32(), tbl, 8, b.build_fconst_f32(3.0f));
+        b.build_store(Type::f32(), tbl, 12, b.build_fconst_f32(4.0f));
+        Value* v = b.build_load_indexed(Type::f32(), tbl, k.p(1), 4, 0);
+        b.build_store(Type::f32(), k.p(0), 0, v);
+        b.build_ret_void();
+        compile_checked(*k.fn);
+        std::string d = dump_of(*k.fn);
+        CHECK(has(d, "OpConstantComposite"));
+        CHECK(has(d, "OpVariable"));
+        CHECK(has(d, "OpAccessChain"));
+    }
+    {
+        Kernel k({Type::ptr(), Type::i32(), Type::f32()});
+        Builder& b = k.b;
+        Value* arr = b.build_alloca(24, 4);
+        b.build_store_indexed(Type::f32(), arr, k.p(1), 4, 0, k.p(2));
+        Value* v = b.build_load_indexed(Type::f32(), arr, k.p(1), 4, 0);
+        b.build_store(Type::f32(), k.p(0), 0, v);
+        b.build_ret_void();
+        compile_checked(*k.fn);
+        std::string d = dump_of(*k.fn);
+        CHECK(has(d, "OpVariable"));
+        CHECK(has(d, "OpAccessChain"));
+    }
+}
+
 TEST_CASE("SPIR-V ISel - a shared pointer flowing through a block parameter is diagnosed") {
     Kernel k({Type::ptr(), Type::i32()}, "escape");
     codegen::KernelBuilder kb(k.b);

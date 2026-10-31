@@ -48,6 +48,8 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     ids_.clear();
     bools_.clear();
     shared_.clear();
+    local_.clear();
+    num_local_vars_ = 0;
     value_uses_.clear();
     prologue_cache_.clear();
     prologue_args_.clear();
@@ -290,8 +292,11 @@ void SpirvISel::lower_instruction(const brass::Instruction& inst) {
             break;
 
         case Opcode::add:
-            if (shared_.count(inst.operand(0)) || shared_.count(inst.operand(1))) lower_add_ptr(inst);
-            else lower_binary(inst, spv::OpIAdd, spv::OpFAdd);
+            if (shared_.count(inst.operand(0)) || shared_.count(inst.operand(1)) ||
+                local_.count(inst.operand(0)) || local_.count(inst.operand(1)))
+                lower_add_ptr(inst);
+            else
+                lower_binary(inst, spv::OpIAdd, spv::OpFAdd);
             break;
         case Opcode::sub: lower_binary(inst, spv::OpISub, spv::OpFSub); break;
         case Opcode::mul: lower_binary(inst, spv::OpIMul, spv::OpFMul); break;
@@ -371,6 +376,7 @@ void SpirvISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::bitcast_i32_f32:
         case Opcode::bitcast_f32_i32: lower_convert(inst, spv::OpBitcast, inst.type()); break;
 
+        case Opcode::alloca_:       lower_alloca(inst); break;
         case Opcode::load:          lower_load(inst); break;
         case Opcode::store:         lower_store(inst); break;
         case Opcode::vload:         lower_vload(inst); break;
@@ -553,6 +559,10 @@ const std::vector<Id>& SpirvISel::ids_of(const Value* v, const char* what) {
     if (shared_.count(v)) {
         fail("shared-memory pointer %" + std::to_string(v->id()) + " used as " + what +
              "; on SPIR-V a ptx_shared_alloc_* result may only be offset with add and passed to the ptx_shared_* intrinsics");
+    }
+    if (local_.count(v)) {
+        fail("local alloca pointer %" + std::to_string(v->id()) + " used as " + what +
+             "; on SPIR-V an alloca result may only be offset with add and used by load/store/load_indexed/store_indexed");
     }
     auto it = ids_.find(v);
     if (it != ids_.end()) return it->second;
