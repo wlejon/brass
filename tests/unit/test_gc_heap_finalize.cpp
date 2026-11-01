@@ -199,29 +199,35 @@ TEST_CASE("gc::Heap finalize - a minor collection decides weak slots naming youn
     // before the collector sees them), and a full collection decides them.
     WeakRoots roots;
     std::vector<uint64_t> strong(64, 0);
-    for (size_t i = 0; i < 64; ++i) {
-        const uintptr_t old_obj = h.allocate(16, kRefNode, kAllocOld);
-        roots.slots.push_back(old_obj);
-        if (i % 2 == 0) strong[i] = old_obj;
-    }
+    // Every target is made in a frame of its own, so that no word of this
+    // frame names a dead one and pins it.
+    in_own_frame([&] {
+        for (size_t i = 0; i < 64; ++i) {
+            const uintptr_t old_obj = h.allocate(16, kRefNode, kAllocOld);
+            roots.slots.push_back(old_obj);
+            if (i % 2 == 0) strong[i] = old_obj;
+        }
+    });
     for (uint64_t& s : strong) h.add_root(&s);
     // And young targets, half of them dead.
     std::vector<uint64_t> young_strong(64, 0);
-    for (size_t i = 0; i < 64; ++i) {
-        const uintptr_t y = h.allocate(16, kRefNode);
-        roots.slots.push_back(y);
-        if (i % 2 == 0) young_strong[i] = y;
-    }
+    in_own_frame([&] {
+        for (size_t i = 0; i < 64; ++i) {
+            const uintptr_t y = h.allocate(16, kRefNode);
+            roots.slots.push_back(y);
+            if (i % 2 == 0) young_strong[i] = y;
+        }
+    });
     for (uint64_t& s : young_strong) h.add_root(&s);
     const std::vector<uint64_t> old_before(roots.slots.begin(), roots.slots.begin() + 64);
     const auto id = h.add_root_source(&visit_weak_roots, &roots);
-    h.collect(CollectionKind::Minor);
+    collect_scrubbed(h, CollectionKind::Minor);
     for (size_t i = 0; i < 64; ++i) CHECK_EQ(roots.slots[i], old_before[i]);  // old: undecided, untouched
     for (size_t i = 0; i < 64; ++i) {
         if (i % 2 == 0) CHECK_EQ(roots.slots[64 + i], young_strong[i]);       // moved with its target
         else CHECK_EQ(roots.slots[64 + i], kCleared);                         // died young
     }
-    h.collect(CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
     for (size_t i = 0; i < 64; ++i) CHECK_EQ(roots.slots[i], i % 2 == 0 ? strong[i] : kCleared);
     h.remove_root_source(id);
     for (uint64_t& s : strong) h.remove_root(&s);
