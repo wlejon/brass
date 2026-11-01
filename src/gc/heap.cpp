@@ -509,11 +509,12 @@ void HeapState::clear_young_starts(uintptr_t lo, uintptr_t hi) noexcept {
 uintptr_t Heap::refill_young(size_t total, LayoutId layout, uint8_t host_bits) noexcept {
     HeapState& s = *s_;
     // Anything the slow path would act on first (a requested collection,
-    // stress, the reserve) is left to it, and so is a window at the end of
-    // its fragment or of the adaptive limit: the object is for the next
-    // fragment, or for a collection.
-    if (s.collecting || s.stress != StressMode::None || s.full_requested || s.minor_requested ||
-        s.old_critical) {
+    // stress) is left to it, and so is a window at the end of its fragment
+    // or of the adaptive limit: the object is for the next fragment, or for a
+    // collection. The reserve (old_critical) is not: the window ends every
+    // chunk only for the stack scan's object starts, and the rest of eden is
+    // the program's as it would be with no chunks (Heap::allocate_at).
+    if (s.collecting || s.stress != StressMode::None || s.full_requested || s.minor_requested) {
         return 0;
     }
     const uintptr_t top = alloc_->top;
@@ -556,35 +557,43 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         s.trigger = detail::GcTrigger::Requested;
         collect_at(CollectionKind::Minor, 0, 0);
     }
+    const bool old = (flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
+    // Eden's next free bytes, after the window has moved to whichever
+    // fragment has room for the object (eden_make_room).
+    const auto bump_young = [&] {
+        const uintptr_t at = alloc_->top;
+        alloc_->top = at + total;
+        s.update_fast_limit();
+        // A known start in each chunk of the window (update_fast_limit).
+        s.set_young_start(at + kHeaderBytes);
+        auto* h = reinterpret_cast<ObjectHeader*>(at);
+        h->size = static_cast<uint32_t>(payload);
+        h->layout = layout;
+        h->gc_bits = 0;
+        h->host_bits = host_bits;
+        if (zero) std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
+        return at + kHeaderBytes;
+    };
     // A collection has had to promote into the reserve (HeapState::
     // old_critical): a full collection may give the room back; if it does not,
     // this allocation fails rather than let the heap reach a collection with
     // nowhere to promote to. The failure leaves the heap consistent, eden
-    // empty, so the program can drop references and go on.
+    // empty, so the program can drop references and go on. A young object
+    // eden still has room for needs no collection and takes none of the
+    // reserve, so it is allocated: the window reaches the runtime at every
+    // chunk and at every object the stacks pinned in eden, and the program
+    // refused an allocation builds its RangeError in what is left.
     if (s.old_critical) {
+        if (!old && s.eden_make_room(total)) return bump_young();
         s.trigger = detail::GcTrigger::Exhausted;
         collect_at(CollectionKind::Full, 0, 0);
         if (s.old_critical) throw std::bad_alloc();
     }
 
-    const bool old = (flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
     bool displaced = false;
     if (!old) {
         for (int attempt = 0; attempt < 3; ++attempt) {
-            if (s.eden_make_room(total)) {
-                const uintptr_t at = alloc_->top;
-                alloc_->top = at + total;
-                s.update_fast_limit();
-                // A known start in each chunk of the window (update_fast_limit).
-                s.set_young_start(at + kHeaderBytes);
-                auto* h = reinterpret_cast<ObjectHeader*>(at);
-                h->size = static_cast<uint32_t>(payload);
-                h->layout = layout;
-                h->gc_bits = 0;
-                h->host_bits = host_bits;
-                if (zero) std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
-                return at + kHeaderBytes;
-            }
+            if (s.eden_make_room(total)) return bump_young();
             // Eden was just collected and still has no room for it between
             // the pinned objects: another collection would pin them again.
             if (attempt > 0 && s.eden_frags.size() > 1) break;
@@ -872,7 +881,7 @@ size_t Heap::committed_bytes() const noexcept {
 }
 
 uint64_t Heap::allocated_bytes() const noexcept {
-    return s_->eden_bytes_retired + (alloc_->top - s_->eden_lo) + s_->old_direct_bytes;
+    return s_->eden_bytes_retired + s_->eden_allocated() + s_->old_direct_bytes;
 }
 
 void Heap::bind_allocation_buffer(AllocationBuffer* buffer) noexcept {
