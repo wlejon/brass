@@ -288,39 +288,37 @@ TEST_CASE("gc::Heap pinning - a survivor-space pin stays through the next collec
         auto keep = std::make_unique<uint64_t>(0);
         h.add_root(keep.get());
         // The object survives one minor collection unpinned (rooted in
-        // *keep only), so it sits in a survivor space.
-        {
-            const uintptr_t o = make_leaf(h, 3, 11);
-            *keep = o;
-        }
+        // *keep only), so it sits in a survivor space. Every read of its
+        // address other than `held` happens in a frame of its own or hidden,
+        // so that `held` is the only word of this frame naming it.
+        brass::test::in_own_frame([&] { *keep = make_leaf(h, 3, 11); });
         h.collect(CollectionKind::Minor);
         volatile uintptr_t held = static_cast<uintptr_t>(*keep);
-        // Off the stack, so that only `held` names the object there.
-        auto at_box = std::make_unique<uintptr_t>(held);
-        const uintptr_t& at = *at_box;
-        CHECK(h.is_young(at));
+        const uint64_t at = brass::test::from_own_frame([&] { return brass::test::hide_address(*keep); });
+        CHECK(brass::test::from_own_frame([&] { return h.is_young(brass::test::unhide_address(at)); }));
         for (int i = 0; i < 3; ++i) {
-            for (int k = 0; k < 2000; ++k) {
-                const uintptr_t n = h.allocate(16, kPair);
-                h.store(n, 0, *list);
-                *list = n;
-                if (k % 64 == 0) *list = 0;  // most of them die
-            }
+            brass::test::in_own_frame([&] {
+                for (int k = 0; k < 2000; ++k) {
+                    const uintptr_t n = h.allocate(16, kPair);
+                    h.store(n, 0, *list);
+                    *list = n;
+                    if (k % 64 == 0) *list = 0;  // most of them die
+                }
+            });
             h.collect(CollectionKind::Minor);
-            CHECK_EQ(static_cast<uintptr_t>(*keep), at);
-            CHECK(intact(at, 3, 11));
+            CHECK(brass::test::from_own_frame([&] { return brass::test::hide_address(*keep) == at; }));
+            CHECK(brass::test::from_own_frame([&] { return intact(brass::test::unhide_address(at), 3, 11); }));
         }
         // Not named by the stack any more: the next collections copy it and
         // the root follows.
         held = 0;
-        scrub_stack();
         for (int i = 0; i < 2; ++i) {
-            churn(h, 1000);
-            h.collect(CollectionKind::Minor);
+            brass::test::in_own_frame([&] { churn(h, 1000); });
+            brass::test::collect_scrubbed(h, CollectionKind::Minor);
         }
-        CHECK(intact(static_cast<uintptr_t>(*keep), 3, 11));
-        CHECK(h.is_valid_object(static_cast<uintptr_t>(*keep)));
-        CHECK(static_cast<uintptr_t>(*keep) != at);
+        CHECK(brass::test::from_own_frame([&] { return intact(static_cast<uintptr_t>(*keep), 3, 11); }));
+        CHECK(brass::test::from_own_frame([&] { return h.is_valid_object(static_cast<uintptr_t>(*keep)); }));
+        CHECK(brass::test::from_own_frame([&] { return brass::test::hide_address(*keep) != at; }));
         h.verify();
         h.remove_root(keep.get());
         h.remove_root(list.get());
@@ -405,8 +403,10 @@ TEST_CASE("gc::Heap pinning - a reference held only in a callee-saved register i
     const uintptr_t before = held;
     h.collect(CollectionKind::Minor);
     __asm__ __volatile__("" : "+r"(held));
-    CHECK_EQ(held, before);
-    CHECK(intact(held, 5, 13));
+    // CHECK_EQ binds references, and GCC refuses the address of a register variable.
+    const uintptr_t after = held;
+    CHECK_EQ(after, before);
+    CHECK(intact(after, 5, 13));
 }
 #endif
 
@@ -434,17 +434,11 @@ TEST_CASE("gc::Heap pinning - stress modes keep stack references valid") {
 TEST_CASE("gc::Heap pinning - an object only a heap root names still moves") {
     Heap h(pin_config());
     HeapScope bind(h);
-    auto root = std::make_unique<uint64_t>(0);
-    h.add_root(root.get());
-    struct Make {
-        PIN_TEST_NOINLINE static void into(Heap& heap, uint64_t* slot) { *slot = make_leaf(heap, 4, 16); }
-    };
-    Make::into(h, root.get());
-    // Off the stack, so that nothing there names the object but by chance.
-    auto before = std::make_unique<uint64_t>(*root);
-    scrub_stack();
-    h.collect(CollectionKind::Minor);
-    CHECK(intact(static_cast<uintptr_t>(*root), 4, 16));
-    CHECK(*root != *before);
-    h.remove_root(root.get());
+    brass::test::HeapRoot root(h);
+    brass::test::in_own_frame([&] { *root.slot = make_leaf(h, 4, 16); });
+    // Hidden, so that nothing on the stack names the object but by chance.
+    const uint64_t before = root.hidden();
+    brass::test::collect_scrubbed(h, CollectionKind::Minor);
+    CHECK(brass::test::from_own_frame([&] { return intact(static_cast<uintptr_t>(*root.slot), 4, 16); }));
+    CHECK(root.hidden() != before);
 }
