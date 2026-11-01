@@ -5,6 +5,8 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
+#include <brass/runtime/fast_trig.hpp>
+#include <brass/runtime/native_function.hpp>
 #include <iostream>
 #include <cmath>
 #include <cstring>
@@ -191,6 +193,11 @@ void Interpreter::register_builtin_host_functions() {
         if (args.empty()) return RuntimeValue::from_f64(0.0);
         return RuntimeValue::from_f64(std::ceil(args[0].as_f64()));
     });
+
+    // The trig runtime, the functions native code links (fast_trig.hpp).
+    register_external_function("brass_sin_f64", runtime::host_function<Interpreter>(&brass_sin_f64));
+    register_external_function("brass_cos_f64", runtime::host_function<Interpreter>(&brass_cos_f64));
+    register_external_function("brass_sincos_f64", runtime::host_function<Interpreter>(&brass_sincos_f64));
 }
 
 RuntimeValue Interpreter::resume(const Function& fn, uint32_t resume_id, const std::vector<RuntimeValue>& state_values) {

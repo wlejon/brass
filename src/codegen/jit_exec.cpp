@@ -11,6 +11,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/fast_trig.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/debug/jit_unwind_registry.hpp>
@@ -113,6 +114,9 @@ static void register_brass_runtime_symbols(JitExecutionEngine& e) {
     e.register_external_symbol("brass_parallel_reduce_f64", reinterpret_cast<void*>(&brass_parallel_reduce_f64));
     e.register_external_symbol("brass_parallel_alloc_context", reinterpret_cast<void*>(&brass_parallel_alloc_context));
     e.register_external_symbol("brass_parallel_free_context", reinterpret_cast<void*>(&brass_parallel_free_context));
+    e.register_external_symbol("brass_sin_f64", reinterpret_cast<void*>(&brass_sin_f64));
+    e.register_external_symbol("brass_cos_f64", reinterpret_cast<void*>(&brass_cos_f64));
+    e.register_external_symbol("brass_sincos_f64", reinterpret_cast<void*>(&brass_sincos_f64));
 }
 
 JitExecutionEngine::JitExecutionEngine(const Target& target)

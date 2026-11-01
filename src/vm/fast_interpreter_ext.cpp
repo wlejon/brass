@@ -3,6 +3,8 @@
 #include <brass/runtime/coroutine.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
+#include <brass/runtime/fast_trig.hpp>
+#include <brass/runtime/native_function.hpp>
 #include <cmath>
 
 namespace brass {
@@ -131,6 +133,12 @@ void FastInterpreter::register_builtin_host_functions() {
         if (args.empty()) return RuntimeValue::from_f64(0.0);
         return RuntimeValue::from_f64(std::ceil(args[0].as_f64()));
     });
+
+    // The trig runtime, the functions native code links (fast_trig.hpp).
+    register_external_function("brass_sin_f64", FastHostFn(runtime::host_function<FastInterpreter>(&brass_sin_f64)));
+    register_external_function("brass_cos_f64", FastHostFn(runtime::host_function<FastInterpreter>(&brass_cos_f64)));
+    register_external_function("brass_sincos_f64",
+                               FastHostFn(runtime::host_function<FastInterpreter>(&brass_sincos_f64)));
 }
 
 void FastInterpreter::handle_write_barrier(FastFrame& frame, uint32_t obj_reg, uint32_t val_reg) {

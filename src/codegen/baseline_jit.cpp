@@ -10,6 +10,7 @@
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/runtime/fast_trig.hpp>
 #include <brass/core/string_pool.hpp>
 #include <brass/pgo/instrument.hpp>
 #include <cstring>
@@ -263,6 +264,9 @@ BaselineJitCompiler::BaselineJitCompiler(Target target)
     symbols_["brass_tier1_record_invocation_fb"] = reinterpret_cast<void*>(&brass_tier1_record_invocation_fb);
     symbols_["brass_coro_set_awaiter"] = reinterpret_cast<void*>(&brass_coro_set_awaiter);
     symbols_["brass_coro_awaiter"] = reinterpret_cast<void*>(&brass_coro_awaiter);
+    symbols_["brass_sin_f64"] = reinterpret_cast<void*>(&brass_sin_f64);
+    symbols_["brass_cos_f64"] = reinterpret_cast<void*>(&brass_cos_f64);
+    symbols_["brass_sincos_f64"] = reinterpret_cast<void*>(&brass_sincos_f64);
     lazy_ = std::make_shared<LazySymbolTable>([this](std::string_view name) { return resolve_lazy(name); });
 }
 

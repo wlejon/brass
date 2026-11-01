@@ -13,6 +13,9 @@ std::string_view symbol_role_name(SymbolRole role) noexcept {
         case SymbolRole::FloatRem: return "frem";
         case SymbolRole::Data: return "data";
         case SymbolRole::NoCollect: return "nocollect";
+        case SymbolRole::SinF64: return "sin_f64";
+        case SymbolRole::CosF64: return "cos_f64";
+        case SymbolRole::SinCosF64: return "sincos_f64";
     }
     return "unknown";
 }
