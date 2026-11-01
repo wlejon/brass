@@ -46,7 +46,7 @@ void HeapState::mark_lines(BlockMeta& meta, uintptr_t block_lo, uintptr_t header
     for (size_t l = first; l <= last; ++l) lines[l] = 1;
 }
 
-uint32_t HeapState::acquire_free_block() {
+uint32_t HeapState::acquire_free_block(bool holes_will_do) {
     // While the last cycle's sweep is pending, some unswept blocks are free
     // ones the eager sweep would have listed: a few are looked at before a
     // fresh block is taken from the frontier, and all of them before the
@@ -54,11 +54,25 @@ uint32_t HeapState::acquire_free_block() {
     // end. A parallel minor collection's promotion never sweeps
     // (HeapState::parallel_promotion): it takes a free block or the frontier.
     if (sweep.low < sweep.high && !parallel_promotion) {
-        if (free_blocks.empty()) sweep_blocks_for_allocation();
+        // The bottom first, then the top: the blocks a refill took from the
+        // frontier while an earlier sweep was pending are there, holding the
+        // few objects it placed, and a heap whose lowest blocks are full
+        // finds their holes there rather than taking a fresh block again.
+        if (free_blocks.empty() && !sweep_blocks_for_allocation() && (!holes_will_do || recyclable_blocks.empty())) {
+            (void)sweep_blocks_for_allocation(/*from_top=*/true);
+        }
         const bool at_reserve = !collecting && mature_blocks_available() <= reserve_mature_blocks;
         const bool at_end = free_blocks.empty() && (blocks.size() + 1) * kBlockBytes > mature_reserve;
         if (at_reserve || at_end) complete_sweep();
     }
+    // The sweep filed a block with holes, which is what the small region
+    // wants: a fresh block taken instead would hold the few objects this
+    // refill places, with the swept block's holes unused. A heap whose lowest
+    // blocks are full grew that way by a block at every cycle that promoted
+    // while its sweep was pending (the allocator's sweep starts at the bottom
+    // each cycle), each holding a few live objects, and every later sweep
+    // walked them all: under full-collection stress, quadratic.
+    if (holes_will_do && !recyclable_blocks.empty()) return kHolesFiled;
     // The last `reserve_mature_blocks` are a collection's (the promotion reserve).
     if (!collecting && mature_blocks_available() <= reserve_mature_blocks) return UINT32_MAX;
     uint32_t index;
@@ -121,7 +135,8 @@ bool HeapState::refill_region(BumpRegion& region, bool whole_block) {
             region.next_line = 0;
             continue;
         }
-        const uint32_t index = acquire_free_block();
+        const uint32_t index = acquire_free_block(/*holes_will_do=*/true);
+        if (index == kHolesFiled) continue;
         if (index == UINT32_MAX) {
             region = BumpRegion{};
             return false;

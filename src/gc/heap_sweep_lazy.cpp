@@ -297,13 +297,13 @@ void HeapState::complete_sweep() {
     end_sweep(*this);
 }
 
-bool HeapState::sweep_blocks_for_allocation() {
+bool HeapState::sweep_blocks_for_allocation(bool from_top) {
     LazySweep& w = sweep;
     const uint64_t t0 = log ? gc_now_ns() : 0;
     bool found = false;
     unsigned swept = 0;
     while (w.low < w.high && swept < kAllocatorSweepBlocks) {
-        const uint32_t index = w.low++;
+        const uint32_t index = from_top ? --w.high : w.low++;
         BlockMeta& meta = *blocks[index];
         if (!block_unswept(meta)) continue;
         const size_t recyclable = recyclable_blocks.size();

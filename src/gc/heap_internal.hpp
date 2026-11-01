@@ -546,7 +546,11 @@ struct HeapState {
     // Commits (and cleans) the cards covering old addresses [lo, hi).
     void commit_cards(uintptr_t lo, uintptr_t hi);
     bool refill_region(BumpRegion& region, bool whole_block);
-    uint32_t acquire_free_block();
+    // A free block, swept or fresh from the frontier; UINT32_MAX when none
+    // may be had. `holes_will_do` (the small region's refill): kHolesFiled
+    // instead when the pending sweep it ran filed a recyclable block.
+    static constexpr uint32_t kHolesFiled = UINT32_MAX - 1;
+    uint32_t acquire_free_block(bool holes_will_do = false);
     // Frees a large object's pages; returns the pages of the free run they
     // joined.
     uint32_t free_large(uint32_t head, uint32_t pages);
@@ -579,9 +583,10 @@ struct HeapState {
     bool sweep_work(uint64_t deadline_ns);
     // All of what is left, at once (a cycle's start; a space near its end).
     void complete_sweep();
-    // The allocator's share: unswept blocks from the bottom until one has
-    // free lines (or is free), at most a few; true when one was found.
-    bool sweep_blocks_for_allocation();
+    // The allocator's share: unswept blocks from the bottom (or the top)
+    // until one has free lines (or is free), at most a few; true when one
+    // was found.
+    bool sweep_blocks_for_allocation(bool from_top = false);
     // Unswept large objects until a free run of `pages` exists (at most a
     // few): true when one was made.
     bool sweep_large_for_allocation(uint32_t pages);

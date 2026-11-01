@@ -566,6 +566,85 @@ TEST_CASE("gc::Heap lazy sweep - excess free blocks go back to the OS in the swe
     }
 }
 
+namespace {
+// One young object pushed onto the list at *head (word 1 links the next).
+BRASS_TEST_NOINLINE void push_young(Heap& h, uint64_t* head) {
+    const uintptr_t node = h.allocate(48, words_layout());
+    h.store(node, 1, *head);
+    *head = node;
+}
+
+// One step of a list a program rebuilds at every push (JavaScript's
+// `items = items.concat([record])`): a fresh array of the records so far
+// plus the new one, which replaces the last as the root.
+BRASS_TEST_NOINLINE void push_copy(Heap& h, uint64_t* list, size_t count) {
+    const uintptr_t str = h.allocate(24, words_layout());
+    const uintptr_t record = h.allocate(48, words_layout());
+    *slot_of(record, 0) = (count << 1) | 1;
+    h.store(record, 1, str);
+    (void)h.allocate(40, words_layout());  // garbage
+    const uintptr_t next = h.allocate((count + 1) * 8, words_layout());
+    const auto old = static_cast<uintptr_t>(*list);
+    for (size_t i = 0; i < count; ++i) h.store(next, i, Heap::load(old, i));
+    h.store(next, count, record);
+    *list = next;
+}
+} // namespace
+
+// A minor collection that promotes a few objects while the sweep is pending
+// finds the holes of the blocks it sweeps, at the bottom or (past a run of
+// full blocks there) at the top, rather than a fresh block each cycle that
+// keeps those few objects and is never filled.
+TEST_CASE("gc::Heap lazy sweep - promotion during the sweep fills swept holes, not a fresh block per cycle") {
+    // Full blocks at the bottom: more than the allocator's first look
+    // (4 blocks), and more than both of its looks there.
+    for (const size_t full_blocks : {size_t{6}, size_t{40}}) {
+        HeapConfig c = config();
+        c.verify = false;
+        c.tenure_age = 1;  // a minor collection promotes what it finds live
+        Heap h(c);
+        // 64-byte objects (7 words and the header), all live: full blocks.
+        OldSet base = make_old(h, full_blocks * (kBlockBytes / 64), 7, 1);
+        root_all(h, base.kept);
+        uint64_t list = 0;
+        h.add_root(&list);
+        constexpr int kCycles = 200;
+        for (int cycle = 0; cycle < kCycles; ++cycle) {
+            collect_scrubbed(h, CollectionKind::Full);  // leaves its sweep pending
+            REQUIRE(h.sweeping());
+            push_young(h, &list);
+            collect_scrubbed(h, CollectionKind::Minor);  // promotes it, the sweep pending
+        }
+        // Right after a full collection, every block in use is unswept. A
+        // block a cycle (200 more) before; the 200 nodes fit in one or two.
+        collect_scrubbed(h, CollectionKind::Full);
+        CHECK(h.pressure().unswept_blocks <= full_blocks + 4);
+        h.remove_root(&list);
+        unroot_all(h, base.kept);
+    }
+}
+
+// The same under alternate stress, as a JavaScript program builds a list by
+// concatenation: the blocks it took grew by one at every full collection
+// (~16 MB a thousand pushes past the first thousand), and each sweep walked
+// them all.
+TEST_CASE("gc::Heap lazy sweep - a list rebuilt at every push under alternate stress keeps its old space small") {
+    HeapConfig c;
+    c.read_environment = false;
+    c.stress = StressMode::Alternate;
+    Heap h(c);
+    uint64_t list = 0;
+    h.add_root(&list);
+    list = h.allocate(8, words_layout());
+    for (size_t i = 0; i < 4000; ++i) push_copy(h, &list, i);
+    // Live in mature blocks: 4000 records of 64 + 32 bytes, about 12 blocks.
+    // Right after a full collection every block in use is unswept; 1500
+    // were before.
+    h.collect(CollectionKind::Full);
+    CHECK(h.pressure().unswept_blocks <= 32);
+    h.remove_root(&list);
+}
+
 TEST_CASE("gc::Heap lazy sweep - an old space near its end finishes the sweep instead of collecting again") {
     HeapConfig c = config();
     c.verify = false;
