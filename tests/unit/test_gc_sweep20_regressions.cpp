@@ -76,7 +76,13 @@ b0:
 }
 )";
 
-int64_t run_cr(int64_t n, size_t* minors) {
+// The collections that move young objects: minor ones, and full ones, which
+// empty the young generation first. BRASS_GC_STRESS=full runs only full ones.
+size_t moving_collections(const GenHeap& heap) {
+    return static_cast<size_t>(heap.minor_collections() + heap.full_collections());
+}
+
+int64_t run_cr(int64_t n, size_t* moving) {
     auto mod = parse_ok(kCr);
     CoroTransformPass pass;
     pass.run_on_module(*mod);
@@ -86,7 +92,7 @@ int64_t run_cr(int64_t n, size_t* minors) {
     auto cr = reinterpret_cast<I64Fn>(jit.get_symbol_address("cr"));
     REQUIRE(cr != nullptr);
     const int64_t r = cr(n);
-    *minors = heap.minor_collections();
+    *moving = moving_collections(heap);
     return r;
 }
 
@@ -188,7 +194,7 @@ extern "C" SWEEP20_NOINLINE int64_t sweep20_host_cb(int64_t n) {
     return g_callback(n);
 }
 
-int64_t run_cb(CbMode mode, size_t* minors) {
+int64_t run_cb(CbMode mode, size_t* moving) {
     g_cb_mode = mode;
     auto mod = parse_ok(kCb);
     codegen::JitExecutionEngine jit;
@@ -200,7 +206,7 @@ int64_t run_cb(CbMode mode, size_t* minors) {
     REQUIRE(g_callback != nullptr);
     REQUIRE(f != nullptr);
     const int64_t r = f(2000);
-    *minors = heap.minor_collections();
+    *moving = moving_collections(heap);
     g_callback = nullptr;
     return r;
 }
@@ -208,13 +214,13 @@ int64_t run_cb(CbMode mode, size_t* minors) {
 } // namespace
 
 TEST_CASE("Sweep20 - coro_resume keeps its generated caller's gcrefs across a collection in the body") {
-    size_t minors = 0;
-    CHECK_EQ(run_cr(10, &minors), 42);
+    size_t moving = 0;
+    CHECK_EQ(run_cr(10, &moving), 42);
     // No collection for 10 frames, unless BRASS_GC_STRESS collects at each.
     const bool env_stress = gc::Heap(test::small_heap_config()).stress() != gc::StressMode::None;
-    if (!env_stress) CHECK_EQ(minors, 0u);
-    CHECK_EQ(run_cr(2000, &minors), 42);
-    CHECK(minors > 0);
+    if (!env_stress) CHECK_EQ(moving, 0u);
+    CHECK_EQ(run_cr(2000, &moving), 42);
+    CHECK(moving > 0);
 }
 
 // The body's collections move the frame; both resumes must see the live copy.
@@ -228,13 +234,13 @@ TEST_CASE("Sweep20 - coro_resume of a body that collects and finishes, then resu
     auto runs = reinterpret_cast<I64Fn>(jit.get_symbol_address("runs"));
     REQUIRE(runs != nullptr);
     CHECK_EQ(runs(2000), 707);
-    CHECK(heap.minor_collections() > 0);
+    CHECK(moving_collections(heap) > 0);
 }
 
 TEST_CASE("Sweep20 - host callback with a NativeFramesScope keeps the generated caller's gcrefs") {
-    size_t minors = 0;
-    CHECK_EQ(run_cb(CbMode::Scope, &minors), 42);
-    CHECK(minors > 0);
+    size_t moving = 0;
+    CHECK_EQ(run_cb(CbMode::Scope, &moving), 42);
+    CHECK(moving > 0);
 }
 
 #if (defined(_WIN32) && defined(_M_X64)) || (defined(__APPLE__) && defined(__aarch64__))
@@ -243,15 +249,15 @@ TEST_CASE("Sweep20 - host callback with a NativeFramesScope keeps the generated 
 // chain every function keeps. Elsewhere compiled code may omit frame
 // pointers and the host must record the transition.
 TEST_CASE("Sweep20 - host callback without a scope keeps the generated caller's gcrefs") {
-    size_t minors = 0;
-    CHECK_EQ(run_cb(CbMode::Plain, &minors), 42);
-    CHECK(minors > 0);
+    size_t moving = 0;
+    CHECK_EQ(run_cb(CbMode::Plain, &moving), 42);
+    CHECK(moving > 0);
 }
 
 TEST_CASE("Sweep20 - host callback with an rbp frame keeps the generated caller's gcrefs") {
-    size_t minors = 0;
-    CHECK_EQ(run_cb(CbMode::FramePointer, &minors), 42);
-    CHECK(minors > 0);
+    size_t moving = 0;
+    CHECK_EQ(run_cb(CbMode::FramePointer, &moving), 42);
+    CHECK(moving > 0);
 }
 #endif
 

@@ -28,6 +28,11 @@ namespace {
 constexpr size_t kMB = size_t{1} << 20;
 constexpr size_t kNodeTotal = 48;  // a 40-byte payload and its header
 
+// Not read from the environment: these tests wait for the minor collection
+// an eden's worth of allocation brings, which BRASS_GC_STRESS's modes replace
+// (full: only full collections; the others: one at every allocation), so a
+// stressed run would test a different heap, and under full stress wait for a
+// minor that never comes.
 HeapConfig eden_config() {
     HeapConfig c;  // the default 16 MB eden, 8 MB survivor spaces, 1 MB copy budget
     c.read_environment = false;
@@ -49,9 +54,15 @@ uintptr_t new_node(Heap& h, uint64_t* list) {
 // linked onto *keep (so the collection copies nearly all of eden); otherwise
 // each dies at once. In a frame of its own, so no node's address is left in
 // the caller's.
+// A heap that is stressed, or one whose minor never comes within twice the
+// whole eden, fails here rather than allocating forever.
 BRASS_TEST_NOINLINE void allocate_until_minor(Heap& h, uint64_t* keep) {
+    REQUIRE(h.stress() == StressMode::None);
     const uint64_t before = h.stats().minor_collections;
-    while (h.stats().minor_collections == before) new_node(h, keep);
+    const size_t most = 2 * (h.pressure().eden_capacity / kNodeTotal + 1);
+    size_t nodes = 0;
+    while (h.stats().minor_collections == before && nodes++ < most) new_node(h, keep);
+    REQUIRE(h.stats().minor_collections != before);
 }
 
 size_t eden_capacity(const Heap& h) { return h.pressure().eden_capacity; }

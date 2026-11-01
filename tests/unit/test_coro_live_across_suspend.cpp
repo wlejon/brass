@@ -347,9 +347,14 @@ TEST_CASE("Coro live values - a collection while suspended moves the frame's gcr
                 if (((layout.pointer_mask >> s) & 1) && f->slots[s] != 0 && f->slots[s] != *obj) slots_ok = false;
             }
         });
-        if (!r.done || !moved || !slots_ok) std::printf("  @gcb under collections on the %s\n", tier_name(t));
+        // BRASS_GC_STRESS=full runs a full collection at each of the body's
+        // allocations and safepoints, while the running frame names the
+        // object: each pins it in place, so it never moves, and only the
+        // slots are checked (they must still name it).
+        const bool can_move = heap->stress() != gc::StressMode::Full;
+        if (!r.done || (can_move && !moved) || !slots_ok) std::printf("  @gcb under collections on the %s\n", tier_name(t));
         CHECK(r.done);
-        CHECK(moved);
+        CHECK(moved || !can_move);
         CHECK(slots_ok);
         CHECK((r.yields == std::vector<uint64_t>{40, 41, 42, 43}));
     }
