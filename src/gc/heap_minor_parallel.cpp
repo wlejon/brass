@@ -39,7 +39,10 @@
 // that does not fit what is left of the space is promoted, as when the serial
 // copy finds the space full (survivor overflow). The unused end of each
 // buffer is slack the adaptive eden's survival sample leaves out
-// (HeapState::survivor_slack). A promotion goes into its thread's own pair of
+// (HeapState::survivor_slack). When residents an earlier evacuation pinned
+// split the to-space, the buffers are taken from its fragments under a lock
+// instead, each still starting on a start-bit word of its own. Pinned objects
+// are never claimed: they stay where they are. A promotion goes into its thread's own pair of
 // mature regions (holes of a recyclable block, whole free blocks for medium
 // objects) or a large object, taken under one lock; a block belongs to one
 // region at a time, so its start bits have one writer, stored atomically for
@@ -143,7 +146,6 @@ struct alignas(kApart) Worker {
     uint64_t promoted_bytes = 0;
     uint64_t promoted_objects = 0;
     uint64_t tenured_bytes = 0;
-    uint64_t slack = 0;
     bool overflow = false;
     uint64_t cards_done_ns = 0;  // when it found the card work all taken (logging only)
 
@@ -166,6 +168,13 @@ struct ParMinor {
     // Written while they run, each on lines of its own.
     alignas(kApart) std::atomic<size_t> card_next{0};
     alignas(kApart) std::atomic<uintptr_t> survivor_top{0};
+    // A to-space that residents split (GcState::to_frags) hands out its
+    // buffers under a lock instead, fragment by fragment.
+    bool fragmented = false;
+    alignas(kApart) std::mutex frag_mutex;
+    size_t frag_index = 0;
+    uintptr_t frag_cursor = 0;  // in to_frags[frag_index]; 0: not yet taken from
+    uintptr_t handed_hi = 0;    // the end of the highest buffer handed out
     alignas(kApart) std::atomic<size_t> pool_size{0};
     std::atomic<unsigned> idle{0};
     alignas(kApart) std::mutex pool_mutex;
@@ -283,17 +292,38 @@ uintptr_t survivor_allocate(Worker& w, size_t total) {
     // A large object takes a piece of its own; the buffer keeps its room.
     const bool own = need > pm.buffer_bytes / 4;
     const size_t want = own ? need : pm.buffer_bytes;
+    if (pm.fragmented) {
+        // Each buffer starts on a start-bit word of its own (aligned), and
+        // ends at most at its fragment's end, short of a resident; the next
+        // fragment's first aligned address lies past the resident's word.
+        const std::vector<YoungFragment>& frags = pm.g.to_frags;
+        std::lock_guard<std::mutex> lock(pm.frag_mutex);
+        while (pm.frag_index < frags.size()) {
+            const YoungFragment& f = frags[pm.frag_index];
+            if (pm.frag_cursor == 0) pm.frag_cursor = (f.lo + kBufferAlign - 1) & ~(kBufferAlign - 1);
+            const uintptr_t at = pm.frag_cursor;
+            const size_t room = f.hi > at ? f.hi - at : 0;
+            const size_t take = std::min(want, room);
+            if (take >= need || (take >= total && take == room)) {
+                pm.frag_cursor = at + take;
+                pm.handed_hi = std::max(pm.handed_hi, at + take);
+                if (own) return at;
+                w.buffer_cursor = at + total;
+                w.buffer_limit = at + take;
+                return at;
+            }
+            ++pm.frag_index;
+            pm.frag_cursor = 0;
+        }
+        return 0;
+    }
     uintptr_t top = pm.survivor_top.load(std::memory_order_relaxed);
     for (;;) {
         const size_t take = std::min<size_t>(want, pm.survivor_end - top);
         if (take < need) return 0;
         if (pm.survivor_top.compare_exchange_weak(top, top + take, std::memory_order_relaxed,
                                                   std::memory_order_relaxed)) {
-            if (own) {
-                w.slack += take - total;
-                return top;
-            }
-            w.slack += w.buffer_limit - w.buffer_cursor;
+            if (own) return top;
             w.buffer_cursor = top + total;
             w.buffer_limit = top + take;
             return top;
@@ -414,7 +444,7 @@ uintptr_t copy(Worker& w, uintptr_t object, uint8_t bits) {
     }
     std::memcpy(reinterpret_cast<void*>(dest), h, total);
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
-    uint8_t nbits = static_cast<uint8_t>(bits & ~(kGcForwarded | kGcBusy | kGcAgeMask));
+    uint8_t nbits = static_cast<uint8_t>(bits & ~(kGcForwarded | kGcBusy | kGcAgeMask | kGcResident));
     if (!promoted) nbits = static_cast<uint8_t>(nbits | (age << kGcAgeShift));
     nh->gc_bits = nbits;
     const uintptr_t moved = dest + kHeaderBytes;
@@ -458,6 +488,8 @@ uintptr_t forward(Worker& w, uintptr_t object) {
     unsigned spins = 0;
     for (;;) {
         if (b & kGcForwarded) return *reinterpret_cast<const uintptr_t*>(object);
+        // Pinned before the threads started (pin_stack_objects): it stays.
+        if (b & kGcPinned) return object;
         if (b & kGcBusy) {
             if (++spins < 1024) cpu_relax();
             else std::this_thread::yield();
@@ -475,6 +507,7 @@ uintptr_t forward(Worker& w, uintptr_t object) {
 uintptr_t live_now(const GcState& g, uintptr_t a) noexcept {
     if (!g.heap.is_young(a) || !g.in_from(a)) return a;
     const uint8_t b = AtomicRef<uint8_t>(header_of(a)->gc_bits).load(std::memory_order_acquire);
+    if (b & kGcPinned) return a;
     return (b & kGcForwarded) ? *reinterpret_cast<const uintptr_t*>(a) : 0;
 }
 
@@ -773,11 +806,14 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     pm.block_bound = static_cast<uint32_t>(s.blocks.size());
     pm.page_bound = s.large_frontier;
     const uintptr_t to_lo = s.survivor_lo[g.to];
-    if (s.survivor_top[g.to] != to_lo || ((to_lo - s.eden_lo) & (kBufferAlign - 1)) != 0) {
-        gc_fatal("a parallel minor collection's survivor space is not empty and aligned");
+    if (((to_lo - s.eden_lo) & (kBufferAlign - 1)) != 0) {
+        gc_fatal("a parallel minor collection's survivor space is not aligned");
     }
+    // Residents an earlier evacuation pinned there split the to-space.
+    pm.fragmented = g.to_frags.size() != 1 || g.to_frags[0].lo != to_lo;
     pm.survivor_top.store(to_lo);
     pm.survivor_end = to_lo + s.survivor_bytes;
+    pm.handed_hi = to_lo;
     pm.buffer_bytes = std::clamp<size_t>((s.survivor_bytes / 64) & ~(kBufferAlign - 1), kBufferAlign, kBufferBytes);
 
     MarkThreads& helpers = heap_helpers(s);
@@ -786,6 +822,9 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     const uintptr_t lo = g.shade ? g.heap.reservation_base() : g.heap.young_base();
     const size_t span = g.shade ? g.heap.reservation_bytes() : g.heap.young_span();
     for (unsigned i = 0; i < pm.threads; ++i) pm.workers.push_back(std::make_unique<Worker>(pm, g.heap, lo, lo + span));
+    // The pinned objects (evacuate pinned them before choosing this path)
+    // are the calling thread's first grey work, shared like the rest.
+    pm.workers[0]->stack.insert(pm.workers[0]->stack.end(), s.pinned.begin(), s.pinned.end());
 
     gather_dirty_cards(g, pm.cards);
     clock.lap(kPhaseCards);
@@ -806,14 +845,13 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
         g.phase_ns[kPhaseTrace] -= cards;
     }
 
-    // The threads' buffers and regions back to the heap: the survivor
-    // space's top past every buffer, the blocks with room left recyclable
-    // again (the next refill finds their holes from the start).
-    s.survivor_top[g.to] = pm.survivor_top.load();
-    uint64_t slack = 0;
+    // The threads' buffers and regions back to the heap: the copies end past
+    // every buffer (reclaim_young sets the survivor space's top, and its
+    // slack, from that), the blocks with room left recyclable again (the next
+    // refill finds their holes from the start).
+    g.to_copied_hi = pm.fragmented ? pm.handed_hi : pm.survivor_top.load();
     for (auto& wp : pm.workers) {
         Worker& w = *wp;
-        slack += w.slack + (w.buffer_limit - w.buffer_cursor);
         for (const BumpRegion* r : {&w.small, &w.medium}) {
             if (r->block == UINT32_MAX) continue;
             const BlockMeta& meta = *s.blocks[r->block];
@@ -834,7 +872,6 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
         s.old_allocated_since_full += w.promoted_bytes;
         g.survivor_overflow = g.survivor_overflow || w.overflow;
     }
-    s.survivor_slack[g.to] = slack;
     s.relocation_epoch += g.copied_objects;
     g.minor_threads = pm.threads;
     settle_weakness(g);

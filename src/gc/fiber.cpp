@@ -1,3 +1,5 @@
+#include "heap_internal.hpp"
+
 #include <brass/gc/fiber.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -20,6 +22,7 @@
 #endif
 #include <windows.h>
 #else
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -93,6 +96,34 @@ thread_local StackRecord* t_running = nullptr;       // null: the thread's own s
 thread_local StackRecord* t_switched_out = nullptr;  // head of the list
 
 StackRecord* running_record() noexcept { return t_running ? t_running : &t_own_stack; }
+
+// The base (highest address) of the thread's own stack, asked of the system
+// the first time it is wanted while that stack runs (on Windows the TIB names
+// the running stack's, which brass's x64 switch swaps), and kept: a thread's
+// first switch, to a fiber, asks before it leaves. 0 if never asked.
+thread_local uintptr_t t_own_stack_base = 0;
+
+uintptr_t own_stack_base() noexcept {
+    if (t_own_stack_base != 0 || t_running != nullptr) return t_own_stack_base;
+#if defined(_WIN32)
+    ULONG_PTR lo = 0, hi = 0;
+    GetCurrentThreadStackLimits(&lo, &hi);
+    t_own_stack_base = static_cast<uintptr_t>(hi);
+#elif defined(__APPLE__)
+    t_own_stack_base = reinterpret_cast<uintptr_t>(pthread_get_stackaddr_np(pthread_self()));
+#else
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+        void* addr = nullptr;
+        size_t size = 0;
+        if (pthread_attr_getstack(&attr, &addr, &size) == 0) {
+            t_own_stack_base = reinterpret_cast<uintptr_t>(addr) + size;
+        }
+        pthread_attr_destroy(&attr);
+    }
+#endif
+    return t_own_stack_base;
+}
 
 // The registered stack locals: written once per index before its count is
 // published, read by every switch after.
@@ -444,6 +475,8 @@ void Fiber::resume() {
     if (impl_->finished) fiber_fatal("a finished fiber was resumed");
     if (impl_->rec.active) fiber_fatal("a fiber was resumed while running or waiting on a fiber it resumed");
     StackRecord* from = running_record();
+    // The thread's own stack's base, while the system still names it.
+    if (from == &t_own_stack) (void)own_stack_base();
 #if defined(BRASS_FIBER_SYSTEM)
     if (from == &t_own_stack) {
         // The thread's own stack is a system fiber too, so it can be
@@ -500,6 +533,37 @@ void Fiber::for_each_stack_span(uintptr_t sp, void (*fn)(void* ctx, const StackS
         fn(ctx, s);
     }
 }
+
+namespace detail {
+
+void for_each_thread_stack(uintptr_t sp, void (*fn)(void* ctx, uintptr_t lo, uintptr_t hi), void* ctx) {
+    // The running stack: a fiber's to its top, or the thread's own to its
+    // base.
+#if defined(BRASS_FIBER_SYSTEM)
+    const uintptr_t running_high =
+        t_running != nullptr ? reinterpret_cast<uintptr_t>(reinterpret_cast<PNT_TIB>(NtCurrentTeb())->StackBase)
+                             : own_stack_base();
+#else
+    const uintptr_t running_high = t_running != nullptr ? t_running->top : own_stack_base();
+#endif
+    if (running_high > sp) fn(ctx, sp, running_high);
+    // Each switched-out stack from where it switched away; brass's own switch
+    // pushed the callee-saved registers there, the system's fibers keep them
+    // in the context the switch captured.
+    for (StackRecord* r = t_switched_out; r != nullptr; r = r->next) {
+#if defined(BRASS_FIBER_SYSTEM)
+        const auto low = static_cast<uintptr_t>(r->context.Sp);
+        if (r->high > low) fn(ctx, low, r->high);
+        fn(ctx, reinterpret_cast<uintptr_t>(&r->context), reinterpret_cast<uintptr_t>(&r->context + 1));
+#else
+        const auto low = reinterpret_cast<uintptr_t>(r->saved_sp);
+        const uintptr_t high = r->fiber != nullptr ? r->top : own_stack_base();
+        if (high > low) fn(ctx, low, high);
+#endif
+    }
+}
+
+} // namespace detail
 
 void Fiber::stack_bounds(uintptr_t& low, uintptr_t& high) const noexcept {
     low = high = 0;

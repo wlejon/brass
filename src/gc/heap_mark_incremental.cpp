@@ -184,7 +184,8 @@ uint64_t popcount_range(const HeapState& s, uintptr_t lo, uintptr_t hi) noexcept
 
 // The young objects an in-place finish marked (for the log).
 uint64_t count_young_marks(const HeapState& s, const GcState& g) noexcept {
-    return popcount_range(s, s.eden_lo, g.eden_top) + popcount_range(s, s.survivor_lo[g.from], g.from_top);
+    return popcount_range(s, s.eden_lo, g.eden_top) + popcount_range(s, s.survivor_lo[g.from], g.from_top) +
+           popcount_range(s, s.survivor_lo[g.to], s.survivor_top[g.to]);
 }
 
 // The finish's young half when it leaves the young generation in place
@@ -215,6 +216,8 @@ void mark_young_in_place(MarkCycle& c, PhaseClock& clock) {
     // young start bits the marks (every marked address is an object's).
     clear_young_marks(s, s.eden_lo, g.eden_top);
     clear_young_marks(s, s.survivor_lo[g.from], g.from_top);
+    // What an earlier evacuation pinned in the other survivor space.
+    clear_young_marks(s, s.survivor_lo[g.to], s.survivor_top[g.to]);
     s.young_in_place = true;
     set_young_range(c.sh, c.workers, true);
     std::vector<CardWork> cards;
@@ -284,6 +287,7 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     s.complete_sweep();
     const uint64_t swept_ns = gc_now_ns() - t0;
     if (s.verify) verify_heap(heap, "before a collection");
+    gather_stack_objects(s);
 
     // The mark bitmaps are clear: the last cycle's sweep cleared every mark
     // it kept, and a block or page handed out since starts clear.
@@ -297,6 +301,10 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
 
     c.workers = make_mark_workers(c.sh, mark_thread_count(s));
     visit_roots(s, c.workers[0]->tracer);
+    // What the evacuation pinned stays young, out of the marker's range: its
+    // old referents (the copies the evacuation promoted among them) are
+    // marked from it here, as a root's.
+    scan_pinned(s, c.workers[0]->tracer);
     if (!evacuate) {
         // The weak slots and ephemerons the roots hold are met again by the
         // finish's root visit; a root table may be rebuilt by the mutator
@@ -313,6 +321,7 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     // the whole eden promotes the least (HeapConfig::cycle_whole_eden).
     if (!evacuate && s.config.cycle_whole_eden) s.restore_eden_for_cycle();
     s.collecting = false;
+    s.stack_objects.clear();
     s.mark_phase = MarkPhase::Marking;
     // From here to the finish the barrier shades old values. A GC point (this
     // is one), so generated code between two GC points sees one range.
@@ -350,6 +359,7 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
         for (const auto& w : c.workers) marked_before += w->marked_objects;
     }
     if (rescan) {
+        gather_stack_objects(s);
         begin_collection(g);
         PhaseClock clock(g);
         if (s.config.finish_promote_all) {
@@ -366,6 +376,7 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
         // The roots again through the marker's tracer: a full collection's
         // view of them, which a minor's root sources do not give.
         visit_roots(s, c.workers[0]->tracer);
+        scan_pinned(s, c.workers[0]->tracer);
         clock.lap(kPhaseRoots);
         g.finish_roots_ns = gc_now_ns() - t1;
     }
@@ -402,6 +413,7 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
     full_reclaim(g, clock);
     s.young_in_place = false;
     s.collecting = false;
+    s.stack_objects.clear();
     s.old_critical = s.old_in_reserve_swept();
     s.mark_phase = MarkPhase::Idle;
     s.update_fast_limit();

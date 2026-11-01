@@ -69,6 +69,26 @@ inline unsigned clz_index64(uint64_t word) noexcept {
 inline constexpr uint8_t kGcBusy = 0x08;
 static_assert((kGcBusy & (kGcForwarded | kGcPinned | kGcLargeMarked | kGcAgeMask)) == 0,
               "kGcBusy is a gc_bits bit of its own");
+// A young object left where it was by an evacuation, because a word of a
+// thread's stack named it (heap_pin.cpp): set from that evacuation on, and
+// cleared when a later one copies it. A young object never carries kGcPinned
+// otherwise, so on a young object kGcPinned means "pinned by the evacuation
+// under way": it stays, is a root, and every slot naming it keeps its value.
+inline constexpr uint8_t kGcResident = 0x80;
+static_assert((kGcResident & (kGcForwarded | kGcPinned | kGcLargeMarked | kGcAgeMask | kGcBusy)) == 0,
+              "kGcResident is a gc_bits bit of its own");
+
+// A free run of a young space, [lo, hi): eden's after an evacuation that
+// pinned objects in it are the gaps between them, which allocation runs
+// through in address order; a to-space's, the gaps between the residents an
+// earlier evacuation left there, which copying fills around them.
+struct YoungFragment {
+    uintptr_t lo;
+    uintptr_t hi;
+    // Eden's: where the allocation window left it (its objects end there),
+    // `lo` until the window has been in it.
+    uintptr_t used = 0;
+};
 
 inline constexpr size_t kStartWordsPerBlock = kGranulesPerBlock / 64;
 inline constexpr size_t kCardsPerBlock = kBlockBytes / kCardBytes;
@@ -264,7 +284,45 @@ struct HeapState {
     std::vector<uint64_t> young_marks;
     bool young_in_place = false;
     uintptr_t eden_synced = 0;      // eden objects below here have their start bits
+    size_t eden_sync_frag = 0;      // the fragment of eden_frags eden_synced lies in
     uint64_t eden_bytes_retired = 0;// eden bytes allocated in earlier cycles
+
+    // ---- stack pinning (heap_pin.cpp) ----
+    // The young objects the words of this thread's stacks name, sorted:
+    // gathered at the start of each pause that visits the roots and visited
+    // as roots by it (visit_roots), dropped at its end.
+    std::vector<uintptr_t> stack_objects;
+    // The young objects the evacuation under way keeps in place (kGcPinned),
+    // sorted, from the evacuation's start to the young spaces' reclaim.
+    std::vector<uintptr_t> pinned;
+    // The young objects the last evacuation kept in place (kGcResident),
+    // sorted. Some may have died since (a cycle's in-place finish drops dead
+    // young objects without moving anything): a dead one is no object (its
+    // start bit is clear), but its bytes stay out of the free fragments.
+    std::vector<uintptr_t> residents;
+    // Eden's free fragments, ascending (the whole of eden when nothing is
+    // pinned). The allocation window lies in eden_frags[eden_frag]; eden is
+    // `fresh` (nothing allocated since the reclaim) while the window is at the
+    // start of fragment eden_fresh_frag.
+    std::vector<YoungFragment> eden_frags;
+    size_t eden_frag = 0;
+    size_t eden_fresh_frag = 0;
+    uintptr_t eden_resident_hi = 0;      // the end of eden's highest resident (eden_lo: none)
+    uint64_t eden_resident_bytes = 0;    // eden's residents' bytes when they were left
+    // During a collection: [survivor_lo[to], + this) holds the residents an
+    // earlier evacuation left in the to-space (GcState::in_from).
+    size_t gc_to_resident_span = 0;
+    // Where eden's objects end: the allocation top, or past it the highest
+    // resident.
+    [[nodiscard]] uintptr_t eden_end() const noexcept;
+    // Moves the allocation window on to the next fragment of eden while the
+    // current one cannot take `total` bytes (within the adaptive limit, or
+    // any fragment while eden is fresh). True when [top, the window's hard
+    // end) holds `total`.
+    bool eden_make_room(size_t total) noexcept;
+    // Eden's fragments from the residents in it (reset_eden then starts the
+    // window at the first).
+    void build_eden_fragments() noexcept;
 
     // Mature blocks.
     uintptr_t mature_lo = 0;
@@ -411,6 +469,10 @@ struct HeapState {
     void set_young_start(uintptr_t payload) noexcept {
         const size_t bit = young_bit(payload);
         young_starts[bit >> 6] |= uint64_t{1} << (bit & 63);
+    }
+    void clear_young_start(uintptr_t payload) noexcept {
+        const size_t bit = young_bit(payload);
+        young_starts[bit >> 6] &= ~(uint64_t{1} << (bit & 63));
     }
     [[nodiscard]] bool young_start(uintptr_t payload) const noexcept {
         const size_t bit = young_bit(payload);
@@ -690,13 +752,28 @@ struct GcState {
     uint64_t finish_old_marked = 0;
     uint64_t finish_young_marked = 0;
     uint64_t slices = 0;
+    uint64_t pinned_objects = 0;  // young objects the stack kept in place
+
+    // The to-space's free fragments (setup_to_space): the space whole, or the
+    // gaps between the residents an earlier evacuation left in it. Survivor
+    // copies are bumped through them; to_copied_hi is where the copies end.
+    std::vector<YoungFragment> to_frags;
+    size_t to_frag = 0;
+    uintptr_t to_cursor = 0;
+    uintptr_t to_limit = 0;
+    uintptr_t to_copied_hi = 0;
 
     GcState(HeapState& state, Heap& h, CollectionKind k) : s(state), heap(h), kind(k) {}
 
-    // Whether `a` lies in the young objects this collection evacuates.
+    // Whether `a` (an object's address) lies in the young objects this
+    // collection evacuates: eden, the from-space, and the residents an
+    // earlier evacuation left in the to-space (a copy made there now does
+    // not carry kGcResident).
     [[nodiscard]] bool in_from(uintptr_t a) const noexcept {
         return a - s.eden_lo < eden_top - s.eden_lo ||
-               a - s.survivor_lo[from] < from_top - s.survivor_lo[from];
+               a - s.survivor_lo[from] < from_top - s.survivor_lo[from] ||
+               (a - s.survivor_lo[to] < s.gc_to_resident_span &&
+                (header_of(a)->gc_bits & kGcResident) != 0);
     }
 };
 
@@ -738,8 +815,44 @@ void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns)
 // (yet) known to be alive. Addresses the collection does not collect are
 // returned unchanged.
 uintptr_t live_address(const GcState& g, uintptr_t a) noexcept;
-// Visits every root of the heap with `tracer`.
+// Visits every root of the heap with `tracer`, the objects the stacks name
+// (HeapState::stack_objects) among them.
 void visit_roots(HeapState& s, Tracer& tracer);
+// The to-space's fragments for evacuation `g` (begun), and the residents'
+// range in_from reads (HeapState::gc_to_resident_span).
+void setup_to_space(GcState& g);
+// After an evacuation (a minor collection, or a full collection's emptying
+// of the young generation): eden and the from-space are free but for the
+// pinned objects, which become the residents; eden's fragments and the
+// survivor spaces' tops are set from them and the copies.
+void reclaim_young(GcState& g);
+
+// ---- stack pinning (heap_pin.cpp) ----
+// Whether collections pin what the stacks name (BRASS_GC_PIN_STACK=1).
+bool stack_pinning() noexcept;
+// The most eden the allocation window spans between two slow-path
+// allocations under stack pinning (HeapState::update_fast_limit): the most a
+// stack word's object is looked for by walking eden's headers.
+inline constexpr size_t kPinChunkBytes = 32 * 1024;
+// The young object whose payload holds `a` (in eden, or a survivor space),
+// or 0: in eden's unsynced part found by walking the headers from the
+// nearest start the slow path recorded, not by syncing all of eden.
+uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept;
+// HeapState::stack_objects from every stack of the calling thread (each word
+// that, untagged or under a reference tag, names a young object's payload): the
+// running stack from here, the callee-saved registers included, and each
+// switched-out fiber's from where it switched away. Empty when pinning is off.
+void gather_stack_objects(HeapState& s);
+// Evacuation `g` keeps the young ones in place: kGcPinned, onto
+// HeapState::pinned (which the caller pushes grey: they are roots).
+void pin_stack_objects(GcState& g);
+// A full collection's marker after an evacuation: the pinned objects are
+// young, outside its range, so their slots are visited here as roots.
+void scan_pinned(HeapState& s, Tracer& tracer);
+// Calls fn(ctx, lo, hi) for each range of the calling thread's stacks that
+// holds frames or saved registers: the running stack from `sp` to its base,
+// each switched-out stack from where it switched away (fiber.cpp).
+void for_each_thread_stack(uintptr_t sp, void (*fn)(void* ctx, uintptr_t lo, uintptr_t hi), void* ctx);
 // Rescans the old generation's dirty cards, cleaning them (heap_cards.cpp).
 void scan_dirty_cards(Tracer& tracer, GcState& g);
 // One piece of a parallel minor collection's card work: a mature card (its

@@ -38,7 +38,7 @@ bool Heap::is_valid_object(uintptr_t a) const noexcept {
     if ((a & (kGranuleBytes - 1)) != 0 || !contains(a)) return false;
     if (is_young(a)) {
         if (s.in_eden(a)) {
-            if (a < s.eden_lo + kHeaderBytes || a >= alloc_->top) return false;
+            if (a < s.eden_lo + kHeaderBytes || a >= s.eden_end()) return false;
             if (a >= s.eden_synced) s.sync_eden_starts();
         } else {
             const int w = s.in_survivor(0, a) ? 0 : 1;
@@ -70,9 +70,42 @@ uintptr_t Heap::find_object(uintptr_t a) const noexcept {
 
 namespace detail {
 
+uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept {
+    const auto payload_holds = [a](uintptr_t p) { return a >= p && a < p + header_of(p)->size; };
+    if (!s.in_eden(a)) {
+        const uintptr_t p = containing_object(s, a, false);
+        return p != 0 && payload_holds(p) ? p : 0;
+    }
+    const uintptr_t top = Collector::buffer(s.heap).top;
+    if (a >= s.eden_synced && a < top) {
+        // Above the sync point, in a fragment's objects: from the nearest
+        // start recorded there (the slow path records one a chunk) or from
+        // where the fragment's unsynced objects begin, header by header to
+        // where they end.
+        size_t k = s.eden_sync_frag;
+        while (k < s.eden_frag && a >= s.eden_frags[k].hi) ++k;
+        const uintptr_t lo = k == s.eden_sync_frag ? s.eden_synced : s.eden_frags[k].lo;
+        const uintptr_t used = k == s.eden_frag ? top : s.eden_frags[k].used;
+        if (a >= lo && a < used) {
+            const size_t bit = find_prev_bit(s.young_starts.data(), s.young_bit(a), s.young_bit(lo + kHeaderBytes));
+            uintptr_t p = bit != SIZE_MAX ? s.eden_lo + bit * kGranuleBytes : lo + kHeaderBytes;
+            while (p - kHeaderBytes < used && p <= a) {
+                if (payload_holds(p)) return p;
+                p += header_of(p)->size + kHeaderBytes;
+            }
+            return 0;
+        }
+    }
+    // Everywhere else an object has its start bit: below the sync point, and
+    // the residents between fragments and past the window.
+    const size_t bit = find_prev_bit(s.young_starts.data(), s.young_bit(a), s.young_bit(s.eden_lo + kHeaderBytes));
+    if (bit == SIZE_MAX) return 0;
+    const uintptr_t p = s.eden_lo + bit * kGranuleBytes;
+    return payload_holds(p) ? p : 0;
+}
+
 uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) noexcept {
     const Heap& heap = s.heap;
-    const Heap::AllocationBuffer& alloc_ = *const_cast<Heap&>(heap).allocation_buffer();
     if (!heap.contains(a)) return 0;
     auto is_young = [&heap](uintptr_t x) { return heap.is_young(x); };
     auto inside = [a](uintptr_t payload) -> uintptr_t {
@@ -82,7 +115,7 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
         uintptr_t lo, top;
         if (s.in_eden(a)) {
             lo = s.eden_lo;
-            top = alloc_.top;
+            top = s.eden_end();
             if (a < top && a + kHeaderBytes > s.eden_synced) s.sync_eden_starts();
         } else {
             const int w = s.in_survivor(0, a) ? 0 : 1;
@@ -192,7 +225,7 @@ void Heap::for_each_object(const std::function<void(uintptr_t)>& fn) const {
             }
         }
     };
-    walk_bits(s.young_starts.data(), s.young_bit(s.eden_lo), s.young_bit(alloc_->top), s.eden_lo);
+    walk_bits(s.young_starts.data(), s.young_bit(s.eden_lo), s.young_bit(s.eden_end()), s.eden_lo);
     for (int w = 0; w < 2; ++w) {
         walk_bits(s.young_starts.data(), s.young_bit(s.survivor_lo[w]), s.young_bit(s.survivor_top[w]), s.eden_lo);
     }
@@ -331,7 +364,13 @@ void verify_heap(Heap& heap, const char* when) {
             scan_object(t, object, true);
         }
     });
+    // The objects the stacks name now, each of which must be one of the
+    // heap's; the collection's own list is left as it was.
+    std::vector<uintptr_t> collection_list;
+    collection_list.swap(s.stack_objects);
+    gather_stack_objects(s);
     visit_roots(s, t);
+    s.stack_objects.swap(collection_list);
 }
 
 } // namespace detail

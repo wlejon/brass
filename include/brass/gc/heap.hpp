@@ -235,6 +235,10 @@ struct HeapStats {
     // it had finished (not part of last_pause_ns), and how long they took.
     uint64_t last_finalizers = 0;
     uint64_t last_finalizer_ns = 0;
+    // Young objects an evacuation left where they were because a word of the
+    // thread's stacks named them: the last collection's, and all time.
+    uint64_t last_pinned = 0;
+    uint64_t pinned_objects = 0;
 };
 
 // How near each generation is to the collection its own trigger would run: a

@@ -52,18 +52,35 @@ GcState& gc_state(Tracer& t) noexcept { return *static_cast<GcState*>(t.state())
 
 // ---- the young generation's evacuation (minor, and a full's first phase) ----
 
+// `total` bytes of the to-space's fragments for a survivor copy, or 0 when
+// they have no room left. One object that does not fit the fragment the
+// copying is in moves it on to the next (the space is one fragment unless
+// residents split it).
+uintptr_t to_space_allocate(GcState& g, size_t total) {
+    while (g.to_limit - g.to_cursor < total) {
+        if (g.to_frag + 1 >= g.to_frags.size()) return 0;
+        ++g.to_frag;
+        g.to_cursor = g.to_frags[g.to_frag].lo;
+        g.to_limit = g.to_frags[g.to_frag].hi;
+    }
+    const uintptr_t at = g.to_cursor;
+    g.to_cursor += total;
+    g.to_copied_hi = g.to_cursor;
+    return at;
+}
+
 uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     HeapState& s = g.s;
     ObjectHeader* h = header_of(object);
+    // Pinned by this evacuation (pin_stack_objects): it stays, and was made
+    // grey when it was pinned.
+    if (h->gc_bits & kGcPinned) return object;
     const size_t total = kHeaderBytes + h->size;
     const unsigned age = std::min<unsigned>(h->age() + 1u, 7u);
-    uintptr_t dest = 0;
-    bool promoted = false;
     const bool young_enough = age < g.tenure_age;
-    if (young_enough && s.survivor_top[g.to] + total <= s.survivor_lo[g.to] + s.survivor_bytes) {
-        dest = s.survivor_top[g.to];
-        s.survivor_top[g.to] += total;
-    } else {
+    uintptr_t dest = young_enough ? to_space_allocate(g, total) : 0;
+    bool promoted = false;
+    if (dest == 0) {
         if (young_enough) g.survivor_overflow = true;
         dest = s.old_allocate(total);
         if (dest == 0) gc_fatal("the old generation's reservation is exhausted while promoting a young object");
@@ -71,7 +88,7 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     }
     std::memcpy(reinterpret_cast<void*>(dest), h, total);
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
-    uint8_t bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask));
+    uint8_t bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask | kGcResident));
     if (!promoted) bits = static_cast<uint8_t>(bits | (age << kGcAgeShift));
     nh->gc_bits = bits;
     // Promoted into the large-object space where a pending sweep has yet to
@@ -140,6 +157,10 @@ void drain(Tracer& t, GcState& g) {
 // state; its phases are timed into `clock`'s collection.
 void evacuate(GcState& young, PhaseClock& clock) {
     HeapState& s = young.s;
+    // What the stacks name stays where it is, and is a root (its slots are
+    // updated like any other's): before anything is copied, so no slot is
+    // ever rewritten to a copy of it.
+    pin_stack_objects(young);
     // Large enough to pay for the helpers: the same evacuation on several
     // threads (heap_minor_parallel.cpp).
     if (const unsigned threads = parallel_minor_threads(young); threads > 1) {
@@ -152,6 +173,7 @@ void evacuate(GcState& young, PhaseClock& clock) {
     const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
     Tracer t(young.heap, Tracer::Purpose::Minor, lo, lo + span, &minor_visit, &weak_visit, &ephemeron_visit,
              &young);
+    young.gray.insert(young.gray.end(), s.pinned.begin(), s.pinned.end());
     visit_roots(s, t);
     clock.lap(kPhaseRoots);
     scan_dirty_cards(t, young);
@@ -194,22 +216,105 @@ void clean_dead_large_cards(HeapState& s) {
 // since its old referents may be swept. Every marked address is an object's
 // start, so the marks are the start bits whether or not eden's were synced
 // (HeapState::sync_eden_starts), and the dead objects above the sync point
-// are never walked: eden counts as synced to `hi`.
-void drop_dead_young_starts(HeapState& s, uintptr_t lo, uintptr_t hi) {
+// are never walked: eden counts as synced to the allocation top, `top`.
+void drop_dead_young_starts(HeapState& s, uintptr_t lo, uintptr_t hi, uintptr_t top) {
     if (hi <= lo) return;
     const size_t first = s.young_bit(lo) >> 6;
     const size_t last = std::min((s.young_bit(hi) + 63) >> 6, s.young_starts.size());
     std::copy(s.young_marks.begin() + static_cast<std::ptrdiff_t>(first),
               s.young_marks.begin() + static_cast<std::ptrdiff_t>(last),
               s.young_starts.begin() + static_cast<std::ptrdiff_t>(first));
-    if (s.in_eden(lo)) s.eden_synced = std::max(s.eden_synced, hi);
+    if (s.in_eden(lo) && top > s.eden_synced) {
+        s.eden_synced = top;
+        s.eden_sync_frag = s.eden_frag;
+    }
 }
 
+// The evacuated spaces' bytes but the pinned objects'.
 void poison_evacuated(HeapState& s, const GcState& g) {
     if (!s.poison) return;
-    std::memset(reinterpret_cast<void*>(s.eden_lo), kPoisonByte, g.eden_top - s.eden_lo);
-    std::memset(reinterpret_cast<void*>(s.survivor_lo[g.from]), kPoisonByte, g.from_top - s.survivor_lo[g.from]);
+    auto poison = [&s](uintptr_t lo, uintptr_t hi) {
+        uintptr_t at = lo;
+        for (const uintptr_t p : s.pinned) {
+            if (p < lo || p >= hi) continue;
+            std::memset(reinterpret_cast<void*>(at), kPoisonByte, p - kHeaderBytes - at);
+            at = p + header_of(p)->size;
+        }
+        if (hi > at) std::memset(reinterpret_cast<void*>(at), kPoisonByte, hi - at);
+    };
+    poison(s.eden_lo, g.eden_top);
+    poison(s.survivor_lo[g.from], g.from_top);
 }
+
+} // namespace
+
+void setup_to_space(GcState& g) {
+    HeapState& s = g.s;
+    const uintptr_t lo = s.survivor_lo[g.to];
+    const uintptr_t end = lo + s.survivor_bytes;
+    g.to_frags.clear();
+    uintptr_t at = lo;
+    for (const uintptr_t r : s.residents) {
+        if (!s.in_survivor(g.to, r)) continue;
+        if (r - kHeaderBytes > at) g.to_frags.push_back(YoungFragment{at, r - kHeaderBytes});
+        at = r + header_of(r)->size;
+    }
+    if (at == lo && s.survivor_top[g.to] != lo) {
+        gc_fatal("the to-space holds objects no evacuation left there");
+    }
+    if (end > at || g.to_frags.empty()) g.to_frags.push_back(YoungFragment{at, end});
+    s.gc_to_resident_span = at - lo;
+    g.to_frag = 0;
+    g.to_cursor = g.to_frags[0].lo;
+    g.to_limit = g.to_frags[0].hi;
+    g.to_copied_hi = lo;
+}
+
+void reclaim_young(GcState& g) {
+    HeapState& s = g.s;
+    poison_evacuated(s, g);
+    s.clear_young_starts(s.eden_lo, g.eden_top);
+    s.clear_young_starts(s.survivor_lo[g.from], g.from_top);
+    // The residents an earlier evacuation left in the to-space and this one
+    // did not pin again were copied, or are dead: no longer objects there.
+    for (const uintptr_t r : s.residents) {
+        if (s.in_survivor(g.to, r) && (header_of(r)->gc_bits & kGcPinned) == 0) s.clear_young_start(r);
+    }
+    // The pinned objects are the residents from here: in place, with their
+    // start bits, unpinned (kGcPinned on a young object is this evacuation's).
+    s.residents.clear();
+    uintptr_t from_hi = s.survivor_lo[g.from];
+    uintptr_t to_hi = s.survivor_lo[g.to];
+    uint64_t eden_bytes = 0;
+    for (const uintptr_t p : s.pinned) {
+        ObjectHeader* h = header_of(p);
+        h->gc_bits = static_cast<uint8_t>((h->gc_bits & ~kGcPinned) | kGcResident);
+        s.set_young_start(p);
+        s.residents.push_back(p);
+        const uintptr_t end = p + h->size;
+        if (s.in_eden(p)) eden_bytes += kHeaderBytes + h->size;
+        else if (s.in_survivor(g.from, p)) from_hi = end;
+        else to_hi = std::max(to_hi, end);
+    }
+    s.pinned.clear();
+    s.eden_resident_bytes = eden_bytes;
+    s.build_eden_fragments();
+    // The survivor spaces' tops cover their objects: the copies and the
+    // residents in the to-space, the residents alone in the from-space. What
+    // lies below a top and is no copy is slack the adaptive eden's survival
+    // sample leaves out (a parallel collection's unused buffer ends, the
+    // fragments' ends, the residents, which nobody copied).
+    s.survivor_top[g.from] = from_hi;
+    s.survivor_top[g.to] = std::max(g.to_copied_hi, to_hi);
+    s.survivor_slack[g.from] = from_hi - s.survivor_lo[g.from];
+    const uint64_t survivor_copies = g.copied_bytes - g.promoted_bytes;
+    const uint64_t to_used = s.survivor_top[g.to] - s.survivor_lo[g.to];
+    s.survivor_slack[g.to] = to_used > survivor_copies ? to_used - survivor_copies : 0;
+    s.from_survivor = g.to;
+    s.gc_to_resident_span = 0;
+}
+
+namespace {
 
 void minor(GcState& g) {
     HeapState& s = g.s;
@@ -225,17 +330,14 @@ void minor(GcState& g) {
     run_hooks(g);
     clock.lap(kPhaseHooks);
 
-    // Reclaim the evacuated spaces.
-    poison_evacuated(s, g);
-    s.clear_young_starts(s.eden_lo, g.eden_top);
-    s.clear_young_starts(s.survivor_lo[g.from], g.from_top);
-    s.survivor_top[g.from] = s.survivor_lo[g.from];
-    s.from_survivor = g.to;
-    s.eden_bytes_retired += g.eden_top - s.eden_lo;
-    // A parallel collection's buffers left unused ends (survivor_slack):
-    // the space held that much less.
+    // What the from-space held that was not slack (a parallel collection's
+    // buffers' unused ends, residents nobody copied): survivors of the last
+    // collection, aged.
     const uint64_t aged = g.from_top - s.survivor_lo[g.from] - s.survivor_slack[g.from];
-    s.survivor_slack[g.from] = 0;
+    // Reclaim the evacuated spaces. Eden's bytes allocated exclude what the
+    // last evacuation left in it.
+    s.eden_bytes_retired += (g.eden_top - s.eden_lo) - std::min<uint64_t>(s.eden_resident_bytes, g.eden_top - s.eden_lo);
+    reclaim_young(g);
     const uint64_t young_collected = (g.eden_top - s.eden_lo) + aged;
     if (young_collected > 0) {
         s.minor_survival = static_cast<double>(g.copied_bytes) / static_cast<double>(young_collected);
@@ -277,7 +379,10 @@ void full_evacuate(GcState& g, PhaseClock& clock, bool shade) {
     young.tenure_age = 1;
     young.shade = shade;
     young.learns_cost = false;  // promoting everything, often shading: not a minor collection's cost
+    setup_to_space(young);
     evacuate(young, clock);
+    g.to_copied_hi = young.to_copied_hi;
+    g.pinned_objects += young.pinned_objects;
     g.copied_bytes += young.copied_bytes;
     g.copied_objects += young.copied_objects;
     g.promoted_bytes += young.promoted_bytes;
@@ -306,21 +411,28 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
         // so that nothing finds it again (a conservative root, verification).
         clean_dead_large_cards(s);
         s.begin_sweep(g.marked_bytes);
-        drop_dead_young_starts(s, s.eden_lo, g.eden_top);
-        drop_dead_young_starts(s, s.survivor_lo[g.from], g.from_top);
+        const uintptr_t top = Collector::buffer(g.heap).top;
+        drop_dead_young_starts(s, s.eden_lo, g.eden_top, top);
+        drop_dead_young_starts(s, s.survivor_lo[g.from], g.from_top, top);
+        // The other survivor space holds what an earlier evacuation pinned.
+        drop_dead_young_starts(s, s.survivor_lo[g.to], s.survivor_top[g.to], top);
+    } else if (!s.pinned.empty()) {
+        // The evacuation left the objects the stacks named in place, young,
+        // and the cards of the old objects that name them dirty: the cards
+        // stay, as after an in-place finish (above), but for dead large
+        // objects'.
+        clean_dead_large_cards(s);
+        s.begin_sweep(g.marked_bytes);
+        s.eden_bytes_retired += (g.eden_top - s.eden_lo) - std::min<uint64_t>(s.eden_resident_bytes, g.eden_top - s.eden_lo);
+        reclaim_young(g);
     } else {
         // A dead object's card may be dirty; cleaning every card here means
         // no card names a dead object afterwards, since nothing stores into
         // one.
         s.begin_sweep(g.marked_bytes);
         clean_all_cards(s);
-        poison_evacuated(s, g);
-        std::fill(s.young_starts.begin(), s.young_starts.end(), 0);
-        s.survivor_top[0] = s.survivor_lo[0];
-        s.survivor_top[1] = s.survivor_lo[1];
-        s.survivor_slack[0] = 0;
-        s.survivor_slack[1] = 0;
-        s.eden_bytes_retired += g.eden_top - s.eden_lo;
+        s.eden_bytes_retired += (g.eden_top - s.eden_lo) - std::min<uint64_t>(s.eden_resident_bytes, g.eden_top - s.eden_lo);
+        reclaim_young(g);
     }
     // The adaptive eden goes back to the whole of it when most of what the
     // old generation gained since the last full collection is dead: the
@@ -403,6 +515,15 @@ void visit_roots(HeapState& s, Tracer& t) {
     }
     for (uintptr_t* slot : slots) t.visit_ref(slot);
     for (uintptr_t* slot : frame_slots) t.visit_address(slot);
+    // The young objects the thread's stacks name (gather_stack_objects),
+    // visited through a copy of the reference: an evacuation pinned them, so
+    // the copy's value does not change, and the stack words stay as they
+    // are; a finish in place marks them.
+    t.set_owner(0, false);
+    for (const uintptr_t object : s.stack_objects) {
+        uint64_t word = static_cast<uint64_t>(object) | s.heap.raw_address_tag();
+        t.visit(&word);
+    }
 }
 
 void scan_object(Tracer& t, uintptr_t object, bool old) {
@@ -443,6 +564,8 @@ uintptr_t live_address(const GcState& g, uintptr_t a) noexcept {
         if (s.young_in_place) return s.young_marked(a) ? a : 0;
         if (!g.in_from(a)) return a;
         const ObjectHeader* h = header_of(a);
+        // Pinned by this evacuation: alive, where it was.
+        if (h->gc_bits & kGcPinned) return a;
         if (!h->forwarded()) return 0;
         a = *reinterpret_cast<const uintptr_t*>(a);
         // A full collection promoted it (at its start, or at a cycle's
@@ -528,12 +651,15 @@ void begin_collection(GcState& g) {
     s.collecting_kind = g.kind;
     g.from = s.from_survivor;
     g.to = 1 - g.from;
-    g.eden_top = Collector::buffer(g.heap).top;
+    // Eden's objects end at its top, or past it at what the last evacuation
+    // pinned there.
+    g.eden_top = s.eden_end();
     g.from_top = s.survivor_top[g.from];
     g.eden_used = g.eden_top - s.eden_lo;
     g.eden_limit = s.eden_limit - s.eden_lo;
     s.gc_eden_top = g.eden_top;
     s.gc_from_top = g.from_top;
+    setup_to_space(g);
 }
 
 void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns) {
@@ -542,6 +668,8 @@ void record_collection(const GcState& g, uint64_t pause_ns, uint64_t longest_ns)
     st.last_pause_ns = longest_ns;
     st.promoted_bytes += g.promoted_bytes;
     st.last_survived_bytes = g.copied_bytes;
+    st.last_pinned = g.pinned_objects;
+    st.pinned_objects += g.pinned_objects;
     if (g.minor_threads > 1) ++st.parallel_evacuations;
     if (g.kind == CollectionKind::Minor) {
         ++st.minor_collections;
@@ -577,11 +705,13 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     std::optional<runtime::CoroRootsLock> coro_lock;
     if (s.coro_frames) coro_lock.emplace(*s.coro_frames);
     if (s.verify) verify_heap(heap, "before a collection");
+    gather_stack_objects(s);
 
     GcState g(s, heap, kind);
     begin_collection(g);
     minor(g);
     s.collecting = false;
+    s.stack_objects.clear();
     s.old_critical = s.old_in_reserve_swept();
 
     if (s.verify) verify_heap(heap, "after a collection");

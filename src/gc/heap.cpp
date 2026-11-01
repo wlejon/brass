@@ -206,6 +206,8 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.poison = s.config.poison;
     s.log = s.config.log;
     s.sweep.lazy = s.config.lazy_sweep;
+    s.eden_resident_hi = s.eden_lo;
+    s.build_eden_fragments();
     s.reset_eden_limit();
     s.reset_eden();
 }
@@ -253,22 +255,74 @@ __attribute__((visibility("default"))) void Heap::set_current(Heap* heap) noexce
 namespace detail {
 
 void HeapState::reset_eden() noexcept {
-    heap.alloc_->top = eden_lo;
-    eden_synced = eden_lo;
+    // The window at eden's first fragment (eden_lo unless an object is
+    // pinned there). Everything below it, the residents among them, has its
+    // start bits.
+    eden_frag = 0;
+    eden_fresh_frag = 0;
+    for (YoungFragment& f : eden_frags) f.used = f.lo;
+    heap.alloc_->top = eden_frags[0].lo;
+    eden_synced = eden_frags[0].lo;
+    eden_sync_frag = 0;
     update_fast_limit();
 }
 
 void HeapState::update_fast_limit() noexcept {
     // Generated code bumps against `end` and nothing else, so the adaptive
-    // limit takes effect there with no change to the code. `end` is never
+    // limit takes effect there with no change to the code, and so does the
+    // end of eden's fragment (a pinned object after it). `end` is never
     // below `top`: an object allowed past eden_limit (Heap::allocate_at) puts
     // `top` above it, and the bump path computes end - top unsigned. Stress
     // mode shuts it, so every allocation reaches the runtime. An open marking
     // cycle does not: young allocation is the same during one (young objects
     // are never marked; minor collections and the finish trace them).
+    //
+    // Under stack pinning the window is also at most kPinChunkBytes, so the
+    // slow path, which records the start of the object it allocates, runs at
+    // least once a chunk: the stack scan finds an object from the nearest
+    // recorded start (eden_object_containing) instead of walking all of eden.
     const uintptr_t top = heap.alloc_->top;
     const bool shut = stress != StressMode::None;
-    heap.alloc_->end = shut ? top : std::max(top, eden_limit);
+    uintptr_t end = std::min(eden_limit, eden_frags[eden_frag].hi);
+    if (stack_pinning()) end = std::min(end, top + kPinChunkBytes);
+    heap.alloc_->end = shut ? top : std::max(top, end);
+}
+
+uintptr_t HeapState::eden_end() const noexcept { return std::max(heap.alloc_->top, eden_resident_hi); }
+
+bool HeapState::eden_make_room(size_t total) noexcept {
+    for (;;) {
+        const YoungFragment& f = eden_frags[eden_frag];
+        const uintptr_t top = heap.alloc_->top;
+        // Allocation stops at the adaptive limit, but a fresh eden takes any
+        // young object whole: max_young_total_ can be above the least limit.
+        const bool fresh = eden_frag == eden_fresh_frag && top == f.lo;
+        const uintptr_t limit = fresh ? f.hi : std::min(f.hi, std::max(eden_limit, top));
+        if (limit - top >= total) return true;
+        if (eden_frag + 1 >= eden_frags.size()) return false;
+        const YoungFragment& next = eden_frags[eden_frag + 1];
+        if (!fresh && next.lo >= eden_limit) return false;
+        // The window leaves this fragment: its objects end where it was
+        // (sync_eden_starts walks each fragment to there, then on to the
+        // next one's start, never across a pinned object or an unused end).
+        eden_frags[eden_frag].used = top;
+        ++eden_frag;
+        if (fresh) eden_fresh_frag = eden_frag;
+        heap.alloc_->top = next.lo;
+    }
+}
+
+void HeapState::build_eden_fragments() noexcept {
+    eden_frags.clear();
+    uintptr_t at = eden_lo;
+    eden_resident_hi = eden_lo;
+    for (const uintptr_t r : residents) {
+        if (!in_eden(r)) continue;
+        if (r - kHeaderBytes > at) eden_frags.push_back(YoungFragment{at, r - kHeaderBytes});
+        at = r + header_of(r)->size;
+        eden_resident_hi = at;
+    }
+    if (eden_hi > at || eden_frags.empty()) eden_frags.push_back(YoungFragment{at, eden_hi});
 }
 
 namespace {
@@ -413,14 +467,23 @@ void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
 }
 
 void HeapState::sync_eden_starts() noexcept {
+    // Fragment by fragment from the sync point: each the window has left to
+    // where it left it, the window's own to the top.
     uintptr_t p = eden_synced;
-    const uintptr_t top = heap.alloc_->top;
-    while (p < top) {
-        const auto* header = reinterpret_cast<const ObjectHeader*>(p);
-        set_young_start(p + kHeaderBytes);
-        p += kHeaderBytes + header->size;
+    size_t k = eden_sync_frag;
+    for (;;) {
+        const uintptr_t end = k == eden_frag ? heap.alloc_->top : eden_frags[k].used;
+        while (p < end) {
+            const auto* header = reinterpret_cast<const ObjectHeader*>(p);
+            set_young_start(p + kHeaderBytes);
+            p += kHeaderBytes + header->size;
+        }
+        if (k >= eden_frag) break;
+        ++k;
+        p = eden_frags[k].lo;
     }
     eden_synced = p;
+    eden_sync_frag = k;
 }
 
 void HeapState::clear_young_starts(uintptr_t lo, uintptr_t hi) noexcept {
@@ -470,59 +533,68 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         if (s.old_critical) throw std::bad_alloc();
     }
 
-    const bool old =(flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
-    if (old) {
-        if (s.old_allocated_since_full + total > s.growth_limit()) {
-            s.trigger = detail::GcTrigger::OldGrowth;
-            collect_at(CollectionKind::Full, 0, 0);
+    const bool old = (flags & (kAllocOld | kAllocPinned)) != 0 || total > max_young_total_;
+    bool displaced = false;
+    if (!old) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (s.eden_make_room(total)) {
+                const uintptr_t at = alloc_->top;
+                alloc_->top = at + total;
+                s.update_fast_limit();
+                // A known start in each chunk of the window (update_fast_limit).
+                if (detail::stack_pinning()) s.set_young_start(at + kHeaderBytes);
+                auto* h = reinterpret_cast<ObjectHeader*>(at);
+                h->size = static_cast<uint32_t>(payload);
+                h->layout = layout;
+                h->gc_bits = 0;
+                h->host_bits = host_bits;
+                if (zero) std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
+                return at + kHeaderBytes;
+            }
+            // Eden was just collected and still has no room for it between
+            // the pinned objects: another collection would pin them again.
+            if (attempt > 0 && s.eden_frags.size() > 1) break;
+            s.trigger = detail::GcTrigger::EdenFull;
+            collect_at(CollectionKind::Minor, 0, 0);
         }
-        uintptr_t header = s.old_allocate(total);
-        if (header == 0) {
-            s.trigger = detail::GcTrigger::Exhausted;
-            collect_at(CollectionKind::Full, 0, 0);
-            header = s.old_allocate(total);
-            if (header == 0) throw std::bad_alloc();
-        }
-        auto* h = reinterpret_cast<ObjectHeader*>(header);
-        h->size = static_cast<uint32_t>(payload);
-        h->layout = layout;
-        h->gc_bits = (flags & kAllocPinned) ? kGcPinned : 0;
-        h->host_bits = host_bits;
-        // A large object made where the pending sweep has yet to walk is
-        // marked, so the walk keeps it (HeapState::note_large_allocated).
-        s.note_large_allocated(header);
-        if (zero) std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
-        s.old_allocated_since_full += total;
-        s.old_direct_bytes += total;
-        // While a cycle is open a new old object is live to it (grey: the
-        // marker scans it once its caller has filled it, at a later GC
-        // point) and its card dirty, so a caller that fills it with stores
-        // the barrier never sees (a frame, B13 in the design) has them
-        // rescanned by the next minor collection too.
-        if (s.mark_phase == detail::MarkPhase::Marking) Collector::allocated_old(*this, header + kHeaderBytes);
-        return header + kHeaderBytes;
+        // Objects the stacks pinned leave no fragment of eden this one fits,
+        // even after a collection: it is allocated old instead, with its card
+        // dirty (below), so that the stores that fill it are rescanned as if
+        // it had been young; brass_gc_alloc's callers drop the barriers of an
+        // object they take to be young (WriteBarrierElimination).
+        if (s.eden_frags.size() <= 1) throw std::bad_alloc();
+        displaced = true;
     }
-
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        // Allocation stops at the adaptive limit, but an empty eden takes any
-        // young object whole: max_young_total_ can be above the least limit.
-        const uintptr_t limit = alloc_->top == s.eden_lo ? s.eden_hi : std::max(s.eden_limit, alloc_->top);
-        if (limit - alloc_->top >= total) {
-            const uintptr_t at = alloc_->top;
-            alloc_->top = at + total;
-            s.update_fast_limit();
-            auto* h = reinterpret_cast<ObjectHeader*>(at);
-            h->size = static_cast<uint32_t>(payload);
-            h->layout = layout;
-            h->gc_bits = 0;
-            h->host_bits = host_bits;
-            if (zero) std::memset(reinterpret_cast<void*>(at + kHeaderBytes), 0, payload);
-            return at + kHeaderBytes;
-        }
-        s.trigger = detail::GcTrigger::EdenFull;
-        collect_at(CollectionKind::Minor, 0, 0);
+    if (s.old_allocated_since_full + total > s.growth_limit()) {
+        s.trigger = detail::GcTrigger::OldGrowth;
+        collect_at(CollectionKind::Full, 0, 0);
     }
-    throw std::bad_alloc();
+    uintptr_t header = s.old_allocate(total);
+    if (header == 0) {
+        s.trigger = detail::GcTrigger::Exhausted;
+        collect_at(CollectionKind::Full, 0, 0);
+        header = s.old_allocate(total);
+        if (header == 0) throw std::bad_alloc();
+    }
+    auto* h = reinterpret_cast<ObjectHeader*>(header);
+    h->size = static_cast<uint32_t>(payload);
+    h->layout = layout;
+    h->gc_bits = (flags & kAllocPinned) ? kGcPinned : 0;
+    h->host_bits = host_bits;
+    // A large object made where the pending sweep has yet to walk is
+    // marked, so the walk keeps it (HeapState::note_large_allocated).
+    s.note_large_allocated(header);
+    if (zero) std::memset(reinterpret_cast<void*>(header + kHeaderBytes), 0, payload);
+    s.old_allocated_since_full += total;
+    s.old_direct_bytes += total;
+    // While a cycle is open a new old object is live to it (grey: the
+    // marker scans it once its caller has filled it, at a later GC
+    // point) and its card dirty, so a caller that fills it with stores
+    // the barrier never sees (a frame, B13 in the design) has them
+    // rescanned by the next minor collection too.
+    if (s.mark_phase == detail::MarkPhase::Marking) Collector::allocated_old(*this, header + kHeaderBytes);
+    else if (displaced) dirty_card(header + kHeaderBytes);
+    return header + kHeaderBytes;
 }
 
 // ---- collection entry points ---------------------------------------------------
@@ -725,9 +797,13 @@ size_t Heap::release_unused_young() noexcept {
         }
         released += hi - lo;
     };
-    release(alloc_->top, s.eden_hi);
-    // Between collections only one survivor space holds anything; each is
-    // released above its top either way.
+    // Eden's free memory: the window's fragment above the top, and every
+    // fragment after it (pinned objects lie between them).
+    release(alloc_->top, s.eden_frags[s.eden_frag].hi);
+    for (size_t i = s.eden_frag + 1; i < s.eden_frags.size(); ++i) release(s.eden_frags[i].lo, s.eden_frags[i].hi);
+    // Between collections one survivor space holds the survivors and the
+    // other at most what the stacks pinned there; each is released above its
+    // top either way.
     for (int i = 0; i < 2; ++i) release(s.survivor_top[i], s.survivor_lo[i] + s.survivor_bytes);
     return released;
 }
