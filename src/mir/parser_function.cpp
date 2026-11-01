@@ -153,8 +153,6 @@ bool Parser::parse_module_attributes(Module& mod) {
         const std::string_view attr = peek().text;
         if (attr == "fp_reassociation") {
             mod.set_allow_fp_reassociation(true);
-        } else if (attr == "deterministic_fp") {
-            mod.set_deterministic_fp(true);
         } else if (attr == "pinned_tls_register") {
             mod.set_pinned_tls_register(true);
         } else if (attr == "precise_stack_roots") {
@@ -314,12 +312,9 @@ Function* Parser::parse_function_decl(Module& mod) {
 
     // Function attributes.
     bool fp_reassociation = false;
-    bool deterministic_fp = false;
     while (peek().is(TokenKind::Ident)) {
         if (peek().text == "fp_reassociation") {
             fp_reassociation = true;
-        } else if (peek().text == "deterministic_fp") {
-            deterministic_fp = true;
         } else {
             error(peek().location, "Unknown function attribute '" + std::string(peek().text) + "'");
             return nullptr;
@@ -331,7 +326,6 @@ Function* Parser::parse_function_decl(Module& mod) {
 
     Function* fn = mod.create_function(fn_name, ret_type, param_types);
     fn->set_allow_fp_reassociation(fp_reassociation);
-    fn->set_deterministic_fp(deterministic_fp);
     for (size_t i = 0; i < param_noalias.size(); ++i) {
         if (param_noalias[i]) fn->set_param_noalias(i);
     }

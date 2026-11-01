@@ -10,7 +10,6 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/float_rem_inline.hpp>
-#include <brass/mir/sincos_fuse.hpp>
 #include <brass/mir/fdiv_pow2.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
@@ -108,9 +107,6 @@ bool has_hot_loop(Function& fn, const pgo::ProfileData* profile, uint64_t min_he
 } // namespace
 
 bool fp_reassociation_allowed(const Function& fn, bool forced) noexcept {
-    if (fn.is_deterministic_fp() || (fn.parent() && fn.parent()->is_deterministic_fp())) {
-        return false;
-    }
     return forced || fn.allow_fp_reassociation() || (fn.parent() && fn.parent()->allow_fp_reassociation());
 }
 
@@ -217,11 +213,6 @@ PassStep float_rem_inline() {
                          [](Function& fn) { return inline_float_rem(fn) != 0; });
 }
 
-PassStep sincos_fuse() {
-    return function_step("sincos_fuse", FunctionFilter::All,
-                         [](Function& fn) { return fuse_sincos(fn) != 0; });
-}
-
 PassStep fdiv_pow2() {
     return function_step("fdiv_pow2", FunctionFilter::All,
                          [](Function& fn) { return rewrite_fdiv_pow2(fn) != 0; });
@@ -317,11 +308,7 @@ PassStep loop_vectorize(const LoopOptOptions& options) {
 PassStep fma(const LoopOptOptions& options) {
     FmaOptOptions o;
     o.stats = options.fma_stats;
-    const bool det_fp = options.deterministic_fp;
-    return loop_step("fma", [o, det_fp](Function& fn) {
-        if (det_fp) return false;
-        return fma_opt_pass(fn, o);
-    }, dce_only(options));
+    return loop_step("fma", [o](Function& fn) { return fma_opt_pass(fn, o); }, dce_only(options));
 }
 
 PassStep loop_unroll(const LoopOptOptions& options) {

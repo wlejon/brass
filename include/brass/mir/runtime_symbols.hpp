@@ -41,22 +41,12 @@ enum class SymbolRole : uint8_t {
     // and callee-saved registers need no clearing for it (`pure` says the
     // same).
     NoCollect,
-    // `sin_f64` / `cos_f64`: (f64) -> f64, the module's sine and cosine.
-    // `sincos_f64`: (f64 x, ptr out) -> void, storing exactly the bits the
-    // module's `sin_f64` answers for x at out[0] and its `cos_f64`'s at
-    // out[8], writing no other memory. A module declaring all three lets
-    // sincos_fuse (sincos_fuse.hpp) answer a sine and a cosine of one value
-    // with one call: one argument reduction, not two.
-    SinF64,
-    CosF64,
-    SinCosF64,
 };
 
 inline constexpr SymbolRole kAllSymbolRoles[] = {
     SymbolRole::Allocator, SymbolRole::Pure, SymbolRole::ArrayNew,
     SymbolRole::ArrayGet, SymbolRole::ArraySet, SymbolRole::FloatRem,
-    SymbolRole::Data, SymbolRole::NoCollect, SymbolRole::SinF64,
-    SymbolRole::CosF64, SymbolRole::SinCosF64,
+    SymbolRole::Data, SymbolRole::NoCollect,
 };
 
 // The keyword the printer writes and the parser reads for `role`.

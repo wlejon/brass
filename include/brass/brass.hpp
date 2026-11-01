@@ -81,7 +81,6 @@
 #include <brass/runtime/resume_table.hpp>
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/host_symbols.hpp>
-#include <brass/runtime/deterministic_math.hpp>
 
 #include <brass/embedding/nanbox.hpp>
 #include <brass/embedding/embedding.hpp>

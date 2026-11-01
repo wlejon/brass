@@ -153,9 +153,6 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
-    bool is_deterministic_fp() const noexcept { return deterministic_fp_; }
-    void set_deterministic_fp(bool det = true) noexcept { deterministic_fp_ = det; }
-
     bool requires_barrier_certs() const noexcept { return requires_barrier_certs_; }
     void set_requires_barrier_certs(bool req = true) noexcept { requires_barrier_certs_ = req; }
 
@@ -218,7 +215,6 @@ private:
     uint32_t next_guard_id_ = 0;
     bool guard_id_known_ = false;
     bool allow_fp_reassociation_ = false;
-    bool deterministic_fp_ = false;
     bool requires_barrier_certs_ = false;
 
     bool has_coro_frame_layout_ = false;

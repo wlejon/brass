@@ -47,7 +47,6 @@ add_executable(brass_unit_tests
     unit/test_pipeline_thread_heap.cpp
     unit/test_patching_concurrency.cpp
     unit/test_jit_engine_move.cpp
-    unit/test_determinism_ratchet.cpp
     unit/test_frontend_interp_safety.cpp
     differential/test_differential_exec.cpp
     differential/test_fast_interpreter_diff.cpp
@@ -73,7 +72,6 @@ add_executable(brass_unit_tests
     differential/test_fuzz_js_loops.cpp
     unit/test_f64_demote.cpp
     unit/test_float_rem_inline.cpp
-    unit/test_sincos_fuse.cpp
     unit/test_fdiv_pow2.cpp
     unit/test_f64_demote_step.cpp
     unit/test_inliner.cpp

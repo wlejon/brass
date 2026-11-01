@@ -97,13 +97,6 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
-    bool is_deterministic_fp() const noexcept { return deterministic_fp_; }
-    void set_deterministic_fp(bool det = true) noexcept {
-        deterministic_fp_ = det;
-        for (Function* fn : functions_) {
-            if (fn) fn->set_deterministic_fp(det);
-        }
-    }
 
     // When set, every function in the module keeps one callee-saved register
     // (x64: R13, aarch64: X28) out of allocation and reads its thread-local
@@ -225,7 +218,6 @@ private:
     std::unordered_map<std::string_view, uint32_t> symbol_roles_;
     std::vector<std::pair<std::string_view, std::string_view>> string_symbols_; // (sym, text), both interned
     bool allow_fp_reassociation_ = false;
-    bool deterministic_fp_ = false;
     bool pinned_tls_register_ = false;
     bool precise_stack_roots_ = false;
     InterruptPoll interrupt_poll_;

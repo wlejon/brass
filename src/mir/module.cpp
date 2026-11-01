@@ -54,7 +54,6 @@ Module::Module(Module&& other) noexcept
       symbol_roles_(std::move(other.symbol_roles_)),
       string_symbols_(std::move(other.string_symbols_)),
       allow_fp_reassociation_(other.allow_fp_reassociation_),
-      deterministic_fp_(other.deterministic_fp_),
       pinned_tls_register_(other.pinned_tls_register_),
       interrupt_poll_(other.interrupt_poll_),
       has_loop_optimizations_(other.has_loop_optimizations_),
@@ -94,7 +93,6 @@ Module& Module::operator=(Module&& other) noexcept {
     symbol_roles_ = std::move(other.symbol_roles_);
     string_symbols_ = std::move(other.string_symbols_);
     allow_fp_reassociation_ = other.allow_fp_reassociation_;
-    deterministic_fp_ = other.deterministic_fp_;
     pinned_tls_register_ = other.pinned_tls_register_;
     interrupt_poll_ = other.interrupt_poll_;
     has_loop_optimizations_ = other.has_loop_optimizations_;
@@ -265,7 +263,6 @@ Function* Module::create_function(std::string_view name, Type return_type, Span<
 
     Function* fn = arena_.make<Function>(interned_name, return_type, std::move(params));
     fn->set_parent(this);
-    if (deterministic_fp_) fn->set_deterministic_fp(true);
     functions_.push_back(fn);
     function_map_[interned_name] = fn;
     return fn;
