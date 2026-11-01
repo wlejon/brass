@@ -67,60 +67,6 @@ void apply_environment(HeapConfig& config) {
     if (!poison.empty() && poison != "0") config.poison = true;
     const std::string log = env_value("BRASS_GC_LOG");
     if (!log.empty() && log != "0") config.log = true;
-    // The A/B switch for the adaptive eden: every minor collection at a full eden.
-    const std::string fixed_eden = env_value("BRASS_GC_FIXED_EDEN");
-    if (!fixed_eden.empty() && fixed_eden != "0") config.adaptive_eden = false;
-    // The A/B switch for the lazy sweep: the old generation swept inside the
-    // full collection's pause.
-    const std::string eager_sweep = env_value("BRASS_GC_EAGER_SWEEP");
-    if (!eager_sweep.empty() && eager_sweep != "0") config.lazy_sweep = false;
-    // The A/B switch for the in-place finish: a cycle's finish evacuates the
-    // young generation, promoting every survivor.
-    const std::string promote_all = env_value("BRASS_GC_FINISH_PROMOTE_ALL");
-    if (!promote_all.empty() && promote_all != "0") config.finish_promote_all = true;
-    const std::string release_run = env_value("BRASS_GC_RELEASE_RUN_BLOCKS");
-    if (!release_run.empty()) {
-        config.release_run_blocks = static_cast<size_t>(std::strtoull(release_run.c_str(), nullptr, 10));
-    }
-    // The A/B switch for the in-place finish's range rescans of large objects.
-    if (env_value("BRASS_GC_RESCAN_RANGES") == "0") config.rescan_card_ranges = false;
-    // The open cycle's headroom over the threshold, a fraction (0: none).
-    const std::string headroom = env_value("BRASS_GC_CYCLE_HEADROOM");
-    if (!headroom.empty()) {
-        char* end = nullptr;
-        const double h = std::strtod(headroom.c_str(), &end);
-        if (end == headroom.c_str() || *end != '\0' || !(h >= 0.0 && h <= 4.0)) {
-            detail::gc_fatal("BRASS_GC_CYCLE_HEADROOM is not a number in [0, 4]");
-        }
-        config.cycle_headroom = h;
-    }
-    // The A/B switches for the adaptive eden around a marking cycle.
-    if (env_value("BRASS_GC_RESTORE_JUDGES_START") == "0") config.restore_judges_cycle_start = false;
-    if (env_value("BRASS_GC_CYCLE_WHOLE_EDEN") == "0") config.cycle_whole_eden = false;
-    if (env_value("BRASS_GC_PARTIAL_MINOR_SHRINKS") == "1") config.partial_minor_shrinks = true;
-    const std::string threads = env_value("BRASS_GC_MARK_THREADS");
-    if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
-    // The A/B switch for the parked marker threads: created and joined by
-    // every drain.
-    if (env_value("BRASS_GC_MARK_POOL") == "0") config.mark_thread_pool = false;
-    // The A/B switch for the parallel minor collection, and its stress form:
-    // every minor collection on several threads, however small.
-    const std::string parallel_minor = env_value("BRASS_GC_PARALLEL_MINOR");
-    if (parallel_minor == "0") config.parallel_minor = ParallelMinor::Off;
-    else if (parallel_minor == "1") config.parallel_minor = ParallelMinor::Auto;
-    else if (parallel_minor == "always") config.parallel_minor = ParallelMinor::Always;
-    const std::string minor_threads = env_value("BRASS_GC_MINOR_THREADS");
-    if (!minor_threads.empty()) {
-        config.minor_threads = static_cast<unsigned>(std::strtoul(minor_threads.c_str(), nullptr, 10));
-    }
-    // The threads of a large parallel minor collection; 0 is the A/B switch
-    // that keeps them on minor_threads.
-    const std::string large_minor = env_value("BRASS_GC_LARGE_MINOR_THREADS");
-    if (large_minor == "0") {
-        config.large_minor_threads_on = false;
-    } else if (!large_minor.empty()) {
-        config.large_minor_threads = static_cast<unsigned>(std::strtoul(large_minor.c_str(), nullptr, 10));
-    }
     // Both old spaces' reservations, in MB: a small one makes the
     // out-of-memory path reachable from a test.
     const std::string old_mb = env_value("BRASS_GC_OLD_RESERVE_MB");
@@ -205,7 +151,6 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     s.verify = s.config.verify;
     s.poison = s.config.poison;
     s.log = s.config.log;
-    s.sweep.lazy = s.config.lazy_sweep;
     s.eden_resident_hi = s.eden_lo;
     s.build_eden_fragments();
     s.reset_eden_limit();
@@ -335,6 +280,10 @@ void HeapState::build_eden_fragments() noexcept {
 }
 
 namespace {
+// The copying a minor collection is bounded to: the eden limit is this over
+// the fraction expected to survive. About 0.5 ms on one thread (1.3-2 MB/ms
+// measured on x64).
+constexpr size_t kMinorCopyBudgetBytes = size_t{1} << 20;
 // The least eden the adaptive limit leaves: below this a minor collection's
 // fixed costs (roots, cards) outweigh the copying it bounds.
 constexpr size_t kMinEdenLimitBytes = size_t{1} << 20;
@@ -380,7 +329,7 @@ void HeapState::reset_eden_limit() noexcept {
 }
 
 void HeapState::restore_eden_for_cycle() noexcept {
-    if (!config.adaptive_eden || eden_limit == eden_hi) return;
+    if (eden_limit == eden_hi) return;
     survival_estimate = 0.0;
     forget_dying();
     restored = false;
@@ -390,10 +339,6 @@ void HeapState::restore_eden_for_cycle() noexcept {
 }
 
 void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
-    if (!config.adaptive_eden) {
-        eden_limit = eden_hi;
-        return;
-    }
     const size_t eden = eden_hi - eden_lo;
     if (m.eden_collected >= kMinSurvivalSampleBytes) {
         // A smaller eden spreads copying out only when the survivors are data
@@ -437,11 +382,10 @@ void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
             // A collection that ran on part of the whole eden (a host's, before
             // a cycle's finish) tenures what the last one aged, a full eden's
             // worth, against the little eden it collected: only an overflow
-            // shows survivors kept there (HeapConfig::partial_minor_shrinks).
-            // bigheap's half-full one before its finish read 2.65 MB tenured
-            // of 6 copied and shrank eden to 1 MB for the cycle after.
-            if (m.at_whole_eden && !m.overflow && !config.partial_minor_shrinks &&
-                m.eden_collected * 2 < eden) {
+            // shows survivors kept there. bigheap's half-full one before its
+            // finish read 2.65 MB tenured of 6 copied and shrank eden to 1 MB
+            // for the cycle after.
+            if (m.at_whole_eden && !m.overflow && m.eden_collected * 2 < eden) {
                 seen = 0.0;
             }
             if (m.at_whole_eden && restore_hold > 0) {
@@ -468,7 +412,7 @@ void HeapState::adapt_eden_limit(const MinorSample& m) noexcept {
     const size_t floor = std::min(kMinEdenLimitBytes, eden);
     double want = static_cast<double>(eden);
     if (survival_estimate > 0.0) {
-        want = std::min(want, static_cast<double>(config.minor_copy_budget_bytes) / survival_estimate);
+        want = std::min(want, static_cast<double>(kMinorCopyBudgetBytes) / survival_estimate);
     }
     // Whole pages, so the limit does not wander by a few bytes per collection.
     const size_t bytes = std::clamp(static_cast<size_t>(want) / kPageBytes * kPageBytes, floor, eden);

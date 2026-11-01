@@ -20,9 +20,8 @@
 // (heap_mark_incremental.cpp: start, slices, finish), back to back here, or
 // as separate calls through Heap::start_marking and the rest, with the
 // mutator and minor collections running between them; then the young
-// generation is not emptied at all but marked where it is at the finish
-// (HeapConfig::finish_promote_all evacuates it there instead), and while the
-// cycle is open a minor collection shades every old object it reaches or
+// generation is not emptied at all but marked where it is at the finish, and
+// while the cycle is open a minor collection shades every old object it reaches or
 // promotes (GcState::shade).
 //
 // Every phase traces through a Tracer with a mode-specific slow path, and
@@ -363,10 +362,9 @@ void minor(GcState& g) {
 
 } // namespace
 
-// A full collection's young generation, emptied into the old one: at its
-// start when it runs back to back, at its finish when a mutator ran between
-// (heap_mark_incremental.cpp).
-void full_evacuate(GcState& g, PhaseClock& clock, bool shade) {
+// A full collection's young generation, emptied into the old one at its
+// start when it runs back to back (heap_mark_incremental.cpp).
+void full_evacuate(GcState& g, PhaseClock& clock) {
     HeapState& s = g.s;
     GcState young(s, g.heap, CollectionKind::Minor);
     young.from = g.from;
@@ -374,8 +372,7 @@ void full_evacuate(GcState& g, PhaseClock& clock, bool shade) {
     young.eden_top = g.eden_top;
     young.from_top = g.from_top;
     young.tenure_age = 1;
-    young.shade = shade;
-    young.learns_cost = false;  // promoting everything, often shading: not a minor collection's cost
+    young.learns_cost = false;  // promoting everything: not a minor collection's cost
     setup_to_space(young);
     evacuate(young, clock);
     g.to_copied_hi = young.to_copied_hi;
@@ -397,7 +394,7 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     clock.lap(kPhaseHooks);
 
     // Liveness is settled: the old generation's memory is freed by the lazy
-    // sweep from here (all of it now with HeapConfig::lazy_sweep off).
+    // sweep from here.
     if (s.young_in_place) {
         // The young generation stays (a cycle's in-place finish), and so do
         // the cards that remember it. A dirty card of a dead mature object is
@@ -445,10 +442,10 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     // one, each cycle longer than the last (bigheap 1 GB went 1.1, 1.8, 2.5
     // GB marked, its live data 0.8). So only the growth before the cycle's
     // start is judged, against what is marked but for the growth since
-    // (HeapConfig::restore_judges_cycle_start). Back to back the two agree.
+    // Back to back the two agree.
     uint64_t marked = g.marked_bytes;
     uint64_t growth = s.old_allocated_since_full;
-    if (s.config.restore_judges_cycle_start && s.cycle_start_growth <= growth) {
+    if (s.cycle_start_growth <= growth) {
         const uint64_t during = growth - s.cycle_start_growth;
         marked = marked > during ? marked - during : 0;
         growth = s.cycle_start_growth;

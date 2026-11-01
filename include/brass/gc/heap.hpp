@@ -44,8 +44,8 @@ enum class StressMode : uint8_t {
 };
 
 // Whether minor collections copy on several threads (HeapConfig::parallel_minor).
+// A collection on one thread is asked for with minor_threads = 1.
 enum class ParallelMinor : uint8_t {
-    Off,     // always on the collecting thread alone
     Auto,    // on several when the collection is large enough to pay for it
     Always,  // on HeapConfig::minor_threads however small (tests, stress)
 };
@@ -60,6 +60,9 @@ inline constexpr uint32_t kAllocPinned = 1u << 1;  // old, and never moved by an
 inline constexpr uint32_t kAllocUninitialized = 1u << 2;
 
 struct HeapConfig {
+    // The whole eden. A minor collection fills the adaptive limit below it,
+    // which shrinks while much of eden survives as data the program keeps
+    // (docs/gc_contract.md, "Adaptive eden").
     size_t eden_bytes = size_t{16} << 20;
     // Each of the two survivor spaces. Young objects that survive a minor
     // collection but not yet `tenure_age` of them wait here; whatever does
@@ -72,19 +75,6 @@ struct HeapConfig {
     // promoted (1: promoted by its first minor collection; at most 7, since
     // an object's age saturates there).
     uint8_t tenure_age = 2;
-    // Survival-adaptive eden: a minor collection's copying costs about its
-    // survivors' bytes, so after each one the eden the next may fill is set
-    // to `minor_copy_budget_bytes` over the fraction of eden that survived
-    // (at least 1 MB, at most `eden_bytes`), when the survivors are data the
-    // program keeps (promoted, not dying in the survivor space), and goes
-    // back to the whole eden once they start dying young. A burst of
-    // survivors then costs several short minor collections instead of one
-    // long one, and a program whose young data dies keeps the whole eden
-    // (docs/gc_contract.md, "Adaptive eden"). false (or
-    // BRASS_GC_FIXED_EDEN=1): every minor collection fills all of eden.
-    bool adaptive_eden = true;
-    // About 0.5 ms of single-thread copying (1.3-2 MB/ms measured on x64).
-    size_t minor_copy_budget_bytes = size_t{1} << 20;
     // Address space reserved for the mature blocks and the large objects;
     // memory is committed as the heap grows.
     size_t mature_reserve_bytes = size_t{4} << 30;
@@ -100,92 +90,26 @@ struct HeapConfig {
     // this and `growth_factor` times the live old bytes after the last one.
     size_t min_full_threshold_bytes = size_t{32} << 20;
     double growth_factor = 1.0;
-    // While a marking cycle is open (start_marking), the growth that
-    // finishes it at an allocation is the threshold times 1 + this. A cycle
-    // marks while the program promotes, and one started on a threshold left
-    // from a heap built faster than it was collected (a boot that built 1 GB
-    // in one turn, last collected at 556 MB) cannot mark it all at a host's
-    // sub-millisecond slices before the plain threshold: the heap then
-    // finished it in one pause of whatever marking was left (32 ms). The
-    // headroom is memory a cycle that falls behind may use, not where cycles
-    // are paced to finish. 0 (or BRASS_GC_CYCLE_HEADROOM=0): the threshold.
-    double cycle_headroom = 0.25;
-    // The finish of a cycle the program ran inside judges only the growth
-    // before the cycle's start when it decides whether to restore the whole
-    // adaptive eden (the growth since is marked whether live or not). false
-    // (or BRASS_GC_RESTORE_JUDGES_START=0): all of it, as before.
-    bool restore_judges_cycle_start = true;
-    // A marking cycle the program runs inside (Heap::start_marking) gives a
-    // shrunk adaptive eden back whole, as the lifetime test does: everything
-    // promoted while it marks is marked, so a shrunk eden's promotions (four
-    // times the whole one's on bigheap after its boot) are marking work as
-    // well as old growth, and the cycle that started on them fell behind.
-    // false (or BRASS_GC_CYCLE_WHOLE_EDEN=0): eden as the minors left it.
-    bool cycle_whole_eden = true;
-    // At the whole eden, a minor collection that collected under half of it
-    // (one a host ran early) shrinks eden only by overflowing the survivor
-    // space: what it tenures is what the last one aged, measured against
-    // the little it collected. true (or BRASS_GC_PARTIAL_MINOR_SHRINKS=1):
-    // its tenured quarter shrinks eden too, as before.
-    bool partial_minor_shrinks = false;
     // Threads that mark the old generation in a full collection (the
     // collecting thread among them) once it holds at least
     // `parallel_mark_bytes`; smaller old generations are marked by the
     // collecting thread alone. 0: half the hardware threads, at most 8.
     unsigned mark_threads = 0;
     size_t parallel_mark_bytes = size_t{16} << 20;
-    // The helper threads stay parked between drains, so a marking cycle's
-    // short slices mark on all of them. false (or BRASS_GC_MARK_POOL=0): each
-    // drain creates its threads and joins them.
-    bool mark_thread_pool = true;
-    // A minor collection (and a marking cycle's finishing evacuation of the
-    // young generation) copies on several threads, the marker's parked
+    // A minor collection copies on several threads, the marker's parked
     // helpers (docs/gc_contract.md, "Parallel Minor Collection"), when it is
-    // expected to take at least `parallel_minor_ms` on one thread (its
-    // expected copying and card work at what serial ones have cost); shorter
-    // ones copy on the collecting thread alone, since parallel copying costs
-    // the program after it more than it saves them. Off (or
-    // BRASS_GC_PARALLEL_MINOR=0): every minor collection on one thread.
-    // Always (BRASS_GC_PARALLEL_MINOR=always): every one on `minor_threads`
-    // threads, however small, for tests and stress.
+    // expected to take at least 1 ms on one thread (its expected copying and
+    // card work at what serial ones have cost); shorter ones copy on the
+    // collecting thread alone, since parallel copying costs the program
+    // after it more than it saves them. Always: every one on
+    // `minor_threads` threads, however small, for tests.
     ParallelMinor parallel_minor = ParallelMinor::Auto;
     // Threads a parallel minor collection copies with (the collecting
-    // thread among them). 0: half the hardware threads, at most 8.
+    // thread among them). 0: half the hardware threads, at most 8, and a
+    // collection expected to copy 4 MB or more on half the hardware threads,
+    // uncapped (every core of an SMT machine); a host's explicit count
+    // stands for both.
     unsigned minor_threads = 0;
-    double parallel_minor_ms = 1.0;
-    // A parallel minor collection expected to copy at least
-    // `large_minor_copy_bytes` copies on `large_minor_threads` threads
-    // instead: such a copy is long enough (a 16 MB eden two thirds of which
-    // survives) that the threads past minor_threads shorten it more than
-    // waking them costs. 0: half the hardware threads, uncapped (every core
-    // of an SMT machine), unless minor_threads is set: a host's explicit
-    // count stands. BRASS_GC_LARGE_MINOR_THREADS=n sets it; =0 (or
-    // `large_minor_threads_on` false) keeps every one on minor_threads.
-    bool large_minor_threads_on = true;
-    unsigned large_minor_threads = 0;
-    size_t large_minor_copy_bytes = size_t{4} << 20;
-    // A full collection's sweep of the old generation is left for after its
-    // pause: done by sweep_slice, by allocation as it needs memory, and
-    // whatever is left by the next cycle's start (docs/gc_contract.md, "Lazy
-    // Sweep"). false (or BRASS_GC_EAGER_SWEEP=1): swept inside the pause.
-    bool lazy_sweep = true;
-    // The most mature blocks (32 KB each) the lazy sweep's release decommits
-    // in one step, between looks at the slice's clock: a cycle that freed much
-    // of a large heap leaves free runs of hundreds of MB, and one decommit of
-    // such a run took a slice past any budget (4.1 ms for 263 MB). 64 blocks
-    // is about 30 us. 0 (or BRASS_GC_RELEASE_RUN_BLOCKS=0): a whole run at once.
-    size_t release_run_blocks = 64;
-    // A marking cycle's finish (finish_marking, or a full collection asked
-    // for while one is open) leaves the young generation where it is and
-    // marks it in place with the old one, so young objects live on and only
-    // the dead ones are dropped (docs/gc_contract.md, "Marking Cycle"). true
-    // (or BRASS_GC_FINISH_PROMOTE_ALL=1): the finish evacuates the young
-    // generation, promoting every survivor, as before.
-    bool finish_promote_all = false;
-    // The in-place finish rescans a large object's dirty cards by their own
-    // ranges, as a minor collection does. false (or
-    // BRASS_GC_RESCAN_RANGES=0): by the marker's 16 KB slices that hold them.
-    bool rescan_card_ranges = true;
     StressMode stress = StressMode::None;
     bool verify = false;  // verify the heap before and after every collection
     bool poison = false;  // overwrite freed memory with 0xDB after every collection
@@ -208,12 +132,8 @@ struct HeapConfig {
     // their frame pointers elsewhere, where that code must keep them.
     bool walk_stack_on_host_collection = false;
     // BRASS_GC_STRESS (minor|full|alternate|incremental|1), BRASS_GC_VERIFY=1,
-    // BRASS_GC_POISON=1, BRASS_GC_LOG=1, BRASS_GC_FIXED_EDEN=1,
-    // BRASS_GC_EAGER_SWEEP=1, BRASS_GC_RELEASE_RUN_BLOCKS=n, BRASS_GC_CYCLE_HEADROOM=f,
-    // BRASS_GC_RESCAN_RANGES=0, BRASS_GC_MARK_THREADS=n,
-    // BRASS_GC_PARALLEL_MINOR=0|1|always, BRASS_GC_MINOR_THREADS=n and
-    // BRASS_GC_OLD_RESERVE_MB=n (both old reservations) override the fields
-    // above when set.
+    // BRASS_GC_POISON=1, BRASS_GC_LOG=1 and BRASS_GC_OLD_RESERVE_MB=n (both
+    // old reservations) override the fields above when set.
     bool read_environment = true;
 };
 
@@ -247,12 +167,12 @@ struct HeapStats {
 // frames) collects ahead of the trigger rather than at an allocation.
 struct HeapPressure {
     size_t eden_used = 0;
-    // The eden a minor collection runs at: the adaptive limit
-    // (HeapConfig::adaptive_eden), at most the eden reserved.
+    // The eden a minor collection runs at: the adaptive limit, at most the
+    // eden reserved.
     size_t eden_capacity = 0;
     uint64_t old_growth = 0;      // old-generation bytes added since the last full collection
     // The growth that runs a full collection, or finishes an open marking
-    // cycle (the threshold plus HeapConfig::cycle_headroom while one marks).
+    // cycle (the threshold plus a quarter of it while one marks).
     uint64_t full_threshold = 0;
     // The last full collection's sweep still to do (Heap::sweep_slice): the
     // mature blocks not yet swept (about a microsecond each), and whether
@@ -412,7 +332,7 @@ public:
     [[nodiscard]] bool marking() const noexcept;
     // Finishes the open cycle (marking whatever grey work is left first),
     // then runs the finalizers it queued. No cycle open stops the process.
-    // The old generation's sweep is left pending (HeapConfig::lazy_sweep).
+    // The old generation's sweep is left pending (sweep_slice).
     void finish_marking();
 
     // ---- Lazy sweep ----------------------------------------------------------

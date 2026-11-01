@@ -77,9 +77,8 @@ void set_young_range(MarkShared& sh, MarkWorkers& workers, bool young);
 // The marked objects behind dirty cards (collect_dirty_cards), as grey
 // entries the drain scans again although marked, without counting them as
 // marked (an unmarked one is dead or scanned whole when the drain reaches
-// it): a mature card's objects, a large object's dirty ranges (the marker's
-// slices that hold them under HeapConfig::rescan_card_ranges false; all of
-// an object that cannot be sliced). Dealt
+// it): a mature card's objects, a large object's dirty ranges (all of an
+// object that cannot be sliced). Dealt
 // out over the workers' stacks. Returns the entries pushed.
 size_t push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work);
 // The grey entries waiting: every worker's stack and the pool's chunks.

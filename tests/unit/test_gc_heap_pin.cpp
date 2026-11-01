@@ -205,10 +205,8 @@ TEST_CASE("gc::Heap pinning - the stack keeps old objects alive, and only while 
 }
 
 TEST_CASE("gc::Heap pinning - an incremental cycle keeps young stack objects alive in place") {
-    for (const bool promote_all : {false, true}) {
-        HeapConfig c = pin_config();
-        c.finish_promote_all = promote_all;
-        Heap h(c);
+    {
+        Heap h(pin_config());
         HeapScope bind(h);
         volatile uintptr_t holder = h.allocate(16, kPair);
         hang_leaf(h, holder, 0, 5, 8);
@@ -231,8 +229,7 @@ TEST_CASE("gc::Heap pinning - an incremental cycle keeps young stack objects ali
 TEST_CASE("gc::Heap pinning - eden allocates around pinned objects, and an object no fragment fits goes old") {
     HeapConfig c = pin_config();
     c.eden_bytes = 64 * 1024;
-    c.survivor_bytes = 64 * 1024;
-    c.adaptive_eden = false;
+    c.survivor_bytes = 64 * 1024;  // an eden under 1 MB the adaptive limit never shrinks
     Heap h(c);
     HeapScope bind(h);
     // Pins spread through eden every 8 KB.
@@ -277,10 +274,10 @@ TEST_CASE("gc::Heap pinning - eden allocates around pinned objects, and an objec
 }
 
 TEST_CASE("gc::Heap pinning - a survivor-space pin stays through the next collection, then is copied") {
-    for (const char* parallel : {"0", "always"}) {
+    for (const bool parallel : {false, true}) {
         HeapConfig c = pin_config();
-        c.parallel_minor = std::string(parallel) == "0" ? ParallelMinor::Off : ParallelMinor::Always;
-        c.minor_threads = 4;
+        c.parallel_minor = parallel ? ParallelMinor::Always : ParallelMinor::Auto;
+        c.minor_threads = parallel ? 4 : 1;
         c.tenure_age = 4;
         Heap h(c);
         HeapScope bind(h);

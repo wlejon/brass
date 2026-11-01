@@ -243,7 +243,6 @@ constexpr size_t kRescanSlice = 0xFFFF;
 // slice around it instead made every finish rescan nearly all of an array the
 // program writes a few hundred random slots of a frame (bigheap's 3 MB one:
 // 394k slots, most of a 1 GB heap's finish).
-// HeapConfig::rescan_card_ranges false: by those slices, as before.
 constexpr uintptr_t kRangeEntry = 1;
 
 size_t slice_bytes_for(size_t size) noexcept {
@@ -477,7 +476,6 @@ size_t push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work
     // completed at its start).
     MarkShared& sh = workers[0]->sh;
     const HeapState& s = sh.s;
-    const bool ranges = s.config.rescan_card_ranges;
     sh.rescan_ranges.clear();
     for (const CardWork& c : work) {
         if (c.starts != 0) {
@@ -493,7 +491,7 @@ size_t push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work
         if (!is_marked(s, c.object)) continue;
         const size_t size = header_of(c.object)->size;
         const bool sliced = size > kSliceBytes && sliceable(layout_descriptor(header_of(c.object)->layout));
-        if (sliced && ranges && !(c.begin == 0 && c.end == size)) {
+        if (sliced && !(c.begin == 0 && c.end == size)) {
             // Its dirty range alone (kRangeEntry). gather_card_work cut it
             // into pieces of at most kCardWorkSliceBytes, so the threads
             // share a long one; the whole of an object is still its slices.
@@ -508,7 +506,7 @@ size_t push_card_rescans(MarkWorkers& workers, const std::vector<CardWork>& work
             last_slice = SIZE_MAX;
             continue;
         }
-        // The marker's slices of it that hold the dirty range.
+        // All of it, as the marker's slices of it.
         const size_t bytes = slice_bytes_for(size);
         for (size_t i = c.begin / bytes; i * bytes < c.end; ++i) {
             if (c.object == last_object && i <= last_slice) continue;
@@ -543,32 +541,7 @@ bool mark_drain(MarkShared& sh, MarkWorkers& workers, unsigned run) {
         else drain<false, false>(main);
         return grey_empty(sh, workers);
     }
-    if (sh.s.config.mark_thread_pool) return drain_on_helpers(sh, workers, timed);
-    // Each worker thread starts at `go`, once `threads` counts exactly the
-    // threads that were created: the termination count depends on it.
-    std::atomic<bool> go{false};
-    std::vector<std::thread> threads;
-    threads.reserve(workers.size() - 1);
-    for (size_t i = 1; i < workers.size(); ++i) {
-        try {
-            threads.emplace_back([&go, timed, &w = *workers[i]] {
-                while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
-                if (timed) drain<true, true>(w);
-                else drain<true, false>(w);
-            });
-        } catch (...) {
-            break;  // fewer threads: the ones that exist share the work
-        }
-    }
-    // A worker whose thread could not be created would not run; what an
-    // earlier slice left on its stack goes to the pool for the others.
-    for (size_t i = threads.size() + 1; i < workers.size(); ++i) pool_stack(sh, *workers[i]);
-    sh.threads = static_cast<unsigned>(threads.size() + 1);
-    go.store(true, std::memory_order_release);
-    if (timed) drain<true, true>(main);
-    else drain<true, false>(main);
-    for (std::thread& t : threads) t.join();
-    return grey_empty(sh, workers);
+    return drain_on_helpers(sh, workers, timed);
 }
 
 } // namespace brass::gc::detail

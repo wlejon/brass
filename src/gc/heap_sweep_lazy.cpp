@@ -33,8 +33,7 @@
 // Heap::sweep_slice does the work for about a budget (the host's time
 // between frames); whatever is left when the next cycle starts is finished
 // there, inside its start's pause, and an old space near its end finishes it
-// before refusing an allocation. HeapConfig::lazy_sweep = false
-// (BRASS_GC_EAGER_SWEEP=1) does all of it inside the finish, as before.
+// before refusing an allocation.
 
 #include "heap_mark.hpp"
 
@@ -63,6 +62,11 @@ constexpr unsigned kAllocatorSweepLarge = 16;
 // object or a free run is one (about a microsecond at most); a release's
 // decommit counts as a look on its own.
 constexpr unsigned kClockEvery = 8;
+// The most mature blocks (32 KB each) one release step decommits, between
+// looks at the clock: a cycle that freed much of a large heap leaves free
+// runs of hundreds of MB, and one decommit of such a run took a slice past
+// any budget (4.1 ms for 263 MB). 64 blocks is about 30 us.
+constexpr size_t kReleaseRunBlocks = 64;
 
 void poison_range(uintptr_t at, size_t bytes) { std::memset(reinterpret_cast<void*>(at), kPoisonByte, bytes); }
 
@@ -194,10 +198,9 @@ bool release_step(HeapState& s) {
         if (!releasable(high)) continue;
         uint32_t low = high;
         s.blocks[low]->committed = false;
-        // HeapConfig::release_run_blocks: a run of hundreds of MB decommitted
-        // by one call was a slice of its own past any budget.
-        const size_t most = s.config.release_run_blocks ? s.config.release_run_blocks : SIZE_MAX;
-        while (w.release_next < w.release_list.size() && low > 0 && high - low + 1 < most &&
+        // At most kReleaseRunBlocks: a run of hundreds of MB decommitted by
+        // one call was a slice of its own past any budget.
+        while (w.release_next < w.release_list.size() && low > 0 && high - low + 1 < kReleaseRunBlocks &&
                w.release_list[w.release_next] == low - 1 && releasable(low - 1)) {
             ++w.release_next;
             --low;
@@ -218,7 +221,7 @@ void end_sweep(HeapState& s) {
     w.active = false;
     w.release_list.clear();
     w.release_next = 0;
-    if (s.log && w.lazy) log_sweep(s);
+    if (s.log) log_sweep(s);
 }
 
 } // namespace
@@ -254,10 +257,6 @@ void HeapState::begin_sweep(uint64_t live_bytes) {
     medium_region = BumpRegion{};
     recyclable_blocks.clear();
     mature_used_lines = 0;  // summed again block by block as they are swept
-    if (!w.lazy) {
-        sweep_work(kNoDeadline);
-        end_sweep(*this);
-    }
 }
 
 bool HeapState::sweep_work(uint64_t deadline_ns) {

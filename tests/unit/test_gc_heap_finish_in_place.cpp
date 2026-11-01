@@ -1,6 +1,5 @@
 // gc::Heap's marking cycle finish with the young generation left in place
-// (HeapConfig::finish_promote_all false, the default; docs/gc_contract.md
-// "Marking Cycle"): the finish marks young objects with the old ones instead
+// (docs/gc_contract.md "Marking Cycle"): the finish marks young objects with the old ones instead
 // of promoting them all, so young survivors that hold the only path to old
 // objects keep them, a young object made and linked during the cycle keeps
 // what it names and stays remembered, weak cells and ephemerons naming young
@@ -9,7 +8,7 @@
 // not move. Every case runs with the minor collections on one thread and on
 // four (ParallelMinor::Always), under verification (the finish's fresh mark
 // reaches every young object it must have marked), and a randomized mutator
-// checks the same against the promote-all finish.
+// checks that what the roots reach survives every finish.
 
 #include "stack_scrub.hpp"
 #include "test_framework.hpp"
@@ -77,7 +76,7 @@ LayoutId table_layout() {
     return id;
 }
 
-HeapConfig config(ParallelMinor minor, bool promote_all = false) {
+HeapConfig config(ParallelMinor minor) {
     HeapConfig c;
     c.eden_bytes = size_t{1} << 20;
     c.survivor_bytes = size_t{512} << 10;
@@ -89,14 +88,14 @@ HeapConfig config(ParallelMinor minor, bool promote_all = false) {
     c.mark_threads = minor == ParallelMinor::Always ? 4 : 1;
     c.parallel_mark_bytes = 0;
     c.parallel_minor = minor;
-    c.minor_threads = 4;
-    c.finish_promote_all = promote_all;
+    c.minor_threads = minor == ParallelMinor::Always ? 4 : 1;
     c.read_environment = false;
     c.verify = true;  // every finish compares the cycle's marks with a fresh mark
     return c;
 }
 
-constexpr ParallelMinor kModes[] = {ParallelMinor::Off, ParallelMinor::Always};
+// One thread (Auto with minor_threads 1) and four.
+constexpr ParallelMinor kModes[] = {ParallelMinor::Auto, ParallelMinor::Always};
 
 uint64_t* slot_of(uintptr_t object, size_t index) { return reinterpret_cast<uint64_t*>(object) + index; }
 
@@ -277,19 +276,16 @@ TEST_CASE("gc::Heap finish in place - a live owner the marker has not reached ye
     }
 }
 
-// HeapConfig::rescan_card_ranges: a black large array's dirty cards are
-// rescanned by their own ranges (or by the marker's 16 KB slices holding
-// them), and every young object stored behind them, at the first card, in the
-// middle, across a card boundary and at the last slot, keeps the old object
-// it alone names.
+// A black large array's dirty cards are rescanned by their own ranges, and
+// every young object stored behind them, at the first card, in the middle,
+// across a card boundary and at the last slot, keeps the old object it alone
+// names.
 TEST_CASE("gc::Heap finish in place - a black large array's dirty ranges are rescanned") {
     constexpr size_t kWords = 8192;  // 64 KB: four of the marker's slices
     constexpr size_t kSlots[] = {1, 2500, 2559, 2560, 5000, kWords - 1};
     for (ParallelMinor mode : kModes) {
-        for (bool ranges : {true, false}) {
-            HeapConfig c = config(mode);
-            c.rescan_card_ranges = ranges;
-            Heap h(c);
+        {
+            Heap h(config(mode));
             HeapRoot<Heap> root(h);
             // The targets' addresses in the C++ heap, where no stack word holds them.
             std::vector<uintptr_t> targets;
@@ -493,25 +489,6 @@ TEST_CASE("gc::Heap finish in place - a dead young object is finalized and stops
     }
 }
 
-TEST_CASE("gc::Heap finish in place - finish_promote_all promotes the young generation as before") {
-    for (ParallelMinor mode : kModes) {
-        Heap h(config(mode, true));
-        HeapRoot<Heap> root(h);
-        const uint64_t c = from_own_frame([&] {
-            const uintptr_t cc = old_words(h, 1);
-            *root.slot = young_words(h, 1);
-            h.store(static_cast<uintptr_t>(*root.slot), 0, cc);
-            return hide_address(cc);
-        });
-        cycle(h);
-        in_own_frame([&] {
-            CHECK(h.is_old(static_cast<uintptr_t>(*root.slot)));
-            CHECK(Heap::load(static_cast<uintptr_t>(*root.slot), 0) == addr(c));
-        });
-        CHECK(alive(h, c));
-    }
-}
-
 namespace {
 
 // Random graphs of young and old nodes, rewired between slices, minor
@@ -598,9 +575,9 @@ struct Graph {
 
 TEST_CASE("gc::Heap finish in place - a randomized mutator with young data across finishes loses nothing") {
     for (ParallelMinor mode : kModes) {
-        for (bool promote_all : {false, true}) {
+        {
             for (uint32_t seed : {21u, 22u, 23u}) {
-                Heap h(config(mode, promote_all));
+                Heap h(config(mode));
                 Graph g(h, seed);
                 for (size_t i = 0; i < g.roots.size(); i += 2) g.roots[i] = g.make();
                 uint64_t finishes = 0;

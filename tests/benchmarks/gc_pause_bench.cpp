@@ -52,8 +52,8 @@ LayoutId words_layout() {
 
 double ms(uint64_t ns) { return static_cast<double>(ns) / 1e6; }
 
-// The default configuration, with only BRASS_GC_LOG and BRASS_GC_MARK_THREADS
-// taken from the environment (stress or verification would measure nothing).
+// The default configuration, with only BRASS_GC_LOG taken from the
+// environment (stress or verification would measure nothing).
 std::string env_value(const char* name) {
 #if defined(_MSC_VER)
     char* owned = nullptr;  // getenv is C4996 under MSVC
@@ -72,8 +72,6 @@ HeapConfig bench_config() {
     HeapConfig config;
     config.read_environment = false;
     config.log = !env_value("BRASS_GC_LOG").empty();
-    const std::string threads = env_value("BRASS_GC_MARK_THREADS");
-    if (!threads.empty()) config.mark_threads = static_cast<unsigned>(std::strtoul(threads.c_str(), nullptr, 10));
     return config;
 }
 

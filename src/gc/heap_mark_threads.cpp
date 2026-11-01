@@ -17,8 +17,6 @@ unsigned configured_threads(unsigned configured) {
 }
 
 unsigned large_minor_thread_count(const HeapConfig& config) {
-    if (!config.large_minor_threads_on) return 1;
-    if (config.large_minor_threads != 0) return config.large_minor_threads;
     // A host that set the minor collection's count has said how many cores
     // it gives the collector; only the default widens.
     if (config.minor_threads != 0) return 1;
@@ -118,15 +116,10 @@ unsigned Heap::start_helper_threads() {
                          "source or hook called it)");
     }
     // As many as the larger of the two parallel paths that use the pool
-    // would ask for; a path that never runs on it asks for none.
-    unsigned threads = 1;
-    if (s.config.mark_thread_pool) {
-        threads = std::max(threads, detail::configured_threads(s.config.mark_threads));
-    }
-    if (s.config.parallel_minor != ParallelMinor::Off) {
-        threads = std::max(threads, detail::configured_threads(s.config.minor_threads));
-        threads = std::max(threads, detail::large_minor_thread_count(s.config));
-    }
+    // would ask for.
+    unsigned threads = detail::configured_threads(s.config.mark_threads);
+    threads = std::max(threads, detail::configured_threads(s.config.minor_threads));
+    threads = std::max(threads, detail::large_minor_thread_count(s.config));
     if (threads <= 1) return 0;
     return detail::heap_helpers(s).ensure(threads - 1);
 }

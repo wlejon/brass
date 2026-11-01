@@ -6,8 +6,7 @@
 // threads and joining them costs about 0.1 ms of it, and the helpers start
 // marking some 60 us in, so a 0.4 ms slice on eight threads marked little
 // more than one on a single thread. A parked helper wakes in microseconds.
-// HeapConfig::mark_thread_pool (BRASS_GC_MARK_POOL=0 turns it off) is the
-// A/B switch. The parallel minor collection shares the pool.
+// The parallel minor collection shares the pool.
 //
 // Creating them is ~0.1 ms a thread, so the collection that first wants them
 // pays most of a millisecond for seven: bro's first parallel minor took 3.9
@@ -34,10 +33,9 @@ class MarkThreads;
 // The threads (the collecting one among them) a HeapConfig field asking for
 // `configured` means: itself, or for 0 half the hardware threads, at most 8.
 unsigned configured_threads(unsigned configured);
-// The threads a large parallel minor collection copies with
-// (HeapConfig::large_minor_threads): itself, or for 0 half the hardware
-// threads, uncapped; 1 when large_minor_threads_on is false, or when it is 0
-// and minor_threads is set (an explicit count is the host's).
+// The threads a parallel minor collection expected to copy at least 4 MB
+// copies with: half the hardware threads, uncapped; 1 when minor_threads is
+// set (an explicit count is the host's).
 unsigned large_minor_thread_count(const HeapConfig& config);
 // The heap's helpers, the pool made at first use (by a parallel drain or
 // minor collection, or Heap::start_helper_threads ahead of them).

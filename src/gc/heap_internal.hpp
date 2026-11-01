@@ -191,7 +191,6 @@ enum class SweepBy : uint8_t {
 // or pages, and whatever is left when the next cycle starts is finished
 // there (so a cycle's marks always start clear).
 struct LazySweep {
-    bool lazy = true;     // HeapConfig::lazy_sweep: false sweeps at the finish
     bool active = false;  // some of the last cycle's sweep is left
     // A block in use is unswept while its sweep_epoch differs. Each finish
     // bumps it, which makes every block in use unswept at no cost.
@@ -275,8 +274,7 @@ struct HeapState {
     size_t survivor_bytes = 0;
     int from_survivor = 0;          // holds last minor collection's survivors
     std::vector<uint64_t> young_starts;  // by payload granule from young_lo
-    // A marking cycle's in-place finish (HeapConfig::finish_promote_all
-    // false): the young objects it found reachable, by the same bits as
+    // A marking cycle's in-place finish: the young objects it found reachable, by the same bits as
     // young_starts. While `young_in_place` is set (from the finish's root
     // visit to the end of its settling) the marker marks young objects here as
     // it marks old ones in theirs, and liveness of a young address is this
@@ -382,17 +380,24 @@ struct HeapState {
     uint64_t old_allocated_since_full = 0;
     uint64_t full_threshold = 0;
     // The growth that runs a full collection (or finishes an open cycle):
-    // the threshold, with HeapConfig::cycle_headroom on top while a cycle
-    // marks, so a cycle the host paces has room to finish at its slices
-    // rather than in one pause at whichever allocation reached the threshold.
+    // the threshold, with a quarter of it on top while a cycle marks, so a
+    // cycle the host paces has room to finish at its slices rather than in
+    // one pause at whichever allocation reached the threshold. A cycle marks
+    // while the program promotes, and one started on a threshold left from a
+    // heap built faster than it was collected (a boot that built 1 GB in one
+    // turn, last collected at 556 MB) could not mark it all at a host's
+    // sub-millisecond slices before the plain threshold: the heap then
+    // finished it in one pause of whatever marking was left (32 ms). The
+    // headroom is memory a cycle that falls behind may use, not where cycles
+    // are paced to finish.
     [[nodiscard]] uint64_t growth_limit() const noexcept {
         if (mark_phase != MarkPhase::Marking) return full_threshold;
-        return full_threshold + static_cast<uint64_t>(static_cast<double>(full_threshold) * config.cycle_headroom);
+        return full_threshold + full_threshold / 4;
     }
     // old_allocated_since_full when the open cycle started: what it grew by
     // after that it marks whether live or not (allocated or promoted grey),
     // so the eden's restore test at its finish (full_reclaim) judges only
-    // the growth before it (HeapConfig::restore_judges_cycle_start).
+    // the growth before it.
     uint64_t cycle_start_growth = 0;
     bool minor_requested = false;
     bool full_requested = false;
@@ -445,8 +450,8 @@ struct HeapState {
     // collection of its own.
     MarkPhase mark_phase = MarkPhase::Idle;
     std::unique_ptr<MarkCycle, MarkCycleDeleter> cycle;
-    // Made at the first parallel drain (HeapConfig::mark_thread_pool), kept
-    // parked until the heap is destroyed.
+    // Made at the first parallel drain or minor collection (or
+    // Heap::start_helper_threads), kept parked until the heap is destroyed.
     std::unique_ptr<MarkThreads, MarkThreadsDeleter> mark_threads;
 
     HeapStats stats;
@@ -552,7 +557,7 @@ struct HeapState {
     // At a cycle's finish, once liveness is settled: every block in use
     // becomes unswept, the allocation regions and recyclable list start
     // over, and the large objects' phase begins. `live_bytes`: the cycle's
-    // marked bytes. With HeapConfig::lazy_sweep off, sweeps all of it now.
+    // marked bytes.
     void begin_sweep(uint64_t live_bytes);
     // Whether block `meta` still holds the last cycle's dead objects.
     [[nodiscard]] bool block_unswept(const BlockMeta& meta) const noexcept {
@@ -588,7 +593,7 @@ struct HeapState {
     // ---- the young generation (heap.cpp) ----
     void reset_eden() noexcept;
     void update_fast_limit() noexcept;
-    // The adaptive eden (HeapConfig::adaptive_eden): allocation stops at
+    // The adaptive eden: allocation stops at
     // eden_limit and a minor collection runs there, eden_hi but for one
     // object too large for an empty eden_limit. survival_estimate is the
     // fraction of eden expected to survive the next minor collection; each
@@ -623,9 +628,11 @@ struct HeapState {
     // has moved from building data to churning a working set does not keep
     // the small eden the build-up called for).
     void reset_eden_limit() noexcept;
-    // A shrunk eden back whole as a marking cycle starts
-    // (HeapConfig::cycle_whole_eden), held there for restore_hold
-    // collections as after the lifetime test, since the survivor space and
+    // A shrunk eden back whole as a marking cycle starts (one the program
+    // runs inside promotes marked, so a shrunk eden's promotions, four times
+    // the whole one's on bigheap after its boot, are marking work as well as
+    // old growth, and the cycle that started on them fell behind), held
+    // there for restore_hold collections as after the lifetime test, since the survivor space and
     // the shrunk eden's promotions say little at first; after them the
     // whole eden judges as always. Not a verdict of that test, so a shrink
     // then does not lengthen its next one (restored stays false).
@@ -804,9 +811,8 @@ private:
 // A full collection's phases around the marking (heap_collect.cpp). Sets up
 // `g` for a collection starting now and marks the heap as collecting:
 void begin_collection(GcState& g);
-// the young generation emptied into the old one, every survivor promoted
-// (`shade`: during an open cycle, shading what it reaches; GcState::shade);
-void full_evacuate(GcState& g, PhaseClock& clock, bool shade);
+// the young generation emptied into the old one, every survivor promoted;
+void full_evacuate(GcState& g, PhaseClock& clock);
 // last, with the marking done and its weak slots, dead ephemerons and totals
 // in `g`: weakness settled, hooks run, the old generation swept, the young
 // spaces reset and the next threshold set.

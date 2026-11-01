@@ -188,8 +188,8 @@ uint64_t count_young_marks(const HeapState& s, const GcState& g) noexcept {
            popcount_range(s, s.survivor_lo[g.to], s.survivor_top[g.to]);
 }
 
-// The finish's young half when it leaves the young generation in place
-// (HeapConfig::finish_promote_all false): the marker marks young objects as
+// The finish's young half, which leaves the young generation in place: the
+// marker marks young objects as
 // it marks old ones, from the roots (visited next) and the dirty cards, and
 // the young objects it reaches it scans with its Full tracer, so their old
 // referents are marked too. Nothing moves, so it all runs on the marker's
@@ -297,7 +297,7 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     g.start_sweep_ns = swept_ns;
     begin_collection(g);
     PhaseClock clock(g);
-    if (evacuate) full_evacuate(g, clock, false);
+    if (evacuate) full_evacuate(g, clock);
 
     c.workers = make_mark_workers(c.sh, mark_thread_count(s));
     visit_roots(s, c.workers[0]->tracer);
@@ -318,8 +318,8 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     // to back nothing grows between.
     s.cycle_start_growth = s.old_allocated_since_full;
     // A cycle the program runs inside marks what is promoted meanwhile:
-    // the whole eden promotes the least (HeapConfig::cycle_whole_eden).
-    if (!evacuate && s.config.cycle_whole_eden) s.restore_eden_for_cycle();
+    // the whole eden promotes the least.
+    if (!evacuate) s.restore_eden_for_cycle();
     s.collecting = false;
     s.stack_objects.clear();
     s.mark_phase = MarkPhase::Marking;
@@ -362,15 +362,7 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
         gather_stack_objects(s, StackObjects::WithOld);
         begin_collection(g);
         PhaseClock clock(g);
-        if (s.config.finish_promote_all) {
-            // The young generation, emptied by a minor collection that
-            // shades: every survivor is promoted grey (the marker then scans
-            // what it names) and every dirty card shades the old objects it
-            // names.
-            full_evacuate(g, clock, true);
-        } else {
-            mark_young_in_place(c, clock);
-        }
+        mark_young_in_place(c, clock);
         const uint64_t t1 = gc_now_ns();
         g.finish_young_ns = t1 - t0;
         // The roots again through the marker's tracer: a full collection's

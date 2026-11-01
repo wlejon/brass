@@ -346,7 +346,7 @@ void check_same(const Outcome& serial, const Outcome& parallel) {
 
 void compare_all(const Options& o, uint32_t seeds) {
     for (uint32_t seed = 1; seed <= seeds; ++seed) {
-        const Outcome serial = run(ParallelMinor::Off, 1, seed, o);
+        const Outcome serial = run(ParallelMinor::Auto, 1, seed, o);
         CHECK_EQ(serial.parallel, uint64_t{0});
         CHECK(serial.promoted > 0);
         for (unsigned threads : {2u, 4u, 8u}) {
@@ -369,7 +369,7 @@ TEST_CASE("gc::Heap parallel minor - random graphs survive exactly as on one thr
 TEST_CASE("gc::Heap parallel minor - with the old generation's lazy sweep pending") {
     Options o;
     o.lazy = true;
-    const Outcome serial = run(ParallelMinor::Off, 1, 7, o);
+    const Outcome serial = run(ParallelMinor::Auto, 1, 7, o);
     CHECK(serial.swept_pending_at_first);
     compare_all(o, 2);
 }
@@ -387,7 +387,7 @@ TEST_CASE("gc::Heap parallel minor - weak slots, ephemerons and finalizers settl
     o.weak = true;
     o.survivor_bytes = size_t{1} << 20;  // the eden's size: nothing promoted but by age, size or pretenuring
     for (uint32_t seed = 1; seed <= 2; ++seed) {
-        const Outcome serial = run(ParallelMinor::Off, 1, seed, o);
+        const Outcome serial = run(ParallelMinor::Auto, 1, seed, o);
         // Something died and something lived, or the comparison says little.
         CHECK(std::count(serial.weak_cleared.begin(), serial.weak_cleared.end(), 1) > 0);
         CHECK(std::count(serial.weak_cleared.begin(), serial.weak_cleared.end(), 0) > 0);
@@ -397,7 +397,7 @@ TEST_CASE("gc::Heap parallel minor - weak slots, ephemerons and finalizers settl
         for (unsigned threads : {2u, 4u, 8u}) check_same(serial, run(ParallelMinor::Always, threads, seed, o));
     }
     o.cycle = true;
-    const Outcome serial = run(ParallelMinor::Off, 1, 3, o);
+    const Outcome serial = run(ParallelMinor::Auto, 1, 3, o);
     check_same(serial, run(ParallelMinor::Always, 8, 3, o));
 }
 
@@ -447,13 +447,14 @@ TEST_CASE("gc::Heap parallel minor - an object named from many cards is copied o
 }
 
 TEST_CASE("gc::Heap parallel minor - the automatic policy copies small collections on one thread") {
-    HeapConfig c = config(ParallelMinor::Auto, 4);
+    // A 16 MB eden, so that the copying collections expect ~8 MB, several
+    // times the 1 ms goal on one thread on any machine; the quiet ones
+    // expect next to nothing.
+    HeapConfig c = config(ParallelMinor::Auto, 4, size_t{16} << 20);
+    c.eden_bytes = size_t{16} << 20;
     c.verify = false;
-    // Low, so that the test does not depend on how fast this machine copies:
-    // the quiet collections expect next to nothing, the others ~1 MB.
-    c.parallel_minor_ms = 0.05;
     Heap h(c);
-    std::vector<uint64_t> keep(20000, 0);
+    std::vector<uint64_t> keep(120000, 0);
     for (uint64_t& r : keep) h.add_root(&r);
     // Quiet collections: next to nothing survives and no card is dirty.
     for (int i = 0; i < 20; ++i) {
@@ -497,21 +498,6 @@ TEST_CASE("gc::Heap parallel minor - start_helper_threads creates the pool both 
         CHECK(h.stats().parallel_evacuations >= 4);
         CHECK_EQ(h.start_helper_threads(), 5u);
         for (uint64_t r : keep) CHECK(h.is_valid_object(static_cast<uintptr_t>(r)));
-    }
-    {
-        // The marker off the pool: the minor collection's count alone.
-        HeapConfig c = config(ParallelMinor::Auto, 3);
-        c.mark_threads = 8;
-        c.mark_thread_pool = false;
-        Heap h(c);
-        CHECK_EQ(h.start_helper_threads(), 2u);
-    }
-    {
-        // Neither path on the pool: no helpers.
-        HeapConfig c = config(ParallelMinor::Off, 4);
-        c.mark_thread_pool = false;
-        Heap h(c);
-        CHECK_EQ(h.start_helper_threads(), 0u);
     }
     {
         // One thread each: no helpers either.

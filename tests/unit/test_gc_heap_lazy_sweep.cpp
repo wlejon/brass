@@ -8,8 +8,8 @@
 // minor collection's card scan never scans a dead object of an unswept block;
 // large objects are freed, kept and reused correctly; finalizers, weak slots
 // and hooks settle at the finish; OS memory is handed back in slices; an old
-// space near its end finishes the sweep rather than collect again; the eager
-// A/B switch; and a randomized mutator under verification.
+// space near its end finishes the sweep rather than collect again; and a
+// randomized mutator under verification.
 
 #include "stack_scrub.hpp"
 #include "test_framework.hpp"
@@ -83,7 +83,7 @@ LayoutId spy_layout() {
     return id;
 }
 
-HeapConfig config(bool lazy = true) {
+HeapConfig config() {
     HeapConfig c;
     c.eden_bytes = size_t{1} << 20;
     c.survivor_bytes = size_t{256} << 10;
@@ -94,17 +94,7 @@ HeapConfig config(bool lazy = true) {
     c.mark_threads = 1;
     c.read_environment = false;
     c.verify = true;
-    c.lazy_sweep = lazy;
     return c;
-}
-
-void set_env(const char* name, const char* value) {
-#if defined(_WIN32)
-    _putenv_s(name, value ? value : "");
-#else
-    if (value) setenv(name, value, 1);
-    else unsetenv(name);
-#endif
 }
 
 uint64_t* slot_of(uintptr_t object, size_t index) { return reinterpret_cast<uint64_t*>(object) + index; }
@@ -239,22 +229,28 @@ TEST_CASE("gc::Heap lazy sweep - a full collection leaves the sweep pending, and
     unroot_all(h, set.kept);
 }
 
-TEST_CASE("gc::Heap lazy sweep - once done it leaves the heap the eager sweep leaves") {
-    // The same program on a lazy heap (swept by slices) and an eager one: the
-    // same old bytes in use, committed memory, and the same objects.
+TEST_CASE("gc::Heap lazy sweep - swept by many slices it leaves the heap one unbounded slice leaves") {
+    // The same program swept by zero-budget slices and by one unbounded
+    // slice: the same old bytes in use, committed memory, and the same
+    // objects.
     size_t used[2] = {}, committed[2] = {};
     std::vector<uintptr_t> objects[2];
-    for (int lazy = 0; lazy < 2; ++lazy) {
-        Heap h(config(lazy == 1));
+    for (int sliced = 0; sliced < 2; ++sliced) {
+        Heap h(config());
         OldSet set = make_old(h, 3000, 5, 4);
         root_all(h, set.kept);
         (void)h.allocate(64 * 1024, words_layout());  // a large object, dead
         h.collect(CollectionKind::Full);
-        CHECK_EQ(h.sweeping(), lazy == 1);
-        sweep_all(h);
-        used[lazy] = h.old_used_bytes();
-        committed[lazy] = h.committed_bytes();
-        h.for_each_object([&](uintptr_t o) { objects[lazy].push_back(o); });
+        CHECK(h.sweeping());
+        if (sliced == 1) {
+            while (!h.sweep_slice(0)) {
+            }
+        } else {
+            sweep_all(h);
+        }
+        used[sliced] = h.old_used_bytes();
+        committed[sliced] = h.committed_bytes();
+        h.for_each_object([&](uintptr_t o) { objects[sliced].push_back(o); });
         unroot_all(h, set.kept);
     }
     CHECK_EQ(used[0], used[1]);
@@ -536,15 +532,13 @@ TEST_CASE("gc::Heap lazy sweep - finalizers, weak slots and hooks settle at the 
     h.remove_post_collection_hook(hook);
 }
 
-// The release decommits at most HeapConfig::release_run_blocks blocks a step
-// (0: each free run whole), so a run of many MB takes many zero-budget
-// slices rather than one past any budget.
+// The release decommits at most 64 blocks (2 MB) a step, so a run of many MB
+// takes many zero-budget slices rather than one past any budget.
 TEST_CASE("gc::Heap lazy sweep - excess free blocks go back to the OS in the sweep's slices") {
-    const auto slices_to_release = [](size_t run_blocks) {
+    {
         HeapConfig c = config();
         c.verify = false;
         c.min_full_threshold_bytes = size_t{1} << 20;  // retained: 64 free blocks, not 32 MB
-        c.release_run_blocks = run_blocks;
         Heap h(c);
         // ~15 MB live in a chain (word 1 links the one before), collected while
         // live so the threshold grows past it, then dropped: one collection
@@ -564,15 +558,12 @@ TEST_CASE("gc::Heap lazy sweep - excess free blocks go back to the OS in the swe
         const size_t before = h.committed_bytes();
         uint64_t slices = 0;
         while (!h.sweep_slice(0)) ++slices;
-        CHECK(slices > 1);
+        // Over 8 MB released at most 2 MB a step, and a zero-budget slice
+        // ends at its first decommit.
         CHECK(h.committed_bytes() + (size_t{8} << 20) < before);
+        CHECK(slices >= 4);
         h.remove_root(&chain);
-        return slices;
-    };
-    const uint64_t whole = slices_to_release(0);
-    slices_to_release(64);
-    // Over 300 blocks released four at a time: a slice each.
-    CHECK(slices_to_release(4) >= whole + 50);
+    }
 }
 
 TEST_CASE("gc::Heap lazy sweep - an old space near its end finishes the sweep instead of collecting again") {
@@ -589,31 +580,6 @@ TEST_CASE("gc::Heap lazy sweep - an old space near its end finishes the sweep in
     const uint64_t fulls = h.stats().full_collections;
     for (size_t i = 0; i < count; ++i) (void)h.allocate(31 * 8, words_layout(), kAllocOld);
     CHECK_EQ(h.stats().full_collections, fulls);
-}
-
-TEST_CASE("gc::Heap lazy sweep - lazy_sweep = false and BRASS_GC_EAGER_SWEEP=1 sweep inside the finish") {
-    {
-        Heap h(config(false));
-        OldSet set = make_old(h, 1000, 4, 2);
-        root_all(h, set.kept);
-        h.collect(CollectionKind::Full);
-        CHECK_FALSE(h.sweeping());
-        CHECK_FALSE(h.pressure().sweeping);
-        unroot_all(h, set.kept);
-    }
-    {
-        set_env("BRASS_GC_EAGER_SWEEP", "1");
-        HeapConfig c = config();
-        c.read_environment = true;
-        Heap h(c);
-        set_env("BRASS_GC_EAGER_SWEEP", nullptr);
-        h.set_stress(StressMode::None);  // whatever BRASS_GC_STRESS the run has
-        OldSet set = make_old(h, 1000, 4, 2);
-        root_all(h, set.kept);
-        h.collect(CollectionKind::Full);
-        CHECK_FALSE(h.sweeping());
-        unroot_all(h, set.kept);
-    }
 }
 
 namespace {

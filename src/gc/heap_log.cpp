@@ -1,7 +1,7 @@
 // BRASS_GC_LOG=1 (or HeapConfig::log): one line on stderr per collection,
 // naming its kind, why it ran, its pause and where the pause went, and how
 // much it copied, promoted and marked, and the eden limit it ran at and the
-// one it left (HeapConfig::adaptive_eden); a line per lazy sweep once it is
+// one it left (the adaptive eden); a line per lazy sweep once it is
 // done (its time by who did it: host slices, the allocator, the completion at
 // the next cycle's start); and a summary line per heap when the heap is
 // destroyed.
