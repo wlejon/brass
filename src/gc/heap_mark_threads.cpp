@@ -37,7 +37,17 @@ MarkThreads::~MarkThreads() {
         quit_ = true;
     }
     wake_.notify_all();
+#if defined(_WIN32)
+    // A heap owned by a thread_local (a worker's) is destroyed in the thread's
+    // TLS callbacks, under the loader lock, and an exiting helper waits for
+    // that lock in its own thread detach: a join there never returns (bro's
+    // worker tests hung in it). So the helpers are waited for until they have
+    // left the loop, the last thing they do with this pool, and detached.
+    while (exited_.load(std::memory_order_acquire) < threads_.size()) std::this_thread::yield();
+    for (std::thread& t : threads_) t.detach();
+#else
     for (std::thread& t : threads_) t.join();
+#endif
 }
 
 unsigned MarkThreads::ensure(unsigned n) {
@@ -81,7 +91,12 @@ void MarkThreads::loop(unsigned helper, uint64_t seen) {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             wake_.wait(lock, [&] { return quit_ || generation_ != seen; });
-            if (quit_) return;
+            if (quit_) {
+                lock.unlock();
+                // The pool may be freed from here on (~MarkThreads).
+                exited_.fetch_add(1, std::memory_order_release);
+                return;
+            }
             seen = generation_;
             if (helper >= running_) continue;
             job = job_;

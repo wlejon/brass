@@ -73,6 +73,7 @@ private:
     void* context_ = nullptr;
     bool quit_ = false;
     std::atomic<unsigned> done_{0};
+    std::atomic<size_t> exited_{0};  // helpers that have left loop() (~MarkThreads)
 };
 
 } // namespace brass::gc::detail
