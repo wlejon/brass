@@ -3,8 +3,6 @@
 #include <cstdint>
 #include <cstdlib>
 
-#include "brass/core/env.hpp"
-
 namespace brass::codegen {
 
 // Signed 64-bit division and remainder by a constant, as a multiply by a
@@ -37,12 +35,6 @@ inline bool takes_signed_div_magic(int64_t d) noexcept {
     if (d < 3) return false;
     const uint64_t u = static_cast<uint64_t>(d);
     return (u & (u - 1)) != 0;
-}
-
-// BRASS_NO_DIV_MAGIC=1 keeps the divide instruction (A/B seam).
-inline bool signed_div_magic_enabled() noexcept {
-    static const bool enabled = env_value("BRASS_NO_DIV_MAGIC").empty();
-    return enabled;
 }
 
 // Hacker's Delight figure 10-1, with 2^31 / 32 bits replaced by 2^63 / 64.

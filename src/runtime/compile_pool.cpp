@@ -1,5 +1,4 @@
 #include <brass/runtime/compile_pool.hpp>
-#include <brass/core/env.hpp>
 #include <brass/runtime/tier_timeline.hpp>
 
 #include <algorithm>
@@ -41,16 +40,9 @@ void shutdown_shared_at_exit() {
     CompilePool::shared().shutdown();
 }
 
-// BRASS_JIT_THREADS, or 0 when unset or not a positive count.
-long env_thread_count() {
-    const long n = std::strtol(env_value("BRASS_JIT_THREADS").c_str(), nullptr, 10);
-    return n > 0 ? n : 0;
-}
-
 } // namespace
 
 size_t CompilePool::default_thread_count() {
-    if (const long n = env_thread_count()) return static_cast<size_t>(std::min<long>(n, 64));
     const size_t hw = std::thread::hardware_concurrency();
     return std::clamp<size_t>(hw / 4, 1, 8);
 }

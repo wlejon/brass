@@ -1,4 +1,3 @@
-#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/codegen/peephole.hpp>
 #include <brass/codegen/lir.hpp>
@@ -56,8 +55,6 @@ const PReg kR11 = PReg::gpr(GPR::R11);
 const PReg kRax = PReg::gpr(GPR::RAX);
 const PReg kRcx = PReg::gpr(GPR::RCX);
 
-bool disabled() { return !brass::env_value("BRASS_NO_RELOAD_REUSE").empty(); }
-
 // Two reloads of slot 3 into `r` around `between` (none: nothing between).
 size_t reloads_left(std::unique_ptr<LirInst> between, PReg r = kR10, bool aarch64 = false) {
     LirFunction fn;
@@ -76,7 +73,6 @@ size_t reloads_left(std::unique_ptr<LirInst> between, PReg r = kR10, bool aarch6
 }  // namespace
 
 TEST_CASE("Reload reuse - a second reload of the same slot into the same scratch is dropped") {
-    if (disabled()) return;
     CHECK_EQ(reloads_left(nullptr), size_t(1));
     CHECK_EQ(reloads_left(nullptr, kR11), size_t(1));
     CHECK_EQ(reloads_left(nullptr, PReg::gpr(GPR::R15)), size_t(1));
@@ -120,7 +116,7 @@ TEST_CASE("Reload reuse - the emitters' implicit R11 writes keep an R11 reload")
     fabs->add_use(LirOperand::preg(PReg::xmm(x64::XMM::XMM0), 8));
     CHECK_EQ(reloads_left(std::move(fabs), kR11), size_t(2));
     // A memory-to-memory move does not touch R10: its reload is still reused.
-    if (!disabled()) {
+    {
         auto mm2 = std::make_unique<LirInst>(LirOpcode::Mov);
         mm2->add_def(LirOperand::slot(7, 8));
         mm2->add_use(LirOperand::slot(8, 8));
@@ -228,7 +224,7 @@ TEST_CASE("Reload reuse - across blocks only into a block entered by falling thr
         auto b = build(fn, false, false);
         run_lir_peephole_optimizations(fn);
         CHECK_EQ(count_reloads(*b[0], kR10, 3), size_t(1));
-        CHECK_EQ(count_reloads(*b[1], kR10, 3), disabled() ? size_t(1) : size_t(0));
+        CHECK_EQ(count_reloads(*b[1], kR10, 3), size_t(0));
         CHECK_EQ(count_reloads(*b[2], kR10, 3), size_t(1));
         CHECK_EQ(count_reloads(*b[3], kR10, 3), size_t(1));
     }
@@ -248,7 +244,7 @@ TEST_CASE("Reload reuse - across blocks only into a block entered by falling thr
 
 TEST_CASE("Reload reuse - AArch64: X12 reloads are reused, the same writes keep them") {
     const PReg x12 = PReg::aarch64_gpr(aarch64::GPR::X12);
-    if (!disabled()) CHECK_EQ(reloads_left(nullptr, x12, true), size_t(1));
+    CHECK_EQ(reloads_left(nullptr, x12, true), size_t(1));
     auto add = std::make_unique<LirInst>(LirOpcode::Add);
     add->add_def(LirOperand::preg(x12, 8));
     add->add_use(LirOperand::preg(x12, 8));

@@ -171,8 +171,6 @@ private:
 };
 
 struct ArmSpeculationOptions {
-    // Arm nothing: every guard is dropped (the guards-vs-branches A/B).
-    bool arm_none = false;
     // 1: a line per function copy with guards (armed of total); 2: also a
     // line per armed site.
     int trace = 0;

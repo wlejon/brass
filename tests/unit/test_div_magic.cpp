@@ -1,4 +1,3 @@
-#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/codegen/div_magic.hpp>
@@ -16,7 +15,7 @@
 //     host for every divisor below, which is what the AArch64 sequence
 //     computes as well;
 //   - both selectors run explicitly on smod / sdiv by a constant: smulh and
-//     no divide, or the divide under BRASS_NO_DIV_MAGIC;
+//     no divide;
 //   - the JIT on this host against C++ `/` and `%` (d > 0, so neither
 //     overflows), over the int64 edges.
 
@@ -94,8 +93,6 @@ std::vector<int64_t> dividends(int64_t d) {
     return out;
 }
 
-bool seam_off() { return !brass::env_value("BRASS_NO_DIV_MAGIC").empty(); }
-
 std::string module_text(int64_t d) {
     std::string ds = std::to_string(d);
     return "module @dm\n\n"
@@ -159,8 +156,8 @@ TEST_CASE("Div magic - x64 selector: smulh, no idiv") {
         REQUIRE(lir != nullptr);
         size_t smulh = 0, divs = 0;
         count_ops(*lir, smulh, divs);
-        CHECK_EQ(smulh, seam_off() ? size_t(0) : size_t(1));
-        CHECK_EQ(divs, seam_off() ? size_t(1) : size_t(0));
+        CHECK_EQ(smulh, size_t(1));
+        CHECK_EQ(divs, size_t(0));
     }
 }
 
@@ -175,8 +172,8 @@ TEST_CASE("Div magic - AArch64 selector: smulh, no sdiv") {
             REQUIRE(lir != nullptr);
             size_t smulh = 0, divs = 0;
             count_ops(*lir, smulh, divs);
-            CHECK_EQ(smulh, seam_off() ? size_t(0) : size_t(1));
-            CHECK_EQ(divs, seam_off() ? size_t(1) : size_t(0));
+            CHECK_EQ(smulh, size_t(1));
+            CHECK_EQ(divs, size_t(0));
         }
     }
 }

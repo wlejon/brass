@@ -592,8 +592,7 @@ public:
     // Whether the allocator zeroes the registers and spill slots dead at each
     // call (clear_dead_callee_gprs_at_calls). The isel turns it off for a
     // module with Module::precise_stack_roots, whose host takes what a dead
-    // word keeps alive in the conservative stack scan; BRASS_NO_PRECISE_ROOTS=1
-    // keeps it on regardless.
+    // word keeps alive in the conservative stack scan.
     bool clear_dead_roots_at_calls = true;
     // Set once liveness has given every block its loop depth (zero outside
     // any loop), so a function whose depths are all zero is known loop-free

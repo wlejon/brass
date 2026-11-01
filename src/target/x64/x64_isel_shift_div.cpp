@@ -123,7 +123,7 @@ bool X64ISel::divisor_unread(const Instruction& inst) const {
     // lower_div_mod's first choice: the magic-number lowering reads the
     // divisor only for a remainder, and then as an immediate when it fits.
     const bool magic = (op == Opcode::sdiv || op == Opcode::smod) && inst.type() == Type::i64() && dv.is_imm &&
-                       takes_signed_div_magic(dv.val) && signed_div_magic_enabled();
+                       takes_signed_div_magic(dv.val);
     if (magic) return !is_mod || dv.fits_i32;
     return divisor_folds(dv, is_mod);
 }
@@ -148,7 +148,7 @@ void X64ISel::lower_div_mod(
     uint8_t sz = dst.size;
 
     ImmIntInfo imm1 = get_imm_int_info(op1_val);
-    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val) && signed_div_magic_enabled()) {
+    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val)) {
         lower_signed_div_magic(inst, lir_bb, is_mod, imm1);
         return;
     }

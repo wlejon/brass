@@ -1,4 +1,3 @@
-#include "brass/core/env.hpp"
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include "aarch64_isel_conditions.hpp"
 #include <cstdlib>
@@ -36,12 +35,8 @@ using namespace brass::codegen;
 // An `and` under a rematerialized `== 0` is not fused into it: the single-use
 // rule skips an `and` only beside a comparison it skipped itself, so here the
 // `and` is lowered and its register tested at each user.
-//
-// BRASS_NO_CMP_REMAT=1 turns it off (the A/B seam, shared with x64).
 void AArch64ISel::find_remat_compares(const Function& mir_fn) {
     remat_cmps_.clear();
-    static const bool off = !brass::env_value("BRASS_NO_CMP_REMAT").empty();
-    if (off) return;
     std::unordered_map<const Value*, uint32_t> consumer_uses;
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {

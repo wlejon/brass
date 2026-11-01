@@ -1,5 +1,4 @@
 #include <brass/mir/fdiv_pow2.hpp>
-#include <brass/core/env.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/uses.hpp>
@@ -10,14 +9,6 @@
 namespace brass {
 
 namespace {
-
-bool disabled_by_env() {
-    static const bool off = [] {
-        const std::string v = env_value("BRASS_NO_FDIV_POW2");
-        return !v.empty() && v[0] != '0';
-    }();
-    return off;
-}
 
 // The divisor's constant, when the division is a scalar float one by a
 // constant (`fconst_f64` carries an f32 constant too, typed f32).
@@ -64,7 +55,6 @@ bool exact_pow2_reciprocal(double c, bool f32, double& recip) {
 }
 
 size_t rewrite_fdiv_pow2(Function& fn) {
-    if (disabled_by_env()) return 0;
     struct Site {
         Instruction* div;
         double recip;

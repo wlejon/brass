@@ -1,23 +1,9 @@
 #include "gvn_table.hpp"
-#include <brass/core/env.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/runtime_symbols.hpp>
 #include <cstdlib>
 
 namespace brass {
-
-namespace {
-
-// BRASS_NO_FDIV_GVN=1: float divisions are not merged (the A/B seam).
-bool fdiv_gvn_disabled_by_env() noexcept {
-    static const bool off = [] {
-        const std::string v = env_value("BRASS_NO_FDIV_GVN");
-        return !v.empty() && v[0] != '0';
-    }();
-    return off;
-}
-
-}  // namespace
 
 bool is_commutative_op(Opcode op, Type type) noexcept {
     switch (op) {
@@ -127,7 +113,7 @@ bool is_pure_gvn_op(const Instruction* inst) noexcept {
             // NaN) and gives the same bits for the same operands, so it
             // merges like a mul; only the integer forms can fault.
             if (op == Opcode::sdiv && (inst->type() == Type::f64() || inst->type() == Type::f32())) {
-                return !fdiv_gvn_disabled_by_env();
+                return true;
             }
             if (inst->operand_count() < 2 || !inst->operand(1)) return false;
             const Value* denom = inst->operand(1);

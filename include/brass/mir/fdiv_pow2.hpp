@@ -17,7 +17,6 @@ namespace brass {
 // cosines) stalls the call on it. V8 makes the same rewrite.
 //
 // Scalar f64 and f32 only. Returns how many divisions it rewrote.
-// BRASS_NO_FDIV_POW2=1 turns it off (the A/B seam).
 size_t rewrite_fdiv_pow2(Function& fn);
 
 // Whether `c` is a nonzero power of two whose reciprocal is exactly a double

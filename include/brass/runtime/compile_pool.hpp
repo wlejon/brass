@@ -39,7 +39,6 @@ public:
     // thread starts when a job is submitted and none is free, and ends
     // after a while with nothing to do, so a process that never tiers
     // anything up never starts one and one whose start is over keeps none.
-    // BRASS_JIT_THREADS in the environment overrides the size.
     static CompilePool& shared();
     // A quarter of the hardware threads, at least one and at most eight: a
     // compile job is long, and the threads it would take are the mutator's

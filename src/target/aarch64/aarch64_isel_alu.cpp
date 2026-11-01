@@ -305,7 +305,7 @@ void AArch64ISel::lower_div_mod(
     // magic multiplier and shifts (div_magic.hpp), as on x64; sdiv's latency
     // is several times smulh's. The remainder's multiply reads the divisor's
     // register; for a quotient its constant is left unused and deleted.
-    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val) && signed_div_magic_enabled()) {
+    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val)) {
         const SignedDivMagic mg = signed_div_magic64(imm1.val);
         VReg m = lir_fn_->allocate_vreg(RegClass::GPR, 8);
         auto mov_m = std::make_unique<LirInst>(LirOpcode::Movabs);

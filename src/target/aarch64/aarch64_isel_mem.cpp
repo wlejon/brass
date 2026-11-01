@@ -1,4 +1,3 @@
-#include "brass/core/env.hpp"
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <cstdlib>
 #include <cstring>
@@ -38,10 +37,8 @@ bool AArch64ISel::can_fuse_load(const Instruction* load_inst, const Instruction*
 // sum from another block that is a value of its own anyway stays one, rather
 // than keeping both addends live to the use as well. AArch64 has no
 // base + index + displacement form, so such a fold was also an add at the use.
-// BRASS_NO_LOCAL_ADDR_FOLD=1 folds across blocks as before (the A/B seam).
 bool AArch64ISel::fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const {
-    static const bool anywhere = !brass::env_value("BRASS_NO_LOCAL_ADDR_FOLD").empty();
-    return anywhere || !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
+    return !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
 }
 
 AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const {

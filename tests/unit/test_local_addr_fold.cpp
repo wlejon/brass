@@ -1,4 +1,3 @@
-#include "brass/core/env.hpp"
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/target/x64/x64_isel.hpp>
@@ -62,8 +61,6 @@ size_t indexed_loads_in_loop(const Lir& lir) {
     return n;
 }
 
-bool seam_off() { return !brass::env_value("BRASS_NO_LOCAL_ADDR_FOLD").empty(); }
-
 }  // namespace
 
 TEST_CASE("Local address fold - x64: a sum that is also a value is read whole in another block") {
@@ -75,8 +72,8 @@ TEST_CASE("Local address fold - x64: a sum that is also a value is read whole in
     auto lir = isel.lower(*fn);
     REQUIRE(lir != nullptr);
     // [p + n] (address-only %s) and [t + i] (%u, same block) keep their
-    // index; [t + 8] has none. With the seam, [p + d + 8] has one as well.
-    CHECK_EQ(indexed_loads_in_loop(*lir), seam_off() ? size_t(3) : size_t(2));
+    // index; [t + 8] has none, nor [p + d + 8].
+    CHECK_EQ(indexed_loads_in_loop(*lir), size_t(2));
 }
 
 TEST_CASE("Local address fold - AArch64: the same rule, lowered with the AArch64 selector") {
@@ -87,7 +84,7 @@ TEST_CASE("Local address fold - AArch64: the same rule, lowered with the AArch64
     aarch64::AArch64ISel isel(Target::aarch64_linux(), CallingConvention::aapcs64());
     auto lir = isel.lower(*fn);
     REQUIRE(lir != nullptr);
-    CHECK_EQ(indexed_loads_in_loop(*lir), seam_off() ? size_t(3) : size_t(2));
+    CHECK_EQ(indexed_loads_in_loop(*lir), size_t(2));
 }
 
 TEST_CASE("Local address fold - the loads read the same words through the JIT") {

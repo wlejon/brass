@@ -387,10 +387,8 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
 // loop around the use (every definition at a lesser depth): its slot is
 // written before the loop and only read in it, while a value the loop
 // defines would be stored there every iteration for its read to wait on.
-// BRASS_NO_FOLDED_USE=1 is the seam: every read wants a register.
 void LinearScanAllocator::mark_folded_uses() {
-    static const bool off = !brass::env_value("BRASS_NO_FOLDED_USE").empty();
-    if (off || !cc_.target().is_x64()) return;
+    if (!cc_.target().is_x64()) return;
     const auto& guard_exits = liveness_.guard_exits();
     for (const auto& block : fn_.blocks) {
         if (guard_exits.count(block->id)) continue;
@@ -597,7 +595,7 @@ void LinearScanAllocator::allocate() {
     // 6. Rewrite all instructions in the function, with the moves between
     // the pieces of split values, and give critical edges their blocks.
     collect_resolution_moves();
-    // Only for a host that may scan the frame conservatively (precise_roots.hpp).
+    // Only for a host that may scan the frame conservatively (Module::precise_stack_roots unset).
     if (fn_.clear_dead_roots_at_calls) clear_dead_callee_gprs_at_calls(final_callee_gprs);
     rewrite_instructions();
     split_critical_edges();

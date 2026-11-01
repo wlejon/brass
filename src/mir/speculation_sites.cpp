@@ -240,7 +240,7 @@ void arm_speculation_sites(Module& mod, const SpecFeedback& feedback, const ArmS
             const uint32_t site = guard->resume_id();
             seen.push_back(site);
             drop_ran_store(*bb, guard, feedback, site);
-            if (!options.arm_none && feedback.should_speculate(site)) {
+            if (feedback.should_speculate(site)) {
                 // The guard takes the hit test; the branch always goes fast.
                 guard->set_operand(0, br->operand(0));
                 br->set_operand(0, placeholder);

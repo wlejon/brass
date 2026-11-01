@@ -1,4 +1,3 @@
-#include "brass/core/env.hpp"
 #include <brass/target/x64/x64_isel.hpp>
 #include <cstdlib>
 #include <cstring>
@@ -62,10 +61,8 @@ bool X64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* use
 // indices) was three values live across every call in place of one, the image
 // address spilled and reloaded at each site. A sum only ever used as an
 // address still folds everywhere: it is then never computed at all.
-// BRASS_NO_LOCAL_ADDR_FOLD=1 folds across blocks as before (the A/B seam).
 bool X64ISel::fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const {
-    static const bool anywhere = !brass::env_value("BRASS_NO_LOCAL_ADDR_FOLD").empty();
-    return anywhere || !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
+    return !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
 }
 
 // A value is address-only when its uses are all the address operand of a load

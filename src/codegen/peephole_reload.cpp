@@ -28,10 +28,7 @@
 // (resume_id) or that stores relative to the frame or stack pointer other
 // than through a spill-slot operand. Blocks start empty: nothing is assumed
 // about what a predecessor left in a scratch register.
-//
-// BRASS_NO_RELOAD_REUSE=1 turns it off (the A/B seam).
 
-#include "brass/core/env.hpp"
 #include <brass/codegen/peephole.hpp>
 #include <brass/target/x64/x64_operands.hpp>
 #include <array>
@@ -45,11 +42,6 @@ namespace brass::codegen {
 namespace {
 
 using Held = PeepholeOptimizer::ScratchHeld;
-
-bool reload_reuse_disabled() {
-    static const bool off = !brass::env_value("BRASS_NO_RELOAD_REUSE").empty();
-    return off;
-}
 
 bool in_memory(const LirOperand& op) { return op.is_mem() || op.is_spill_slot(); }
 
@@ -133,7 +125,6 @@ static std::vector<char> fallthrough_only(const LirFunction& fn) {
 }
 
 bool PeepholeOptimizer::reuse_scratch_reloads() {
-    if (reload_reuse_disabled()) return false;
     const bool a64 = fn_.calling_conv.target().is_aarch64();
     std::array<Held, 5> held;
     if (a64) {
