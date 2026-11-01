@@ -319,7 +319,8 @@ private:
     std::vector<uint64_t> finalized_;
 };
 
-Outcome run(ParallelMinor mode, unsigned threads, uint32_t seed, const Options& o) {
+BRASS_TEST_NOINLINE Outcome run_in_scrubbed_frame(ParallelMinor mode, unsigned threads, uint32_t seed,
+                                                  const Options& o) {
     World w(o.survivor_bytes ? config(mode, threads, o.survivor_bytes) : config(mode, threads), seed);
     w.build_old(o.lazy);
     w.swept_pending_at_first = w.h.sweeping();
@@ -332,6 +333,15 @@ Outcome run(ParallelMinor mode, unsigned threads, uint32_t seed, const Options& 
         if (o.cycle) (void)w.h.mark_slice(20'000);
     }
     return w.finish(o);
+}
+
+// The world in a frame scrubbed first: the words below here hold the last
+// run's addresses, and this heap's reservation may lie where that one's was,
+// so a stale word left in the new frame would pin (keep in place, or alive)
+// whatever this heap put at that address, in one run and not the next.
+Outcome run(ParallelMinor mode, unsigned threads, uint32_t seed, const Options& o) {
+    scrub_stack();
+    return run_in_scrubbed_frame(mode, threads, seed, o);
 }
 
 void check_same(const Outcome& serial, const Outcome& parallel) {

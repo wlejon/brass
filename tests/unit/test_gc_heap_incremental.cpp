@@ -166,7 +166,12 @@ BRASS_TEST_NOINLINE Built build(Heap& h, uint32_t seed, std::vector<uint64_t>& r
             h.store(table, 2 + 2 * e, nodes[pick(kNodes)]);
         }
     }
-    h.collect(CollectionKind::Full);  // everything old now; the table of nodes still roots all
+    // Everything old now; the table of nodes still roots all. On a scrubbed
+    // stack: the allocator's frames below this one left node addresses in
+    // slots the collection's frames may not write, and a node one of them
+    // names stays young in place (pinned), to be evacuated by a later full
+    // collection but marked in place by a cycle, at another offset.
+    brass::test::collect_scrubbed(h, CollectionKind::Full);
     for (size_t i = 0; i < kNodes; i += 7) {
         h.add_finalizer(static_cast<uintptr_t>(nodes[i]), &record_finalized, &finalized,
                         reinterpret_cast<void*>(i));
@@ -190,6 +195,12 @@ Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
     std::vector<uint64_t> roots(kArrays + kWeakCells + kTables + 16, 0);
     for (uint64_t& r : roots) h.add_root(&r);
     std::vector<uintptr_t> finalized;
+    // The words below this frame hold the last run's addresses, and this
+    // heap's reservation may lie where that one's was: a stale word left in
+    // build's frame would pin whatever this heap put at that address, in one
+    // run and not the next (an object kept young in place against one
+    // copied old: the comparison's offsets differ, flakily).
+    scrub_stack();
     const Built built = build(h, seed, roots, finalized);
     const size_t weak_first = built.weak_first;
     const size_t table_first = built.table_first;
