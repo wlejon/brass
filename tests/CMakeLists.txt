@@ -525,12 +525,12 @@ target_link_libraries(brass_benchmarks
 add_test(NAME benchmarks COMMAND brass_benchmarks)
 add_test(NAME performance_ratchet COMMAND brass_benchmarks --check-ratchet)
 set_tests_properties(benchmarks performance_ratchet PROPERTIES
-    TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf")
+    TIMEOUT 600 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" LABELS "perf" SKIP_RETURN_CODE 77)
 
 # gc::Heap pause times against the live old-generation size. Run by hand for
 # the full table; `--check` is the perf ratchet on collector pauses.
-add_executable(brass_gc_pause_bench benchmarks/gc_pause_bench.cpp)
-target_include_directories(brass_gc_pause_bench PRIVATE ${BRASS_INCLUDE_DIR})
+add_executable(brass_gc_pause_bench benchmarks/gc_pause_bench.cpp benchmarks/bench_load.cpp)
+target_include_directories(brass_gc_pause_bench PRIVATE ${BRASS_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks)
 target_link_libraries(brass_gc_pause_bench PRIVATE brass)
 add_test(NAME gc_pause_ratchet COMMAND brass_gc_pause_bench --check)
 
@@ -558,7 +558,10 @@ if(BRASS_WITH_SPIRV)
         target_compile_definitions(brass_spirv_bench PRIVATE BRASS_SPIRV_BENCH_SHADER_DIR="${_spv_dir}")
     endif()
 endif()
-set_tests_properties(gc_pause_ratchet PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE LABELS "perf")
+# Both ratchets carry a machine-load guard (benchmarks/bench_load.hpp): RUN_SERIAL
+# keeps ctest's own tests off the machine, and a run other processes kept busy
+# is measured again, then reported skipped (exit 77) rather than failed.
+set_tests_properties(gc_pause_ratchet PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE LABELS "perf" SKIP_RETURN_CODE 77)
 
 if(BRASS_BUILD_TOOLS)
     # brass_opt_cli.coro_args.*: brass-opt lowers coroutines before running

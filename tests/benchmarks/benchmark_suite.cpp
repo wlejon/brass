@@ -7,6 +7,9 @@
 #include "bench_simd_math.hpp"
 #include "bench_interpreter.hpp"
 #include <cstdlib>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 #include <map>
 #include <vector>
 #include <string>
@@ -139,10 +142,43 @@ int record_in_processes(const std::string& self, int runs, int cpu, bool force, 
     return 0;
 }
 
+// --check-ratchet's machine-load guard. Each attempt is its own process (a
+// host's bimodal key picks its mode per process, as above), run with
+// --one-attempt. A regression on a quiet machine fails at once; one on a
+// machine other processes kept busy (bench_load.hpp) is no verdict, so the
+// attempt exits kBusyNoVerdict and is run again; busy through every attempt,
+// the ratchet exits kBusyNoVerdict, which ctest reports as skipped
+// (SKIP_RETURN_CODE in tests/CMakeLists.txt), not passed.
+constexpr int kBusyNoVerdict = 77;
+constexpr int kCheckAttempts = 3;
+
+int check_in_processes(int argc, char** argv) {
+    std::string cmd = quote_arg(argv[0]);
+    for (int i = 1; i < argc; ++i) cmd += " " + quote_arg(argv[i]);
+    cmd += " --one-attempt";
+#if defined(_WIN32)
+    cmd = "\"" + cmd + "\"";  // cmd /c strips one pair of outer quotes
+#endif
+    for (int attempt = 1; attempt <= kCheckAttempts; ++attempt) {
+        std::cout << "\n[RUN] ratchet attempt " << attempt << " of " << kCheckAttempts << " (own process)\n"
+                  << std::flush;
+        int rc = std::system(cmd.c_str());
+#if !defined(_WIN32)
+        rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
+#endif
+        if (rc != kBusyNoVerdict) return rc == 0 ? 0 : 1;
+        std::cout << "[LOAD] attempt " << attempt << " regressed on a busy machine: not a verdict.\n";
+    }
+    std::cout << "[LOAD] SKIPPED: the machine was busy on all " << kCheckAttempts
+              << " attempts that regressed; no verdict.\n";
+    return kBusyNoVerdict;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     bool check_ratchet = false;
+    bool one_attempt = false;
     bool update_ratchet = false;
     bool force = false;
     int runs = 0;  // 0: one run, or kDefaultRecordRuns when recording
@@ -156,6 +192,8 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--check-ratchet") {
             check_ratchet = true;
+        } else if (arg == "--one-attempt") {
+            one_attempt = true;
         } else if (arg == "--update-ratchet") {
             update_ratchet = true;
         } else if (arg == "--force") {
@@ -182,7 +220,11 @@ int main(int argc, char** argv) {
                       << "Options:\n"
                       << "  --check-ratchet           Fail (exit 1) when a key regresses past its golden by more\n"
                       << "                            than its margin. Goldens are per machine:\n"
-                      << "                            bench/hosts/<host>.json; a host without one reports and passes\n"
+                      << "                            bench/hosts/<host>.json; a host without one reports and passes.\n"
+                      << "                            A regression on a busy machine is run again in a new process;\n"
+                      << "                            busy on all 3 attempts, it exits 77 (no verdict)\n"
+                      << "  --one-attempt             With --check-ratchet: one attempt in this process; a regression\n"
+                      << "                            on a busy machine exits 77\n"
                       << "  --update-ratchet          Record this machine's goldens: the per-key median over\n"
                       << "                            --runs suite runs (default " << kDefaultRecordRuns << "). Refused on a busy\n"
                       << "                            machine unless --force\n"
@@ -198,6 +240,9 @@ int main(int argc, char** argv) {
         }
     }
     if (runs <= 0) runs = update_ratchet ? kDefaultRecordRuns : 1;
+    if (check_ratchet && !update_ratchet && !one_attempt && !is_debug_build()) {
+        return check_in_processes(argc, argv);
+    }
 
     // 1. This machine's goldens
     host = RatchetManager::normalize_host(host.empty() ? machine_host_name() : host);
@@ -326,5 +371,6 @@ int main(int argc, char** argv) {
         << " key(s) regressed past their margin:\n";
     for (const auto& f : ratchet_failures) out << "  - " << f << "\n";
     out << "\n";
+    if (gate && machine_busy) return kBusyNoVerdict;
     return gate ? 1 : 0;
 }

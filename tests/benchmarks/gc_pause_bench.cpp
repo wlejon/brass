@@ -20,6 +20,8 @@
 //   brass_gc_pause_bench --check   one size of each, against generous bounds;
 //                                  exits non-zero past any of them
 
+#include "bench_load.hpp"
+
 #include <brass/gc/heap.hpp>
 
 #include <algorithm>
@@ -340,11 +342,11 @@ void print_churn(const ChurnResult& r) {
                 static_cast<unsigned long long>(r.build_fulls), r.build_full_max_ms);
 }
 
-// Bounds loose enough for a loaded or slow machine: each one sits several
-// times above what the collector does, so crossing one is a regression in
-// kind (a minor that rescans the old generation, a full per batch, a full
-// mark that stopped scaling), not noise.
-int check() {
+// Bounds loose enough for a slow machine: each one sits several times above
+// what the collector does, so crossing one is a regression in kind (a minor
+// that rescans the old generation, a full per batch, a full mark that stopped
+// scaling), not noise. Returns the number of bounds crossed.
+int check_once() {
     int failures = 0;
     auto bound = [&](const char* what, double value, double limit) {
         const bool ok = value <= limit;
@@ -366,8 +368,46 @@ int check() {
     bound("churn: full collections inside batches", static_cast<double>(c.batch_fulls), 4.0);
     bound("churn: minor pause while building, max ms", c.build_minor_max_ms, 60.0);
     bound("churn: full pause while building, max ms", c.build_full_max_ms, 250.0);
+    return failures;
+}
+
+// The ratchet: check_once under the machine-load guard (bench_load.hpp). A
+// bound crossed while other processes kept the machine busy says nothing
+// about the collector (a pause stretched by a descheduled thread), so that
+// attempt is run again; a bound crossed on a quiet machine fails at once,
+// and a machine busy through every attempt gives no verdict: the ratchet
+// exits kSkipped, which ctest reports as skipped (SKIP_RETURN_CODE), not
+// passed.
+constexpr int kSkipped = 77;
+constexpr int kAttempts = 3;
+
+int check() {
+    using namespace brass::bench;
+    int failures = 0;
+    for (int attempt = 1; attempt <= kAttempts; ++attempt) {
+        if (attempt > 1) std::printf("\n[LOAD] attempt %d of %d\n", attempt, kAttempts);
+        const double before = report_load_before_run(1.0);
+        std::fflush(stdout);
+        const CpuLoadSample start = sample_cpu_load();
+        failures = check_once();
+        std::fflush(stdout);
+        const double during = report_load_during_run(start);
+        std::fflush(stdout);
+        const bool busy = before > kBusyMachinePercent || during > kBusyMachinePercent;
+        if (failures == 0) return 0;
+        if (!busy) break;
+        std::printf("[LOAD] %d bound(s) crossed on a busy machine: not a verdict.\n", failures);
+        if (attempt == kAttempts) {
 #if defined(NDEBUG)
-    return failures ? 1 : 0;
+            std::printf("[LOAD] SKIPPED: the machine was busy on all %d attempts; no verdict.\n", kAttempts);
+            return kSkipped;
+#else
+            break;
+#endif
+        }
+    }
+#if defined(NDEBUG)
+    return 1;
 #else
     // The bounds are for optimized code. An unoptimized collector pauses
     // about five times longer (jserve, 2026-10-09: churn minors 30 / 122 ms
