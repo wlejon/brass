@@ -70,18 +70,16 @@ uintptr_t Heap::find_object(uintptr_t a) const noexcept {
 
 namespace detail {
 
-uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept {
-    const auto payload_holds = [a](uintptr_t p) { return a >= p && a < p + header_of(p)->size; };
-    if (!s.in_eden(a)) {
-        const uintptr_t p = containing_object(s, a, false);
-        return p != 0 && payload_holds(p) ? p : 0;
-    }
+// The eden object whose header or payload holds `a`, or 0, without syncing
+// eden's start bits: above the sync point, in a fragment's objects, from the
+// nearest start recorded there (the runtime records one a chunk,
+// kPinChunkBytes) or from where the fragment's unsynced objects begin, header
+// by header; everywhere else (below the sync point, the residents between
+// fragments and past the window) an object has its start bit.
+uintptr_t eden_object_at(HeapState& s, uintptr_t a) noexcept {
+    const auto holds = [a](uintptr_t p) { return a + kHeaderBytes >= p && a < p + header_of(p)->size; };
     const uintptr_t top = Collector::buffer(s.heap).top;
     if (a >= s.eden_synced && a < top) {
-        // Above the sync point, in a fragment's objects: from the nearest
-        // start recorded there (the slow path records one a chunk) or from
-        // where the fragment's unsynced objects begin, header by header to
-        // where they end.
         size_t k = s.eden_sync_frag;
         while (k < s.eden_frag && a >= s.eden_frags[k].hi) ++k;
         const uintptr_t lo = k == s.eden_sync_frag ? s.eden_synced : s.eden_frags[k].lo;
@@ -89,19 +87,24 @@ uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept {
         if (a >= lo && a < used) {
             const size_t bit = find_prev_bit(s.young_starts.data(), s.young_bit(a), s.young_bit(lo + kHeaderBytes));
             uintptr_t p = bit != SIZE_MAX ? s.eden_lo + bit * kGranuleBytes : lo + kHeaderBytes;
-            while (p - kHeaderBytes < used && p <= a) {
-                if (payload_holds(p)) return p;
+            while (p - kHeaderBytes < used && p <= a + kHeaderBytes) {
+                if (holds(p)) return p;
                 p += header_of(p)->size + kHeaderBytes;
             }
             return 0;
         }
     }
-    // Everywhere else an object has its start bit: below the sync point, and
-    // the residents between fragments and past the window.
-    const size_t bit = find_prev_bit(s.young_starts.data(), s.young_bit(a), s.young_bit(s.eden_lo + kHeaderBytes));
+    if (a >= s.eden_end()) return 0;
+    const uintptr_t probe = std::min(a + kHeaderBytes, s.eden_end() - kGranuleBytes);
+    const size_t bit = find_prev_bit(s.young_starts.data(), s.young_bit(probe), s.young_bit(s.eden_lo + kHeaderBytes));
     if (bit == SIZE_MAX) return 0;
     const uintptr_t p = s.eden_lo + bit * kGranuleBytes;
-    return payload_holds(p) ? p : 0;
+    return holds(p) ? p : 0;
+}
+
+uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept {
+    const uintptr_t p = s.in_eden(a) ? eden_object_at(s, a) : containing_object(s, a, false);
+    return p != 0 && a >= p && a < p + header_of(p)->size ? p : 0;
 }
 
 uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) noexcept {
@@ -112,16 +115,14 @@ uintptr_t containing_object(HeapState& s, uintptr_t a, bool accept_forwarded) no
         return (a + kHeaderBytes >= payload && a < payload + header_of(payload)->size) ? payload : 0;
     };
     if (is_young(a)) {
-        uintptr_t lo, top;
         if (s.in_eden(a)) {
-            lo = s.eden_lo;
-            top = s.eden_end();
-            if (a < top && a + kHeaderBytes > s.eden_synced) s.sync_eden_starts();
-        } else {
-            const int w = s.in_survivor(0, a) ? 0 : 1;
-            lo = s.survivor_lo[w];
-            top = s.survivor_top[w];
+            const uintptr_t payload = eden_object_at(s, a);
+            if (payload == 0 || (header_of(payload)->forwarded() && !accept_forwarded)) return 0;
+            return payload;
         }
+        const int w = s.in_survivor(0, a) ? 0 : 1;
+        const uintptr_t lo = s.survivor_lo[w];
+        const uintptr_t top = s.survivor_top[w];
         if (a >= top) return 0;
         const uintptr_t probe = std::min(a + kHeaderBytes, top - kGranuleBytes);
         const size_t bit = find_prev_bit(s.young_starts.data(), s.young_bit(probe), s.young_bit(lo + kHeaderBytes));
@@ -368,7 +369,7 @@ void verify_heap(Heap& heap, const char* when) {
     // heap's; the collection's own list is left as it was.
     std::vector<uintptr_t> collection_list;
     collection_list.swap(s.stack_objects);
-    gather_stack_objects(s);
+    gather_stack_objects(s, StackObjects::WithOld);
     visit_roots(s, t);
     s.stack_objects.swap(collection_list);
 }

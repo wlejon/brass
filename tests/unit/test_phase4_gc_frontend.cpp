@@ -74,24 +74,30 @@ TEST_CASE("Phase 4 - Generational GC: generation queries classify young, old and
 TEST_CASE("Phase 4 - Generational GC: Multiple and duplicate roots do not duplicate young objects") {
     gc::Heap gc(plain_config());
 
-    // Allocate young object with data
-    uintptr_t orig_obj = gc.allocate_masked(24, 0, 42);
-    REQUIRE(orig_obj != 0);
-    gc.store(orig_obj, 0, 0x1122334455667788ULL);
-    gc.store(orig_obj, 1, 0x99AABBCCDDEEFF00ULL);
-
-    // Three root pointers pointing to the SAME object, plus a duplicate slot address
-    uint64_t r1 = orig_obj;
-    uint64_t r2 = orig_obj;
-    uint64_t r3 = orig_obj;
+    // Three root pointers pointing to the SAME object, plus a duplicate slot
+    // address: the slots in the C++ heap, the object made in a frame of its
+    // own and its address kept hidden. The stack is read conservatively, and
+    // a word naming the object would pin it (stack_scrub.hpp).
+    auto slots = std::make_unique<uint64_t[]>(3);
+    uint64_t& r1 = slots[0];
+    uint64_t& r2 = slots[1];
+    uint64_t& r3 = slots[2];
+    const uint64_t orig_obj = test::from_own_frame([&] {
+        uintptr_t obj = gc.allocate_masked(24, 0, 42);
+        REQUIRE(obj != 0);
+        gc.store(obj, 0, 0x1122334455667788ULL);
+        gc.store(obj, 1, 0x99AABBCCDDEEFF00ULL);
+        r1 = r2 = r3 = obj;
+        return test::hide_address(obj);
+    });
     {
         SlotRoots roots(gc, {&r1, &r2, &r3, &r1});
-        gc.collect(gc::CollectionKind::Minor);
+        test::collect_scrubbed(gc, gc::CollectionKind::Minor);
     }
 
     CHECK_EQ(gc.stats().minor_collections, 1ULL);
     CHECK(r1 != 0);
-    CHECK_NE(r1, orig_obj); // Evacuated from eden
+    CHECK_NE(test::hide_address(r1), orig_obj); // Evacuated from eden
 
     // All root slots must point to the identical evacuated object (identity preserved!)
     CHECK_EQ(r1, r2);
@@ -112,28 +118,32 @@ TEST_CASE("Phase 4 - Generational GC: Card roots deduplication and tenured-to-yo
     REQUIRE(tenured != 0);
     CHECK(gc.is_old(tenured));
 
-    // Allocate a young object
-    uintptr_t young = gc.allocate_masked(16, 0, 55);
-    REQUIRE(young != 0);
-    CHECK(gc.is_young(young));
-    gc.store(young, 0, 0xABCDEF0123456789ULL);
-
-    // Old object fields 0 and 1 both point to young object
-    gc.store(tenured, 0, young);
-    gc.store(tenured, 1, young);
-
-    // Stack root also points to young object
-    uint64_t stack_root = young;
+    // A root slot also pointing to the young object: in the C++ heap, the
+    // young object made in a frame of its own and its address kept hidden
+    // (the stack is read conservatively: stack_scrub.hpp).
+    auto root_slot = std::make_unique<uint64_t>(0);
+    uint64_t& stack_root = *root_slot;
+    const uint64_t young = test::from_own_frame([&] {
+        uintptr_t y = gc.allocate_masked(16, 0, 55);
+        REQUIRE(y != 0);
+        CHECK(gc.is_young(y));
+        gc.store(y, 0, 0xABCDEF0123456789ULL);
+        // Old object fields 0 and 1 both point to young object
+        gc.store(tenured, 0, y);
+        gc.store(tenured, 1, y);
+        stack_root = y;
+        return test::hide_address(y);
+    });
     {
         SlotRoots roots(gc, {&stack_root});
         // Minor collection: processes both the root and the dirty cards
-        gc.collect(gc::CollectionKind::Minor);
+        test::collect_scrubbed(gc, gc::CollectionKind::Minor);
     }
 
     CHECK_EQ(gc.stats().minor_collections, 1ULL);
     CHECK(gc.is_valid_object(stack_root));
     CHECK(gc.is_young(stack_root));
-    CHECK_NE(stack_root, young);
+    CHECK_NE(test::hide_address(stack_root), young);
 
     // Both fields in the old object must point to the EXACT same object as stack_root
     uint64_t f0 = gc::Heap::load(tenured, 0);
@@ -154,38 +164,44 @@ TEST_CASE("Phase 4 - Generational GC: Objects with >= 64 fields do not invoke UB
 
     gc::Heap gc(plain_config());
 
-    // Pointer mask with bits 0 and 1 set
-    uint64_t mask = 0x3ULL;
-    uintptr_t large_obj = gc.allocate_masked(OBJ_SIZE, mask, 88);
-    REQUIRE(large_obj != 0);
+    // The root off the stack, the objects made in a frame of their own: a
+    // stack word naming a young object would pin it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> root_holder(gc);
+    uint64_t& root = *root_holder.slot;
+    test::in_own_frame([&] {
+        // Pointer mask with bits 0 and 1 set
+        uint64_t mask = 0x3ULL;
+        uintptr_t large_obj = gc.allocate_masked(OBJ_SIZE, mask, 88);
+        REQUIRE(large_obj != 0);
 
-    // Allocate young child referenced by field 0
-    uintptr_t child = gc.allocate_masked(16, 0, 77);
-    REQUIRE(child != 0);
-    gc.store(child, 0, 0x42424242ULL);
-    gc.store(large_obj, 0, child);
+        // Allocate young child referenced by field 0
+        uintptr_t child = gc.allocate_masked(16, 0, 77);
+        REQUIRE(child != 0);
+        gc.store(child, 0, 0x42424242ULL);
+        gc.store(large_obj, 0, child);
 
-    // Write distinctive values to fields beyond 64 (field 68 and 71): not
-    // references under this mask, so a collection must copy them verbatim.
-    gc.store(large_obj, 68, 0xDEADBEEFCAFE0068ULL);
-    gc.store(large_obj, 71, 0xDEADBEEFCAFE0071ULL);
+        // Write distinctive values to fields beyond 64 (field 68 and 71): not
+        // references under this mask, so a collection must copy them verbatim.
+        gc.store(large_obj, 68, 0xDEADBEEFCAFE0068ULL);
+        gc.store(large_obj, 71, 0xDEADBEEFCAFE0071ULL);
+        root = large_obj;
+    });
 
-    uint64_t root = large_obj;
-    gc.add_root(&root);
-
-    gc.collect(gc::CollectionKind::Minor);
+    test::collect_scrubbed(gc, gc::CollectionKind::Minor);
 
     CHECK_EQ(gc.stats().minor_collections, 1ULL);
-    CHECK(gc.is_valid_object(root));
-    CHECK_EQ(gc::Heap::load(root, 68), 0xDEADBEEFCAFE0068ULL);
-    CHECK_EQ(gc::Heap::load(root, 71), 0xDEADBEEFCAFE0071ULL);
+    test::in_own_frame([&] {
+        CHECK(gc.is_valid_object(root));
+        CHECK_EQ(gc::Heap::load(root, 68), 0xDEADBEEFCAFE0068ULL);
+        CHECK_EQ(gc::Heap::load(root, 71), 0xDEADBEEFCAFE0071ULL);
 
-    uint64_t child_after = gc::Heap::load(root, 0);
-    CHECK(gc.is_valid_object(child_after));
-    CHECK_EQ(gc::Heap::load(child_after, 0), 0x42424242ULL);
+        uint64_t child_after = gc::Heap::load(root, 0);
+        CHECK(gc.is_valid_object(child_after));
+        CHECK_EQ(gc::Heap::load(child_after, 0), 0x42424242ULL);
+    });
 
     // A full collection promotes both
-    gc.collect(gc::CollectionKind::Full);
+    test::collect_scrubbed(gc, gc::CollectionKind::Full);
 
     CHECK_EQ(gc.stats().full_collections, 1ULL);
     CHECK(gc.is_valid_object(root));
@@ -194,7 +210,6 @@ TEST_CASE("Phase 4 - Generational GC: Objects with >= 64 fields do not invoke UB
     CHECK_EQ(gc::Heap::load(root, 71), 0xDEADBEEFCAFE0071ULL);
     CHECK(gc.is_old(gc::Heap::load(root, 0)));
     CHECK_EQ(gc::Heap::load(gc::Heap::load(root, 0), 0), 0x42424242ULL);
-    gc.remove_root(&root);
 }
 
 TEST_CASE("Phase 4 - Heap: Objects with >= 64 fields survive a full collection") {

@@ -1,6 +1,7 @@
 // gc::Heap threading: a heap per thread, each collecting on its own while the
 // others run, sharing only the process-wide layout registry.
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -10,6 +11,10 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::collect_scrubbed;
+using brass::test::from_own_frame;
+using brass::test::HeapRoot;
+using brass::test::in_own_frame;
 
 namespace {
 
@@ -77,26 +82,31 @@ TEST_CASE("gc::Heap threads - eight heaps allocate and collect concurrently") {
             started.fetch_add(1);
             while (started.load() < kThreads) std::this_thread::yield();
 
-            uint64_t keep = 0;
-            uint64_t pair = 0;
-            h.add_root(&keep);
-            h.add_root(&pair);
-            for (int round = 0; round < 6; ++round) {
-                uint64_t counter = 0;
-                keep = build_tree(h, tree, 9, counter);  // 1023 nodes; the previous tree is garbage
-                const uint64_t expected = counter * (counter + 1) / 2;
-                pair = h.allocate(16, weak_pair);
-                uint64_t dropped = build_tree(h, tree, 3, counter);
-                h.store(static_cast<uintptr_t>(pair), 0, dropped);
-                h.store(static_cast<uintptr_t>(pair), 1, keep);
-                h.collect(round % 2 ? CollectionKind::Full : CollectionKind::Minor);
-                if (Heap::load(static_cast<uintptr_t>(pair), 0) != 0) failures.fetch_add(1);
-                if (Heap::load(static_cast<uintptr_t>(pair), 1) != keep) failures.fetch_add(1);
-                if (tree_sum(static_cast<uintptr_t>(keep)) != expected) failures.fetch_add(1);
+            // The roots off the stack, which is read conservatively: the
+            // dropped tree must die (stack_scrub.hpp).
+            {
+                HeapRoot<Heap> keep(h);
+                HeapRoot<Heap> pair(h);
+                for (int round = 0; round < 6; ++round) {
+                    const uint64_t expected = from_own_frame([&] {
+                        uint64_t counter = 0;
+                        *keep.slot = build_tree(h, tree, 9, counter);  // 1023 nodes; the previous tree is garbage
+                        const uint64_t sum = counter * (counter + 1) / 2;
+                        *pair.slot = h.allocate(16, weak_pair);
+                        const uint64_t dropped = build_tree(h, tree, 3, counter);
+                        h.store(static_cast<uintptr_t>(*pair.slot), 0, dropped);
+                        h.store(static_cast<uintptr_t>(*pair.slot), 1, *keep.slot);
+                        return sum;
+                    });
+                    collect_scrubbed(h, round % 2 ? CollectionKind::Full : CollectionKind::Minor);
+                    in_own_frame([&] {
+                        if (Heap::load(static_cast<uintptr_t>(*pair.slot), 0) != 0) failures.fetch_add(1);
+                        if (Heap::load(static_cast<uintptr_t>(*pair.slot), 1) != *keep.slot) failures.fetch_add(1);
+                        if (tree_sum(static_cast<uintptr_t>(*keep.slot)) != expected) failures.fetch_add(1);
+                    });
+                }
+                h.verify();
             }
-            h.verify();
-            h.remove_root(&pair);
-            h.remove_root(&keep);
             if (Heap::current() != &h) failures.fetch_add(1);
         });
     }

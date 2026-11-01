@@ -120,15 +120,18 @@ constexpr size_t kTableEntries = 40;
 // at random, collected by `how`. Every random choice comes from one seed, so
 // two heaps given the same seed and threads hold the same graph at the same
 // offsets.
-Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
-    Heap h(cycle_config(threads));
+struct Built {
+    size_t weak_first = 0;
+    size_t table_first = 0;
+};
+
+// The graph, built in a frame of its own: the collections that compare read
+// the stack conservatively, and a node's address left in the frame that
+// collects would keep it in one run and not another (stack_scrub.hpp).
+BRASS_TEST_NOINLINE Built build(Heap& h, uint32_t seed, std::vector<uint64_t>& roots,
+                                std::vector<uintptr_t>& finalized) {
     std::mt19937 rng(seed);
     auto pick = [&](size_t n) { return static_cast<size_t>(rng() % n); };
-
-    // Roots: a few nodes, every array, every weak cell and table (so their
-    // contents can be read afterwards).
-    std::vector<uint64_t> roots(kArrays + kWeakCells + kTables + 16, 0);
-    for (uint64_t& r : roots) h.add_root(&r);
     size_t root_at = 0;
 
     std::vector<uint64_t> nodes(kNodes, 0);  // a host table: rooted until the cut below
@@ -163,7 +166,6 @@ Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
             h.store(table, 2 + 2 * e, nodes[pick(kNodes)]);
         }
     }
-    std::vector<uintptr_t> finalized;
     h.collect(CollectionKind::Full);  // everything old now; the table of nodes still roots all
     for (size_t i = 0; i < kNodes; i += 7) {
         h.add_finalizer(static_cast<uintptr_t>(nodes[i]), &record_finalized, &finalized,
@@ -177,13 +179,31 @@ Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
         }
     }
     std::fill(nodes.begin(), nodes.end(), 0);
+    return Built{weak_first, table_first};
+}
 
+Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
+    using brass::test::scrub_stack;
+    Heap h(cycle_config(threads));
+    // Roots: a few nodes, every array, every weak cell and table (so their
+    // contents can be read afterwards).
+    std::vector<uint64_t> roots(kArrays + kWeakCells + kTables + 16, 0);
+    for (uint64_t& r : roots) h.add_root(&r);
+    std::vector<uintptr_t> finalized;
+    const Built built = build(h, seed, roots, finalized);
+    const size_t weak_first = built.weak_first;
+    const size_t table_first = built.table_first;
+
+    // Every collection that reads the stack (a full one, a cycle's start and
+    // finish) runs on a scrubbed one.
     Outcome out;
+    scrub_stack();
     if (how == How::Full) {
         h.collect(CollectionKind::Full);
     } else if (how == How::StartFinish || how == How::Partial) {
         REQUIRE(h.start_marking());
         for (int i = 0; how == How::Partial && i < 3; ++i) CHECK_FALSE(h.mark_slice(budget_ns));
+        scrub_stack();
         h.finish_marking();
     } else {
         REQUIRE(h.start_marking());
@@ -192,6 +212,7 @@ Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
         while (!h.mark_slice(budget_ns)) ++out.slices;
         ++out.slices;
         CHECK(h.mark_slice(budget_ns));  // done stays done
+        scrub_stack();
         h.finish_marking();
         CHECK_FALSE(h.marking());
     }
@@ -257,15 +278,19 @@ TEST_CASE("gc::Heap incremental - tiny slices mark and sweep exactly what a full
 TEST_CASE("gc::Heap incremental - a slice keeps roughly to its budget") {
     HeapConfig c = cycle_config(4);
     Heap h(c);
-    // A long list (no parallelism to find), well over a slice to mark.
-    uint64_t head = 0;
-    h.add_root(&head);
-    for (size_t i = 0; i < 200000; ++i) {
-        const uintptr_t n = h.allocate(16, words_layout());
-        h.store(n, 0, head);
-        head = n;
-    }
-    h.collect(CollectionKind::Full);
+    // A long list (no parallelism to find), well over a slice to mark. Its
+    // head is a root off the stack and the list is built in a frame of its
+    // own: a stack word naming a node marks it as a root (stack_scrub.hpp).
+    brass::test::HeapRoot<Heap> head(h);
+    brass::test::in_own_frame([&] {
+        for (size_t i = 0; i < 200000; ++i) {
+            const uintptr_t n = h.allocate(16, words_layout());
+            h.store(n, 0, *head.slot);
+            *head.slot = n;
+        }
+    });
+    brass::test::collect_scrubbed(h, CollectionKind::Full);
+    brass::test::scrub_stack();
     REQUIRE(h.start_marking());
     const uint64_t budget = 100'000;  // 0.1 ms
     uint64_t slices = 0;

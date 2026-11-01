@@ -202,37 +202,51 @@ TEST_CASE("Coroutine Runtime - frames on a heap whose reference tags leave raw a
     CHECK(!heap->raw_addresses_are_references());
     CHECK_EQ(heap->raw_address_tag(), kTag << gc::kTagShift);
 
-    uintptr_t frame = brass_coro_create_at(nullptr, 2, 1, 0, 0);
-    REQUIRE(frame != 0);
-    CHECK(heap->is_old(frame));
-    uintptr_t obj = heap->allocate_masked(32, 0, 1);
-    REQUIRE(heap->is_young(obj));
-    *reinterpret_cast<int64_t*>(obj) = 77;
-    auto* f = reinterpret_cast<runtime::BrassCoroFrame*>(frame);
-    f->slots[0] = (kTag << gc::kTagShift) | obj;
-    heap->write_barrier(frame, f->slots[0]);
+    // The frames' addresses hidden, used in frames of their own: the stack is
+    // read conservatively, and a word naming a frame would keep it
+    // (stack_scrub.hpp).
+    const uint64_t frame = test::from_own_frame([&] {
+        uintptr_t fr = brass_coro_create_at(nullptr, 2, 1, 0, 0);
+        REQUIRE(fr != 0);
+        CHECK(heap->is_old(fr));
+        uintptr_t obj = heap->allocate_masked(32, 0, 1);
+        REQUIRE(heap->is_young(obj));
+        *reinterpret_cast<int64_t*>(obj) = 77;
+        auto* f = reinterpret_cast<runtime::BrassCoroFrame*>(fr);
+        f->slots[0] = (kTag << gc::kTagShift) | obj;
+        heap->write_barrier(fr, f->slots[0]);
+        return test::hide_address(fr);
+    });
+    auto at = [](uint64_t hidden) { return static_cast<uintptr_t>(test::unhide_address(hidden)); };
 
-    heap->collect(gc::CollectionKind::Minor);
-    heap->collect(gc::CollectionKind::Full);
-    CHECK(heap->is_valid_object(frame));
-    const uintptr_t moved = static_cast<uintptr_t>(f->slots[0] & gc::kAddressMask);
-    CHECK((f->slots[0] >> gc::kTagShift) == kTag);
-    CHECK(heap->is_valid_object(moved));
-    CHECK_EQ(*reinterpret_cast<int64_t*>(moved), 77);
+    test::collect_scrubbed(heap.heap, gc::CollectionKind::Minor);
+    test::collect_scrubbed(heap.heap, gc::CollectionKind::Full);
+    test::in_own_frame([&] {
+        CHECK(heap->is_valid_object(at(frame)));
+        auto* f = reinterpret_cast<runtime::BrassCoroFrame*>(at(frame));
+        const uintptr_t moved = static_cast<uintptr_t>(f->slots[0] & gc::kAddressMask);
+        CHECK((f->slots[0] >> gc::kTagShift) == kTag);
+        CHECK(heap->is_valid_object(moved));
+        CHECK_EQ(*reinterpret_cast<int64_t*>(moved), 77);
+    });
 
-    uintptr_t awaiter = brass_coro_create_at(nullptr, 1, 0, 0, 0);
-    REQUIRE(awaiter != 0);
-    brass_coro_set_awaiter(frame, awaiter);
-    brass_coro_unroot(awaiter);
-    heap->collect(gc::CollectionKind::Full);
-    CHECK(heap->is_valid_object(awaiter));
-    CHECK_EQ(brass_coro_awaiter(frame), awaiter);
-    CHECK(!brass_coro_is_done(awaiter));
-
-    brass_coro_unroot(frame);
-    heap->collect(gc::CollectionKind::Full);
-    CHECK(!heap->is_valid_object(frame));
-    CHECK(!heap->is_valid_object(awaiter));
+    const uint64_t awaiter = test::from_own_frame([&] {
+        uintptr_t aw = brass_coro_create_at(nullptr, 1, 0, 0, 0);
+        REQUIRE(aw != 0);
+        brass_coro_set_awaiter(at(frame), aw);
+        brass_coro_unroot(aw);
+        return test::hide_address(aw);
+    });
+    test::collect_scrubbed(heap.heap, gc::CollectionKind::Full);
+    test::in_own_frame([&] {
+        CHECK(heap->is_valid_object(at(awaiter)));
+        CHECK(test::hide_address(brass_coro_awaiter(at(frame))) == awaiter);
+        CHECK(!brass_coro_is_done(at(awaiter)));
+        brass_coro_unroot(at(frame));
+    });
+    test::collect_scrubbed(heap.heap, gc::CollectionKind::Full);
+    CHECK(!heap->is_valid_object(at(frame)));
+    CHECK(!heap->is_valid_object(at(awaiter)));
 }
 
 TEST_CASE("Coroutine Runtime - Microtask Queue & Promises") {

@@ -544,32 +544,33 @@ TEST_CASE("Fast Interpreter - GC Root Scanning during Active Frame") {
 
     FastInterpreter interp(gc::HeapConfig{});
 
-    // Allocate an object in GC heap before running
-    uintptr_t obj = interp.heap().allocate_masked(24, 0, 1);
-    REQUIRE(obj != 0);
-    interp.heap().store(obj, 0, 0x1122334455667788ULL);
-    interp.heap().store(obj, 1, 0xAABBCCDDEEFF0011ULL);
-
-    uintptr_t old_addr = obj;
-    uintptr_t new_addr = 0;
+    // Allocate an object in GC heap before running. Its addresses are kept
+    // hidden: the stack is read conservatively, and a word naming the young
+    // object would pin it (stack_scrub.hpp).
+    const uint64_t old_addr = test::from_own_frame([&] {
+        uintptr_t obj = interp.heap().allocate_masked(24, 0, 1);
+        REQUIRE(obj != 0);
+        interp.heap().store(obj, 0, 0x1122334455667788ULL);
+        interp.heap().store(obj, 1, 0xAABBCCDDEEFF0011ULL);
+        return test::hide_address(obj);
+    });
+    uint64_t new_addr = 0;
 
     interp.register_external_function("trigger_gc_scavenge", [&](FastInterpreter& in, const std::vector<RuntimeValue>&) -> RuntimeValue {
-        uint64_t local_root = obj;
-        in.heap().add_root(&local_root);
+        test::HeapRoot<gc::Heap> local_root(in.heap());
+        test::set_hidden(local_root.slot, old_addr);
         // A full collection: the young object is promoted (moved).
-        in.heap().collect(gc::CollectionKind::Full);
-        in.heap().remove_root(&local_root);
-
-        new_addr = static_cast<uintptr_t>(local_root);
-        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(new_addr, 0)));
+        test::collect_scrubbed(in.heap(), gc::CollectionKind::Full);
+        new_addr = local_root.hidden();
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(static_cast<uintptr_t>(*local_root.slot), 0)));
     });
 
     RuntimeValue res = interp.run(*fn, {});
     CHECK_EQ(static_cast<uint64_t>(res.as_i64()), 0x1122334455667788ULL);
     CHECK_NE(old_addr, new_addr);
-    CHECK(interp.heap().is_valid_object(new_addr));
-    CHECK(interp.heap().is_old(new_addr));
-    CHECK(!interp.heap().is_valid_object(old_addr));
+    CHECK(interp.heap().is_valid_object(static_cast<uintptr_t>(test::unhide_address(new_addr))));
+    CHECK(interp.heap().is_old(static_cast<uintptr_t>(test::unhide_address(new_addr))));
+    CHECK(!interp.heap().is_valid_object(static_cast<uintptr_t>(test::unhide_address(old_addr))));
 }
 
 TEST_CASE("Fast Interpreter - Young Generation Scavenge with Active Frame") {
@@ -588,28 +589,28 @@ TEST_CASE("Fast Interpreter - Young Generation Scavenge with Active Frame") {
     b.build_ret(call_inst);
     fn->rebuild_cfg_predecessors();
 
-    uintptr_t nursery_obj = gen_gc.allocate_masked(16, 0, 9);
-    REQUIRE(nursery_obj != 0);
-    gen_gc.store(nursery_obj, 0, 0xCAFEBABE12345678ULL);
-
-    uintptr_t old_addr = nursery_obj;
-    uintptr_t updated_addr = 0;
+    // Hidden addresses: a stack word naming the young object would pin it.
+    const uint64_t old_addr = test::from_own_frame([&] {
+        uintptr_t nursery_obj = gen_gc.allocate_masked(16, 0, 9);
+        REQUIRE(nursery_obj != 0);
+        gen_gc.store(nursery_obj, 0, 0xCAFEBABE12345678ULL);
+        return test::hide_address(nursery_obj);
+    });
+    uint64_t updated_addr = 0;
 
     interp.register_external_function("gen_gc_hook", [&](FastInterpreter&, const std::vector<RuntimeValue>&) -> RuntimeValue {
-        uint64_t root = nursery_obj;
-        gen_gc.add_root(&root);
-        gen_gc.collect(gc::CollectionKind::Minor);
-        gen_gc.remove_root(&root);
-
-        updated_addr = static_cast<uintptr_t>(root);
-        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(updated_addr, 0)));
+        test::HeapRoot<gc::Heap> root(gen_gc);
+        test::set_hidden(root.slot, old_addr);
+        test::collect_scrubbed(gen_gc, gc::CollectionKind::Minor);
+        updated_addr = root.hidden();
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(static_cast<uintptr_t>(*root.slot), 0)));
     });
 
     RuntimeValue res = interp.run(*fn, {});
     CHECK_EQ(static_cast<uint64_t>(res.as_i64()), 0xCAFEBABE12345678ULL);
     CHECK_NE(old_addr, updated_addr);
-    CHECK(gen_gc.is_valid_object(updated_addr));
-    CHECK(gen_gc.is_young(updated_addr));  // copied to a survivor space, not yet promoted
+    CHECK(gen_gc.is_valid_object(static_cast<uintptr_t>(test::unhide_address(updated_addr))));
+    CHECK(gen_gc.is_young(static_cast<uintptr_t>(test::unhide_address(updated_addr))));  // copied to a survivor space, not yet promoted
 }
 
 TEST_CASE("Fast Interpreter - GC Root Scanning of Suspended Coroutine") {
@@ -634,37 +635,44 @@ TEST_CASE("Fast Interpreter - GC Root Scanning of Suspended Coroutine") {
 
     FastInterpreter interp(gc::HeapConfig{});
 
-    uintptr_t obj = interp.heap().allocate_masked(16, 0, 10);
-    interp.heap().store(obj, 0, 0xDEADBEEFCAFEULL);
-    uintptr_t old_addr = obj;
-    uintptr_t updated_obj = 0;
+    // Hidden addresses, the coroutine made in a frame of its own: a stack
+    // word naming the young object would pin it.
+    uint64_t old_addr = 0;
+    uint64_t updated_obj = 0;
 
     interp.register_external_function("read_coro_gc_field", [&](FastInterpreter&, const std::vector<RuntimeValue>& args) -> RuntimeValue {
-        updated_obj = args[0].as_gcref();
-        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(updated_obj, 0)));
+        updated_obj = test::hide_address(args[0].as_gcref());
+        return RuntimeValue::from_i64(static_cast<int64_t>(gc::Heap::load(args[0].as_gcref(), 0)));
     });
 
-    uintptr_t handle = interp.coro_create(*gen, {RuntimeValue::from_gcref(obj)});
+    const uintptr_t handle = test::from_own_frame([&] {
+        uintptr_t obj = interp.heap().allocate_masked(16, 0, 10);
+        interp.heap().store(obj, 0, 0xDEADBEEFCAFEULL);
+        old_addr = test::hide_address(obj);
+        return interp.coro_create(*gen, {RuntimeValue::from_gcref(obj)});
+    });
     REQUIRE(handle != 0);
 
     // 1. Run until first suspend: coroutine yields 1
-    uint64_t y1 = interp.coro_resume(handle, 0);
+    uint64_t y1 = test::from_own_frame([&] { return interp.coro_resume(handle, 0); });
     CHECK_EQ(y1, 1ULL);
     CHECK(!interp.coro_is_done(handle));
 
     // 2. Coroutine is now suspended. Trigger GC collection from host: the
     // interpreter's roots (the suspended coroutine's registers among them)
     // are a root source of its heap.
-    std::vector<uintptr_t*> roots;
-    interp.collect_all_roots(roots);
-    REQUIRE(!roots.empty());
-    interp.heap().collect(gc::CollectionKind::Minor);
+    test::in_own_frame([&] {
+        std::vector<uintptr_t*> roots;
+        interp.collect_all_roots(roots);
+        REQUIRE(!roots.empty());
+    });
+    test::collect_scrubbed(interp.heap(), gc::CollectionKind::Minor);
 
     // 3. Resume coroutine: it reads from the updated object pointer
     uint64_t final_res = interp.coro_resume(handle, 0);
     CHECK_EQ(final_res, 0xDEADBEEFCAFEULL);
     CHECK_NE(old_addr, updated_obj);
-    CHECK(interp.heap().is_valid_object(updated_obj));
+    CHECK(interp.heap().is_valid_object(static_cast<uintptr_t>(test::unhide_address(updated_obj))));
     CHECK(interp.coro_is_done(handle));
 
     interp.coro_destroy(handle);

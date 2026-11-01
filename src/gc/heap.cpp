@@ -277,18 +277,27 @@ void HeapState::update_fast_limit() noexcept {
     // cycle does not: young allocation is the same during one (young objects
     // are never marked; minor collections and the finish trace them).
     //
-    // Under stack pinning the window is also at most kPinChunkBytes, so the
-    // slow path, which records the start of the object it allocates, runs at
-    // least once a chunk: the stack scan finds an object from the nearest
-    // recorded start (eden_object_containing) instead of walking all of eden.
+    // The window is also at most kPinChunkBytes, so the runtime, which
+    // records the start of the object it allocates past the window
+    // (Heap::refill_young, Heap::allocate_at), runs at least once a chunk:
+    // the stack scan finds an object from the nearest recorded start
+    // (young_object_containing) instead of walking all of eden.
     const uintptr_t top = heap.alloc_->top;
     const bool shut = stress != StressMode::None;
-    uintptr_t end = std::min(eden_limit, eden_frags[eden_frag].hi);
-    if (stack_pinning()) end = std::min(end, top + kPinChunkBytes);
+    const uintptr_t end = std::min({eden_limit, eden_frags[eden_frag].hi, top + kPinChunkBytes});
     heap.alloc_->end = shut ? top : std::max(top, end);
 }
 
 uintptr_t HeapState::eden_end() const noexcept { return std::max(heap.alloc_->top, eden_resident_hi); }
+
+uint64_t HeapState::eden_allocated() const noexcept {
+    uint64_t bytes = 0;
+    for (size_t k = 0; k <= eden_frag && k < eden_frags.size(); ++k) {
+        const uintptr_t used = k == eden_frag ? heap.alloc_->top : eden_frags[k].used;
+        if (used > eden_frags[k].lo) bytes += used - eden_frags[k].lo;
+    }
+    return bytes;
+}
 
 bool HeapState::eden_make_room(size_t total) noexcept {
     for (;;) {
@@ -497,6 +506,31 @@ void HeapState::clear_young_starts(uintptr_t lo, uintptr_t hi) noexcept {
 
 // ---- allocation ---------------------------------------------------------------
 
+uintptr_t Heap::refill_young(size_t total, LayoutId layout, uint8_t host_bits) noexcept {
+    HeapState& s = *s_;
+    // Anything the slow path would act on first (a requested collection,
+    // stress, the reserve) is left to it, and so is a window at the end of
+    // its fragment or of the adaptive limit: the object is for the next
+    // fragment, or for a collection.
+    if (s.collecting || s.stress != StressMode::None || s.full_requested || s.minor_requested ||
+        s.old_critical) {
+        return 0;
+    }
+    const uintptr_t top = alloc_->top;
+    const uintptr_t limit = std::min(s.eden_frags[s.eden_frag].hi, s.eden_limit);
+    if (top > limit || limit - top < total) return 0;
+    alloc_->top = top + total;
+    s.update_fast_limit();
+    s.set_young_start(top + kHeaderBytes);
+    auto* h = reinterpret_cast<ObjectHeader*>(top);
+    h->size = static_cast<uint32_t>(total - kHeaderBytes);
+    h->layout = layout;
+    h->gc_bits = 0;
+    h->host_bits = host_bits;
+    zero_payload(top + kHeaderBytes, total - kHeaderBytes);
+    return top + kHeaderBytes;
+}
+
 uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8_t host_bits,
                             uintptr_t caller_fp, uintptr_t caller_ip) {
     HeapState& s = *s_;
@@ -542,7 +576,7 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
                 alloc_->top = at + total;
                 s.update_fast_limit();
                 // A known start in each chunk of the window (update_fast_limit).
-                if (detail::stack_pinning()) s.set_young_start(at + kHeaderBytes);
+                s.set_young_start(at + kHeaderBytes);
                 auto* h = reinterpret_cast<ObjectHeader*>(at);
                 h->size = static_cast<uint32_t>(payload);
                 h->layout = layout;

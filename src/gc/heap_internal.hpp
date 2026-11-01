@@ -308,13 +308,17 @@ struct HeapState {
     size_t eden_frag = 0;
     size_t eden_fresh_frag = 0;
     uintptr_t eden_resident_hi = 0;      // the end of eden's highest resident (eden_lo: none)
-    uint64_t eden_resident_bytes = 0;    // eden's residents' bytes when they were left
     // During a collection: [survivor_lo[to], + this) holds the residents an
     // earlier evacuation left in the to-space (GcState::in_from).
     size_t gc_to_resident_span = 0;
     // Where eden's objects end: the allocation top, or past it the highest
     // resident.
     [[nodiscard]] uintptr_t eden_end() const noexcept;
+    // Eden's bytes allocated since the reclaim: the used part of each
+    // fragment the window has been in. The residents' bytes are not among
+    // them, nor the free fragments under them (eden_end - eden_lo would count
+    // the whole of eden below a resident pinned near its end).
+    [[nodiscard]] uint64_t eden_allocated() const noexcept;
     // Moves the allocation window on to the next fragment of eden while the
     // current one cannot take `total` bytes (within the adaptive limit, or
     // any fragment while eden is fresh). True when [top, the window's hard
@@ -728,7 +732,7 @@ struct GcState {
     // learned per byte of that and of the copying done.
     uint64_t serial_card_bytes = 0;
     bool learns_cost = true;  // false for a full collection's evacuation
-    uint64_t eden_used = 0;
+    uint64_t eden_used = 0;     // eden allocated when it started (HeapState::eden_allocated)
     uint64_t eden_limit = 0;    // the limit eden_used was allocated under
     uint64_t phase_ns[kGcPhaseCount] = {};
     // A full collection's cycle: the pauses of its start, its mark slices
@@ -828,11 +832,9 @@ void setup_to_space(GcState& g);
 void reclaim_young(GcState& g);
 
 // ---- stack pinning (heap_pin.cpp) ----
-// Whether collections pin what the stacks name (BRASS_GC_PIN_STACK=1).
-bool stack_pinning() noexcept;
 // The most eden the allocation window spans between two slow-path
-// allocations under stack pinning (HeapState::update_fast_limit): the most a
-// stack word's object is looked for by walking eden's headers.
+// allocations (HeapState::update_fast_limit): the most a stack word's object
+// is looked for by walking eden's headers.
 inline constexpr size_t kPinChunkBytes = 32 * 1024;
 // The young object whose payload holds `a` (in eden, or a survivor space),
 // or 0: in eden's unsynced part found by walking the headers from the
@@ -841,8 +843,11 @@ uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept;
 // HeapState::stack_objects from every stack of the calling thread (each word
 // that, untagged or under a reference tag, names a young object's payload): the
 // running stack from here, the callee-saved registers included, and each
-// switched-out fiber's from where it switched away. Empty when pinning is off.
-void gather_stack_objects(HeapState& s);
+// switched-out fiber's from where it switched away. A collection that marks
+// the old generation gathers the old objects named too (WithOld), which
+// visit_roots then marks; a minor needs only the young.
+enum class StackObjects { YoungOnly, WithOld };
+void gather_stack_objects(HeapState& s, StackObjects which);
 // Evacuation `g` keeps the young ones in place: kGcPinned, onto
 // HeapState::pinned (which the caller pushes grey: they are roots).
 void pin_stack_objects(GcState& g);

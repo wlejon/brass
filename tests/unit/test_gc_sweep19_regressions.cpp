@@ -86,29 +86,32 @@ void run_full_after_deopt(bool fast) {
     // 45 fillers, then `old`, promoted by one minor collection; the fillers
     // then die, so the full collection reclaims old-generation space around
     // the live `old`.
+    // Made in a frame of its own, `old` rooted off the stack: a stack word
+    // naming it would pin it young (stack_scrub.hpp).
     std::vector<uint64_t> fill(45);
-    for (auto& f : fill) {
-        f = heap.allocate_masked(48, 0, 2);
-        reinterpret_cast<int64_t*>(f)[3] = 1000;
-        heap.add_root(&f);
-    }
-    uint64_t old = heap.allocate_masked(48, 1ULL << 2, 2);
-    reinterpret_cast<int64_t*>(old)[3] = 7;
-    heap.add_root(&old);
-    heap.collect(gc::CollectionKind::Minor);
+    test::HeapRoot<gc::Heap> old(heap);
+    test::in_own_frame([&] {
+        for (auto& f : fill) {
+            f = heap.allocate_masked(48, 0, 2);
+            reinterpret_cast<int64_t*>(f)[3] = 1000;
+            heap.add_root(&f);
+        }
+        *old.slot = heap.allocate_masked(48, 1ULL << 2, 2);
+        reinterpret_cast<int64_t*>(*old.slot)[3] = 7;
+    });
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);
     for (auto& f : fill) heap.remove_root(&f);
-    REQUIRE(heap.is_old(old));
+    REQUIRE(heap.is_old(static_cast<uintptr_t>(*old.slot)));
 
     const uint64_t fulls = heap.stats().full_collections;
-    RuntimeValue r = h->call_native({RuntimeValue::from_bits(Type::gcref(), old), RuntimeValue::from_i32(0)});
+    RuntimeValue r = h->call_native({RuntimeValue::from_bits(Type::gcref(), *old.slot), RuntimeValue::from_i32(0)});
     CHECK_EQ(r.as_i64(), 49);
     CHECK(heap.stats().full_collections >= fulls + 1);
     CHECK_EQ(prog.pipeline().tier2_deopts(), 1u);
-    CHECK_EQ(reinterpret_cast<const int64_t*>(old)[3], 7);
-    const uint64_t y = gc::Heap::load(old, 2);
-    CHECK(heap.is_old(y)); // a full collection promotes every young survivor
+    CHECK_EQ(reinterpret_cast<const int64_t*>(*old.slot)[3], 7);
+    const uint64_t y = gc::Heap::load(static_cast<uintptr_t>(*old.slot), 2);
+    CHECK(heap.is_valid_object(static_cast<uintptr_t>(y)));
     CHECK_EQ(reinterpret_cast<const int64_t*>(y)[2], 42);
-    heap.remove_root(&old);
 }
 
 // @ck holds %o across coro_create calls that fill the heap.
@@ -184,24 +187,32 @@ TEST_CASE("Sweep19 - a full collection tolerates a root slot reported twice") {
     gc::HeapConfig config = test::small_heap_config(1);
     config.poison = true;
     gc::Heap heap(config);
-    uint64_t dead = heap.allocate_masked(48, 0, 2);
-    uint64_t live = heap.allocate_masked(48, 0, 2);
-    reinterpret_cast<int64_t*>(dead)[2] = 1234;
-    reinterpret_cast<int64_t*>(live)[2] = 42;
-    heap.add_root(&dead);
-    heap.add_root(&live);
-    heap.collect(gc::CollectionKind::Minor);
-    REQUIRE(heap.is_old(dead));
-    REQUIRE(heap.is_old(live));
-    heap.collect(gc::CollectionKind::Full);
-    const uint64_t both_live = heap.stats().old_live_bytes;
-    heap.remove_root(&dead);
-    heap.remove_root(&live);
-    auto id = add_twice(heap, &live);
-    heap.collect(gc::CollectionKind::Full);
-    heap.collect(gc::CollectionKind::Full);
-    CHECK(heap.is_valid_object(live));
-    CHECK_EQ(reinterpret_cast<const int64_t*>(live)[2], 42);
+    // The slots in the C++ heap, made in frames of their own: the stack is
+    // read conservatively (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> dead(heap);
+    auto live = std::make_unique<uint64_t>(0);
+    uint64_t both_live = 0;
+    {
+        test::HeapRoot<gc::Heap> live_root(heap);
+        test::in_own_frame([&] {
+            *dead.slot = heap.allocate_masked(48, 0, 2);
+            *live_root.slot = heap.allocate_masked(48, 0, 2);
+            reinterpret_cast<int64_t*>(*dead.slot)[2] = 1234;
+            reinterpret_cast<int64_t*>(*live_root.slot)[2] = 42;
+        });
+        test::collect_scrubbed(heap, gc::CollectionKind::Minor);
+        REQUIRE(heap.is_old(static_cast<uintptr_t>(*dead.slot)));
+        REQUIRE(heap.is_old(static_cast<uintptr_t>(*live_root.slot)));
+        test::collect_scrubbed(heap, gc::CollectionKind::Full);
+        both_live = heap.stats().old_live_bytes;
+        *live = *live_root.slot;
+    }
+    *dead.slot = 0;
+    auto id = add_twice(heap, live.get());
+    test::collect_scrubbed(heap, gc::CollectionKind::Full);
+    test::collect_scrubbed(heap, gc::CollectionKind::Full);
+    CHECK(heap.is_valid_object(static_cast<uintptr_t>(*live)));
+    CHECK_EQ(reinterpret_cast<const int64_t*>(*live)[2], 42);
     CHECK(heap.stats().old_live_bytes < both_live); // `dead` was reclaimed once, not kept
     heap.remove_root_source(id);
 }
@@ -210,16 +221,21 @@ TEST_CASE("Sweep19 - a minor collection tolerates a root slot reported twice") {
     gc::HeapConfig config = test::small_heap_config(3);
     config.poison = true;
     gc::Heap heap(config);
-    uint64_t live = heap.allocate_masked(48, 0, 2);
-    reinterpret_cast<int64_t*>(live)[2] = 42;
-    const uint64_t first = live;
-    auto id = add_twice(heap, &live);
-    heap.collect(gc::CollectionKind::Minor);
-    heap.collect(gc::CollectionKind::Minor);
-    CHECK(heap.is_young(live)); // copied once per collection, not twice
-    CHECK_NE(live, first);
-    CHECK(heap.is_valid_object(live));
-    CHECK_EQ(reinterpret_cast<const int64_t*>(live)[2], 42);
+    auto live = std::make_unique<uint64_t>(0);
+    const uint64_t first = test::from_own_frame([&] {
+        *live = heap.allocate_masked(48, 0, 2);
+        reinterpret_cast<int64_t*>(*live)[2] = 42;
+        return test::hide_address(*live);
+    });
+    auto id = add_twice(heap, live.get());
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);
+    test::in_own_frame([&] {
+        CHECK(heap.is_young(static_cast<uintptr_t>(*live))); // copied once per collection, not twice
+        CHECK_NE(test::hide_address(*live), first);
+        CHECK(heap.is_valid_object(static_cast<uintptr_t>(*live)));
+        CHECK_EQ(reinterpret_cast<const int64_t*>(*live)[2], 42);
+    });
     heap.remove_root_source(id);
 }
 

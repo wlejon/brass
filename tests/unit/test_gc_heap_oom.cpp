@@ -2,6 +2,7 @@
 // the allocation with std::bad_alloc (after a full collection) instead of
 // stopping the process, and the heap goes on once the program lets go.
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -10,6 +11,9 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::from_own_frame;
+using brass::test::HeapRoot;
+using brass::test::scrub_stack;
 
 namespace {
 
@@ -54,24 +58,26 @@ size_t chain_length(uint64_t head) {
 
 TEST_CASE("gc::Heap OOM - young survivors filling the old generation fail an allocation, and the heap recovers") {
     Heap h(tiny_old_config());
-    uint64_t keep = 0;
-    h.add_root(&keep);
-    const size_t linked = fill_until_oom(h, &keep, size_t{2} << 20);
+    // The chain's head in a heap root, the filling in frames of its own: the
+    // stack is read conservatively, and a stale word naming the old head
+    // would keep the whole chain (stack_scrub.hpp).
+    HeapRoot<Heap> keep(h);
+    const size_t linked = from_own_frame([&] { return fill_until_oom(h, keep.slot, size_t{2} << 20); });
     REQUIRE(linked != SIZE_MAX);
     CHECK(linked > 100000);
     // Everything linked before the failure is intact.
-    CHECK_EQ(chain_length(keep), linked);
+    CHECK_EQ(from_own_frame([&] { return chain_length(*keep.slot); }), linked);
     h.verify();
     CHECK(h.stats().full_collections > 0);
 
     // Let go: the next collection gives the room back and allocation works.
-    keep = 0;
-    const size_t again = fill_until_oom(h, &keep, 50000);
+    *keep.slot = 0;
+    scrub_stack();
+    const size_t again = from_own_frame([&] { return fill_until_oom(h, keep.slot, 50000); });
     CHECK_EQ(again, SIZE_MAX);
-    CHECK_EQ(chain_length(keep), size_t{50000});
+    CHECK_EQ(from_own_frame([&] { return chain_length(*keep.slot); }), size_t{50000});
     h.collect(CollectionKind::Full);
     h.verify();
-    h.remove_root(&keep);
 }
 
 TEST_CASE("gc::Heap OOM - failing again and again stays recoverable") {

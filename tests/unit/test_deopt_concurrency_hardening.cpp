@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 using namespace brass;
 using namespace brass::runtime;
@@ -33,55 +34,63 @@ TEST_CASE("Deopt Hardening - GCRef in InterpreterFrame Survives GC Scavenge") {
     config.read_environment = false;
     gc::Heap gc(config);
 
-    // Allocate an object in the young generation
-    uintptr_t orig_addr = gc.allocate_masked(24, 0, 77);
-    REQUIRE(orig_addr != 0);
-    gc.store(orig_addr, 0, 0xCAFEBABEDEADBEEFULL);
-    gc.store(orig_addr, 1, 0x1234567890ABCDEFULL);
-
-    // 1. Create a DeoptFrame with GCRef kind
-    DeoptFrame dframe;
-    dframe.resume_id = 1;
-    dframe.push_deopt_value(DeoptValue::gcref(orig_addr));
-    CHECK_EQ(dframe.get_value(0).kind, DeoptValueKind::GcRef);
-    CHECK_EQ(dframe.get_value(0).as_gcref(), orig_addr);
-
-    // 2. Convert to RuntimeValues
-    std::vector<RuntimeValue> rvals = dframe.to_runtime_values();
-    REQUIRE_EQ(rvals.size(), 1u);
-    CHECK(rvals[0].is_gcref());
-    CHECK_EQ(rvals[0].as_gcref(), orig_addr);
-
-    // 3. Set into an InterpreterFrame
+    // 3. (Made first.) The InterpreterFrame the value lands in, in the C++
+    // heap: the stack is read conservatively, and a word naming the young
+    // object would pin it. The object's address is kept hidden, and steps
+    // 1-4 run in a frame of their own (stack_scrub.hpp).
     Module mod("test_gc_frame_mod");
     Function* fn = mod.create_function("fn_gc", Type::void_type(), {Type::gcref()});
     Builder b(*fn);
     BasicBlock* bb = b.append_block("entry");
     b.position_at_end(bb);
     Value* gcref_val = b.add_param(Type::gcref());
-
-    InterpreterFrame frame(fn);
-    frame.set_value(gcref_val, rvals[0]);
-
-    // 4. Collect roots from InterpreterFrame
+    auto frame_holder = std::make_unique<InterpreterFrame>(fn);
+    InterpreterFrame& frame = *frame_holder;
     std::vector<uintptr_t*> roots;
-    frame.collect_roots(roots);
-    REQUIRE_EQ(roots.size(), 1u);
-    CHECK_EQ(*roots[0], orig_addr);
+
+    const uint64_t orig_addr = test::from_own_frame([&] {
+        // Allocate an object in the young generation
+        uintptr_t addr = gc.allocate_masked(24, 0, 77);
+        REQUIRE(addr != 0);
+        gc.store(addr, 0, 0xCAFEBABEDEADBEEFULL);
+        gc.store(addr, 1, 0x1234567890ABCDEFULL);
+
+        // 1. Create a DeoptFrame with GCRef kind
+        DeoptFrame dframe;
+        dframe.resume_id = 1;
+        dframe.push_deopt_value(DeoptValue::gcref(addr));
+        CHECK_EQ(dframe.get_value(0).kind, DeoptValueKind::GcRef);
+        CHECK_EQ(dframe.get_value(0).as_gcref(), addr);
+
+        // 2. Convert to RuntimeValues
+        std::vector<RuntimeValue> rvals = dframe.to_runtime_values();
+        REQUIRE_EQ(rvals.size(), 1u);
+        CHECK(rvals[0].is_gcref());
+        CHECK_EQ(rvals[0].as_gcref(), addr);
+
+        // 3. Set into the InterpreterFrame
+        frame.set_value(gcref_val, rvals[0]);
+
+        // 4. Collect roots from InterpreterFrame
+        frame.collect_roots(roots);
+        REQUIRE_EQ(roots.size(), 1u);
+        CHECK_EQ(*roots[0], addr);
+        return test::hide_address(addr);
+    });
 
     // 5. Trigger moving GC scavenge
     const auto source = gc.add_root_source([&roots](gc::Tracer& tracer) {
         for (uintptr_t* slot : roots) tracer.visit_ref(slot);
     });
-    gc.collect(gc::CollectionKind::Minor);
+    test::collect_scrubbed(gc, gc::CollectionKind::Minor);
     gc.remove_root_source(source);
     CHECK_EQ(gc.collection_count(), 1u);
 
     // 6. Verify pointer was relocated
     uintptr_t relocated_addr = *roots[0];
-    CHECK_NE(relocated_addr, orig_addr);
+    CHECK_NE(test::hide_address(relocated_addr), orig_addr);
     CHECK(gc.is_valid_object(relocated_addr));
-    CHECK(!gc.is_valid_object(orig_addr));
+    CHECK(!gc.is_valid_object(static_cast<uintptr_t>(test::unhide_address(orig_addr))));
 
     // 7. Verify the InterpreterFrame now contains the relocated pointer
     RuntimeValue updated_val = frame.get_value(gcref_val);

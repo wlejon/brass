@@ -18,19 +18,23 @@
 // named again (heap_collect.cpp, reclaim_young; GcState::in_from). A marking
 // cycle's finish that leaves the young generation in place marks it, as a
 // root (HeapState::stack_objects through visit_roots). Old objects never
-// move, so a word naming one is passed over.
+// move, but a collection that marks the old generation (a full collection, a
+// marking cycle's start and its finish's rescan) reads the stacks for them
+// too, and a word naming an old object's payload marks it as a root: a raw
+// reference in a local keeps whatever it names alive, old or young. A minor
+// collection decides nothing old, so it passes over them.
 //
 // The scan is conservative: a word that merely looks like such a reference
 // (a number, a stale slot of a dead frame) keeps its object for that
 // collection too. It never makes anything unsound, only something live a
-// little longer.
+// little longer. The collector keeps its own words out of what it reads: it
+// clears the stack below the collection's frame before the scan, and of the
+// registers it reads only the callee-saved integer ones, where a caller's
+// references can be; the rest are the collector's scratch.
 
 #include "heap_internal.hpp"
 
-#include <brass/core/env.hpp>
-
 #include <algorithm>
-#include <string>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -50,14 +54,6 @@
 
 namespace brass::gc::detail {
 
-bool stack_pinning() noexcept {
-    static const bool on = [] {
-        const std::string v = env_value("BRASS_GC_PIN_STACK");
-        return !v.empty() && v != "0";
-    }();
-    return on;
-}
-
 namespace {
 
 // More than any stack brass or a host makes: a span past it is a bound gone
@@ -67,22 +63,22 @@ constexpr uintptr_t kMaxStackSpan = uintptr_t{1} << 30;
 struct StackScan {
     const Heap* heap;
     std::vector<uintptr_t>* candidates;
+    bool old;  // old addresses too (StackObjects::WithOld)
 };
 
-// Every word of [lo, hi) that names an address in the young generation,
-// untagged or under a reference tag. Old objects never move, so the stacks'
-// names for them need nothing, and keep nothing alive: a host roots what it
-// keeps.
+// Every word of [lo, hi) that names an address in the young generation (and,
+// when the scan asks for them, the old), untagged or under a reference tag.
 void scan_words(void* context, uintptr_t lo, uintptr_t hi) {
     auto& scan = *static_cast<StackScan*>(context);
     lo = (lo + sizeof(uint64_t) - 1) & ~(uintptr_t{sizeof(uint64_t)} - 1);
     if (hi <= lo || hi - lo > kMaxStackSpan) return;
     const Heap& heap = *scan.heap;
+    const bool old = scan.old;
     for (uintptr_t p = lo; p + sizeof(uint64_t) <= hi; p += sizeof(uint64_t)) {
         const uint64_t word = *reinterpret_cast<const uint64_t*>(p);
         if ((word >> kTagShift) != 0 && !heap.is_reference_tag(word)) continue;
         const auto a = static_cast<uintptr_t>(word & kAddressMask);
-        if (heap.is_young(a)) scan.candidates->push_back(a);
+        if (old ? heap.contains(a) : heap.is_young(a)) scan.candidates->push_back(a);
     }
 }
 
@@ -97,12 +93,40 @@ BRASS_PIN_NOINLINE void scan_from_here(StackScan& scan) {
 // Puts the callee-saved registers in this frame, where scan_from_here reads
 // them: a reference a caller keeps only in a register is seen too.
 BRASS_PIN_NOINLINE void scan_thread_stacks(StackScan& scan) {
-#if defined(_WIN32)
-    CONTEXT registers;
-    RtlCaptureContext(&registers);
+#if defined(_WIN32) && defined(_M_X64)
+    // Only the callee-saved integer registers: whatever else the context
+    // holds (the volatile registers, the vector ones) is the collector's own
+    // scratch, and a stale reference in it would keep its object.
+    uintptr_t registers[8];
+    {
+        CONTEXT context;
+        RtlCaptureContext(&context);
+        registers[0] = context.Rbx;
+        registers[1] = context.Rbp;
+        registers[2] = context.Rsi;
+        registers[3] = context.Rdi;
+        registers[4] = context.R12;
+        registers[5] = context.R13;
+        registers[6] = context.R14;
+        registers[7] = context.R15;
+        SecureZeroMemory(&context, sizeof(context));
+    }
     scan_from_here(scan);
-    // The context lives until the scan has read it.
-    const void* volatile keep = &registers;
+    // The registers live until the scan has read them.
+    const void* volatile keep = registers;
+    (void)keep;
+#elif defined(_WIN32) && defined(_M_ARM64)
+    uintptr_t registers[12];
+    {
+        CONTEXT context;
+        RtlCaptureContext(&context);
+        for (int i = 0; i < 10; ++i) registers[i] = context.X[19 + i];
+        registers[10] = context.Fp;
+        registers[11] = context.Lr;
+        SecureZeroMemory(&context, sizeof(context));
+    }
+    scan_from_here(scan);
+    const void* volatile keep = registers;
     (void)keep;
 #elif defined(__x86_64__)
     uintptr_t registers[6];
@@ -137,25 +161,46 @@ BRASS_PIN_NOINLINE void scan_thread_stacks(StackScan& scan) {
 #endif
 }
 
+// The collection's own work before the scan (a lazy sweep finished, a
+// verification) walked objects in frames as deep as the scan's, and the
+// scan's frames would read what those left in their slots the scan never
+// writes (the register context's unused parts, padding): the collector would
+// keep what it had just looked at. Cleared first, from below this frame's
+// caller.
+constexpr size_t kScanFrameWords = 1024;
+
+BRASS_PIN_NOINLINE void clear_scan_frames() {
+    volatile uint64_t words[kScanFrameWords];
+    for (size_t i = 0; i < kScanFrameWords; ++i) words[i] = 0;
+    (void)words[0];
+}
+
 } // namespace
 
-void gather_stack_objects(HeapState& s) {
+void gather_stack_objects(HeapState& s, StackObjects which) {
     s.stack_objects.clear();
-    if (!stack_pinning()) return;
     std::vector<uintptr_t> candidates;
     candidates.reserve(256);
-    StackScan scan{&s.heap, &candidates};
+    StackScan scan{&s.heap, &candidates, which == StackObjects::WithOld};
+    clear_scan_frames();
     scan_thread_stacks(scan);
     std::sort(candidates.begin(), candidates.end());
     candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
     // Each candidate to the object whose payload holds it
-    // (young_object_containing). An address in an object's header is no
-    // reference to it (a reference is the payload's address, or inside it)
-    // but the bound of a space or of the object before it, which the
-    // collector's own frames hold: eden's base would pin eden's first object.
+    // (young_object_containing, containing_object for the old spaces). An
+    // address in an object's header is no reference to it (a reference is
+    // the payload's address, or inside it) but the bound of a space or of the
+    // object before it, which the collector's own frames hold: eden's base
+    // would pin eden's first object.
     std::vector<uintptr_t>& objects = s.stack_objects;
     for (const uintptr_t a : candidates) {
-        const uintptr_t object = young_object_containing(s, a);
+        uintptr_t object = 0;
+        if (s.heap.is_young(a)) {
+            object = young_object_containing(s, a);
+        } else {
+            object = containing_object(s, a, false);
+            if (object > a) object = 0;
+        }
         if (object == 0) continue;
         if (objects.empty() || objects.back() != object) objects.push_back(object);
     }

@@ -10,6 +10,7 @@
 #include <brass/debug/jit_code_registry.hpp>
 #include <brass/debug/symbolicator.hpp>
 #include <bit>
+#include <memory>
 #include <string>
 
 using namespace brass;
@@ -145,19 +146,26 @@ TEST_CASE("CoroFramesGc - a frame that became old keeps the young objects its bo
         test::BoundHeap heap(cfg);
         Program prog(*mod);
         prog.place("keep", bt);
-        RootedFrame f;
-        f.frame = static_cast<uintptr_t>(prog.call("mk", Tier::Interp, {RuntimeValue::from_i64(4242)}).raw_bits());
+        // The frame's root in the C++ heap, used from frames of their own:
+        // a stack word naming the frame would pin it young (stack_scrub.hpp).
+        auto rooted = std::make_unique<RootedFrame>();
+        RootedFrame& f = *rooted;
+        test::in_own_frame([&] {
+            f.frame = static_cast<uintptr_t>(prog.call("mk", Tier::Interp, {RuntimeValue::from_i64(4242)}).raw_bits());
+        });
         REQUIRE(f.frame != 0);
         runtime::ProgramScope scope(prog.table);
-        CHECK_EQ(brass_coro_resume(f.frame, 0), 0u);
-        heap->collect(gc::CollectionKind::Full);
-        heap->collect(gc::CollectionKind::Full);
+        CHECK_EQ(test::from_own_frame([&] { return brass_coro_resume(f.frame, 0); }), 0u);
+        test::collect_scrubbed(heap.heap, gc::CollectionKind::Full);
+        test::collect_scrubbed(heap.heap, gc::CollectionKind::Full);
         REQUIRE(heap->is_old(f.frame));
         // The body allocates a young object and keeps it in the old frame.
-        CHECK_EQ(brass_coro_resume(f.frame, 0), 0u);
-        heap->collect(gc::CollectionKind::Minor);
-        for (int i = 0; i < 2000; ++i) (void)heap->allocate_masked(16, 0, 1);
-        heap->collect(gc::CollectionKind::Minor);
+        CHECK_EQ(test::from_own_frame([&] { return brass_coro_resume(f.frame, 0); }), 0u);
+        test::collect_scrubbed(heap.heap, gc::CollectionKind::Minor);
+        test::in_own_frame([&] {
+            for (int i = 0; i < 2000; ++i) (void)heap->allocate_masked(16, 0, 1);
+        });
+        test::collect_scrubbed(heap.heap, gc::CollectionKind::Minor);
         const uint64_t got = brass_coro_resume(f.frame, 0);
         if (got != 4242u) std::printf("body %s\n", tier_name(bt));
         CHECK_EQ(got, 4242u);

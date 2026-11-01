@@ -146,23 +146,29 @@ TEST_CASE("Phase 1 - Heap Root Capture During Eden Exhaustion") {
     heap.set_poison(true);
     CHECK_EQ(heap.collection_count(), 0);
 
-    // Register a root slot
-    uint64_t root_obj = heap.allocate_masked(32, 0, 1);
-    heap.store(root_obj, 0, 12345);
-    heap.add_root(&root_obj);
-    const uint64_t original = root_obj;
+    // Register a root slot: off the stack, the object made in a frame of its
+    // own, its address kept hidden. The stack is read conservatively, and a
+    // word naming the object would pin it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> root_obj(heap);
+    test::in_own_frame([&] {
+        *root_obj.slot = heap.allocate_masked(32, 0, 1);
+        heap.store(*root_obj.slot, 0, 12345);
+    });
+    const uint64_t original = root_obj.hidden();
 
     // Allocate until eden fills and the allocation collects.
-    for (int i = 0; i < 5000; ++i) {
-        heap.allocate_masked(32, 0, 2);
-    }
+    test::scrub_stack();
+    test::in_own_frame([&] {
+        for (int i = 0; i < 5000; ++i) {
+            heap.allocate_masked(32, 0, 2);
+        }
+    });
 
     CHECK(heap.collection_count() > 0);
     // Root must have been relocated and not poisoned
-    CHECK(root_obj != original);
-    CHECK(heap.is_valid_object(root_obj));
-    CHECK_EQ(gc::Heap::load(root_obj, 0), 12345u);
-    heap.remove_root(&root_obj);
+    CHECK(root_obj.hidden() != original);
+    CHECK(heap.is_valid_object(*root_obj.slot));
+    CHECK_EQ(gc::Heap::load(*root_obj.slot, 0), 12345u);
 }
 
 TEST_CASE("Phase 1 - ParallelRuntime Algebraic Reduction Identity and Re-entrancy") {

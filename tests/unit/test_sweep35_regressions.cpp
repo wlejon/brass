@@ -155,15 +155,23 @@ TEST_CASE("Sweep35 - a queued coroutine is resumed where a collection moved it")
     auto mod = lower(kBodyMod);
     gc::Heap heap;
     ActiveGc a(&heap);
-    const uintptr_t f = make_frame(*mod);
-    CoroFrameRef ref = coro_frame_ref(reinterpret_cast<BrassCoroFrame*>(f));
+    // The frame made and queued in a frame of its own, its address hidden:
+    // a stack word naming it would pin it (stack_scrub.hpp).
     MicrotaskQueue q;
-    q.enqueue_coro(reinterpret_cast<BrassCoroFrame*>(f), 10);
-    q.enqueue_coro(reinterpret_cast<BrassCoroFrame*>(f), 20);
-    heap.collect(gc::CollectionKind::Minor);  // the young frame is copied: it moves
-    BrassCoroFrame* moved = resolve_coro_frame_ref(ref);
-    REQUIRE(moved != nullptr);
-    CHECK(reinterpret_cast<uintptr_t>(moved) != f);
+    CoroFrameRef ref{};
+    const uint64_t f = test::from_own_frame([&] {
+        const uintptr_t frame = make_frame(*mod);
+        ref = coro_frame_ref(reinterpret_cast<BrassCoroFrame*>(frame));
+        q.enqueue_coro(reinterpret_cast<BrassCoroFrame*>(frame), 10);
+        q.enqueue_coro(reinterpret_cast<BrassCoroFrame*>(frame), 20);
+        return test::hide_address(frame);
+    });
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);  // the young frame is copied: it moves
+    CHECK(test::from_own_frame([&] {
+        BrassCoroFrame* moved = resolve_coro_frame_ref(ref);
+        return moved != nullptr && test::hide_address(reinterpret_cast<uintptr_t>(moved)) != f;
+    }));
+    BrassCoroFrame* moved = nullptr;
     q.run_all();
     moved = resolve_coro_frame_ref(ref);
     REQUIRE(moved != nullptr);
@@ -382,17 +390,21 @@ TEST_CASE("Sweep35 - a finished frame a collection moved is answered where it is
     auto mod = lower(kBodyMod);
     gc::Heap heap;
     ActiveGc a(&heap);
-    uint64_t f = make_frame(*mod);
-    heap.add_root(&f);
-    CHECK_EQ(brass_coro_resume(f, 10), 5u);
-    brass_coro_destroy(f);
-    const uintptr_t old = f;
-    heap.collect(gc::CollectionKind::Minor);  // the finished frame is kept by the root and moves
-    REQUIRE(f != old);
-    CHECK_EQ(brass_coro_is_done(f), 1u);
-    CHECK_EQ(brass_coro_resume(f, 20), 5u);
+    // Rooted off the stack, used in frames of its own: a stack word naming
+    // the frame would pin it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> f(heap);
+    test::in_own_frame([&] {
+        *f.slot = make_frame(*mod);
+        CHECK_EQ(brass_coro_resume(*f.slot, 10), 5u);
+        brass_coro_destroy(*f.slot);
+    });
+    const uint64_t old = f.hidden();
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);  // the finished frame is kept by the root and moves
+    REQUIRE(f.hidden() != old);
+    CHECK_EQ(brass_coro_is_done(*f.slot), 1u);
+    CHECK_EQ(brass_coro_resume(*f.slot, 20), 5u);
     // The address it left is not a frame any more.
-    CHECK(throws_logic_error([&] { (void)brass_coro_is_done(old); }));
-    CHECK(throws_logic_error([&] { brass_coro_resume(old, 1); }));
-    heap.remove_root(&f);
+    const uintptr_t was = static_cast<uintptr_t>(test::unhide_address(old));
+    CHECK(throws_logic_error([&] { (void)brass_coro_is_done(was); }));
+    CHECK(throws_logic_error([&] { brass_coro_resume(was, 1); }));
 }

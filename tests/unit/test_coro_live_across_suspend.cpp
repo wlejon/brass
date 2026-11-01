@@ -315,24 +315,36 @@ TEST_CASE("Coro live values - a collection while suspended moves the frame's gcr
     CHECK(pointer_slots >= 2);
     for (Tier t : kTiers) {
         GenHeap heap;
-        uintptr_t obj = heap->allocate_masked(48, 0, 2);
-        REQUIRE(obj != 0);
-        *reinterpret_cast<int64_t*>(obj + 16) = 40;
+        // The object's root in the C++ heap, its address passed and compared
+        // only from frames of their own: the stack is read conservatively,
+        // and a word naming the object would pin it (stack_scrub.hpp).
+        auto obj = std::make_unique<uintptr_t>(0);
+        const std::vector<uint64_t> args = test::from_own_frame([&] {
+            *obj = heap->allocate_masked(48, 0, 2);
+            REQUIRE(*obj != 0);
+            *reinterpret_cast<int64_t*>(*obj + 16) = 40;
+            return std::vector<uint64_t>{*obj, 3};
+        });
         ThreadRootsScope keep_obj([](void* ctx, std::vector<uintptr_t*>& roots) {
             roots.push_back(static_cast<uintptr_t*>(ctx));
-        }, &obj);
+        }, obj.get());
+        // drive's frame takes the place of the one that made the object.
+        test::scrub_stack();
         int collections = 0;
         bool moved = false;
         bool slots_ok = true;
-        const Run r = drive(*mod, "gcb", t, {obj, 3}, [&](uintptr_t& frame) {
-            const uintptr_t before = obj;
-            heap->collect(collections++ % 2 == 0 ? gc::CollectionKind::Minor : gc::CollectionKind::Full);
-            if (obj != before) moved = true;
-            // Scribble over the old copy: a stale slot reads garbage.
-            if (obj != before) *reinterpret_cast<int64_t*>(before + 16) = -1;
+        const Run r = drive(*mod, "gcb", t, args, [&](uintptr_t& frame) {
+            const uint64_t before = test::hide_address(*obj);
+            test::collect_scrubbed(heap.heap, collections++ % 2 == 0 ? gc::CollectionKind::Minor : gc::CollectionKind::Full);
+            test::in_own_frame([&] {
+                if (test::hide_address(*obj) == before) return;
+                moved = true;
+                // Scribble over the old copy: a stale slot reads garbage.
+                *reinterpret_cast<int64_t*>(test::unhide_address(before) + 16) = -1;
+            });
             auto* f = reinterpret_cast<runtime::BrassCoroFrame*>(frame);
             for (uint32_t s = 0; s < layout.slot_count; ++s) {
-                if (((layout.pointer_mask >> s) & 1) && f->slots[s] != 0 && f->slots[s] != obj) slots_ok = false;
+                if (((layout.pointer_mask >> s) & 1) && f->slots[s] != 0 && f->slots[s] != *obj) slots_ok = false;
             }
         });
         if (!r.done || !moved || !slots_ok) std::printf("  @gcb under collections on the %s\n", tier_name(t));

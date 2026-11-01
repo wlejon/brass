@@ -7,7 +7,13 @@
 // object named from thousands of cards scanned by different threads is copied
 // once; the automatic policy copies small collections on one thread; and
 // start_helper_threads creates the helpers both parallel paths share.
+//
+// The stack is read conservatively (docs/gc_contract.md 2.5): a word left by
+// a dead frame would keep an object in one run and not in the other, so the
+// runs touch the heap in frames of their own and scrub the stack before
+// every collection (stack_scrub.hpp).
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -19,6 +25,8 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::collect_scrubbed;
+using brass::test::scrub_stack;
 
 namespace {
 
@@ -145,6 +153,17 @@ public:
     }
 
     void build_old(bool lazy) {
+        make_old();
+        collect_scrubbed(h, CollectionKind::Full);
+        if (lazy) {
+            // Old garbage for a lazy sweep to be pending over: a third of the
+            // old nodes unrooted, and with them whatever only they named.
+            for (size_t i = 0; i < kOld; i += 3) old_[i] = 0;
+            collect_scrubbed(h, CollectionKind::Full);
+        }
+    }
+
+    BRASS_TEST_NOINLINE void make_old() {
         for (size_t i = 0; i < kOld; ++i) old_[i] = node(kNodeWords);
         for (size_t i = 0; i < kOld; ++i) {
             for (size_t k = 1; k < kNodeWords; ++k) {
@@ -156,18 +175,16 @@ public:
         holders_[0] = node(kArrayWords, kAllocOld);  // weak cells
         holders_[1] = h.allocate((2 + 2 * 400) * 8, ephemeron_table_layout());  // old after the full
         reinterpret_cast<uint64_t*>(holders_[1])[0] = next_id_++;
-        h.collect(CollectionKind::Full);
-        if (lazy) {
-            // Old garbage for a lazy sweep to be pending over: a third of the
-            // old nodes unrooted, and with them whatever only they named.
-            for (size_t i = 0; i < kOld; i += 3) old_[i] = 0;
-            h.collect(CollectionKind::Full);
-        }
     }
 
     // One round: young nodes linked among themselves and from old objects,
     // some old-to-young links cut again, then a minor collection.
     void round(bool weak) {
+        mutate(weak);
+        collect_scrubbed(h, CollectionKind::Minor);
+    }
+
+    BRASS_TEST_NOINLINE void mutate(bool weak) {
         std::vector<uintptr_t> young;
         young.reserve(kYoungPerRound);
         for (size_t i = 0; i < kYoungPerRound; ++i) {
@@ -199,7 +216,6 @@ public:
         }
         for (size_t i = 0; i < 200; ++i) h.store(static_cast<uintptr_t>(arrays_[pick(kArrays)]), 1 + pick(kArrayWords - 1), 0);
         if (weak) weak_round(young);
-        h.collect(CollectionKind::Minor);
     }
 
     void weak_round(const std::vector<uintptr_t>& young) {
@@ -260,7 +276,22 @@ public:
 
     Outcome finish(const Options& o) {
         Outcome out;
-        if (o.cycle) h.finish_marking();
+        if (o.cycle) {
+            scrub_stack();
+            h.finish_marking();
+        }
+        record(o, out);
+        collect_scrubbed(h, CollectionKind::Full);
+        out.graph_full = graph();
+        h.for_each_object([&](uintptr_t) { ++out.objects_full; });
+        out.live_full = h.stats().old_live_bytes;
+        out.finalized = finalized_;
+        std::sort(out.finalized.begin(), out.finalized.end());
+        out.swept_pending_at_first = swept_pending_at_first;
+        return out;
+    }
+
+    BRASS_TEST_NOINLINE void record(const Options& o, Outcome& out) {
         if (o.weak) {
             for (size_t i = 0; i < cells_; ++i) {
                 const uintptr_t cell = static_cast<uintptr_t>(Heap::load(static_cast<uintptr_t>(holders_[0]), 1 + i));
@@ -272,14 +303,6 @@ public:
         out.graph = graph();
         out.parallel = h.stats().parallel_evacuations;
         out.promoted = h.stats().promoted_bytes;
-        h.collect(CollectionKind::Full);
-        out.graph_full = graph();
-        h.for_each_object([&](uintptr_t) { ++out.objects_full; });
-        out.live_full = h.stats().old_live_bytes;
-        out.finalized = finalized_;
-        std::sort(out.finalized.begin(), out.finalized.end());
-        out.swept_pending_at_first = swept_pending_at_first;
-        return out;
     }
 
     bool swept_pending_at_first = false;
@@ -300,7 +323,10 @@ Outcome run(ParallelMinor mode, unsigned threads, uint32_t seed, const Options& 
     World w(o.survivor_bytes ? config(mode, threads, o.survivor_bytes) : config(mode, threads), seed);
     w.build_old(o.lazy);
     w.swept_pending_at_first = w.h.sweeping();
-    if (o.cycle) REQUIRE(w.h.start_marking());
+    if (o.cycle) {
+        scrub_stack();
+        REQUIRE(w.h.start_marking());
+    }
     for (int r = 0; r < o.rounds; ++r) {
         w.round(o.weak);
         if (o.cycle) (void)w.h.mark_slice(20'000);

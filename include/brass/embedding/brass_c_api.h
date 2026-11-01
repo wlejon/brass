@@ -65,8 +65,9 @@ BRASS_API void BRASS_CALL brass_heap_destroy(brass_heap_t* heap);
 // Binds `heap` (NULL: none) as the calling thread's heap, returning the one
 // bound before. Compiled code called on the thread allocates from it.
 BRASS_API brass_heap_t* BRASS_CALL brass_heap_bind(brass_heap_t* heap);
-// A zeroed object; 0 when the heap cannot hold it. May collect: every
-// reference the caller holds across the call must be a root.
+// A zeroed object; 0 when the heap cannot hold it. May collect: a reference
+// the caller holds on its stack or in a register stays current and alive;
+// one held anywhere else (heap memory, another thread) must be a root.
 BRASS_API uintptr_t BRASS_CALL brass_heap_allocate(brass_heap_t* heap, size_t size, uint64_t pointer_mask, uint32_t type_tag);
 BRASS_API brass_value_t BRASS_CALL brass_heap_allocate_value(brass_heap_t* heap, size_t size, uint64_t pointer_mask, uint32_t type_tag);
 // A full collection (full != 0) or a young-generation one.

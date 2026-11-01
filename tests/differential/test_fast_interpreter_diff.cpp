@@ -716,20 +716,30 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Garbage Collection Roots") 
 
     // 1. Oracle Interpreter
     // Each host function roots the object, runs a young (moving) collection
-    // on the interpreter's heap and reads the object where it moved.
-    auto scavenge = [](gc::Heap& heap, uintptr_t obj, uintptr_t& updated) {
-        uint64_t root = obj;
-        heap.add_root(&root);
-        heap.collect(gc::CollectionKind::Minor);
-        heap.remove_root(&root);
-        updated = static_cast<uintptr_t>(root);
-        return static_cast<int64_t>(gc::Heap::load(updated, 0));
+    // on the interpreter's heap and reads the object where it moved. The
+    // addresses are kept hidden: the stack is read conservatively, and a word
+    // naming the young object would pin it (stack_scrub.hpp).
+    auto scavenge = [](gc::Heap& heap, uint64_t hidden_obj, uint64_t& hidden_updated) {
+        test::HeapRoot<gc::Heap> root(heap);
+        test::set_hidden(root.slot, hidden_obj);
+        test::collect_scrubbed(heap, gc::CollectionKind::Minor);
+        hidden_updated = root.hidden();
+        return static_cast<int64_t>(gc::Heap::load(static_cast<uintptr_t>(*root.slot), 0));
+    };
+    auto make = [](gc::Heap& heap) {
+        return test::from_own_frame([&] {
+            uintptr_t obj = heap.allocate_masked(24, 0, 7);
+            heap.store(obj, 0, 0x123456789ABCDEF0ULL);
+            return test::hide_address(obj);
+        });
+    };
+    auto valid = [](gc::Heap& heap, uint64_t hidden) {
+        return heap.is_valid_object(static_cast<uintptr_t>(test::unhide_address(hidden)));
     };
 
     Interpreter oracle(gc::HeapConfig{});
-    uintptr_t o_obj = oracle.heap().allocate_masked(24, 0, 7);
-    oracle.heap().store(o_obj, 0, 0x123456789ABCDEF0ULL);
-    uintptr_t o_updated = 0;
+    const uint64_t o_obj = make(oracle.heap());
+    uint64_t o_updated = 0;
 
     oracle.register_external_function("scavenge_and_check", [&](Interpreter& in, const std::vector<RuntimeValue>& args) -> RuntimeValue {
         const int64_t field = scavenge(in.heap(), o_obj, o_updated);
@@ -739,9 +749,8 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Garbage Collection Roots") 
 
     // 2. FastInterpreter
     FastInterpreter fast(gc::HeapConfig{});
-    uintptr_t f_obj = fast.heap().allocate_masked(24, 0, 7);
-    fast.heap().store(f_obj, 0, 0x123456789ABCDEF0ULL);
-    uintptr_t f_updated = 0;
+    const uint64_t f_obj = make(fast.heap());
+    uint64_t f_updated = 0;
 
     fast.register_external_function("scavenge_and_check", [&](FastInterpreter& in, const std::vector<RuntimeValue>& args) -> RuntimeValue {
         const int64_t field = scavenge(in.heap(), f_obj, f_updated);
@@ -752,8 +761,8 @@ TEST_CASE("Differential - FastInterpreter vs Oracle: Garbage Collection Roots") 
     CHECK_EQ(o_res.as_i64(), f_res.as_i64());
     CHECK_NE(o_updated, o_obj);
     CHECK_NE(f_updated, f_obj);
-    CHECK(oracle.heap().is_valid_object(o_updated));
-    CHECK(fast.heap().is_valid_object(f_updated));
+    CHECK(valid(oracle.heap(), o_updated));
+    CHECK(valid(fast.heap(), f_updated));
 }
 
 // ============================================================================

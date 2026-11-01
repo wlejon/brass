@@ -753,7 +753,7 @@ unsigned parallel_minor_threads(GcState& g) {
     if (c.parallel_minor == ParallelMinor::Off) return 1;
     unsigned most = configured_threads(c.minor_threads);
     if (most <= 1) return 1;
-    const uint64_t young = (g.eden_top - s.eden_lo) + (g.from_top - s.survivor_lo[g.from]);
+    const uint64_t young = g.eden_used + (g.from_top - s.survivor_lo[g.from]);
     // A long copy on every core (HeapConfig::large_minor_threads): a thread's
     // copying is bound by the misses on the objects it claims (eden was
     // written on the program's core), not by the others, so more threads cut

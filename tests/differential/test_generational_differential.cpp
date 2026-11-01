@@ -103,53 +103,55 @@ TEST_CASE("Differential - Old-to-Young mutation across Minor Collections") {
     gc::Heap full_gc(small_config(1));
     gc::Heap gen_gc(small_config(1));  // promoted by the first minor collection
 
-    // Create long-lived root object in both heaps
-    uint64_t f_root = full_gc.allocate_masked(16, 2ULL, 1);
-    full_gc.store(f_root, 0, 1000ULL);
-    full_gc.store(f_root, 1, 0ULL);
-
-    uint64_t g_root = gen_gc.allocate_masked(16, 2ULL, 1);
-    gen_gc.store(g_root, 0, 1000ULL);
-    gen_gc.store(g_root, 1, 0ULL);
-
-    full_gc.add_root(&f_root);
-    gen_gc.add_root(&g_root);
+    // Long-lived root objects in both heaps, rooted off the stack and made
+    // in frames of their own: the stack is read conservatively, and a word
+    // naming a young object would pin it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> f_root(full_gc);
+    test::HeapRoot<gc::Heap> g_root(gen_gc);
+    test::in_own_frame([&] {
+        *f_root.slot = full_gc.allocate_masked(16, 2ULL, 1);
+        full_gc.store(*f_root.slot, 0, 1000ULL);
+        full_gc.store(*f_root.slot, 1, 0ULL);
+        *g_root.slot = gen_gc.allocate_masked(16, 2ULL, 1);
+        gen_gc.store(*g_root.slot, 0, 1000ULL);
+        gen_gc.store(*g_root.slot, 1, 0ULL);
+    });
 
     // Advance generation: both roots become old
-    gen_gc.collect(gc::CollectionKind::Minor);
-    full_gc.collect(gc::CollectionKind::Full);
-    CHECK(gen_gc.is_old(g_root));
-    CHECK(full_gc.is_old(f_root));
+    test::collect_scrubbed(gen_gc, gc::CollectionKind::Minor);
+    test::collect_scrubbed(full_gc, gc::CollectionKind::Full);
+    CHECK(gen_gc.is_old(*g_root.slot));
+    CHECK(full_gc.is_old(*f_root.slot));
 
     // Now allocate a new young leaf
-    uintptr_t f_leaf = full_gc.allocate_masked(16, 0ULL, 2);
-    full_gc.store(f_leaf, 0, 9999ULL);
-    full_gc.store(f_root, 1, f_leaf);
-
-    uintptr_t g_leaf = gen_gc.allocate_masked(16, 0ULL, 2);
-    gen_gc.store(g_leaf, 0, 9999ULL);
-    gen_gc.store(g_root, 1, g_leaf);  // Critical: old points to young, through the barrier
-    CHECK(gen_gc.is_young(g_leaf));
+    const uint64_t g_leaf = test::from_own_frame([&] {
+        uintptr_t f_leaf = full_gc.allocate_masked(16, 0ULL, 2);
+        full_gc.store(f_leaf, 0, 9999ULL);
+        full_gc.store(*f_root.slot, 1, f_leaf);
+        uintptr_t leaf = gen_gc.allocate_masked(16, 0ULL, 2);
+        gen_gc.store(leaf, 0, 9999ULL);
+        gen_gc.store(*g_root.slot, 1, leaf);  // Critical: old points to young, through the barrier
+        CHECK(gen_gc.is_young(leaf));
+        return test::hide_address(leaf);
+    });
 
     // Collect with ONLY roots (leaf is not directly rooted!)
-    gen_gc.collect(gc::CollectionKind::Minor);
-    full_gc.collect(gc::CollectionKind::Full);
+    test::collect_scrubbed(gen_gc, gc::CollectionKind::Minor);
+    test::collect_scrubbed(full_gc, gc::CollectionKind::Full);
 
     // Both should preserve leaf through root's reference
-    uint64_t f_leaf_after = gc::Heap::load(f_root, 1);
-    uint64_t g_leaf_after = gc::Heap::load(g_root, 1);
+    uint64_t f_leaf_after = gc::Heap::load(*f_root.slot, 1);
+    uint64_t g_leaf_after = gc::Heap::load(*g_root.slot, 1);
 
     REQUIRE_NE(f_leaf_after, 0ULL);
     REQUIRE_NE(g_leaf_after, 0ULL);
-    CHECK_NE(g_leaf_after, g_leaf);  // moved: promoted by this minor collection
+    CHECK_NE(test::hide_address(g_leaf_after), g_leaf);  // moved: promoted by this minor collection
 
     CHECK(full_gc.is_valid_object(f_leaf_after));
     CHECK(gen_gc.is_valid_object(g_leaf_after));
 
     CHECK_EQ(gc::Heap::load(f_leaf_after, 0), 9999ULL);
     CHECK_EQ(gc::Heap::load(g_leaf_after, 0), 9999ULL);
-    full_gc.remove_root(&f_root);
-    gen_gc.remove_root(&g_root);
 }
 
 TEST_CASE("Differential - Interpreter MIR execution with Write Barrier") {

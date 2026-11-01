@@ -131,53 +131,63 @@ TEST_CASE("GC Concurrency Safety - Write barrier card marking with tagged young 
 TEST_CASE("GC Concurrency Safety - Minor scavenge evacuates tagged roots preserving tag bits") {
     gc::Heap heap(plain_config());
 
-    // Allocate two young objects
-    uintptr_t young1 = heap.allocate_masked(64, 0, 1);
-    uintptr_t young2 = heap.allocate_masked(64, 0, 2);
-    REQUIRE(young1 != 0);
-    REQUIRE(young2 != 0);
-    REQUIRE(heap.is_young(young1));
-    REQUIRE(heap.is_young(young2));
+    // The root slots in the C++ heap, the objects made in a frame of their
+    // own and their addresses kept hidden: the stack is read conservatively,
+    // and a word naming a young object would pin it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> r1(heap), r2(heap), r3(heap);
+    uint64_t& root1 = *r1.slot;
+    uint64_t& root2 = *r2.slot;
+    uint64_t& root3 = *r3.slot;
+    uint64_t young1 = 0, young2 = 0;  // hidden
+    test::in_own_frame([&] {
+        // Allocate two young objects
+        uintptr_t y1 = heap.allocate_masked(64, 0, 1);
+        uintptr_t y2 = heap.allocate_masked(64, 0, 2);
+        REQUIRE(y1 != 0);
+        REQUIRE(y2 != 0);
+        REQUIRE(heap.is_young(y1));
+        REQUIRE(heap.is_young(y2));
 
-    // Write distinctive payloads
-    *reinterpret_cast<uint64_t*>(young1) = 0x1122334455667788ULL;
-    *reinterpret_cast<uint64_t*>(young2) = 0xAABBCCDDEEFF0011ULL;
+        // Write distinctive payloads
+        *reinterpret_cast<uint64_t*>(y1) = 0x1122334455667788ULL;
+        *reinterpret_cast<uint64_t*>(y2) = 0xAABBCCDDEEFF0011ULL;
 
-    // Root 1: Bronze tagged object pointer
-    uint64_t root1 = BRONZE_OBJECT_TAG | young1;
-    // Root 2: HostValue GCRef tagged pointer
-    uint64_t root2 = HOST_GCREF_TAG | young2;
-    // Root 3: Duplicate reference to young1 with different tag
-    uint64_t root3 = HOST_GCREF_TAG | young1;
-
-    heap.add_root(&root1);
-    heap.add_root(&root2);
-    heap.add_root(&root3);
+        // Root 1: Bronze tagged object pointer
+        root1 = BRONZE_OBJECT_TAG | y1;
+        // Root 2: HostValue GCRef tagged pointer
+        root2 = HOST_GCREF_TAG | y2;
+        // Root 3: Duplicate reference to young1 with different tag
+        root3 = HOST_GCREF_TAG | y1;
+        young1 = test::hide_address(y1);
+        young2 = test::hide_address(y2);
+    });
 
     // Run minor collection (evacuate to a survivor space)
-    heap.collect(gc::CollectionKind::Minor);
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);
 
-    // Check Root 1: Tag preserved, pointer updated into the young generation
-    CHECK((root1 & TAG_MASK) == BRONZE_OBJECT_TAG);
-    uintptr_t new_ptr1 = root1 & PAYLOAD_MASK;
-    CHECK(new_ptr1 != young1);
-    CHECK(heap.is_young(new_ptr1));
-    CHECK(*reinterpret_cast<uint64_t*>(new_ptr1) == 0x1122334455667788ULL);
+    test::in_own_frame([&] {
+        // Check Root 1: Tag preserved, pointer updated into the young generation
+        CHECK((root1 & TAG_MASK) == BRONZE_OBJECT_TAG);
+        uintptr_t new_ptr1 = root1 & PAYLOAD_MASK;
+        CHECK(test::hide_address(new_ptr1) != young1);
+        CHECK(heap.is_young(new_ptr1));
+        CHECK(*reinterpret_cast<uint64_t*>(new_ptr1) == 0x1122334455667788ULL);
 
-    // Check Root 2: Tag preserved, pointer updated into the young generation
-    CHECK((root2 & TAG_MASK) == HOST_GCREF_TAG);
-    uintptr_t new_ptr2 = root2 & PAYLOAD_MASK;
-    CHECK(new_ptr2 != young2);
-    CHECK(heap.is_young(new_ptr2));
-    CHECK(*reinterpret_cast<uint64_t*>(new_ptr2) == 0xAABBCCDDEEFF0011ULL);
+        // Check Root 2: Tag preserved, pointer updated into the young generation
+        CHECK((root2 & TAG_MASK) == HOST_GCREF_TAG);
+        uintptr_t new_ptr2 = root2 & PAYLOAD_MASK;
+        CHECK(test::hide_address(new_ptr2) != young2);
+        CHECK(heap.is_young(new_ptr2));
+        CHECK(*reinterpret_cast<uint64_t*>(new_ptr2) == 0xAABBCCDDEEFF0011ULL);
 
-    // Check Root 3: Pointing to same object as root1, with HOST_GCREF_TAG preserved
-    CHECK((root3 & TAG_MASK) == HOST_GCREF_TAG);
-    uintptr_t new_ptr3 = root3 & PAYLOAD_MASK;
-    CHECK(new_ptr3 == new_ptr1);
+        // Check Root 3: Pointing to same object as root1, with HOST_GCREF_TAG preserved
+        CHECK((root3 & TAG_MASK) == HOST_GCREF_TAG);
+        uintptr_t new_ptr3 = root3 & PAYLOAD_MASK;
+        CHECK(new_ptr3 == new_ptr1);
+    });
 
     // Run full collection: promotes to the old generation, preserving tags
-    heap.collect(gc::CollectionKind::Full);
+    test::collect_scrubbed(heap, gc::CollectionKind::Full);
 
     CHECK((root1 & TAG_MASK) == BRONZE_OBJECT_TAG);
     uintptr_t tenured_ptr1 = root1 & PAYLOAD_MASK;
@@ -191,10 +201,6 @@ TEST_CASE("GC Concurrency Safety - Minor scavenge evacuates tagged roots preserv
 
     CHECK((root3 & TAG_MASK) == HOST_GCREF_TAG);
     CHECK((root3 & PAYLOAD_MASK) == tenured_ptr1);
-
-    heap.remove_root(&root1);
-    heap.remove_root(&root2);
-    heap.remove_root(&root3);
 }
 
 TEST_CASE("GC Concurrency Safety - Card roots and Cheney scan with tagged pointers in fields") {
@@ -208,27 +214,29 @@ TEST_CASE("GC Concurrency Safety - Card roots and Cheney scan with tagged pointe
     uint64_t parent_root = tenured_parent;
     heap.add_root(&parent_root);
 
-    // Allocate young child
-    uintptr_t young_child = heap.allocate_masked(64, 0, 6);
-    REQUIRE(heap.is_young(young_child));
-    *reinterpret_cast<uint64_t*>(young_child) = 0x9988776655443322ULL;
-
-    // Store tagged young pointer into the old parent's field 0
-    uint64_t tagged_child = BRONZE_OBJECT_TAG | young_child;
-    heap.store(tenured_parent, 0, tagged_child);
+    // Allocate young child, in a frame of its own, its address kept hidden:
+    // a stack word naming it would pin it (stack_scrub.hpp).
+    const uint64_t young_child = test::from_own_frame([&] {
+        uintptr_t child = heap.allocate_masked(64, 0, 6);
+        REQUIRE(heap.is_young(child));
+        *reinterpret_cast<uint64_t*>(child) = 0x9988776655443322ULL;
+        // Store tagged young pointer into the old parent's field 0
+        heap.store(tenured_parent, 0, BRONZE_OBJECT_TAG | child);
+        return test::hide_address(child);
+    });
 
     // Verify card is dirty
     CHECK(card_dirty(heap, tenured_parent));
 
     // Collect minor: parent is old, child referenced only via dirty card
-    heap.collect(gc::CollectionKind::Minor);
+    test::collect_scrubbed(heap, gc::CollectionKind::Minor);
     CHECK(parent_root == tenured_parent);  // old objects never move
 
     // Verify the parent's field 0 has the evacuated child with tag intact
     uint64_t updated_child_val = gc::Heap::load(tenured_parent, 0);
     CHECK((updated_child_val & TAG_MASK) == BRONZE_OBJECT_TAG);
     uintptr_t updated_child_ptr = updated_child_val & PAYLOAD_MASK;
-    CHECK(updated_child_ptr != young_child);
+    CHECK(test::hide_address(updated_child_ptr) != young_child);
     CHECK(heap.is_young(updated_child_ptr));
     CHECK(*reinterpret_cast<uint64_t*>(updated_child_ptr) == 0x9988776655443322ULL);
 

@@ -2,6 +2,7 @@
 // slots, as the interpreters report them), the interior write barrier, and
 // the process-wide default configuration.
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -9,6 +10,10 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::collect_scrubbed;
+using brass::test::from_own_frame;
+using brass::test::hide_address;
+using brass::test::in_own_frame;
 
 namespace {
 
@@ -44,18 +49,23 @@ TEST_CASE("gc::Heap roots - a derived root keeps its object and its offset as th
         Heap h(small_config());
         Slots slots;
         const auto id = h.add_root_source(&visit_slots, &slots);
-        const uintptr_t obj = h.allocate(64, kPair);
-        reinterpret_cast<uint64_t*>(obj)[5] = 1234;
-        slots.derived.push_back(obj + 40);         // interior: word 5
-        slots.derived.push_back(obj);              // the start itself
-        slots.derived.push_back(0x7FFD000000000000ULL | (obj + 8));  // tagged interior
-        h.collect(kind);
-        const uintptr_t moved = static_cast<uintptr_t>(slots.derived[1]);
-        CHECK(moved != obj);  // young objects move in both kinds
-        CHECK(h.is_valid_object(moved));
-        CHECK_EQ(slots.derived[0], static_cast<uint64_t>(moved + 40));
-        CHECK_EQ(*reinterpret_cast<uint64_t*>(slots.derived[0]), uint64_t{1234});
-        CHECK_EQ(slots.derived[2], 0x7FFD000000000000ULL | (moved + 8));
+        const uint64_t before = from_own_frame([&] {
+            const uintptr_t obj = h.allocate(64, kPair);
+            reinterpret_cast<uint64_t*>(obj)[5] = 1234;
+            slots.derived.push_back(obj + 40);         // interior: word 5
+            slots.derived.push_back(obj);              // the start itself
+            slots.derived.push_back(0x7FFD000000000000ULL | (obj + 8));  // tagged interior
+            return hide_address(obj);
+        });
+        collect_scrubbed(h, kind);
+        in_own_frame([&] {
+            const uintptr_t moved = static_cast<uintptr_t>(slots.derived[1]);
+            CHECK(hide_address(moved) != before);  // young objects move in both kinds
+            CHECK(h.is_valid_object(moved));
+            CHECK_EQ(slots.derived[0], static_cast<uint64_t>(moved + 40));
+            CHECK_EQ(*reinterpret_cast<uint64_t*>(slots.derived[0]), uint64_t{1234});
+            CHECK_EQ(slots.derived[2], 0x7FFD000000000000ULL | (moved + 8));
+        });
         h.remove_root_source(id);
     }
 }
@@ -64,16 +74,22 @@ TEST_CASE("gc::Heap roots - a conservative root is followed only when it names a
     Heap h(small_config());
     Slots slots;
     const auto id = h.add_root_source(&visit_slots, &slots);
-    const uintptr_t obj = h.allocate(32, kPair);
-    const uintptr_t other = h.allocate(32, kPair);
-    slots.conservative.push_back(obj);         // an object: kept and updated
-    slots.conservative.push_back(other + 16);  // inside one: left alone, and no root
-    slots.conservative.push_back(12345);       // not an address at all
-    h.collect(CollectionKind::Minor);
-    CHECK(slots.conservative[0] != obj);
-    CHECK(h.is_valid_object(static_cast<uintptr_t>(slots.conservative[0])));
-    CHECK_EQ(slots.conservative[1], static_cast<uint64_t>(other + 16));
-    CHECK_EQ(slots.conservative[2], uint64_t{12345});
+    const uint64_t before = from_own_frame([&] {
+        const uintptr_t obj = h.allocate(32, kPair);
+        const uintptr_t other = h.allocate(32, kPair);
+        slots.conservative.push_back(obj);         // an object: kept and updated
+        slots.conservative.push_back(other + 16);  // inside one: left alone, and no root
+        slots.conservative.push_back(12345);       // not an address at all
+        return hide_address(other + 16);
+    });
+    const uint64_t obj_before = hide_address(slots.conservative[0]);
+    collect_scrubbed(h, CollectionKind::Minor);
+    in_own_frame([&] {
+        CHECK(hide_address(slots.conservative[0]) != obj_before);
+        CHECK(h.is_valid_object(static_cast<uintptr_t>(slots.conservative[0])));
+        CHECK(hide_address(slots.conservative[1]) == before);
+        CHECK_EQ(slots.conservative[2], uint64_t{12345});
+    });
     h.remove_root_source(id);
 }
 

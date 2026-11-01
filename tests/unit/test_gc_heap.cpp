@@ -2,6 +2,7 @@
 // mature and large-object spaces, cards, full collections, tagged slots,
 // custom layouts, roots, verification and the stress modes.
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -11,6 +12,11 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::hide_address;
+using brass::test::HeapRoot;
+using brass::test::in_own_frame;
+using brass::test::scrub_stack;
+using brass::test::unhide_address;
 
 namespace {
 
@@ -128,34 +134,46 @@ TEST_CASE("gc::Heap - a minor collection moves reachable young objects and drops
     HeapConfig c = small_config();
     c.tenure_age = 3;
     Heap h(c);
-    uint64_t root = 0;
-    h.add_root(&root);
-    root = make_node(h, 42);
-    uintptr_t dead = make_node(h, 7);
-    const uintptr_t before = static_cast<uintptr_t>(root);
+    HeapRoot<Heap> root(h);
+    uint64_t dead = 0;
+    uint64_t before = 0;
+    in_own_frame([&] {
+        *root.slot = make_node(h, 42);
+        dead = hide_address(make_node(h, 7));
+        before = root.hidden();
+    });
     const uint64_t epoch = h.relocation_epoch();
 
+    scrub_stack();
     h.collect(CollectionKind::Minor);
     CHECK_EQ(h.stats().minor_collections, uint64_t{1});
-    CHECK_NE(static_cast<uintptr_t>(root), before);
-    CHECK(h.is_young(static_cast<uintptr_t>(root)));
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), 1), uint64_t{42});
-    CHECK(!h.is_valid_object(dead));
     CHECK_EQ(h.relocation_epoch(), epoch + 1);
-    CHECK_EQ(header_of(static_cast<uintptr_t>(root))->age(), 1);
+    in_own_frame([&] {
+        const uintptr_t r = static_cast<uintptr_t>(*root.slot);
+        CHECK_NE(root.hidden(), before);
+        CHECK(h.is_young(r));
+        CHECK_EQ(Heap::load(r, 1), uint64_t{42});
+        CHECK(!h.is_valid_object(static_cast<uintptr_t>(unhide_address(dead))));
+        CHECK_EQ(header_of(r)->age(), 1);
+    });
 
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    CHECK(h.is_young(static_cast<uintptr_t>(root)));
-    CHECK_EQ(header_of(static_cast<uintptr_t>(root))->age(), 2);
+    in_own_frame([&] {
+        CHECK(h.is_young(static_cast<uintptr_t>(*root.slot)));
+        CHECK_EQ(header_of(static_cast<uintptr_t>(*root.slot))->age(), 2);
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);  // age 3: promoted
-    CHECK(h.is_old(static_cast<uintptr_t>(root)));
-    CHECK(!h.is_movable(static_cast<uintptr_t>(root)));
-    const uintptr_t promoted = static_cast<uintptr_t>(root);
+    in_own_frame([&] {
+        CHECK(h.is_old(static_cast<uintptr_t>(*root.slot)));
+        CHECK(!h.is_movable(static_cast<uintptr_t>(*root.slot)));
+    });
+    const uint64_t promoted = root.hidden();
     h.collect(CollectionKind::Minor);
     h.collect(CollectionKind::Full);
-    CHECK_EQ(static_cast<uintptr_t>(root), promoted);  // old objects stay put
-    CHECK_EQ(Heap::load(promoted, 1), uint64_t{42});
-    h.remove_root(&root);
+    CHECK_EQ(root.hidden(), promoted);  // old objects stay put
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(*root.slot), 1), uint64_t{42});
 }
 
 TEST_CASE("gc::Heap - chains survive many minor collections under verification") {
@@ -248,34 +266,41 @@ TEST_CASE("gc::Heap - a full collection reclaims old garbage and reuses its line
 
 TEST_CASE("gc::Heap - large objects: direct allocation, cards, reclamation, interior lookup") {
     Heap h(small_config());
-    uint64_t big = h.allocate(200 * 1024, kArray);  // over the large threshold
-    h.add_root(&big);
-    const uintptr_t b = static_cast<uintptr_t>(big);
-    CHECK(h.is_old(b));
-    CHECK(h.is_valid_object(b));
-    CHECK_EQ(h.find_object(b + 150 * 1024), b);
-    CHECK_EQ(Heap::object_size(b), size_t{200 * 1024});
-    for (size_t i = 0; i < 64; ++i) h.store(b, i * 100, make_node(h, i));
+    HeapRoot<Heap> big(h);
+    uint64_t b = 0;  // hidden
+    in_own_frame([&] {
+        *big.slot = h.allocate(200 * 1024, kArray);  // over the large threshold
+        const uintptr_t a = static_cast<uintptr_t>(*big.slot);
+        b = hide_address(a);
+        CHECK(h.is_old(a));
+        CHECK(h.is_valid_object(a));
+        CHECK_EQ(h.find_object(a + 150 * 1024), a);
+        CHECK_EQ(Heap::object_size(a), size_t{200 * 1024});
+        for (size_t i = 0; i < 64; ++i) h.store(a, i * 100, make_node(h, i));
+    });
     for (int i = 0; i < 4; ++i) h.collect(CollectionKind::Minor);
     h.verify();
-    uint64_t sum = 0;
-    for (size_t i = 0; i < 64; ++i) sum += Heap::load(static_cast<uintptr_t>(Heap::load(b, i * 100)), 1);
-    CHECK_EQ(sum, uint64_t{64 * 63 / 2});
-    CHECK_EQ(static_cast<uintptr_t>(big), b);  // never moves
+    in_own_frame([&] {
+        const uintptr_t a = static_cast<uintptr_t>(*big.slot);
+        uint64_t sum = 0;
+        for (size_t i = 0; i < 64; ++i) sum += Heap::load(static_cast<uintptr_t>(Heap::load(a, i * 100)), 1);
+        CHECK_EQ(sum, uint64_t{64 * 63 / 2});
+    });
+    CHECK_EQ(big.hidden(), b);  // never moves
 
     // A dead large object's run is freed and its pages kept committed for the
     // next one (heap_spaces.cpp, kRetainedLargeBytes): the same size again
     // takes the same run, zeroed, and commits nothing more.
     const size_t committed = h.committed_bytes();
-    big = 0;
+    *big.slot = 0;
+    scrub_stack();
     h.collect(CollectionKind::Full);
-    CHECK(!h.is_valid_object(b));
+    CHECK(!h.is_valid_object(static_cast<uintptr_t>(unhide_address(b))));
     CHECK_EQ(h.committed_bytes(), committed);
-    big = h.allocate(200 * 1024, kArray);
-    CHECK_EQ(static_cast<uintptr_t>(big), b);
+    in_own_frame([&] { *big.slot = h.allocate(200 * 1024, kArray); });
+    CHECK_EQ(big.hidden(), b);
     CHECK_EQ(h.committed_bytes(), committed);
-    CHECK_EQ(Heap::load(b, 100), uint64_t{0});
-    h.remove_root(&big);
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(unhide_address(b)), 100), uint64_t{0});
 }
 
 TEST_CASE("gc::Heap - medium and large young objects are promoted to the right space") {
@@ -283,22 +308,27 @@ TEST_CASE("gc::Heap - medium and large young objects are promoted to the right s
     c.eden_bytes = 256 * 1024;
     c.tenure_age = 1;
     Heap h(c);
-    uint64_t medium = h.allocate(4000, kArray);
-    uint64_t large = h.allocate(20000, kArray);  // young (under the large threshold), promoted to the LOS
-    h.add_root(&medium);
-    h.add_root(&large);
-    CHECK(h.is_young(static_cast<uintptr_t>(medium)));
-    CHECK(h.is_young(static_cast<uintptr_t>(large)));
-    h.store(static_cast<uintptr_t>(medium), 3, make_node(h, 5));
-    h.store(static_cast<uintptr_t>(large), 2000, make_node(h, 6));
+    HeapRoot<Heap> medium(h);
+    HeapRoot<Heap> large(h);
+    in_own_frame([&] {
+        *medium.slot = h.allocate(4000, kArray);
+        *large.slot = h.allocate(20000, kArray);  // young (under the large threshold), promoted to the LOS
+        CHECK(h.is_young(static_cast<uintptr_t>(*medium.slot)));
+        CHECK(h.is_young(static_cast<uintptr_t>(*large.slot)));
+        h.store(static_cast<uintptr_t>(*medium.slot), 3, make_node(h, 5));
+        h.store(static_cast<uintptr_t>(*large.slot), 2000, make_node(h, 6));
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    CHECK(h.is_old(static_cast<uintptr_t>(medium)));
-    CHECK(h.is_old(static_cast<uintptr_t>(large)));
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(Heap::load(static_cast<uintptr_t>(medium), 3)), 1), uint64_t{5});
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(Heap::load(static_cast<uintptr_t>(large), 2000)), 1), uint64_t{6});
+    in_own_frame([&] {
+        const auto m = static_cast<uintptr_t>(*medium.slot);
+        const auto l = static_cast<uintptr_t>(*large.slot);
+        CHECK(h.is_old(m));
+        CHECK(h.is_old(l));
+        CHECK_EQ(Heap::load(static_cast<uintptr_t>(Heap::load(m, 3)), 1), uint64_t{5});
+        CHECK_EQ(Heap::load(static_cast<uintptr_t>(Heap::load(l, 2000)), 1), uint64_t{6});
+    });
     h.verify();
-    h.remove_root(&medium);
-    h.remove_root(&large);
 }
 
 TEST_CASE("gc::Heap - word slots keep their tag, and reference tags filter what is a reference") {
@@ -307,26 +337,28 @@ TEST_CASE("gc::Heap - word slots keep their tag, and reference tags filter what 
     HeapConfig c = small_config();
     c.reference_tags = {0, 0x7FFD};
     Heap h(c);
-    uint64_t tagged = 0;
-    uint64_t raw = 0;
-    uint64_t fake = 0;
-    h.add_root(&tagged);
-    h.add_root(&raw);
-    h.add_root(&fake);
-    uintptr_t target = make_node(h, 11);
-    tagged = kTagGcref | target;
-    raw = target;
-    fake = kTagDouble | target;  // a number whose low bits look like a reference
+    HeapRoot<Heap> tagged(h);
+    HeapRoot<Heap> raw(h);
+    HeapRoot<Heap> fake(h);
+    uint64_t target = 0;  // hidden
+    in_own_frame([&] {
+        const uintptr_t t = make_node(h, 11);
+        target = hide_address(t);
+        *tagged.slot = kTagGcref | t;
+        *raw.slot = t;
+        *fake.slot = kTagDouble | t;  // a number whose low bits look like a reference
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    const uintptr_t moved = static_cast<uintptr_t>(tagged & kAddressMask);
-    CHECK_NE(moved, target);
-    CHECK_EQ(tagged & ~kAddressMask, kTagGcref);
-    CHECK_EQ(static_cast<uintptr_t>(raw), moved);
-    CHECK_EQ(fake, kTagDouble | target);  // untouched
-    CHECK_EQ(Heap::load(moved, 1), uint64_t{11});
-    h.remove_root(&tagged);
-    h.remove_root(&raw);
-    h.remove_root(&fake);
+    in_own_frame([&] {
+        const uintptr_t t = static_cast<uintptr_t>(unhide_address(target));
+        const uintptr_t moved = static_cast<uintptr_t>(*tagged.slot & kAddressMask);
+        CHECK_NE(moved, t);
+        CHECK_EQ(*tagged.slot & ~kAddressMask, kTagGcref);
+        CHECK_EQ(static_cast<uintptr_t>(*raw.slot), moved);
+        CHECK_EQ(*fake.slot, kTagDouble | t);  // untouched
+        CHECK_EQ(Heap::load(moved, 1), uint64_t{11});
+    });
 }
 
 TEST_CASE("gc::Heap - a heap whose reference tags leave out 0 takes no raw word for a reference") {
@@ -334,28 +366,38 @@ TEST_CASE("gc::Heap - a heap whose reference tags leave out 0 takes no raw word 
     HeapConfig c = small_config();
     c.reference_tags = {0xFFF1};
     Heap h(c);
-    uint64_t tagged = 0;
-    uint64_t raw = 0;
-    uint64_t derived = 0;
-    h.add_root(&tagged);
-    h.add_root(&raw);
-    uintptr_t target = make_node(h, 12);
-    tagged = kTagObject | target;
-    raw = target;                     // a raw pointer the host holds, not a reference
-    derived = target + 8;
-    h.add_root_source([&](Tracer& t) {
-        t.visit_conservative(&raw);   // an untyped register holding it
-        t.visit_derived(&derived);
+    // Held in heap memory: a raw word on the stack is read as a reference by
+    // the stack scan whatever the reference tags (gc_contract.md 2.5).
+    HeapRoot<Heap> tagged(h);
+    auto words = std::make_unique<uint64_t[]>(2);
+    uint64_t* raw = &words[0];
+    uint64_t* derived = &words[1];
+    uint64_t target = 0;  // hidden
+    in_own_frame([&] {
+        const uintptr_t t = make_node(h, 12);
+        target = hide_address(t);
+        *tagged.slot = kTagObject | t;
+        *raw = t;  // a raw pointer the host holds, not a reference
+        *derived = t + 8;
+        CHECK(!h.is_reference_tag(t));
+        CHECK(h.is_reference_tag(*tagged.slot));
     });
-    CHECK(!h.is_reference_tag(target));
-    CHECK(h.is_reference_tag(tagged));
+    h.add_root(raw);
+    h.add_root_source([raw, derived](Tracer& t) {
+        t.visit_conservative(raw);  // an untyped register holding it
+        t.visit_derived(derived);
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    const uintptr_t moved = static_cast<uintptr_t>(tagged & kAddressMask);
-    CHECK_NE(moved, target);
-    CHECK_EQ(tagged & ~kAddressMask, kTagObject);
-    CHECK_EQ(static_cast<uintptr_t>(raw), target);          // untouched
-    CHECK_EQ(static_cast<uintptr_t>(derived), target + 8);  // untouched
-    CHECK_EQ(Heap::load(moved, 1), uint64_t{12});
+    in_own_frame([&] {
+        const uintptr_t t = static_cast<uintptr_t>(unhide_address(target));
+        const uintptr_t moved = static_cast<uintptr_t>(*tagged.slot & kAddressMask);
+        CHECK_NE(moved, t);
+        CHECK_EQ(*tagged.slot & ~kAddressMask, kTagObject);
+        CHECK_EQ(static_cast<uintptr_t>(*raw), t);          // untouched
+        CHECK_EQ(static_cast<uintptr_t>(*derived), t + 8);  // untouched
+        CHECK_EQ(Heap::load(moved, 1), uint64_t{12});
+    });
     // The barrier ignores a raw word too: storing one into an old object
     // leaves its card clean.
     uint64_t old = h.allocate(16, kNode, kAllocOld);
@@ -366,8 +408,7 @@ TEST_CASE("gc::Heap - a heap whose reference tags leave out 0 takes no raw word 
     h.store(static_cast<uintptr_t>(old), 0, young);
     CHECK_EQ(h.card_table_base()[card], kCardClean);
     h.store(static_cast<uintptr_t>(old), 0, 0);
-    h.remove_root(&tagged);
-    h.remove_root(&raw);
+    h.remove_root(raw);
     h.remove_root(&old);
 }
 
@@ -397,47 +438,55 @@ TEST_CASE("gc::Heap - remember() covers a bulk copy into an old object") {
 
 TEST_CASE("gc::Heap - the bump region can live in a host's buffer") {
     Heap h(small_config());
-    uint64_t kept = 0;
-    h.add_root(&kept);
-    kept = make_node(h, 21);
+    HeapRoot<Heap> kept(h);
+    HeapRoot<Heap> root(h);
+    in_own_frame([&] { *kept.slot = make_node(h, 21); });
     const Heap::AllocationBuffer before = *h.allocation_buffer();
-    Heap::AllocationBuffer host;
+    // On the C++ heap: the buffer's top is an eden address, which a stack
+    // word would read as naming the object below it.
+    auto host_buffer = std::make_unique<Heap::AllocationBuffer>();
+    Heap::AllocationBuffer& host = *host_buffer;
     h.bind_allocation_buffer(&host);
     CHECK(h.allocation_buffer() == &host);
-    CHECK_EQ(host.top, before.top);
-    CHECK_EQ(host.end, before.end);
+    CHECK(host.top == before.top);
+    CHECK(host.end == before.end);
     // An object bumped by hand in the host's buffer, as inline generated
     // code does, is a heap object like any other.
-    const size_t total = kHeaderBytes + 16;
-    REQUIRE(host.end - host.top >= total);
-    auto* header = reinterpret_cast<ObjectHeader*>(host.top);
-    header->size = 16;
-    header->layout = kNode;
-    header->gc_bits = 0;
-    header->host_bits = 0;
-    const uintptr_t inline_obj = host.top + kHeaderBytes;
-    host.top += total;
-    reinterpret_cast<uint64_t*>(inline_obj)[0] = kept;
-    reinterpret_cast<uint64_t*>(inline_obj)[1] = 22;
-    uint64_t root = inline_obj;
-    h.add_root(&root);
-    const uintptr_t via_heap = h.allocate(16, kNode);
-    CHECK_EQ(via_heap, inline_obj + 16 + kHeaderBytes);  // the heap bumps the same region
-    CHECK(h.is_valid_object(inline_obj));
+    uint64_t inline_obj = 0;  // hidden
+    in_own_frame([&] {
+        const size_t total = kHeaderBytes + 16;
+        REQUIRE(host.end - host.top >= total);
+        auto* header = reinterpret_cast<ObjectHeader*>(host.top);
+        header->size = 16;
+        header->layout = kNode;
+        header->gc_bits = 0;
+        header->host_bits = 0;
+        const uintptr_t obj = host.top + kHeaderBytes;
+        host.top += total;
+        reinterpret_cast<uint64_t*>(obj)[0] = *kept.slot;
+        reinterpret_cast<uint64_t*>(obj)[1] = 22;
+        *root.slot = obj;
+        inline_obj = hide_address(obj);
+        const uintptr_t via_heap = h.allocate(16, kNode);
+        CHECK_EQ(via_heap, obj + 16 + kHeaderBytes);  // the heap bumps the same region
+        CHECK(h.is_valid_object(obj));
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    CHECK_NE(static_cast<uintptr_t>(root), inline_obj);
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), 1), uint64_t{22});
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), 0), kept);
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(kept), 1), uint64_t{21});
+    in_own_frame([&] {
+        const auto r = static_cast<uintptr_t>(*root.slot);
+        CHECK_NE(root.hidden(), inline_obj);
+        CHECK_EQ(Heap::load(r, 1), uint64_t{22});
+        CHECK_EQ(Heap::load(r, 0), *kept.slot);
+        CHECK_EQ(Heap::load(static_cast<uintptr_t>(*kept.slot), 1), uint64_t{21});
+    });
     CHECK(host.top <= host.end);  // the collection reset the host's region
     h.set_stress(StressMode::Minor);
-    CHECK_EQ(host.top, host.end);
+    CHECK(host.top == host.end);
     h.set_stress(StressMode::None);
     h.bind_allocation_buffer(nullptr);
     CHECK(h.allocation_buffer() != &host);
-    CHECK_EQ(h.allocation_buffer()->top, host.top);
-    h.remove_root(&root);
-    h.remove_root(&kept);
+    CHECK(h.allocation_buffer()->top == host.top);
 }
 
 namespace {
@@ -458,19 +507,26 @@ TEST_CASE("gc::Heap - a custom layout's trace function decides which words are r
     d.name = "counted";
     const LayoutId counted = register_layout(d);
     Heap h(small_config());
-    uint64_t obj = h.allocate(8 * 4, counted);
-    h.add_root(&obj);
-    const uintptr_t target = make_node(h, 3);
-    auto* words = reinterpret_cast<uint64_t*>(obj);
-    words[0] = 1;
-    words[1] = target;
-    words[2] = target;  // raw data that happens to equal the address
+    HeapRoot<Heap> obj(h);
+    uint64_t target = 0;  // hidden
+    in_own_frame([&] {
+        *obj.slot = h.allocate(8 * 4, counted);
+        const uintptr_t t = make_node(h, 3);
+        target = hide_address(t);
+        auto* words = reinterpret_cast<uint64_t*>(*obj.slot);
+        words[0] = 1;
+        words[1] = t;
+        words[2] = t;  // raw data that happens to equal the address
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    words = reinterpret_cast<uint64_t*>(obj);
-    CHECK_NE(static_cast<uintptr_t>(words[1]), target);
-    CHECK_EQ(words[2], static_cast<uint64_t>(target));
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(words[1]), 1), uint64_t{3});
-    h.remove_root(&obj);
+    in_own_frame([&] {
+        const uint64_t t = unhide_address(target);
+        auto* words = reinterpret_cast<uint64_t*>(*obj.slot);
+        CHECK_NE(words[1], t);
+        CHECK_EQ(words[2], t);
+        CHECK_EQ(Heap::load(static_cast<uintptr_t>(words[1]), 1), uint64_t{3});
+    });
 }
 
 TEST_CASE("gc::Heap - root sources and object iteration") {
@@ -479,15 +535,21 @@ TEST_CASE("gc::Heap - root sources and object iteration") {
     const auto id = h.add_root_source([&table](Tracer& t) {
         for (auto& w : table) t.visit(&w);
     });
-    for (size_t i = 0; i < table.size(); ++i) table[i] = make_node(h, i);
+    in_own_frame([&] {
+        for (size_t i = 0; i < table.size(); ++i) table[i] = make_node(h, i);
+    });
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    uint64_t sum = 0;
-    for (uint64_t w : table) sum += Heap::load(static_cast<uintptr_t>(w), 1);
-    CHECK_EQ(sum, uint64_t{50 * 49 / 2});
+    in_own_frame([&] {
+        uint64_t sum = 0;
+        for (uint64_t w : table) sum += Heap::load(static_cast<uintptr_t>(w), 1);
+        CHECK_EQ(sum, uint64_t{50 * 49 / 2});
+    });
     size_t objects = 0;
     h.for_each_object([&](uintptr_t) { ++objects; });
     CHECK_EQ(objects, size_t{50});
     h.remove_root_source(id);
+    scrub_stack();
     h.collect(CollectionKind::Full);
     objects = 0;
     h.for_each_object([&](uintptr_t) { ++objects; });
@@ -498,13 +560,13 @@ TEST_CASE("gc::Heap - poison mode overwrites evacuated memory") {
     HeapConfig c = small_config();
     c.poison = true;
     Heap h(c);
-    uint64_t root = make_node(h, 77);
-    h.add_root(&root);
-    const uintptr_t old_copy = static_cast<uintptr_t>(root);
+    HeapRoot<Heap> root(h);
+    in_own_frame([&] { *root.slot = make_node(h, 77); });
+    const uint64_t old_copy = root.hidden();
+    scrub_stack();
     h.collect(CollectionKind::Minor);
-    CHECK_EQ(Heap::load(old_copy, 1), uint64_t{0xDBDBDBDBDBDBDBDBULL});
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(root), 1), uint64_t{77});
-    h.remove_root(&root);
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(unhide_address(old_copy)), 1), uint64_t{0xDBDBDBDBDBDBDBDBULL});
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(*root.slot), 1), uint64_t{77});
 }
 
 TEST_CASE("gc::Heap - every stress mode keeps a mutating graph intact") {

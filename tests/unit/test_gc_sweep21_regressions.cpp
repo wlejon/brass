@@ -346,7 +346,9 @@ TEST_CASE("Sweep21 - coro_resume reads and unregisters the moved frame's live co
     const uintptr_t original = frame;
     CHECK_EQ(brass_coro_resume(frame, 0), 7u);
     REQUIRE(heap.minor_collections() > 0);
-    CHECK(frame != original);  // the body's collections moved the frame
+    // The resume names the frame on the stack while the body runs, so the
+    // body's collections pin it where it is (docs/gc_contract.md 2.5).
+    CHECK(frame == original);
     CHECK_EQ(brass_coro_is_done(frame), 1u);
     // A finished body's resume unregisters the frame: through a stale
     // pointer it would read is_done from the old copy and keep the live one.

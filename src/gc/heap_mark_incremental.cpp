@@ -287,7 +287,7 @@ void Collector::start_cycle(Heap& heap, bool evacuate) {
     s.complete_sweep();
     const uint64_t swept_ns = gc_now_ns() - t0;
     if (s.verify) verify_heap(heap, "before a collection");
-    gather_stack_objects(s);
+    gather_stack_objects(s, StackObjects::WithOld);
 
     // The mark bitmaps are clear: the last cycle's sweep cleared every mark
     // it kept, and a block or page handed out since starts clear.
@@ -359,7 +359,7 @@ void Collector::finish_cycle(Heap& heap, bool rescan) {
         for (const auto& w : c.workers) marked_before += w->marked_objects;
     }
     if (rescan) {
-        gather_stack_objects(s);
+        gather_stack_objects(s, StackObjects::WithOld);
         begin_collection(g);
         PhaseClock clock(g);
         if (s.config.finish_promote_all) {

@@ -17,6 +17,7 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <vector>
 #include <cstring>
+#include <memory>
 
 using namespace brass;
 using namespace brass::runtime;
@@ -51,27 +52,48 @@ size_t count_barriers(const Function& fn) {
 TEST_CASE("Hardening - Generational GC Stack Walker Bridge with Forwarded Roots") {
     gc::Heap gc(plain_config());
 
-    // Allocate two young objects in eden
-    uintptr_t young_obj1 = gc.allocate_masked(24, 0, 10);
-    uintptr_t young_obj2 = gc.allocate_masked(24, 0, 11);
-    REQUIRE(young_obj1 != 0);
-    REQUIRE(young_obj2 != 0);
-    CHECK(gc.is_young(young_obj1));
-    CHECK(gc.is_young(young_obj2));
-
-    gc.store(young_obj1, 0, 0x1111222233334444ULL);
-    gc.store(young_obj2, 0, 0x5555666677778888ULL);
-
-    // Set up synthetic stack frame simulating JIT execution
+    // A synthetic frame simulating JIT execution, on the thread's stack as a
+    // generated frame is. The conservative scan reads it too, so what its
+    // slots name is pinned (docs/gc_contract.md 2.5): the frame's objects
+    // stay where they are, and what they reference (made in a frame of its
+    // own, its address kept hidden: stack_scrub.hpp) is evacuated and the
+    // references to it updated.
     alignas(16) uint64_t stack_mem[16] = {0};
     uint64_t* rbp_ptr = &stack_mem[8];
     uintptr_t rbp_addr = reinterpret_cast<uintptr_t>(rbp_ptr);
     rbp_ptr[0] = 0; // saved caller RBP
     rbp_ptr[1] = 0; // return IP
 
-    // Place young objects in frame spill slots [RBP - 8] and [RBP - 16]
-    *reinterpret_cast<void**>(rbp_addr - 8) = reinterpret_cast<void*>(young_obj1);
-    *reinterpret_cast<void**>(rbp_addr - 16) = reinterpret_cast<void*>(young_obj2);
+    uint64_t child1 = 0, child2 = 0;  // hidden
+    test::in_own_frame([&] {
+        // Two young objects in eden, each holding (slot 0) a young child
+        // only they reach.
+        uintptr_t y1 = gc.allocate_masked(24, 0x1, 10);
+        uintptr_t y2 = gc.allocate_masked(24, 0x1, 11);
+        uintptr_t c1 = gc.allocate_masked(16, 0, 12);
+        uintptr_t c2 = gc.allocate_masked(16, 0, 13);
+        REQUIRE(y1 != 0);
+        REQUIRE(y2 != 0);
+        REQUIRE(c1 != 0);
+        REQUIRE(c2 != 0);
+        CHECK(gc.is_young(y1));
+        CHECK(gc.is_young(y2));
+
+        gc.store(c1, 0, 0x1111222233334444ULL);
+        gc.store(c2, 0, 0x5555666677778888ULL);
+        gc.store(y1, 0, c1);
+        gc.store(y2, 0, c2);
+        gc.store(y1, 1, 0xAAAA);
+        gc.store(y2, 1, 0xBBBB);
+
+        // Place young objects in frame spill slots [RBP - 8] and [RBP - 16]
+        *reinterpret_cast<void**>(rbp_addr - 8) = reinterpret_cast<void*>(y1);
+        *reinterpret_cast<void**>(rbp_addr - 16) = reinterpret_cast<void*>(y2);
+        child1 = test::hide_address(c1);
+        child2 = test::hide_address(c2);
+    });
+    const uintptr_t young_obj1 = *reinterpret_cast<uintptr_t*>(rbp_addr - 8);
+    const uintptr_t young_obj2 = *reinterpret_cast<uintptr_t*>(rbp_addr - 16);
 
     // Build stack map for return address 0x600020
     uintptr_t return_ip = 0x600020;
@@ -93,67 +115,84 @@ TEST_CASE("Hardening - Generational GC Stack Walker Bridge with Forwarded Roots"
     // through the thread's stack maps.
     const ModuleStackMap* previous_maps = brass_get_active_stack_maps();
     brass_set_active_stack_maps(&stack_maps);
+    test::scrub_stack();
+    const uint64_t pinned_before = gc.stats().pinned_objects;
     gc.collect_at(gc::CollectionKind::Minor, rbp_addr, return_ip);
     brass_set_active_stack_maps(previous_maps);
 
     CHECK_EQ(gc.stats().minor_collections, 1ULL);
+    CHECK(gc.stats().pinned_objects >= pinned_before + 2);
 
-    // Read forwarded pointers from stack frame
-    void* forwarded_slot1 = *reinterpret_cast<void**>(rbp_addr - 8);
-    void* forwarded_slot2 = *reinterpret_cast<void**>(rbp_addr - 16);
-    uintptr_t new_addr1 = reinterpret_cast<uintptr_t>(forwarded_slot1);
-    uintptr_t new_addr2 = reinterpret_cast<uintptr_t>(forwarded_slot2);
+    // The frame's objects stayed, young and intact.
+    const uintptr_t addr1 = *reinterpret_cast<uintptr_t*>(rbp_addr - 8);
+    const uintptr_t addr2 = *reinterpret_cast<uintptr_t*>(rbp_addr - 16);
+    CHECK_EQ(addr1, young_obj1);
+    CHECK_EQ(addr2, young_obj2);
+    CHECK(gc.is_young(addr1));
+    CHECK(gc.is_young(addr2));
+    CHECK(gc.is_valid_object(addr1));
+    CHECK(gc.is_valid_object(addr2));
+    CHECK_EQ(gc::Heap::load(addr1, 1), 0xAAAAULL);
+    CHECK_EQ(gc::Heap::load(addr2, 1), 0xBBBBULL);
 
-    // Verify objects were evacuated to Survivor space and stack slots updated
-    CHECK_NE(new_addr1, young_obj1);
-    CHECK_NE(new_addr2, young_obj2);
-    CHECK(gc.is_young(new_addr1));
-    CHECK(gc.is_young(new_addr2));
-    CHECK(gc.is_valid_object(new_addr1));
-    CHECK(gc.is_valid_object(new_addr2));
-
-    // Verify payload integrity at new addresses
-    CHECK_EQ(gc::Heap::load(new_addr1, 0), 0x1111222233334444ULL);
-    CHECK_EQ(gc::Heap::load(new_addr2, 0), 0x5555666677778888ULL);
+    // Their children were evacuated and the references to them updated.
+    const auto new_child1 = static_cast<uintptr_t>(gc::Heap::load(addr1, 0));
+    const auto new_child2 = static_cast<uintptr_t>(gc::Heap::load(addr2, 0));
+    CHECK_NE(test::hide_address(new_child1), child1);
+    CHECK_NE(test::hide_address(new_child2), child2);
+    CHECK(gc.is_valid_object(new_child1));
+    CHECK(gc.is_valid_object(new_child2));
+    CHECK_EQ(gc::Heap::load(new_child1, 0), 0x1111222233334444ULL);
+    CHECK_EQ(gc::Heap::load(new_child2, 0), 0x5555666677778888ULL);
 }
 
 TEST_CASE("Hardening - Suspended Coroutines Rooting and Lifecycle Across Collections") {
     gc::Heap gen_gc(plain_config());
     gc::HeapScope bind(gen_gc);
 
-    // Create coroutine frame with 4 slots, slot 0 and 1 are pointer slots
-    // (mask = 0x3). No generated caller: the test is not generated code.
-    uintptr_t coro_addr = brass_coro_create_at(nullptr, 4, 0x3ULL, 0, 0);
-    REQUIRE(coro_addr != 0);
-    CHECK(is_active_coro_frame(coro_addr));
-    CHECK(gen_gc.is_young(coro_addr));
+    // The frame rooted off the stack, made in a frame of its own, the
+    // addresses kept hidden: the stack is read conservatively, and a word
+    // naming a young object would pin it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> coro_root_holder(gen_gc);
+    uint64_t& coro_root = *coro_root_holder.slot;
+    uint64_t coro_addr = 0, child1 = 0, child2 = 0;  // hidden
+    test::in_own_frame([&] {
+        // Create coroutine frame with 4 slots, slot 0 and 1 are pointer slots
+        // (mask = 0x3). No generated caller: the test is not generated code.
+        uintptr_t addr = brass_coro_create_at(nullptr, 4, 0x3ULL, 0, 0);
+        REQUIRE(addr != 0);
+        CHECK(is_active_coro_frame(addr));
+        CHECK(gen_gc.is_young(addr));
 
-    auto* frame = reinterpret_cast<BrassCoroFrame*>(coro_addr);
+        auto* frame = reinterpret_cast<BrassCoroFrame*>(addr);
 
-    // Allocate young children and store them in the coroutine's slots (the
-    // frame is young: no barrier needed)
-    uintptr_t child1 = gen_gc.allocate_masked(16, 0, 21);
-    uintptr_t child2 = gen_gc.allocate_masked(16, 0, 22);
-    gen_gc.store(child1, 0, 0xAAAAAAAAULL);
-    gen_gc.store(child2, 0, 0xBBBBBBBBULL);
+        // Allocate young children and store them in the coroutine's slots (the
+        // frame is young: no barrier needed)
+        uintptr_t c1 = gen_gc.allocate_masked(16, 0, 21);
+        uintptr_t c2 = gen_gc.allocate_masked(16, 0, 22);
+        gen_gc.store(c1, 0, 0xAAAAAAAAULL);
+        gen_gc.store(c2, 0, 0xBBBBBBBBULL);
 
-    frame->slots[0] = child1;
-    frame->slots[1] = child2;
+        frame->slots[0] = c1;
+        frame->slots[1] = c2;
+        coro_root = addr;
+        coro_addr = test::hide_address(addr);
+        child1 = test::hide_address(c1);
+        child2 = test::hide_address(c2);
+    });
 
-    uint64_t coro_root = coro_addr;
-    gen_gc.add_root(&coro_root);
     // Trigger minor collection - coroutine is active so it must be rooted and evacuated!
-    gen_gc.collect(gc::CollectionKind::Minor);
+    test::collect_scrubbed(gen_gc, gc::CollectionKind::Minor);
     CHECK_EQ(gen_gc.stats().minor_collections, 1ULL);
 
     // Frame must have been evacuated to a survivor space
     uintptr_t new_coro_addr = static_cast<uintptr_t>(coro_root);
-    CHECK(new_coro_addr != coro_addr);
+    CHECK(test::hide_address(new_coro_addr) != coro_addr);
     CHECK(gen_gc.is_young(new_coro_addr));
     CHECK(is_active_coro_frame(new_coro_addr));
     // The registry follows the frame even though a root had already moved it
     // (the old copy's is_done then holds the forwarding address).
-    CHECK(!is_active_coro_frame(coro_addr));
+    CHECK(!is_active_coro_frame(static_cast<uintptr_t>(test::unhide_address(coro_addr))));
     size_t registered = 0;
     uintptr_t registered_addr = 0;
     visit_active_coro_frames([&](uintptr_t* slot) {
@@ -167,8 +206,8 @@ TEST_CASE("Hardening - Suspended Coroutines Rooting and Lifecycle Across Collect
     uintptr_t new_child1 = static_cast<uintptr_t>(new_frame->slots[0]);
     uintptr_t new_child2 = static_cast<uintptr_t>(new_frame->slots[1]);
 
-    CHECK(new_child1 != child1);
-    CHECK(new_child2 != child2);
+    CHECK(test::hide_address(new_child1) != child1);
+    CHECK(test::hide_address(new_child2) != child2);
     CHECK(gen_gc.is_young(new_child1));
     CHECK(gen_gc.is_young(new_child2));
     CHECK_EQ(gc::Heap::load(new_child1, 0), 0xAAAAAAAAULL);
@@ -177,8 +216,6 @@ TEST_CASE("Hardening - Suspended Coroutines Rooting and Lifecycle Across Collect
     // Destroy coroutine and ensure unregistered
     brass_coro_destroy(new_coro_addr);
     CHECK(!is_active_coro_frame(new_coro_addr));
-
-    gen_gc.remove_root(&coro_root);
 }
 
 TEST_CASE("Hardening - Pretenured frame's argument slots follow young objects across minor collections") {
@@ -222,32 +259,37 @@ TEST_CASE("Hardening - Card Table Multi-Card Object Scanning") {
     constexpr size_t NUM_FIELDS = 192;
     constexpr size_t OBJ_SIZE = NUM_FIELDS * sizeof(uint64_t);
 
-    // Allocated young, promoted by its survival of two minor collections:
-    uint64_t root = gc.allocate_masked(OBJ_SIZE, 1ULL << 63, 77);
-    gc.add_root(&root);
-    gc.collect(gc::CollectionKind::Minor);
-    gc.collect(gc::CollectionKind::Minor);
+    // Allocated young, promoted by its survival of two minor collections. The
+    // root off the stack, the young objects made in frames of their own and
+    // their addresses hidden: a stack word naming a young object would pin
+    // it (stack_scrub.hpp).
+    test::HeapRoot<gc::Heap> root_holder(gc);
+    uint64_t& root = *root_holder.slot;
+    test::in_own_frame([&] { root = gc.allocate_masked(OBJ_SIZE, 1ULL << 63, 77); });
+    test::collect_scrubbed(gc, gc::CollectionKind::Minor);
+    test::collect_scrubbed(gc, gc::CollectionKind::Minor);
     CHECK(gc.is_old(root));
     uintptr_t large_obj = static_cast<uintptr_t>(root);
 
-    // Allocate a small young object
-    uintptr_t young_child = gc.allocate_masked(16, 0, 88);
-    gc.store(young_child, 0, 0x12345678ULL);
-
-    // Field 180 is at offset 180 * 8 = 1440 bytes into large_obj,
-    // which falls onto a subsequent card of the multi-card object!
-    gc.store(large_obj, 180, young_child);
+    const uint64_t young_child = test::from_own_frame([&] {
+        // Allocate a small young object
+        uintptr_t child = gc.allocate_masked(16, 0, 88);
+        gc.store(child, 0, 0x12345678ULL);
+        // Field 180 is at offset 180 * 8 = 1440 bytes into large_obj,
+        // which falls onto a subsequent card of the multi-card object!
+        gc.store(large_obj, 180, child);
+        return test::hide_address(child);
+    });
 
     // Collect minor: multi-card scanning must detect young_child from dirty card
-    gc.collect(gc::CollectionKind::Minor);
+    test::collect_scrubbed(gc, gc::CollectionKind::Minor);
     CHECK_EQ(root, large_obj);  // old objects never move
 
     // Verify young_child was evacuated and field 180 updated
     uintptr_t forwarded_child = static_cast<uintptr_t>(gc::Heap::load(large_obj, 180));
-    CHECK_NE(forwarded_child, young_child);
+    CHECK_NE(test::hide_address(forwarded_child), young_child);
     CHECK(gc.is_young(forwarded_child));
     CHECK_EQ(gc::Heap::load(forwarded_child, 0), 0x12345678ULL);
-    gc.remove_root(&root);
 }
 
 TEST_CASE("Hardening - Large Tenured Allocation Write Barrier Retention in WBE") {

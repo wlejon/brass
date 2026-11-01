@@ -3,7 +3,12 @@
 // finalizer whose allocation collects (what that collection finds dead runs
 // in the same run, after the batch, never nested), one that throws, and the
 // minor collection's weak processing leaving old targets alone.
+//
+// The stack is read conservatively (docs/gc_contract.md 2.5): what a test
+// means to die is held only in heap roots, made in frames of its own, and the
+// stack scrubbed before the collection (stack_scrub.hpp).
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -13,6 +18,10 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::collect_scrubbed;
+using brass::test::HeapRoot;
+using brass::test::in_own_frame;
+using brass::test::scrub_stack;
 
 namespace {
 
@@ -50,26 +59,25 @@ void count_one(void* a) { g_runs.at(reinterpret_cast<uintptr_t>(a)) += 1; }
 TEST_CASE("gc::Heap finalize - the two-context form passes both words, once") {
     Heap h(fin_config());
     g_runs.assign(2, 0);
-    uint64_t keep = h.allocate(8, kLeafNode);
-    h.add_root(&keep);
-    h.add_finalizer(static_cast<uintptr_t>(keep), &count_pair, reinterpret_cast<void*>(uintptr_t{0}),
-                    reinterpret_cast<void*>(uintptr_t{0xC0FFEE}));
-    {
-        uintptr_t dead = h.allocate(8, kLeafNode);
+    HeapRoot<Heap> keep(h);
+    in_own_frame([&] {
+        *keep.slot = h.allocate(8, kLeafNode);
+        h.add_finalizer(static_cast<uintptr_t>(*keep.slot), &count_pair, reinterpret_cast<void*>(uintptr_t{0}),
+                        reinterpret_cast<void*>(uintptr_t{0xC0FFEE}));
+        const uintptr_t dead = h.allocate(8, kLeafNode);
         h.add_finalizer(dead, &count_pair, reinterpret_cast<void*>(uintptr_t{1}),
                         reinterpret_cast<void*>(uintptr_t{0xC0FFEE}));
-    }
-    h.collect(CollectionKind::Minor);
+    });
+    collect_scrubbed(h, CollectionKind::Minor);
     CHECK_EQ(g_runs[0], 0);
     CHECK_EQ(g_runs[1], 1);
     CHECK_EQ(h.stats().last_finalizers, uint64_t{1});
-    keep = 0;
-    h.collect(CollectionKind::Full);
+    *keep.slot = 0;
+    collect_scrubbed(h, CollectionKind::Full);
     CHECK_EQ(g_runs[0], 1);
-    h.collect(CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
     CHECK_EQ(g_runs[0], 1);
     CHECK_EQ(g_runs[1], 1);
-    h.remove_root(&keep);
 }
 
 TEST_CASE("gc::Heap finalize - thousands across young deaths, promotion and old deaths, each once") {
@@ -77,29 +85,32 @@ TEST_CASE("gc::Heap finalize - thousands across young deaths, promotion and old 
     constexpr size_t kCount = 6000;
     g_runs.assign(kCount, 0);
     // A rooted array of the survivors: every third object, the rest die young.
-    uint64_t holder = h.allocate(8 * kCount, mask_layout(~uint64_t{0}, 43), kAllocOld);
-    h.add_root(&holder);
-    for (size_t i = 0; i < kCount; ++i) {
-        const uintptr_t obj = h.allocate(16, kLeafNode);
-        if (i % 2 == 0) h.add_finalizer(obj, &count_one, reinterpret_cast<void*>(i));
-        else h.add_finalizer(obj, &count_pair, reinterpret_cast<void*>(i), reinterpret_cast<void*>(uintptr_t{0xC0FFEE}));
-        if (i % 3 == 0) h.store(static_cast<uintptr_t>(holder), i, obj);
-    }
-    h.collect(CollectionKind::Minor);
-    h.collect(CollectionKind::Minor);
-    h.collect(CollectionKind::Minor);  // the survivors are old now
+    HeapRoot<Heap> holder(h);
+    in_own_frame([&] {
+        *holder.slot = h.allocate(8 * kCount, mask_layout(~uint64_t{0}, 43), kAllocOld);
+        for (size_t i = 0; i < kCount; ++i) {
+            const uintptr_t obj = h.allocate(16, kLeafNode);
+            if (i % 2 == 0) h.add_finalizer(obj, &count_one, reinterpret_cast<void*>(i));
+            else h.add_finalizer(obj, &count_pair, reinterpret_cast<void*>(i), reinterpret_cast<void*>(uintptr_t{0xC0FFEE}));
+            if (i % 3 == 0) h.store(static_cast<uintptr_t>(*holder.slot), i, obj);
+        }
+    });
+    collect_scrubbed(h, CollectionKind::Minor);
+    collect_scrubbed(h, CollectionKind::Minor);
+    collect_scrubbed(h, CollectionKind::Minor);  // the survivors are old now
     for (size_t i = 0; i < kCount; ++i) CHECK_EQ(g_runs[i], i % 3 == 0 ? 0 : 1);
     // Half the survivors let go: only a full collection decides them.
-    for (size_t i = 0; i < kCount; i += 6) h.store(static_cast<uintptr_t>(holder), i, 0);
-    h.collect(CollectionKind::Minor);
+    in_own_frame([&] {
+        for (size_t i = 0; i < kCount; i += 6) h.store(static_cast<uintptr_t>(*holder.slot), i, 0);
+    });
+    collect_scrubbed(h, CollectionKind::Minor);
     for (size_t i = 0; i < kCount; ++i) CHECK_EQ(g_runs[i], i % 3 == 0 ? 0 : 1);
-    h.collect(CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
     for (size_t i = 0; i < kCount; ++i) CHECK_EQ(g_runs[i], (i % 3 == 0 && i % 6 != 0) ? 0 : 1);
-    holder = 0;
-    h.collect(CollectionKind::Full);
-    h.collect(CollectionKind::Full);
+    *holder.slot = 0;
+    collect_scrubbed(h, CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
     for (size_t i = 0; i < kCount; ++i) CHECK_EQ(g_runs[i], 1);
-    h.remove_root(&holder);
 }
 
 namespace {
@@ -114,12 +125,21 @@ void nested_dead(void*) {
     ++g_nested_ran;
 }
 
+BRASS_TEST_NOINLINE void make_doomed() {
+    for (int i = 0; i < 16; ++i) g_heap->add_finalizer(g_heap->allocate(16, kLeafNode), &nested_dead, nullptr);
+}
+
+BRASS_TEST_NOINLINE void fill_eden() {
+    for (int i = 0; i < 4000; ++i) (void)g_heap->allocate(128, kLeafNode);
+}
+
 void outer_allocates(void*) {
     g_in_outer = true;
     // Objects that die at once, each with a finalizer, then enough
     // allocation to fill eden: the collection this causes finds them dead.
-    for (int i = 0; i < 16; ++i) g_heap->add_finalizer(g_heap->allocate(16, kLeafNode), &nested_dead, nullptr);
-    for (int i = 0; i < 4000; ++i) (void)g_heap->allocate(128, kLeafNode);
+    make_doomed();
+    scrub_stack();
+    fill_eden();
     g_in_outer = false;
     ++g_outer_ran;
 }
@@ -130,8 +150,10 @@ TEST_CASE("gc::Heap finalize - a finalizer's own collection queues its dead for 
     g_heap = &h;
     g_nested_ran = g_outer_ran = 0;
     const uint64_t before = h.collection_count();
-    for (int i = 0; i < 3; ++i) h.add_finalizer(h.allocate(16, kLeafNode), &outer_allocates, nullptr);
-    h.collect(CollectionKind::Minor);
+    in_own_frame([&] {
+        for (int i = 0; i < 3; ++i) h.add_finalizer(h.allocate(16, kLeafNode), &outer_allocates, nullptr);
+    });
+    collect_scrubbed(h, CollectionKind::Minor);
     CHECK_EQ(g_outer_ran, 3);
     CHECK(h.collection_count() > before + 1);  // the finalizers' allocations collected
     CHECK_EQ(g_nested_ran, 48);
@@ -148,16 +170,16 @@ void counts(void*) { ++g_after_throw; }
 TEST_CASE("gc::Heap finalize - a finalizer that throws does not stop later collections' finalizers") {
     Heap h(fin_config());
     g_after_throw = 0;
-    h.add_finalizer(h.allocate(16, kLeafNode), &throws, nullptr);
+    in_own_frame([&] { h.add_finalizer(h.allocate(16, kLeafNode), &throws, nullptr); });
     bool threw = false;
     try {
-        h.collect(CollectionKind::Minor);
+        collect_scrubbed(h, CollectionKind::Minor);
     } catch (const std::bad_alloc&) {
         threw = true;
     }
     CHECK(threw);
-    h.add_finalizer(h.allocate(16, kLeafNode), &counts, nullptr);
-    h.collect(CollectionKind::Minor);
+    in_own_frame([&] { h.add_finalizer(h.allocate(16, kLeafNode), &counts, nullptr); });
+    collect_scrubbed(h, CollectionKind::Minor);
     CHECK_EQ(g_after_throw, 1);
 }
 

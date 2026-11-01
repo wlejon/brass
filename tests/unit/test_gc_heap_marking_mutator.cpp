@@ -13,6 +13,7 @@
 // it white, then a mutator step that hides it behind something already
 // marked and drops the young path. C survives only if that step shaded it.
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -25,6 +26,14 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::collect_scrubbed;
+using brass::test::from_own_frame;
+using brass::test::HeapRoot;
+using brass::test::hide_address;
+using brass::test::in_own_frame;
+using brass::test::scrub_stack;
+using brass::test::set_hidden;
+using brass::test::unhide_address;
 
 namespace {
 
@@ -106,6 +115,37 @@ uintptr_t old_behind_young(Heap& h, uint64_t& young_root) {
     return c;
 }
 
+// For the tests that need an object to die. The stack is read
+// conservatively, and a collection that marks the old generation (a cycle's
+// start and finish, a full collection) keeps every old object a stack word
+// names (docs/gc_contract.md 2.5): those tests keep the objects' addresses
+// hidden (stack_scrub.hpp), touch them only in frames of their own, and
+// scrub the stack before each collection step.
+
+// old_behind_young, made in its own frame; C's address hidden.
+BRASS_TEST_NOINLINE uint64_t hidden_old_behind_young(Heap& h, uint64_t* young_root) {
+    return hide_address(old_behind_young(h, *young_root));
+}
+
+// A new object, its address hidden.
+BRASS_TEST_NOINLINE uint64_t hidden_allocate(Heap& h, size_t bytes, LayoutId layout, uint32_t flags = 0) {
+    return hide_address(h.allocate(bytes, layout, flags));
+}
+
+BRASS_TEST_NOINLINE bool alive(const Heap& h, uint64_t hidden) {
+    return h.is_valid_object(static_cast<uintptr_t>(unhide_address(hidden)));
+}
+
+BRASS_TEST_FORCEINLINE bool start_scrubbed(Heap& h) {
+    scrub_stack();
+    return h.start_marking();
+}
+
+BRASS_TEST_FORCEINLINE void finish_scrubbed(Heap& h) {
+    scrub_stack();
+    h.finish_marking();
+}
+
 } // namespace
 
 TEST_CASE("gc::Heap marking - the barrier's value range is young, and the whole heap while a cycle is open") {
@@ -164,36 +204,36 @@ TEST_CASE("gc::Heap marking - a store during a cycle shades the old reference it
 
 TEST_CASE("gc::Heap marking - a minor collection during a cycle keeps what is still held at the finish") {
     Heap h(config());
-    uint64_t y1 = 0, y3 = 0, root3 = 0, holder = 0;
-    for (uint64_t* r : {&y1, &y3, &root3, &holder}) h.add_root(r);
+    HeapRoot<Heap> y1(h), y3(h), root3(h), holder(h), y2(h);
     // Through a live young object.
-    const uintptr_t c1 = old_behind_young(h, y1);
+    const uint64_t c1 = hidden_old_behind_young(h, y1.slot);
     // Through a dirty card: an old holder names young y2, which names c2.
-    holder = h.allocate(16, words_layout(), kAllocOld);
-    uint64_t y2 = 0;
-    const uintptr_t c2 = old_behind_young(h, y2);
-    h.store(static_cast<uintptr_t>(holder), 0, y2);
+    const uint64_t c2 = hidden_old_behind_young(h, y2.slot);
+    in_own_frame([&] {
+        *holder.slot = h.allocate(16, words_layout(), kAllocOld);
+        h.store(static_cast<uintptr_t>(*holder.slot), 0, *y2.slot);
+    });
+    *y2.slot = 0;
     // Through a root written after the start (roots carry no barrier).
-    const uintptr_t c3 = old_behind_young(h, y3);
-    REQUIRE(h.start_marking());
+    const uint64_t c3 = hidden_old_behind_young(h, y3.slot);
+    REQUIRE(start_scrubbed(h));
     drain(h);
-    root3 = c3;
-    y3 = 0;
-    h.collect(CollectionKind::Minor);
+    set_hidden(root3.slot, c3);
+    *y3.slot = 0;
+    collect_scrubbed(h, CollectionKind::Minor);
     drain(h);
     // Still held at the finish: the finish's evacuation and root visit reach them.
-    h.finish_marking();
-    CHECK(h.is_valid_object(c1));
-    CHECK(h.is_valid_object(c2));
-    CHECK(h.is_valid_object(c3));
-    y1 = 0;
-    h.store(static_cast<uintptr_t>(holder), 0, 0);
-    root3 = 0;
-    h.collect(CollectionKind::Full);
-    CHECK_FALSE(h.is_valid_object(c1));
-    CHECK_FALSE(h.is_valid_object(c2));
-    CHECK_FALSE(h.is_valid_object(c3));
-    for (uint64_t* r : {&y1, &y3, &root3, &holder}) h.remove_root(r);
+    finish_scrubbed(h);
+    CHECK(alive(h, c1));
+    CHECK(alive(h, c2));
+    CHECK(alive(h, c3));
+    *y1.slot = 0;
+    in_own_frame([&] { h.store(static_cast<uintptr_t>(*holder.slot), 0, 0); });
+    *root3.slot = 0;
+    collect_scrubbed(h, CollectionKind::Full);
+    CHECK_FALSE(alive(h, c1));
+    CHECK_FALSE(alive(h, c2));
+    CHECK_FALSE(alive(h, c3));
 }
 
 TEST_CASE("gc::Heap marking - what a root or young object held only across a minor dies with the cycle") {
@@ -203,27 +243,27 @@ TEST_CASE("gc::Heap marking - what a root or young object held only across a min
     // of the time, shading it would keep a WeakRef's briefly kept target
     // alive in every cycle.
     Heap h(config());
-    uint64_t y1 = 0, y3 = 0, root3 = 0, holder = 0;
-    for (uint64_t* r : {&y1, &y3, &root3, &holder}) h.add_root(r);
-    const uintptr_t c1 = old_behind_young(h, y1);
-    holder = h.allocate(16, words_layout(), kAllocOld);
-    uint64_t y2 = 0;
-    const uintptr_t c2 = old_behind_young(h, y2);
-    h.store(static_cast<uintptr_t>(holder), 0, y2);
-    const uintptr_t c3 = old_behind_young(h, y3);
-    REQUIRE(h.start_marking());
+    HeapRoot<Heap> y1(h), y3(h), root3(h), holder(h), y2(h);
+    const uint64_t c1 = hidden_old_behind_young(h, y1.slot);
+    const uint64_t c2 = hidden_old_behind_young(h, y2.slot);
+    in_own_frame([&] {
+        *holder.slot = h.allocate(16, words_layout(), kAllocOld);
+        h.store(static_cast<uintptr_t>(*holder.slot), 0, *y2.slot);
+    });
+    *y2.slot = 0;
+    const uint64_t c3 = hidden_old_behind_young(h, y3.slot);
+    REQUIRE(start_scrubbed(h));
     drain(h);
-    root3 = c3;
-    y3 = 0;
-    h.collect(CollectionKind::Minor);
-    y1 = 0;
-    h.store(static_cast<uintptr_t>(holder), 0, 0);
-    root3 = 0;
-    h.finish_marking();
-    CHECK_FALSE(h.is_valid_object(c1));
-    CHECK_FALSE(h.is_valid_object(c2));
-    CHECK_FALSE(h.is_valid_object(c3));
-    for (uint64_t* r : {&y1, &y3, &root3, &holder}) h.remove_root(r);
+    set_hidden(root3.slot, c3);
+    *y3.slot = 0;
+    collect_scrubbed(h, CollectionKind::Minor);
+    *y1.slot = 0;
+    in_own_frame([&] { h.store(static_cast<uintptr_t>(*holder.slot), 0, 0); });
+    *root3.slot = 0;
+    finish_scrubbed(h);
+    CHECK_FALSE(alive(h, c1));
+    CHECK_FALSE(alive(h, c2));
+    CHECK_FALSE(alive(h, c3));
 }
 
 TEST_CASE("gc::Heap marking - a weak target read back in every cycle still dies") {
@@ -233,34 +273,34 @@ TEST_CASE("gc::Heap marking - a weak target read back in every cycle still dies"
     // cycle always open. The target must be cleared within a cycle or two.
     for (int minors_before_drop = 0; minors_before_drop < 3; ++minors_before_drop) {
         Heap h(config());
-        uint64_t cell = h.allocate(8, weak_cell_layout(), kAllocOld);
-        h.add_root(&cell);
-        uint64_t target = h.allocate(16, words_layout(), kAllocOld);
-        *slot_of(static_cast<uintptr_t>(cell), 0) = target;
-        h.add_root(&target);
-        h.collect(CollectionKind::Full);  // every card clean, nothing young
-        REQUIRE_EQ(*slot_of(static_cast<uintptr_t>(cell), 0), target);
-        h.remove_root(&target);
-        target = 0;
-        uint64_t kept = 0;
-        h.add_root(&kept);
+        HeapRoot<Heap> cell(h);
+        {
+            HeapRoot<Heap> target(h);
+            in_own_frame([&] {
+                *cell.slot = h.allocate(8, weak_cell_layout(), kAllocOld);
+                *target.slot = h.allocate(16, words_layout(), kAllocOld);
+                *slot_of(static_cast<uintptr_t>(*cell.slot), 0) = *target.slot;
+            });
+            collect_scrubbed(h, CollectionKind::Full);  // every card clean, nothing young
+            in_own_frame([&] { REQUIRE_EQ(*slot_of(static_cast<uintptr_t>(*cell.slot), 0), *target.slot); });
+        }
+        HeapRoot<Heap> kept(h);
         int cycles = 0;
         for (; cycles < 6; ++cycles) {
-            const uint64_t read = *slot_of(static_cast<uintptr_t>(cell), 0);
-            if (read == kCleared) break;
-            REQUIRE(h.start_marking());
-            kept = read;  // the read, held across minors
-            (void)h.allocate(16, words_layout());
-            for (int i = 0; i < minors_before_drop; ++i) h.collect(CollectionKind::Minor);
-            kept = 0;
+            const bool cleared = from_own_frame([&] { return *slot_of(static_cast<uintptr_t>(*cell.slot), 0) == kCleared; });
+            if (cleared) break;
+            REQUIRE(start_scrubbed(h));
+            // The read, held across minors.
+            in_own_frame([&] { *kept.slot = *slot_of(static_cast<uintptr_t>(*cell.slot), 0); });
+            (void)hidden_allocate(h, 16, words_layout());
+            for (int i = 0; i < minors_before_drop; ++i) collect_scrubbed(h, CollectionKind::Minor);
+            *kept.slot = 0;
             (void)h.mark_slice(0);
-            h.collect(CollectionKind::Minor);
+            collect_scrubbed(h, CollectionKind::Minor);
             drain(h);
-            h.finish_marking();
+            finish_scrubbed(h);
         }
         CHECK(cycles <= 2);
-        h.remove_root(&kept);
-        h.remove_root(&cell);
     }
 }
 
@@ -312,34 +352,35 @@ TEST_CASE("gc::Heap marking - an object promoted during a cycle is marked as it 
     HeapConfig cfg = config();
     cfg.tenure_age = 1;
     Heap h(cfg);
-    uint64_t root = 0;
-    h.add_root(&root);
-    REQUIRE(h.start_marking());
-    root = h.allocate(16, words_layout());
-    h.collect(CollectionKind::Minor);
-    const auto promoted = static_cast<uintptr_t>(root);
-    CHECK(h.is_old(promoted));
-    root = 0;
-    h.finish_marking();
-    CHECK(h.is_valid_object(promoted));  // dead before the finish, kept: it was marked when promoted
-    h.collect(CollectionKind::Full);
-    CHECK_FALSE(h.is_valid_object(promoted));
-    h.remove_root(&root);
+    HeapRoot<Heap> root(h);
+    REQUIRE(start_scrubbed(h));
+    in_own_frame([&] { *root.slot = h.allocate(16, words_layout()); });
+    collect_scrubbed(h, CollectionKind::Minor);
+    const uint64_t promoted = root.hidden();
+    CHECK(from_own_frame([&] { return h.is_old(static_cast<uintptr_t>(*root.slot)); }));
+    *root.slot = 0;
+    finish_scrubbed(h);
+    CHECK(alive(h, promoted));  // dead before the finish, kept: it was marked when promoted
+    collect_scrubbed(h, CollectionKind::Full);
+    CHECK_FALSE(alive(h, promoted));
 }
 
 TEST_CASE("gc::Heap marking - an old object allocated during a cycle is grey and its card dirty") {
     Heap h(config());
-    REQUIRE(h.start_marking());
-    const uintptr_t n = h.allocate(16, words_layout(), kAllocOld);
-    CHECK_EQ(card_of(h, n), kCardDirty);
-    const uintptr_t big = h.allocate(64 * 1024, words_layout());  // large: old at once
-    CHECK(h.is_old(big));
-    CHECK_EQ(card_of(h, big), kCardDirty);
-    h.finish_marking();
-    CHECK(h.is_valid_object(n));  // never reachable, yet live to the cycle it was made in
-    CHECK(h.is_valid_object(big));
-    h.collect(CollectionKind::Full);
-    CHECK_FALSE(h.is_valid_object(n));
+    REQUIRE(start_scrubbed(h));
+    const uint64_t n = hidden_allocate(h, 16, words_layout(), kAllocOld);
+    const uint64_t big = hidden_allocate(h, 64 * 1024, words_layout());  // large: old at once
+    in_own_frame([&] {
+        CHECK_EQ(card_of(h, static_cast<uintptr_t>(unhide_address(n))), kCardDirty);
+        CHECK(h.is_old(static_cast<uintptr_t>(unhide_address(big))));
+        CHECK_EQ(card_of(h, static_cast<uintptr_t>(unhide_address(big))), kCardDirty);
+    });
+    finish_scrubbed(h);
+    CHECK(alive(h, n));  // never reachable, yet live to the cycle it was made in
+    CHECK(alive(h, big));
+    collect_scrubbed(h, CollectionKind::Full);
+    CHECK_FALSE(alive(h, n));
+    CHECK_FALSE(alive(h, big));
 
     // Filled with a store the barrier never sees, after the marker scanned
     // it (a frame's arguments, B13): its dirty card covers the store.
@@ -416,47 +457,49 @@ TEST_CASE("gc::Heap marking - each barrier elision rule holds with a cycle open"
 TEST_CASE("gc::Heap marking - an ephemeron key rewritten behind the barrier's back is decided by the cycle") {
     for (bool minor_between : {false, true}) {
         Heap h(config());
-        uint64_t table = 0, key = 0, value = 0, young = 0;
-        for (uint64_t* r : {&table, &key, &value, &young}) h.add_root(r);
-        table = h.allocate(5 * 8, table_layout(), kAllocOld);
-        const auto t = static_cast<uintptr_t>(table);
-        *slot_of(t, 0) = 2;
-        key = h.allocate(16, words_layout(), kAllocOld);
-        value = h.allocate(16, words_layout(), kAllocOld);
-        h.store(t, 1, key);
-        h.store(t, 2, value);
-        const uintptr_t doomed = old_behind_young(h, young);
-        REQUIRE(h.start_marking());
+        HeapRoot<Heap> table(h), key(h), value(h), young(h);
+        in_own_frame([&] {
+            *table.slot = h.allocate(5 * 8, table_layout(), kAllocOld);
+            const auto t = static_cast<uintptr_t>(*table.slot);
+            *slot_of(t, 0) = 2;
+            *key.slot = h.allocate(16, words_layout(), kAllocOld);
+            *value.slot = h.allocate(16, words_layout(), kAllocOld);
+            h.store(t, 1, *key.slot);
+            h.store(t, 2, *value.slot);
+        });
+        const uint64_t doomed = hidden_old_behind_young(h, young.slot);
+        REQUIRE(start_scrubbed(h));
         drain(h);  // the entry's key was marked when the table was scanned: no entry pending
-        *slot_of(t, 1) = doomed;  // a bulk copy, remembered by card only
-        h.remember(t);
-        young = 0;
-        if (minor_between) h.collect(CollectionKind::Minor);
-        h.finish_marking();
+        in_own_frame([&] {
+            const auto t = static_cast<uintptr_t>(*table.slot);
+            *slot_of(t, 1) = unhide_address(doomed);  // a bulk copy, remembered by card only
+            h.remember(t);
+        });
+        *young.slot = 0;
+        if (minor_between) collect_scrubbed(h, CollectionKind::Minor);
+        finish_scrubbed(h);
         // The key dies with nothing else naming it: the entry is cleared, not
         // left naming a freed object (verification after the finish would
         // stop the process on that).
-        CHECK_EQ(Heap::load(t, 1), uint64_t{0});
-        CHECK_EQ(Heap::load(t, 2), uint64_t{0});
-        CHECK_FALSE(h.is_valid_object(doomed));
-        for (uint64_t* r : {&table, &key, &value, &young}) h.remove_root(r);
+        CHECK_EQ(Heap::load(static_cast<uintptr_t>(*table.slot), 1), uint64_t{0});
+        CHECK_EQ(Heap::load(static_cast<uintptr_t>(*table.slot), 2), uint64_t{0});
+        CHECK_FALSE(alive(h, doomed));
     }
 }
 
 TEST_CASE("gc::Heap marking - a full collection asked for inside a cycle finishes it, then collects whole") {
     Heap h(config());
-    uint64_t root = h.allocate(16, words_layout(), kAllocOld);
-    h.add_root(&root);
-    const auto x = static_cast<uintptr_t>(root);
-    REQUIRE(h.start_marking());
+    HeapRoot<Heap> root(h);
+    in_own_frame([&] { *root.slot = h.allocate(16, words_layout(), kAllocOld); });
+    const uint64_t x = root.hidden();
+    REQUIRE(start_scrubbed(h));
     drain(h);  // x is marked
-    root = 0;
+    *root.slot = 0;
     const uint64_t fulls = h.stats().full_collections;
-    h.collect(CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
     CHECK_FALSE(h.marking());
     CHECK_EQ(h.stats().full_collections, fulls + 2);
-    CHECK_FALSE(h.is_valid_object(x));  // the cycle kept it; the whole collection after did not
-    h.remove_root(&root);
+    CHECK_FALSE(alive(h, x));  // the cycle kept it; the whole collection after did not
 }
 
 namespace {

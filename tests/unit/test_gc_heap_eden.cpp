@@ -10,7 +10,11 @@
 // pins it whole. The limit is
 // what generated code bumps against (the allocation buffer's end), and an
 // empty eden still takes the largest young object.
+//
+// The lists' heads are heap roots, off the stack: a head on the stack would
+// pin its node in eden (docs/gc_contract.md 2.5).
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -19,6 +23,7 @@
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::HeapRoot;
 
 namespace {
 
@@ -45,8 +50,9 @@ uintptr_t new_node(Heap& h, uint64_t* list) {
 
 // Allocates nodes until a minor collection runs. With `keep`, every node is
 // linked onto *keep (so the collection copies nearly all of eden); otherwise
-// each dies at once.
-void allocate_until_minor(Heap& h, uint64_t* keep) {
+// each dies at once. In a frame of its own, so no node's address is left in
+// the caller's.
+BRASS_TEST_NOINLINE void allocate_until_minor(Heap& h, uint64_t* keep) {
     const uint64_t before = h.stats().minor_collections;
     while (h.stats().minor_collections == before) new_node(h, keep);
 }
@@ -75,36 +81,36 @@ TEST_CASE("gc::Heap adaptive eden - a survival spike shrinks the limit, and it r
     Heap h(eden_config());
     const size_t full = eden_capacity(h);
     CHECK_EQ(full, size_t{16} * kMB);
-    uint64_t keep = 0;
-    h.add_root(&keep);
+    HeapRoot<Heap> keep_root(h);
+    uint64_t* const keep = keep_root.slot;
 
     // The first spike collection runs at the whole eden (nothing predicted
     // it), copies nearly all of it and promotes what overflows the survivor
     // space: the next runs at about the budget.
-    shrink_by_spike(h, &keep);
+    shrink_by_spike(h, keep);
     CHECK(eden_capacity(h) >= kMB);
 
     // The next copies the survivor space again, which no eden limit bounds;
     // after it, while the spike lasts, each collection copies about the budget
     // out of eden and as much again out of the survivor space (last time's
     // survivors, aged there to see whether they are kept).
-    allocate_until_minor(h, &keep);
+    allocate_until_minor(h, keep);
     for (int i = 0; i < 4; ++i) {
-        allocate_until_minor(h, &keep);
+        allocate_until_minor(h, keep);
         CHECK(h.stats().last_survived_bytes <= 2 * kMB + kMB / 4);
         CHECK(eden_capacity(h) <= kMB + kMB / 4);
     }
 
     // The data dies: the survivors aged in the survivor space die with it, so
     // the next collection finds them dead and the whole eden comes back.
-    keep = 0;
+    *keep = 0;
+    brass::test::scrub_stack();
     int collections = 0;
     while (eden_capacity(h) < full) {
         allocate_until_minor(h, nullptr);
         ++collections;
         REQUIRE(collections <= 2);
     }
-    h.remove_root(&keep);
 }
 
 TEST_CASE("gc::Heap adaptive eden - a workload whose young data dies keeps the whole eden") {
@@ -157,20 +163,20 @@ TEST_CASE("gc::Heap adaptive eden - a working set after a build-up gets the whol
     // the old generation's garbage brings a full collection.
     Heap h(eden_config());
     const size_t full = eden_capacity(h);
-    uint64_t keep = 0;
-    uint64_t batch = 0;
-    h.add_root(&keep);
-    h.add_root(&batch);
+    HeapRoot<Heap> keep_root(h);
+    HeapRoot<Heap> batch_root(h);
+    uint64_t* const keep = keep_root.slot;
+    uint64_t* const batch = batch_root.slot;
     const size_t build_nodes = 96 * kMB / kNodeTotal;
-    for (size_t i = 0; i < build_nodes; ++i) new_node(h, &keep);
+    for (size_t i = 0; i < build_nodes; ++i) new_node(h, keep);
     REQUIRE(eden_capacity(h) < 2 * kMB);
     const uint64_t fulls = h.stats().full_collections;
     const uint64_t first = h.stats().minor_collections;
     const size_t batch_nodes = 3 * kMB / kNodeTotal;
     uint64_t back_at = 0;
     for (int b = 0; b < 200; ++b) {
-        batch = 0;
-        for (size_t j = 0; j < batch_nodes; ++j) new_node(h, &batch);
+        *batch = 0;
+        for (size_t j = 0; j < batch_nodes; ++j) new_node(h, batch);
         if (back_at == 0 && eden_capacity(h) == full) back_at = h.stats().minor_collections - first;
     }
     CHECK(back_at > 0);
@@ -180,23 +186,33 @@ TEST_CASE("gc::Heap adaptive eden - a working set after a build-up gets the whol
     // 600 MB at the whole eden is about 38 collections; the shrunk start adds
     // its two dozen.
     CHECK(h.stats().minor_collections - first <= 38 + 24 + 8);
-    h.remove_root(&batch);
-    h.remove_root(&keep);
 }
 
 TEST_CASE("gc::Heap adaptive eden - the limit is the allocation buffer's end, and an empty eden takes any young object") {
     Heap h(eden_config());
-    uint64_t keep = 0;
-    h.add_root(&keep);
-    shrink_by_spike(h, &keep);
+    HeapRoot<Heap> keep_root(h);
+    uint64_t* const keep = keep_root.slot;
+    shrink_by_spike(h, keep);
     const size_t limit = eden_capacity(h);
     // Generated code bumps against `end`: after the collection it sits at the
-    // shrunk limit, not at eden's end.
+    // shrunk limit or before it (a window of kPinChunkBytes at most, which
+    // the runtime moves on), never past it, and eden is collected once the
+    // allocation since reaches the limit.
     const Heap::AllocationBuffer* buffer = h.allocation_buffer();
-    CHECK_EQ(buffer->end - h.young_base(), limit);
+    CHECK(buffer->end - h.young_base() <= limit);
+    {
+        const uint64_t minors = h.stats().minor_collections;
+        size_t allocated = 0;
+        while (h.stats().minor_collections == minors) {
+            new_node(h, keep);
+            allocated += kNodeTotal;
+        }
+        CHECK(allocated >= limit - kNodeTotal);
+        CHECK(allocated <= limit + 2 * kNodeTotal);
+    }
 
     // A young object larger than the limit still fits an empty eden.
-    keep = 0;
+    *keep = 0;
     h.collect(CollectionKind::Minor);
     REQUIRE(eden_capacity(h) < kMB + kMB / 4);
     const uintptr_t big = h.allocate(kMB, kLeafLayout);
@@ -206,16 +222,15 @@ TEST_CASE("gc::Heap adaptive eden - the limit is the allocation buffer's end, an
     const uint64_t before = h.stats().minor_collections;
     new_node(h, nullptr);
     CHECK_EQ(h.stats().minor_collections, before + 1);
-    h.remove_root(&keep);
 }
 
 TEST_CASE("gc::Heap adaptive eden - a full collection restores the whole eden once the build-up is dead, not before") {
     Heap h(eden_config());
     const size_t full = eden_capacity(h);
-    uint64_t keep = 0;
-    h.add_root(&keep);
-    shrink_by_spike(h, &keep);
-    allocate_until_minor(h, &keep);
+    HeapRoot<Heap> keep_root(h);
+    uint64_t* const keep = keep_root.slot;
+    shrink_by_spike(h, keep);
+    allocate_until_minor(h, keep);
 
     // The data built is still live: the old generation grew by what it
     // holds, and the build-up that shrank eden is taken to go on.
@@ -224,11 +239,10 @@ TEST_CASE("gc::Heap adaptive eden - a full collection restores the whole eden on
 
     // Dropped: the next full collection finds the growth since the last one
     // (the young data promoted as it collected) and the build all dead.
-    for (int i = 0; i < 4; ++i) allocate_until_minor(h, &keep);
-    keep = 0;
-    h.collect(CollectionKind::Full);
+    for (int i = 0; i < 4; ++i) allocate_until_minor(h, keep);
+    *keep = 0;
+    brass::test::collect_scrubbed(h, CollectionKind::Full);
     CHECK_EQ(eden_capacity(h), full);
-    h.remove_root(&keep);
 }
 
 // HeapConfig::restore_judges_cycle_start: a cycle the program runs inside
@@ -245,24 +259,24 @@ TEST_CASE("gc::Heap adaptive eden - a cycle's finish judges the growth before it
         c.cycle_whole_eden = false;  // eden stays shrunk through the cycle
         Heap h(c);
         const size_t full = eden_capacity(h);
-        uint64_t keep = 0;
-        uint64_t during = 0;
-        h.add_root(&keep);
-        h.add_root(&during);
-        shrink_by_spike(h, &keep);
-        for (int i = 0; i < 4; ++i) allocate_until_minor(h, &keep);
+        HeapRoot<Heap> keep_root(h);
+        HeapRoot<Heap> during_root(h);
+        uint64_t* const keep = keep_root.slot;
+        uint64_t* const during = during_root.slot;
+        shrink_by_spike(h, keep);
+        for (int i = 0; i < 4; ++i) allocate_until_minor(h, keep);
         // The build goes on in another list until the first is all old, so
         // its death is not seen in the survivor space (which would restore
         // the whole eden before the cycle).
-        for (int i = 0; i < 3; ++i) allocate_until_minor(h, &during);
+        for (int i = 0; i < 3; ++i) allocate_until_minor(h, during);
         const uint64_t before = h.pressure().old_growth;
         REQUIRE(before > 8 * kMB);
-        keep = 0;  // the first build-up dies
+        *keep = 0;  // the first build-up dies
         REQUIRE(eden_capacity(h) < kMB + kMB / 4);
         REQUIRE(h.start_marking());
         // Inside the cycle the program keeps more than the build was: the
         // shrunk eden promotes it, grey.
-        while (h.pressure().old_growth < 2 * before + 2 * kMB) allocate_until_minor(h, &during);
+        while (h.pressure().old_growth < 2 * before + 2 * kMB) allocate_until_minor(h, during);
         REQUIRE(eden_capacity(h) < kMB + kMB / 4);
         REQUIRE(h.marking());
         while (!h.mark_slice(0)) {
@@ -270,8 +284,6 @@ TEST_CASE("gc::Heap adaptive eden - a cycle's finish judges the growth before it
         h.finish_marking();
         if (judge_start) CHECK_EQ(eden_capacity(h), full);
         else CHECK(eden_capacity(h) < kMB + kMB / 4);
-        h.remove_root(&during);
-        h.remove_root(&keep);
     }
 }
 
@@ -288,27 +300,25 @@ TEST_CASE("gc::Heap adaptive eden - a marking cycle starts on the whole eden") {
         c.min_full_threshold_bytes = size_t{1} << 30;  // only the test's collections
         Heap h(c);
         const size_t full = eden_capacity(h);
-        uint64_t keep = 0;
-        h.add_root(&keep);
-        shrink_by_spike(h, &keep);
+        HeapRoot<Heap> keep_root(h);
+        uint64_t* const keep = keep_root.slot;
+        shrink_by_spike(h, keep);
         h.collect(CollectionKind::Full);
         CHECK(eden_capacity(h) < kMB + kMB / 4);  // the build is live: still shrunk
         REQUIRE(h.start_marking());
         if (!whole) {
             CHECK(eden_capacity(h) < kMB + kMB / 4);
             h.finish_marking();
-            h.remove_root(&keep);
             continue;
         }
         CHECK_EQ(eden_capacity(h), full);
         // The build goes on: held whole through its first collections there.
         for (int i = 0; i < 4; ++i) {
-            allocate_until_minor(h, &keep);
+            allocate_until_minor(h, keep);
             CHECK_EQ(eden_capacity(h), full);
         }
         CHECK(h.marking());
         h.finish_marking();
-        h.remove_root(&keep);
     }
 }
 
@@ -325,10 +335,10 @@ TEST_CASE("gc::Heap adaptive eden - a collection of part of the whole eden shrin
         c.partial_minor_shrinks = shrinks;
         Heap h(c);
         const size_t full = eden_capacity(h);
-        uint64_t keep = 0;
-        h.add_root(&keep);
+        HeapRoot<Heap> keep_root(h);
+        uint64_t* const keep = keep_root.slot;
         const size_t kept_nodes = 6 * kMB / kNodeTotal;
-        for (size_t i = 0; i < kept_nodes; ++i) new_node(h, &keep);
+        for (size_t i = 0; i < kept_nodes; ++i) new_node(h, keep);
         allocate_until_minor(h, nullptr);
         REQUIRE(h.stats().last_survived_bytes > 5 * kMB);
         REQUIRE(eden_capacity(h) == full);
@@ -339,7 +349,6 @@ TEST_CASE("gc::Heap adaptive eden - a collection of part of the whole eden shrin
         REQUIRE(h.stats().minor_collections == before + 1);
         if (shrinks || half) CHECK(eden_capacity(h) < full);
         else CHECK_EQ(eden_capacity(h), full);
-        h.remove_root(&keep);
     }
 }
 
@@ -347,12 +356,11 @@ TEST_CASE("gc::Heap adaptive eden - adaptive_eden = false and BRASS_GC_FIXED_EDE
     {
         Heap h(eden_config(/*adaptive=*/false));
         const size_t full = eden_capacity(h);
-        uint64_t keep = 0;
-        h.add_root(&keep);
-        allocate_until_minor(h, &keep);
+        HeapRoot<Heap> keep_root(h);
+        uint64_t* const keep = keep_root.slot;
+        allocate_until_minor(h, keep);
         CHECK(h.stats().last_survived_bytes > 15 * kMB);
         CHECK_EQ(eden_capacity(h), full);
-        h.remove_root(&keep);
     }
     {
         set_env("BRASS_GC_FIXED_EDEN", "1");
@@ -361,10 +369,9 @@ TEST_CASE("gc::Heap adaptive eden - adaptive_eden = false and BRASS_GC_FIXED_EDE
         Heap h(c);
         set_env("BRASS_GC_FIXED_EDEN", nullptr);
         const size_t full = eden_capacity(h);
-        uint64_t keep = 0;
-        h.add_root(&keep);
-        allocate_until_minor(h, &keep);
+        HeapRoot<Heap> keep_root(h);
+        uint64_t* const keep = keep_root.slot;
+        allocate_until_minor(h, keep);
         CHECK_EQ(eden_capacity(h), full);
-        h.remove_root(&keep);
     }
 }

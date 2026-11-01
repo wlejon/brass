@@ -3,7 +3,7 @@
 // or pointing inside its object, still names the object, intact, after minor,
 // full and incremental collections, and after parallel ones; what the pinned
 // object names is updated as a root's would be; an old object only the stack
-// names survives a full collection. Eden allocates around pinned objects (its
+// names survives a full collection, and dies once nothing names it. Eden allocates around pinned objects (its
 // fragments), an object no fragment fits is allocated old with its card
 // dirty, survivor spaces copy around the residents an earlier pin left there,
 // and a resident no longer named is copied like any other survivor. A
@@ -13,8 +13,6 @@
 
 #include <brass/gc/fiber.hpp>
 #include <brass/gc/heap.hpp>
-
-#include <brass/core/env.hpp>
 
 #include <cstdio>
 #include <cstring>
@@ -81,19 +79,9 @@ PIN_TEST_NOINLINE void scrub_stack() {
     (void)words[0];
 }
 
-// The switch is read once per process (BRASS_GC_PIN_STACK=1), before the
-// first collection of any test: these tests run only with it on.
-bool pinning_on() {
-    const std::string v = brass::env_value("BRASS_GC_PIN_STACK");
-    const bool on = !v.empty() && v != "0";
-    if (!on) std::printf("  (skipped: BRASS_GC_PIN_STACK is not set)\n");
-    return on;
-}
-
 } // namespace
 
 TEST_CASE("gc::Heap pinning - an untagged young reference on the stack survives minor and full collections in place") {
-    if (!pinning_on()) return;
     Heap h(pin_config());
     HeapScope bind(h);
     volatile uintptr_t held = make_leaf(h, 6, 1);
@@ -116,7 +104,6 @@ TEST_CASE("gc::Heap pinning - an untagged young reference on the stack survives 
 }
 
 TEST_CASE("gc::Heap pinning - a tagged reference and an interior pointer pin their objects") {
-    if (!pinning_on()) return;
     HeapConfig c = pin_config();
     c.reference_tags = {kPointerTag};
     Heap h(c);
@@ -137,8 +124,18 @@ TEST_CASE("gc::Heap pinning - a tagged reference and an interior pointer pin the
     }
 }
 
+// The holder's two leaves are objects and intact. Read in a frame of its own,
+// so no word the caller keeps names (and pins) a leaf.
+PIN_TEST_NOINLINE void check_leaves(Heap& h, uintptr_t holder) {
+    const uintptr_t first = static_cast<uintptr_t>(Heap::load(holder, 0));
+    const uintptr_t second = static_cast<uintptr_t>(Heap::load(holder, 1));
+    CHECK(h.is_valid_object(first));
+    CHECK(h.is_valid_object(second));
+    CHECK(intact(first, 8, 4));
+    CHECK(intact(second, 3, 5));
+}
+
 TEST_CASE("gc::Heap pinning - a pinned object's slots are roots and are updated") {
-    if (!pinning_on()) return;
     Heap h(pin_config());
     HeapScope bind(h);
     volatile uintptr_t holder = h.allocate(16, kPair);
@@ -147,14 +144,10 @@ TEST_CASE("gc::Heap pinning - a pinned object's slots are roots and are updated"
     // Aged, then promoted (tenure 2), while the holder stays where it is.
     for (int i = 0; i < 4; ++i) {
         churn(h, 5000);
+        scrub_stack();
         h.collect(CollectionKind::Minor);
         CHECK(h.is_young(holder));
-        const uintptr_t first = static_cast<uintptr_t>(Heap::load(holder, 0));
-        const uintptr_t second = static_cast<uintptr_t>(Heap::load(holder, 1));
-        CHECK(h.is_valid_object(first));
-        CHECK(h.is_valid_object(second));
-        CHECK(intact(first, 8, 4));
-        CHECK(intact(second, 3, 5));
+        check_leaves(h, holder);
     }
     CHECK_FALSE(h.is_young(static_cast<uintptr_t>(Heap::load(holder, 0))));
     // A full collection marks the promoted leaves through the pinned holder.
@@ -166,25 +159,52 @@ TEST_CASE("gc::Heap pinning - a pinned object's slots are roots and are updated"
     CHECK(intact(static_cast<uintptr_t>(Heap::load(holder, 1)), 3, 5));
 }
 
-TEST_CASE("gc::Heap pinning - the stack keeps no old object alive") {
-    if (!pinning_on()) return;
+// The old objects made here, their addresses kept only masked (no word of the
+// stack names them once this returns).
+constexpr uintptr_t kAddressMaskOut = 0x5A5A5A5A5A5A5A5AULL;
+PIN_TEST_NOINLINE void make_old_unnamed(Heap& h, uintptr_t* mature, uintptr_t* large) {
+    *mature = make_leaf(h, 32, 6, kAllocOld) ^ kAddressMaskOut;
+    *large = make_leaf(h, kLargeWords, 7) ^ kAddressMaskOut;
+}
+
+TEST_CASE("gc::Heap pinning - the stack keeps old objects alive, and only while it names them") {
     Heap h(pin_config());
     HeapScope bind(h);
-    // Old objects never move: a host roots the ones it keeps, and a stack
-    // word naming one is passed over.
-    volatile uintptr_t mature = make_leaf(h, 32, 6, kAllocOld);
-    volatile uintptr_t large = make_leaf(h, kLargeWords, 7);  // large-object space
-    CHECK_FALSE(h.is_young(mature));
-    CHECK_FALSE(h.is_young(large));
+    {
+        volatile uintptr_t mature = make_leaf(h, 32, 6, kAllocOld);
+        volatile uintptr_t large = make_leaf(h, kLargeWords, 7);  // large-object space
+        volatile uintptr_t inside = mature + 8 * 5;               // an interior word
+        CHECK_FALSE(h.is_young(mature));
+        CHECK_FALSE(h.is_young(large));
+        h.collect(CollectionKind::Full);
+        while (!h.sweep_slice(UINT64_MAX)) {
+        }
+        CHECK(h.is_valid_object(mature));
+        CHECK(h.is_valid_object(large));
+        CHECK(intact(mature, 32, 6));
+        CHECK(intact(large, 4, 7));
+        mature = 0;
+        h.collect(CollectionKind::Full);
+        while (!h.sweep_slice(UINT64_MAX)) {
+        }
+        const uintptr_t kept = inside - 8 * 5;
+        CHECK(h.is_valid_object(kept));
+        CHECK(intact(kept, 32, 6));
+        inside = 0;
+        large = 0;
+    }
+    uintptr_t mature = 0;
+    uintptr_t large = 0;
+    make_old_unnamed(h, &mature, &large);
+    scrub_stack();
     h.collect(CollectionKind::Full);
     while (!h.sweep_slice(UINT64_MAX)) {
     }
-    CHECK_FALSE(h.is_valid_object(mature));
-    CHECK_FALSE(h.is_valid_object(large));
+    CHECK_FALSE(h.is_valid_object(mature ^ kAddressMaskOut));
+    CHECK_FALSE(h.is_valid_object(large ^ kAddressMaskOut));
 }
 
 TEST_CASE("gc::Heap pinning - an incremental cycle keeps young stack objects alive in place") {
-    if (!pinning_on()) return;
     for (const bool promote_all : {false, true}) {
         HeapConfig c = pin_config();
         c.finish_promote_all = promote_all;
@@ -209,7 +229,6 @@ TEST_CASE("gc::Heap pinning - an incremental cycle keeps young stack objects ali
 }
 
 TEST_CASE("gc::Heap pinning - eden allocates around pinned objects, and an object no fragment fits goes old") {
-    if (!pinning_on()) return;
     HeapConfig c = pin_config();
     c.eden_bytes = 64 * 1024;
     c.survivor_bytes = 64 * 1024;
@@ -258,9 +277,6 @@ TEST_CASE("gc::Heap pinning - eden allocates around pinned objects, and an objec
 }
 
 TEST_CASE("gc::Heap pinning - a survivor-space pin stays through the next collection, then is copied") {
-    if (!pinning_on()) {
-        return;
-    }
     for (const char* parallel : {"0", "always"}) {
         HeapConfig c = pin_config();
         c.parallel_minor = std::string(parallel) == "0" ? ParallelMinor::Off : ParallelMinor::Always;
@@ -315,7 +331,6 @@ TEST_CASE("gc::Heap pinning - a survivor-space pin stays through the next collec
 }
 
 TEST_CASE("gc::Heap pinning - parallel minor collections pin as the serial ones do") {
-    if (!pinning_on()) return;
     HeapConfig c = pin_config();
     c.parallel_minor = ParallelMinor::Always;
     c.minor_threads = 8;
@@ -363,7 +378,6 @@ PIN_TEST_NOINLINE void fiber_hold(void* arg) {
 } // namespace
 
 TEST_CASE("gc::Heap pinning - a suspended fiber's stack pins what it names") {
-    if (!pinning_on()) return;
     Heap h(pin_config());
     HeapScope bind(h);
     FiberHold f;
@@ -383,7 +397,6 @@ TEST_CASE("gc::Heap pinning - a suspended fiber's stack pins what it names") {
 
 #if (defined(__x86_64__) || defined(__aarch64__)) && !defined(_MSC_VER)
 TEST_CASE("gc::Heap pinning - a reference held only in a callee-saved register is seen") {
-    if (!pinning_on()) return;
     Heap h(pin_config());
     HeapScope bind(h);
 #if defined(__x86_64__)
@@ -401,7 +414,6 @@ TEST_CASE("gc::Heap pinning - a reference held only in a callee-saved register i
 #endif
 
 TEST_CASE("gc::Heap pinning - stress modes keep stack references valid") {
-    if (!pinning_on()) return;
     for (const StressMode mode : {StressMode::Minor, StressMode::Full, StressMode::Alternate, StressMode::Incremental}) {
         HeapConfig c = pin_config();
         c.verify = false;
@@ -423,7 +435,6 @@ TEST_CASE("gc::Heap pinning - stress modes keep stack references valid") {
 }
 
 TEST_CASE("gc::Heap pinning - an object only a heap root names still moves") {
-    if (!pinning_on()) return;
     Heap h(pin_config());
     HeapScope bind(h);
     auto root = std::make_unique<uint64_t>(0);

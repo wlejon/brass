@@ -24,6 +24,8 @@
 #include <type_traits>
 #include <brass/verify/bv_solver.hpp>
 
+#include "stack_scrub.hpp"
+
 namespace brass::test {
 
 // Per-process scratch directory for files a test writes (objects, DLLs,
@@ -181,6 +183,10 @@ public:
             std::cout << "  [RUN ] " << tc.name << "\n" << std::flush;
             auto start = std::chrono::high_resolution_clock::now();
             bool skipped = false;
+            // The tests before this one left their words where its frames
+            // will be, and a heap reserves the range the last one freed: the
+            // stack scan would read them as naming this test's objects.
+            scrub_stack();
             try {
                 tc.func();
             } catch (const TestSkipped& skip) {

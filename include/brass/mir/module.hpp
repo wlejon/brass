@@ -107,15 +107,15 @@ public:
     bool pinned_tls_register() const noexcept { return pinned_tls_register_; }
     void set_pinned_tls_register(bool pinned) noexcept { pinned_tls_register_ = pinned; }
 
-    // The host finds this module's frames' roots through their stack maps
-    // and nothing else: no conservative scan of a stack (gc::Fiber's
-    // StackSpan) ever reads a word of them. A stack map names only what is
-    // live at its call, so a dead register or spill slot is never read
-    // before it is written again, and the allocator's zeroing of the dead
-    // ones at every call (LinearScanAllocator::clear_dead_callee_gprs_at_calls,
-    // there so a conservative scan does not keep a dead object alive or pin
-    // it) buys such a host nothing. Off by default: a host that scans its
-    // stacks conservatively (brasslua) needs the zeroing.
+    // The allocator leaves the registers and spill slots dead at each call
+    // as they are, instead of zeroing them
+    // (LinearScanAllocator::clear_dead_callee_gprs_at_calls). The stack maps
+    // name only what is live at a call, so a dead location is never read as
+    // a root through them; the zeroing is for the collector's conservative
+    // stack scan (gc::Heap pins what any stack word names, heap_pin.cpp),
+    // where a dead word that still names an object keeps it alive, and
+    // pinned, for that collection. A host that takes that retention to save
+    // the stores at every call sets this. Off by default.
     bool precise_stack_roots() const noexcept { return precise_stack_roots_; }
     void set_precise_stack_roots(bool precise) noexcept { precise_stack_roots_ = precise; }
 

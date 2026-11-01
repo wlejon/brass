@@ -288,8 +288,10 @@ public:
 
     // ---- Allocation --------------------------------------------------------
     // A zeroed object of at least `bytes` payload bytes (see
-    // payload_bytes_for) and layout `layout`. May collect first; every
-    // reference the caller holds across the call must be a root. Throws
+    // payload_bytes_for) and layout `layout`. May collect first: a reference
+    // the caller holds on its stack or in a register stays current (the
+    // collection pins or marks what the stacks name, gc_contract.md 2.5); one
+    // held anywhere else (a C++ heap allocation, a container) must be a root. Throws
     // std::bad_alloc when the reservation is exhausted.
     uintptr_t allocate(size_t bytes, LayoutId layout, uint32_t flags = 0, uint8_t host_bits = 0) {
         if (flags == 0) {
@@ -301,7 +303,8 @@ public:
     // allocation buffer, else 0. Never collects, so it needs no roots.
     uintptr_t try_allocate_young(size_t bytes, LayoutId layout, uint8_t host_bits = 0) noexcept {
         const size_t total = payload_bytes_for(bytes) + kHeaderBytes;
-        if (total > max_young_total_ || total > static_cast<size_t>(alloc_->end - alloc_->top)) return 0;
+        if (total > max_young_total_) return 0;
+        if (total > static_cast<size_t>(alloc_->end - alloc_->top)) return refill_young(total, layout, host_bits);
         const uintptr_t at = alloc_->top;
         alloc_->top = at + total;
         auto* header = reinterpret_cast<ObjectHeader*>(at);
@@ -640,6 +643,11 @@ private:
     void run_pending_finalizers();
     // What the stress mode does at an allocation or safepoint.
     void stress_step(uintptr_t caller_fp, uintptr_t caller_ip);
+    // try_allocate_young past the window's end: when the window stopped only
+    // at a chunk's bound (HeapState::update_fast_limit), the next chunk is
+    // opened and the object taken from it, with its start recorded, without
+    // the slow path's mutator frame or stack maps; else 0. Never collects.
+    uintptr_t refill_young(size_t total, LayoutId layout, uint8_t host_bits) noexcept;
     void remember_range_old(uintptr_t object, uintptr_t begin, uintptr_t end) noexcept;
     // Dirties the card of old address `a` and marks its region (kCardRegionShift).
     void dirty_card(uintptr_t a) noexcept {

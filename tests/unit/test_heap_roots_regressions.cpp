@@ -206,8 +206,8 @@ TEST_CASE("Sweep17 - a collection sees the fresh Tier-0 interpreter's roots (Fas
 }
 
 // brass_gc_collect from generated code walks the JIT frame: the object
-// @keepj holds across it moves (a full collection promotes it) and the
-// frame's slot is updated, else the load reads poison.
+// @keepj holds across it survives, where the frame names it (the stack scan
+// pins it: docs/gc_contract.md 2.5), else the load reads poison.
 TEST_CASE("Sweep17 - a collection requested by generated code walks the JIT frame") {
     auto mod = parse_ok(kDeopt);
     gc::Heap heap;
@@ -218,9 +218,10 @@ TEST_CASE("Sweep17 - a collection requested by generated code walks the JIT fram
     auto fn = jit.get_function_ptr<int64_t (*)()>("keepj");
     REQUIRE(fn != nullptr);
     const uint64_t before = heap.stats().full_collections;
+    const uint64_t pinned_before = heap.stats().pinned_objects;
     CHECK_EQ(fn(), 42);
     CHECK(heap.stats().full_collections > before);
-    CHECK(heap.stats().promoted_bytes > 0);
+    CHECK(heap.stats().pinned_objects > pinned_before);
 }
 
 // An allocation from generated code that collects walks the JIT frame: in

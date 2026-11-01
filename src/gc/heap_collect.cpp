@@ -285,19 +285,17 @@ void reclaim_young(GcState& g) {
     s.residents.clear();
     uintptr_t from_hi = s.survivor_lo[g.from];
     uintptr_t to_hi = s.survivor_lo[g.to];
-    uint64_t eden_bytes = 0;
     for (const uintptr_t p : s.pinned) {
         ObjectHeader* h = header_of(p);
         h->gc_bits = static_cast<uint8_t>((h->gc_bits & ~kGcPinned) | kGcResident);
         s.set_young_start(p);
         s.residents.push_back(p);
         const uintptr_t end = p + h->size;
-        if (s.in_eden(p)) eden_bytes += kHeaderBytes + h->size;
-        else if (s.in_survivor(g.from, p)) from_hi = end;
+        if (s.in_eden(p)) continue;
+        if (s.in_survivor(g.from, p)) from_hi = end;
         else to_hi = std::max(to_hi, end);
     }
     s.pinned.clear();
-    s.eden_resident_bytes = eden_bytes;
     s.build_eden_fragments();
     // The survivor spaces' tops cover their objects: the copies and the
     // residents in the to-space, the residents alone in the from-space. What
@@ -334,16 +332,15 @@ void minor(GcState& g) {
     // buffers' unused ends, residents nobody copied): survivors of the last
     // collection, aged.
     const uint64_t aged = g.from_top - s.survivor_lo[g.from] - s.survivor_slack[g.from];
-    // Reclaim the evacuated spaces. Eden's bytes allocated exclude what the
-    // last evacuation left in it.
-    s.eden_bytes_retired += (g.eden_top - s.eden_lo) - std::min<uint64_t>(s.eden_resident_bytes, g.eden_top - s.eden_lo);
+    // Reclaim the evacuated spaces.
+    s.eden_bytes_retired += g.eden_used;
     reclaim_young(g);
-    const uint64_t young_collected = (g.eden_top - s.eden_lo) + aged;
+    const uint64_t young_collected = g.eden_used + aged;
     if (young_collected > 0) {
         s.minor_survival = static_cast<double>(g.copied_bytes) / static_cast<double>(young_collected);
     }
     MinorSample sample;
-    sample.eden_collected = g.eden_top - s.eden_lo;
+    sample.eden_collected = g.eden_used;
     sample.copied = g.copied_bytes;
     sample.aged = aged;
     sample.tenured = g.tenured_bytes;
@@ -423,7 +420,7 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
         // objects'.
         clean_dead_large_cards(s);
         s.begin_sweep(g.marked_bytes);
-        s.eden_bytes_retired += (g.eden_top - s.eden_lo) - std::min<uint64_t>(s.eden_resident_bytes, g.eden_top - s.eden_lo);
+        s.eden_bytes_retired += g.eden_used;
         reclaim_young(g);
     } else {
         // A dead object's card may be dirty; cleaning every card here means
@@ -431,7 +428,7 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
         // one.
         s.begin_sweep(g.marked_bytes);
         clean_all_cards(s);
-        s.eden_bytes_retired += (g.eden_top - s.eden_lo) - std::min<uint64_t>(s.eden_resident_bytes, g.eden_top - s.eden_lo);
+        s.eden_bytes_retired += g.eden_used;
         reclaim_young(g);
     }
     // The adaptive eden goes back to the whole of it when most of what the
@@ -515,10 +512,11 @@ void visit_roots(HeapState& s, Tracer& t) {
     }
     for (uintptr_t* slot : slots) t.visit_ref(slot);
     for (uintptr_t* slot : frame_slots) t.visit_address(slot);
-    // The young objects the thread's stacks name (gather_stack_objects),
-    // visited through a copy of the reference: an evacuation pinned them, so
-    // the copy's value does not change, and the stack words stay as they
-    // are; a finish in place marks them.
+    // The objects the thread's stacks name (gather_stack_objects), visited
+    // through a copy of the reference: an evacuation pinned the young ones
+    // and old ones never move, so the copy's value does not change, and the
+    // stack words stay as they are; a marking pass (or a finish in place)
+    // marks them.
     t.set_owner(0, false);
     for (const uintptr_t object : s.stack_objects) {
         uint64_t word = static_cast<uint64_t>(object) | s.heap.raw_address_tag();
@@ -655,7 +653,7 @@ void begin_collection(GcState& g) {
     // pinned there.
     g.eden_top = s.eden_end();
     g.from_top = s.survivor_top[g.from];
-    g.eden_used = g.eden_top - s.eden_lo;
+    g.eden_used = s.eden_allocated();
     g.eden_limit = s.eden_limit - s.eden_lo;
     s.gc_eden_top = g.eden_top;
     s.gc_from_top = g.from_top;
@@ -705,7 +703,7 @@ void Collector::collect(Heap& heap, CollectionKind kind) {
     std::optional<runtime::CoroRootsLock> coro_lock;
     if (s.coro_frames) coro_lock.emplace(*s.coro_frames);
     if (s.verify) verify_heap(heap, "before a collection");
-    gather_stack_objects(s);
+    gather_stack_objects(s, StackObjects::YoungOnly);
 
     GcState g(s, heap, kind);
     begin_collection(g);

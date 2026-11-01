@@ -18,6 +18,7 @@
 #include <string>
 #include <cstring>
 #include <cmath>
+#include <memory>
 
 using namespace brass;
 using namespace brass::test;
@@ -32,31 +33,33 @@ TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under a Moving 
     config.poison = true;
     gc::Heap gc(config);
 
-    constexpr size_t NUM_ARGS = 18;
+    static constexpr size_t NUM_ARGS = 18;
+    // The old addresses in the C++ heap: the stack is read conservatively,
+    // and a word naming a young object would pin it (stack_scrub.hpp).
     std::vector<uintptr_t> old_addrs(NUM_ARGS);
-    std::vector<uintptr_t> roots(NUM_ARGS);
 
-    // Allocate 18 separate young objects
-    for (size_t i = 0; i < NUM_ARGS; ++i) {
-        uintptr_t obj = gc.allocate_masked(16, 0, 100 + static_cast<uint32_t>(i));
-        REQUIRE(obj != 0);
-        gc.store(obj, 0, 0x1000ULL + i);
-        gc.store(obj, 1, 0x2000ULL + i);
-        old_addrs[i] = obj;
-        roots[i] = obj;
-    }
-
-    // Set up a simulated shadow GC frame with 18 slots
+    // A simulated shadow GC frame with 18 slots, in the C++ heap for the
+    // same reason (a frame on the stack would be read by the scan too).
     struct SimulatedFrame {
         void* prev = nullptr;
         uint32_t count = NUM_ARGS;
         uint32_t pad = 0;
         int64_t slots[NUM_ARGS];
-    } frame;
+    };
+    auto frame_holder = std::make_unique<SimulatedFrame>();
+    SimulatedFrame& frame = *frame_holder;
 
-    for (size_t i = 0; i < NUM_ARGS; ++i) {
-        frame.slots[i] = static_cast<int64_t>(roots[i]);
-    }
+    // Allocate 18 separate young objects
+    in_own_frame([&] {
+        for (size_t i = 0; i < NUM_ARGS; ++i) {
+            uintptr_t obj = gc.allocate_masked(16, 0, 100 + static_cast<uint32_t>(i));
+            REQUIRE(obj != 0);
+            gc.store(obj, 0, 0x1000ULL + i);
+            gc.store(obj, 1, 0x2000ULL + i);
+            old_addrs[i] = obj;
+            frame.slots[i] = static_cast<int64_t>(obj);
+        }
+    });
 
     // Roots pointing directly into the frame slots
     const auto source = gc.add_root_source([&frame](gc::Tracer& tracer) {
@@ -64,7 +67,7 @@ TEST_CASE("Frontend Hardening - Dynamic Call Argument Relocation under a Moving 
     });
 
     // Trigger a moving (young-generation) collection
-    gc.collect(gc::CollectionKind::Minor);
+    collect_scrubbed(gc, gc::CollectionKind::Minor);
     gc.remove_root_source(source);
     CHECK_EQ(gc.collection_count(), 1ULL);
 

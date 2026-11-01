@@ -11,6 +11,7 @@
 // space near its end finishes the sweep rather than collect again; the eager
 // A/B switch; and a randomized mutator under verification.
 
+#include "stack_scrub.hpp"
 #include "test_framework.hpp"
 
 #include <brass/gc/heap.hpp>
@@ -19,12 +20,20 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
 
 using namespace brass::gc;
+using brass::test::collect_scrubbed;
+using brass::test::from_own_frame;
+using brass::test::HeapRoot;
+using brass::test::hide_address;
+using brass::test::in_own_frame;
+using brass::test::scrub_stack;
+using brass::test::unhide_address;
 
 namespace {
 
@@ -113,7 +122,12 @@ struct OldSet {
     std::vector<uint64_t> kept;
 };
 
-OldSet make_old(Heap& h, size_t count, size_t words, size_t keep_every) {
+// In a frame of its own: the stack is read conservatively, and a collection
+// that marks the old generation keeps what a stack word names
+// (docs/gc_contract.md 2.5). The tests that need an object to die keep its
+// address only in the C++ heap (these vectors) or hidden (stack_scrub.hpp),
+// touch it in frames of their own, and scrub the stack before collecting.
+BRASS_TEST_NOINLINE OldSet make_old(Heap& h, size_t count, size_t words, size_t keep_every) {
     OldSet set;
     set.kept.reserve(count / keep_every + 1);
     for (size_t i = 0; i < count; ++i) {
@@ -131,6 +145,49 @@ void root_all(Heap& h, std::vector<uint64_t>& roots) {
 
 void unroot_all(Heap& h, std::vector<uint64_t>& roots) {
     for (uint64_t& r : roots) h.remove_root(&r);
+}
+
+BRASS_TEST_FORCEINLINE bool start_scrubbed(Heap& h) {
+    scrub_stack();
+    return h.start_marking();
+}
+
+BRASS_TEST_NOINLINE bool alive(const Heap& h, uint64_t hidden) {
+    return h.is_valid_object(static_cast<uintptr_t>(unhide_address(hidden)));
+}
+
+// Whether every address listed is (or none is) a valid object.
+BRASS_TEST_NOINLINE bool all_valid(const Heap& h, const std::vector<uintptr_t>& objects) {
+    for (const uintptr_t o : objects) {
+        if (!h.is_valid_object(o)) return false;
+    }
+    return true;
+}
+
+BRASS_TEST_NOINLINE bool none_valid(const Heap& h, const std::vector<uintptr_t>& objects) {
+    for (const uintptr_t o : objects) {
+        if (h.is_valid_object(o)) return false;
+    }
+    return true;
+}
+
+// Every nonzero root, as addresses.
+BRASS_TEST_NOINLINE std::vector<uintptr_t> nonzero(const std::vector<uint64_t>& roots) {
+    std::vector<uintptr_t> out;
+    for (const uint64_t r : roots) {
+        if (r) out.push_back(static_cast<uintptr_t>(r));
+    }
+    return out;
+}
+
+// Moves every `step`-th root (from `first`) into the returned list, zeroing it.
+BRASS_TEST_NOINLINE std::vector<uintptr_t> drop_every(std::vector<uint64_t>& roots, size_t first, size_t step) {
+    std::vector<uintptr_t> dropped;
+    for (size_t i = first; i < roots.size(); i += step) {
+        dropped.push_back(static_cast<uintptr_t>(roots[i]));
+        roots[i] = 0;
+    }
+    return dropped;
 }
 
 } // namespace
@@ -278,31 +335,26 @@ TEST_CASE("gc::Heap lazy sweep - a cycle's start finishes the pending sweep, and
         Heap h(config());
         OldSet set = make_old(h, 3000, 4, 3);
         root_all(h, set.kept);
-        h.collect(CollectionKind::Full);
+        collect_scrubbed(h, CollectionKind::Full);
         REQUIRE(h.sweeping());
         // Drop more, so the next cycle has dead of its own: had the last
         // cycle's marks survived, these would look marked and live.
-        std::vector<uintptr_t> dropped;
-        for (size_t i = 0; i < set.kept.size(); i += 2) {
-            dropped.push_back(static_cast<uintptr_t>(set.kept[i]));
-            set.kept[i] = 0;
-        }
+        const std::vector<uintptr_t> dropped = drop_every(set.kept, 0, 2);
         if (how == 0) {
-            REQUIRE(h.start_marking());
+            REQUIRE(start_scrubbed(h));
             CHECK_FALSE(h.sweeping());  // finished in the start's pause
             while (!h.mark_slice(UINT64_MAX)) {
             }
+            scrub_stack();
             h.finish_marking();
         } else {
-            h.collect(CollectionKind::Full);
+            collect_scrubbed(h, CollectionKind::Full);
         }
         CHECK(h.sweeping());  // this cycle's own, pending again
-        for (uintptr_t o : dropped) CHECK_FALSE(h.is_valid_object(o));
-        for (uint64_t o : set.kept) {
-            if (o) CHECK(h.is_valid_object(static_cast<uintptr_t>(o)));
-        }
+        CHECK(none_valid(h, dropped));
+        CHECK(all_valid(h, nonzero(set.kept)));
         sweep_all(h);
-        for (uintptr_t o : dropped) CHECK_FALSE(h.is_valid_object(o));
+        CHECK(none_valid(h, dropped));
         unroot_all(h, set.kept);
     }
 }
@@ -318,37 +370,47 @@ TEST_CASE("gc::Heap lazy sweep - what a minor collection promotes during the swe
     // yet to judge, and would free what is unmarked).
     std::vector<uint64_t> big(40, 0);
     root_all(h, big);
-    for (uint64_t& b : big) b = h.allocate(20 * 1024, words_layout());
-    h.collect(CollectionKind::Full);
+    in_own_frame([&] {
+        for (uint64_t& b : big) b = h.allocate(20 * 1024, words_layout());
+    });
+    collect_scrubbed(h, CollectionKind::Full);
     REQUIRE(h.sweeping());
     std::vector<uint64_t> young(300, 0);
     root_all(h, young);
-    for (size_t i = 0; i < young.size(); ++i) {
-        // Mature-sized, and every 50th 12 KB: young (below the large-object
-        // threshold), promoted into the large-object space.
-        const size_t bytes = i % 50 == 0 ? 12 * 1024 : 40;
-        young[i] = h.allocate(bytes, words_layout());
-        *slot_of(static_cast<uintptr_t>(young[i]), 0) = set.kept[i % set.kept.size()];
-    }
-    h.collect(CollectionKind::Minor);
-    for (uint64_t o : young) REQUIRE(h.is_old(static_cast<uintptr_t>(o)));
+    in_own_frame([&] {
+        for (size_t i = 0; i < young.size(); ++i) {
+            // Mature-sized, and every 50th 12 KB: young (below the large-object
+            // threshold), promoted into the large-object space.
+            const size_t bytes = i % 50 == 0 ? 12 * 1024 : 40;
+            young[i] = h.allocate(bytes, words_layout());
+            *slot_of(static_cast<uintptr_t>(young[i]), 0) = set.kept[i % set.kept.size()];
+        }
+    });
+    collect_scrubbed(h, CollectionKind::Minor);
+    REQUIRE(from_own_frame([&] {
+        for (uint64_t o : young) {
+            if (!h.is_old(static_cast<uintptr_t>(o))) return false;
+        }
+        return true;
+    }));
     REQUIRE(h.sweeping());
     sweep_all(h);
-    for (size_t i = 0; i < young.size(); ++i) {
-        const auto o = static_cast<uintptr_t>(young[i]);
-        CHECK(h.is_valid_object(o));
-        CHECK_EQ(Heap::load(o, 0), set.kept[i % set.kept.size()]);
-    }
+    in_own_frame([&] {
+        for (size_t i = 0; i < young.size(); ++i) {
+            const auto o = static_cast<uintptr_t>(young[i]);
+            CHECK(h.is_valid_object(o));
+            CHECK_EQ(Heap::load(o, 0), set.kept[i % set.kept.size()]);
+        }
+    });
     // And they are ordinary old objects to the next cycle: kept while held,
     // freed once not.
-    h.collect(CollectionKind::Full);
-    for (uint64_t o : young) CHECK(h.is_valid_object(static_cast<uintptr_t>(o)));
-    std::vector<uintptr_t> was(young.begin(), young.end());
-    for (uint64_t& o : young) o = 0;
-    h.collect(CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
+    CHECK(all_valid(h, nonzero(young)));
+    const std::vector<uintptr_t> was = drop_every(young, 0, 1);
+    collect_scrubbed(h, CollectionKind::Full);
     sweep_all(h);
-    for (uintptr_t o : was) CHECK_FALSE(h.is_valid_object(o));
-    for (uint64_t b : big) CHECK(h.is_valid_object(static_cast<uintptr_t>(b)));
+    CHECK(none_valid(h, was));
+    CHECK(all_valid(h, nonzero(big)));
     unroot_all(h, big);
     unroot_all(h, young);
     unroot_all(h, set.kept);
@@ -358,29 +420,32 @@ TEST_CASE("gc::Heap lazy sweep - a minor collection's card scan never scans a de
     Heap h(config());
     // Live L and dead D side by side in one card: a store into L dirties the
     // card both start in. D's trace function counts its calls.
-    uint64_t live = h.allocate(16, words_layout(), kAllocOld);
-    h.add_root(&live);
-    const uintptr_t dead = h.allocate(16, spy_layout(), kAllocOld);
-    const auto l = static_cast<uintptr_t>(live);
-    REQUIRE_EQ((dead - h.old_base()) >> kCardShift, (l - h.old_base()) >> kCardShift);
-    // D names a large object that dies with it: once freed (and its pages
-    // reused), D's slot names memory that is no object.
-    *slot_of(dead, 0) = h.allocate(64 * 1024, words_layout());
-    h.collect(CollectionKind::Full);
+    HeapRoot<Heap> live(h);
+    const uint64_t dead = from_own_frame([&] {
+        *live.slot = h.allocate(16, words_layout(), kAllocOld);
+        const uintptr_t d = h.allocate(16, spy_layout(), kAllocOld);
+        const auto l = static_cast<uintptr_t>(*live.slot);
+        REQUIRE_EQ((d - h.old_base()) >> kCardShift, (l - h.old_base()) >> kCardShift);
+        // D names a large object that dies with it: once freed (and its pages
+        // reused), D's slot names memory that is no object.
+        *slot_of(d, 0) = h.allocate(64 * 1024, words_layout());
+        return hide_address(d);
+    });
+    collect_scrubbed(h, CollectionKind::Full);
     REQUIRE(h.sweeping());
-    REQUIRE_FALSE(h.is_valid_object(dead));
+    REQUIRE_FALSE(alive(h, dead));
     g_spy_traces = 0;
-    uint64_t young = h.allocate(16, words_layout());
-    h.store(l, 0, young);  // dirties the shared card
-    young = 0;
-    h.collect(CollectionKind::Minor);
+    in_own_frame([&] {
+        // Dirties the shared card.
+        h.store(static_cast<uintptr_t>(*live.slot), 0, h.allocate(16, words_layout()));
+    });
+    collect_scrubbed(h, CollectionKind::Minor);
     CHECK_EQ(g_spy_traces, uint64_t{0});
     CHECK(h.sweeping());
     sweep_all(h);
-    h.collect(CollectionKind::Minor);
+    collect_scrubbed(h, CollectionKind::Minor);
     CHECK_EQ(g_spy_traces, uint64_t{0});
-    CHECK(h.is_valid_object(l));
-    h.remove_root(&live);
+    CHECK(h.is_valid_object(static_cast<uintptr_t>(*live.slot)));
 }
 
 TEST_CASE("gc::Heap lazy sweep - large objects: the dead freed, those allocated during the sweep kept, pages reused") {
@@ -389,44 +454,41 @@ TEST_CASE("gc::Heap lazy sweep - large objects: the dead freed, those allocated 
     // Forty, every fourth dropped: more than one allocation's walk looks at.
     std::vector<uint64_t> big(40, 0);
     root_all(h, big);
-    for (uint64_t& b : big) b = h.allocate(kBig, words_layout());
-    std::vector<uintptr_t> dropped;
-    for (size_t i = 0; i < big.size(); i += 4) {
-        dropped.push_back(static_cast<uintptr_t>(big[i]));
-        big[i] = 0;
-    }
-    h.collect(CollectionKind::Full);
+    in_own_frame([&] {
+        for (uint64_t& b : big) b = h.allocate(kBig, words_layout());
+    });
+    const std::vector<uintptr_t> dropped = drop_every(big, 0, 4);
+    collect_scrubbed(h, CollectionKind::Full);
     REQUIRE(h.sweeping());
-    for (uintptr_t d : dropped) CHECK_FALSE(h.is_valid_object(d));
+    CHECK(none_valid(h, dropped));
     const size_t committed = h.committed_bytes();
     // A large object of the same size: no free run fits yet, so the
     // allocator walks the sweep forward and takes a dead one's pages rather
     // than growing the space.
-    uint64_t again = h.allocate(kBig, words_layout());
-    h.add_root(&again);
-    CHECK(std::find(dropped.begin(), dropped.end(), static_cast<uintptr_t>(again)) != dropped.end());
+    HeapRoot<Heap> again(h);
+    HeapRoot<Heap> during(h);
+    in_own_frame([&] {
+        *again.slot = h.allocate(kBig, words_layout());
+        CHECK(std::find(dropped.begin(), dropped.end(), static_cast<uintptr_t>(*again.slot)) != dropped.end());
+    });
     CHECK(h.committed_bytes() <= committed);
     // Larger than any dead run: the walk's next steps find none, and it lands
     // at the frontier, past the cursor, while the walk is under way: kept by it.
-    uint64_t during = h.allocate(5 * kBig, words_layout());
-    h.add_root(&during);
+    in_own_frame([&] { *during.slot = h.allocate(5 * kBig, words_layout()); });
     REQUIRE(h.sweeping());
     sweep_all(h);
-    for (uint64_t b : big) {
-        if (b) CHECK(h.is_valid_object(static_cast<uintptr_t>(b)));
-    }
-    CHECK(h.is_valid_object(static_cast<uintptr_t>(again)));
-    CHECK(h.is_valid_object(static_cast<uintptr_t>(during)));
+    CHECK(all_valid(h, nonzero(big)));
+    const uint64_t a = again.hidden();
+    const uint64_t d = during.hidden();
+    CHECK(alive(h, a));
+    CHECK(alive(h, d));
     // Their marks were cleared by the walk: dropped, the next cycle frees them.
-    const auto a = static_cast<uintptr_t>(again);
-    const auto d = static_cast<uintptr_t>(during);
-    again = during = 0;
-    h.collect(CollectionKind::Full);
-    CHECK_FALSE(h.is_valid_object(a));
-    CHECK_FALSE(h.is_valid_object(d));
+    *again.slot = 0;
+    *during.slot = 0;
+    collect_scrubbed(h, CollectionKind::Full);
+    CHECK_FALSE(alive(h, a));
+    CHECK_FALSE(alive(h, d));
     sweep_all(h);
-    h.remove_root(&again);
-    h.remove_root(&during);
     unroot_all(h, big);
 }
 
@@ -437,36 +499,41 @@ void count_finalizer(void*) { ++g_finalized; }
 
 TEST_CASE("gc::Heap lazy sweep - finalizers, weak slots and hooks settle at the finish, before anything is freed") {
     Heap h(config());
-    uint64_t cell_live = h.allocate(8, weak_cell_layout(), kAllocOld);
-    uint64_t cell_dead = h.allocate(8, weak_cell_layout(), kAllocOld);
-    uint64_t target = h.allocate(16, words_layout(), kAllocOld);
-    for (uint64_t* r : {&cell_live, &cell_dead, &target}) h.add_root(r);
-    const uintptr_t doomed = h.allocate(16, words_layout(), kAllocOld);
-    *slot_of(static_cast<uintptr_t>(cell_live), 0) = target;
-    *slot_of(static_cast<uintptr_t>(cell_dead), 0) = doomed;
+    HeapRoot<Heap> cell_live(h), cell_dead(h), target(h);
+    // The doomed object's address, for the hook: in the C++ heap, where no
+    // stack word holds it.
+    auto doomed = std::make_unique<uintptr_t>(0);
     g_finalized = 0;
-    h.add_finalizer(doomed, &count_finalizer, nullptr);
+    in_own_frame([&] {
+        *cell_live.slot = h.allocate(8, weak_cell_layout(), kAllocOld);
+        *cell_dead.slot = h.allocate(8, weak_cell_layout(), kAllocOld);
+        *target.slot = h.allocate(16, words_layout(), kAllocOld);
+        *doomed = h.allocate(16, words_layout(), kAllocOld);
+        *slot_of(static_cast<uintptr_t>(*cell_live.slot), 0) = *target.slot;
+        *slot_of(static_cast<uintptr_t>(*cell_dead.slot), 0) = *doomed;
+        h.add_finalizer(*doomed, &count_finalizer, nullptr);
+    });
     uintptr_t hook_saw = 1;
     bool hook_ran = false;
-    const auto hook = h.add_post_collection_hook([&](Heap& heap, CollectionKind kind) {
+    uintptr_t* const doomed_at = doomed.get();
+    const auto hook = h.add_post_collection_hook([&hook_saw, &hook_ran, doomed_at](Heap& heap, CollectionKind kind) {
         if (kind != CollectionKind::Full) return;
         hook_ran = true;
-        hook_saw = heap.survivor_of(doomed);
+        hook_saw = heap.survivor_of(*doomed_at);
     });
-    h.collect(CollectionKind::Full);
+    collect_scrubbed(h, CollectionKind::Full);
     REQUIRE(h.sweeping());
     CHECK(hook_ran);
     CHECK_EQ(hook_saw, uintptr_t{0});
     CHECK_EQ(g_finalized, uint64_t{1});
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(cell_dead), 0), kCleared);
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(cell_live), 0), target);
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(*cell_dead.slot), 0), kCleared);
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(*cell_live.slot), 0), *target.slot);
     // A minor collection during the sweep decides nothing old again.
-    h.collect(CollectionKind::Minor);
+    collect_scrubbed(h, CollectionKind::Minor);
     sweep_all(h);
     CHECK_EQ(g_finalized, uint64_t{1});
-    CHECK_EQ(Heap::load(static_cast<uintptr_t>(cell_live), 0), target);
+    CHECK_EQ(Heap::load(static_cast<uintptr_t>(*cell_live.slot), 0), *target.slot);
     h.remove_post_collection_hook(hook);
-    for (uint64_t* r : {&cell_live, &cell_dead, &target}) h.remove_root(r);
 }
 
 // The release decommits at most HeapConfig::release_run_blocks blocks a step
