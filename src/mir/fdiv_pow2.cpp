@@ -1,4 +1,5 @@
 #include <brass/mir/fdiv_pow2.hpp>
+#include <brass/core/env.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/uses.hpp>
@@ -12,8 +13,8 @@ namespace {
 
 bool disabled_by_env() {
     static const bool off = [] {
-        const char* v = std::getenv("BRASS_NO_FDIV_POW2");
-        return v && *v && *v != '0';
+        const std::string v = env_value("BRASS_NO_FDIV_POW2");
+        return !v.empty() && v[0] != '0';
     }();
     return off;
 }

@@ -1,7 +1,7 @@
 #pragma once
 
+#include <brass/core/env.hpp>
 #include <brass/mir/module.hpp>
-#include <cstdlib>
 
 namespace brass::codegen {
 
@@ -13,7 +13,7 @@ namespace brass::codegen {
 // there only for a conservative scan. BRASS_NO_PRECISE_ROOTS=1 (read once a
 // process) zeroes them for every module, as before, for A/B.
 inline bool clears_dead_roots_at_calls(const Module* mod) {
-    static const bool seam_off = std::getenv("BRASS_NO_PRECISE_ROOTS") != nullptr;
+    static const bool seam_off = !brass::env_value("BRASS_NO_PRECISE_ROOTS").empty();
     return seam_off || mod == nullptr || !mod->precise_stack_roots();
 }
 

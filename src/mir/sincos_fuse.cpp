@@ -1,4 +1,5 @@
 #include <brass/mir/sincos_fuse.hpp>
+#include <brass/core/env.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
@@ -16,8 +17,8 @@ namespace {
 
 bool fuse_disabled_by_env() {
     static const bool off = [] {
-        const char* v = std::getenv("BRASS_NO_SINCOS_FUSE");
-        return v && *v && *v != '0';
+        const std::string v = env_value("BRASS_NO_SINCOS_FUSE");
+        return !v.empty() && v[0] != '0';
     }();
     return off;
 }

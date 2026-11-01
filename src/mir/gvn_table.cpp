@@ -1,4 +1,5 @@
 #include "gvn_table.hpp"
+#include <brass/core/env.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/runtime_symbols.hpp>
 #include <cstdlib>
@@ -10,8 +11,8 @@ namespace {
 // BRASS_NO_FDIV_GVN=1: float divisions are not merged (the A/B seam).
 bool fdiv_gvn_disabled_by_env() noexcept {
     static const bool off = [] {
-        const char* v = std::getenv("BRASS_NO_FDIV_GVN");
-        return v && *v && *v != '0';
+        const std::string v = env_value("BRASS_NO_FDIV_GVN");
+        return !v.empty() && v[0] != '0';
     }();
     return off;
 }

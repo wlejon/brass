@@ -1,4 +1,5 @@
 #include <brass/codegen/linear_scan.hpp>
+#include <brass/core/env.hpp>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -388,7 +389,7 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
 // defines would be stored there every iteration for its read to wait on.
 // BRASS_NO_FOLDED_USE=1 is the seam: every read wants a register.
 void LinearScanAllocator::mark_folded_uses() {
-    static const bool off = std::getenv("BRASS_NO_FOLDED_USE") != nullptr;
+    static const bool off = !brass::env_value("BRASS_NO_FOLDED_USE").empty();
     if (off || !cc_.target().is_x64()) return;
     const auto& guard_exits = liveness_.guard_exits();
     for (const auto& block : fn_.blocks) {
