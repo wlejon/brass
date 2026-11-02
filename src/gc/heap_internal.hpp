@@ -238,14 +238,10 @@ struct LazySweep {
 
 // A marking cycle's state between its calls (heap_mark_incremental.cpp).
 struct MarkCycle;
-struct MarkCycleDeleter {
-    void operator()(MarkCycle* cycle) const noexcept;
-};
+struct MarkCycleDeleter { void operator()(MarkCycle* cycle) const noexcept; };
 // The marker's parked helper threads (heap_mark_threads.hpp).
 class MarkThreads;
-struct MarkThreadsDeleter {
-    void operator()(MarkThreads* threads) const noexcept;
-};
+struct MarkThreadsDeleter { void operator()(MarkThreads* threads) const noexcept; };
 
 // What a minor collection tells the adaptive eden (HeapState::adapt_eden_limit).
 struct MinorSample {
@@ -464,18 +460,12 @@ struct HeapState {
 
     // ---- geometry ----
     [[nodiscard]] bool in_eden(uintptr_t a) const noexcept { return a - eden_lo < eden_hi - eden_lo; }
-    [[nodiscard]] bool in_survivor(int which, uintptr_t a) const noexcept {
-        return a - survivor_lo[which] < survivor_bytes;
-    }
+    [[nodiscard]] bool in_survivor(int which, uintptr_t a) const noexcept { return a - survivor_lo[which] < survivor_bytes; }
     [[nodiscard]] bool in_mature(uintptr_t a) const noexcept { return a - mature_lo < mature_reserve; }
     [[nodiscard]] bool in_large(uintptr_t a) const noexcept { return a - large_lo < large_reserve; }
-    [[nodiscard]] uint32_t block_index(uintptr_t a) const noexcept {
-        return static_cast<uint32_t>((a - mature_lo) / kBlockBytes);
-    }
+    [[nodiscard]] uint32_t block_index(uintptr_t a) const noexcept { return static_cast<uint32_t>((a - mature_lo) / kBlockBytes); }
     [[nodiscard]] uintptr_t block_base(uint32_t index) const noexcept { return mature_lo + index * kBlockBytes; }
-    [[nodiscard]] size_t young_bit(uintptr_t payload) const noexcept {
-        return (payload - eden_lo) / kGranuleBytes;
-    }
+    [[nodiscard]] size_t young_bit(uintptr_t payload) const noexcept { return (payload - eden_lo) / kGranuleBytes; }
     void set_young_start(uintptr_t payload) noexcept {
         const size_t bit = young_bit(payload);
         young_starts[bit >> 6] |= uint64_t{1} << (bit & 63);
