@@ -354,6 +354,12 @@ std::vector<uint8_t> ElfSoWriter::write() {
         sections[data_idx].relocations = ds->relocations;
         sections[data_idx].source = ".data";
     }
+    // A .symtab naming every function of .text, so a profiler or debugger
+    // reading the file (perf, gdb) names the image's code. Non-alloc: the
+    // loader never maps it, and the image's exports stay .dynsym's alone.
+    const uint32_t symtab_idx = add(".symtab", elf64::SHT_SYMTAB, 0, 8, 24, {});
+    const uint32_t strtab_idx = add(".strtab", elf64::SHT_STRTAB, 0, 1, 0, {});
+    sections[symtab_idx].sh_link = strtab_idx;
     const uint32_t shstrtab_idx = add(".shstrtab", elf64::SHT_STRTAB, 0, 1, 0, {});
 
     sections[hash_idx].sh_link = dynsym_idx;
@@ -597,7 +603,34 @@ std::vector<uint8_t> ElfSoWriter::write() {
         return {};
     }
 
-    // 9. .shstrtab, non-alloc, after the last segment
+    // 9. .symtab / .strtab, then .shstrtab: non-alloc, after the last segment
+    {
+        std::vector<uint8_t>& sym = sections[symtab_idx].data;
+        std::vector<uint8_t>& str = sections[strtab_idx].data;
+        str.push_back(0);
+        sym.assign(24, 0);   // the null symbol
+        const uint64_t text_addr = sections[text_idx].sh_addr;
+        for (const auto& os : working_obj.symbols) {
+            if (os.type != object::SymbolType::Function || os.section_index < 0 || os.name.empty()) continue;
+            if (working_obj.sections[static_cast<size_t>(os.section_index)].name != ".text") continue;
+            write_u32(sym, static_cast<uint32_t>(str.size()));
+            write_cstring(str, os.name);
+            write_u8(sym, static_cast<uint8_t>((elf64::STB_LOCAL << 4) | elf64::STT_FUNC));
+            write_u8(sym, 0);
+            write_u16(sym, static_cast<uint16_t>(text_idx));
+            write_u64(sym, text_addr + os.value);
+            write_u64(sym, os.size);
+        }
+        // Every entry is local, so the first non-local one is past the end.
+        sections[symtab_idx].sh_info = static_cast<uint32_t>(sym.size() / 24);
+        for (uint32_t idx : {symtab_idx, strtab_idx}) {
+            ElfShdr& t = sections[idx];
+            cur = align_up(cur, t.sh_addralign);
+            t.sh_offset = cur;
+            t.sh_size = t.data.size();
+            cur += t.sh_size;
+        }
+    }
     std::vector<uint8_t>& shstrtab = sections[shstrtab_idx].data;
     shstrtab.push_back(0);
     for (auto& s : sections) {
