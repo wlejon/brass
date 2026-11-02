@@ -127,64 +127,75 @@ struct Built {
 
 // The graph, built in a frame of its own: the collections that compare read
 // the stack conservatively, and a node's address left in the frame that
-// collects would keep it in one run and not another (stack_scrub.hpp).
+// collects would keep it in one run and not another (stack_scrub.hpp). The
+// objects are made and touched only in frames below build's own
+// (from_own_frame, in_own_frame), so neither build's frame nor the
+// callee-saved registers it holds name one at its full collection, where
+// scrub_stack() does not reach: under clang on arm64 the last ephemeron
+// table's address stayed there, the table was pinned young in place, and a
+// later full collection copied it old where a cycle marked it in place.
 BRASS_TEST_NOINLINE Built build(Heap& h, uint32_t seed, std::vector<uint64_t>& roots,
                                 std::vector<uintptr_t>& finalized) {
     std::mt19937 rng(seed);
     auto pick = [&](size_t n) { return static_cast<size_t>(rng() % n); };
-    size_t root_at = 0;
 
     std::vector<uint64_t> nodes(kNodes, 0);  // a host table: rooted until the cut below
     for (uint64_t& n : nodes) h.add_root(&n);
-    for (size_t i = 0; i < kNodes; ++i) nodes[i] = h.allocate(kNodeWords * 8, words_layout());
-    for (size_t i = 0; i < kNodes; ++i) {
-        for (size_t k = 0; k < kNodeWords; ++k) {
-            if (rng() % 4 == 0) continue;  // some slots stay null
-            h.store(static_cast<uintptr_t>(nodes[i]), k, nodes[pick(kNodes)]);
+    const Built built = brass::test::from_own_frame([&] {
+        size_t root_at = 0;
+        for (size_t i = 0; i < kNodes; ++i) nodes[i] = h.allocate(kNodeWords * 8, words_layout());
+        for (size_t i = 0; i < kNodes; ++i) {
+            for (size_t k = 0; k < kNodeWords; ++k) {
+                if (rng() % 4 == 0) continue;  // some slots stay null
+                h.store(static_cast<uintptr_t>(nodes[i]), k, nodes[pick(kNodes)]);
+            }
         }
-    }
-    for (size_t a = 0; a < kArrays; ++a) {
-        const uintptr_t arr = h.allocate(kArrayWords * 8, words_layout());
-        roots[root_at++] = arr;
-        for (size_t k = 0; k < kArrayWords; k += 1 + pick(64)) h.store(arr, k, nodes[pick(kNodes)]);
-    }
-    for (size_t i = 0; i < 16; ++i) roots[root_at++] = nodes[pick(kNodes)];
-    const size_t weak_first = root_at;
-    for (size_t i = 0; i < kWeakCells; ++i) {
-        const uintptr_t cell = h.allocate(8, weak_cell_layout());
-        roots[root_at++] = cell;
-        h.store(cell, 0, nodes[pick(kNodes)]);
-    }
-    const size_t table_first = root_at;
-    for (size_t t = 0; t < kTables; ++t) {
-        const uintptr_t table = h.allocate((1 + 2 * kTableEntries) * 8, ephemeron_table_layout());
-        roots[root_at++] = table;
-        reinterpret_cast<uint64_t*>(table)[0] = kTableEntries;
-        for (size_t e = 0; e < kTableEntries; ++e) {
-            h.store(table, 1 + 2 * e, nodes[pick(kNodes)]);
-            // Some values are other keys' keys: chains the fixpoint resolves.
-            h.store(table, 2 + 2 * e, nodes[pick(kNodes)]);
+        for (size_t a = 0; a < kArrays; ++a) {
+            const uintptr_t arr = h.allocate(kArrayWords * 8, words_layout());
+            roots[root_at++] = arr;
+            for (size_t k = 0; k < kArrayWords; k += 1 + pick(64)) h.store(arr, k, nodes[pick(kNodes)]);
         }
-    }
+        for (size_t i = 0; i < 16; ++i) roots[root_at++] = nodes[pick(kNodes)];
+        const size_t weak_first = root_at;
+        for (size_t i = 0; i < kWeakCells; ++i) {
+            const uintptr_t cell = h.allocate(8, weak_cell_layout());
+            roots[root_at++] = cell;
+            h.store(cell, 0, nodes[pick(kNodes)]);
+        }
+        const size_t table_first = root_at;
+        for (size_t t = 0; t < kTables; ++t) {
+            const uintptr_t table = h.allocate((1 + 2 * kTableEntries) * 8, ephemeron_table_layout());
+            roots[root_at++] = table;
+            reinterpret_cast<uint64_t*>(table)[0] = kTableEntries;
+            for (size_t e = 0; e < kTableEntries; ++e) {
+                h.store(table, 1 + 2 * e, nodes[pick(kNodes)]);
+                // Some values are other keys' keys: chains the fixpoint resolves.
+                h.store(table, 2 + 2 * e, nodes[pick(kNodes)]);
+            }
+        }
+        return Built{weak_first, table_first};
+    });
     // Everything old now; the table of nodes still roots all. On a scrubbed
     // stack: the allocator's frames below this one left node addresses in
     // slots the collection's frames may not write, and a node one of them
     // names stays young in place (pinned), to be evacuated by a later full
     // collection but marked in place by a cycle, at another offset.
     brass::test::collect_scrubbed(h, CollectionKind::Full);
-    for (size_t i = 0; i < kNodes; i += 7) {
-        h.add_finalizer(static_cast<uintptr_t>(nodes[i]), &record_finalized, &finalized,
-                        reinterpret_cast<void*>(i));
-    }
-    // The host table goes; links are cut at random, so some of the graph dies.
-    for (uint64_t& n : nodes) h.remove_root(&n);
-    for (size_t i = 0; i < kNodes; ++i) {
-        for (size_t k = 0; k < kNodeWords; ++k) {
-            if (rng() % 3 == 0) h.store(static_cast<uintptr_t>(nodes[i]), k, 0);
+    brass::test::in_own_frame([&] {
+        for (size_t i = 0; i < kNodes; i += 7) {
+            h.add_finalizer(static_cast<uintptr_t>(nodes[i]), &record_finalized, &finalized,
+                            reinterpret_cast<void*>(i));
         }
-    }
-    std::fill(nodes.begin(), nodes.end(), 0);
-    return Built{weak_first, table_first};
+        // The host table goes; links are cut at random, so some of the graph dies.
+        for (uint64_t& n : nodes) h.remove_root(&n);
+        for (size_t i = 0; i < kNodes; ++i) {
+            for (size_t k = 0; k < kNodeWords; ++k) {
+                if (rng() % 3 == 0) h.store(static_cast<uintptr_t>(nodes[i]), k, 0);
+            }
+        }
+        std::fill(nodes.begin(), nodes.end(), 0);
+    });
+    return built;
 }
 
 Outcome run(How how, uint64_t budget_ns, unsigned threads, uint32_t seed) {
