@@ -84,6 +84,11 @@ void X64ISel::find_address_only(const Function& mir_fn) {
     }
 }
 
+bool X64ISel::materialized(const Value* v) const {
+    if (!v || !v->is_instruction()) return true;
+    return skipped_insts_.count(v->defining_instruction()) == 0;
+}
+
 X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const {
     MemFold fold;
     fold.base_val = ptr;
@@ -98,7 +103,7 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
     ImmIntInfo imm0 = get_imm_int_info(op0);
     ImmIntInfo imm1 = get_imm_int_info(op1);
 
-    if (imm1.is_imm && imm1.fits_i32) {
+    if (imm1.is_imm && imm1.fits_i32 && materialized(op0)) {
         int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val;
         if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
             // `(a + b) + imm` from another block: the inner sum is one lea
@@ -124,10 +129,11 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
                     const Value* a1 = def0->operand(1);
                     ImmIntInfo imm_a0 = get_imm_int_info(a0);
                     ImmIntInfo imm_a1 = get_imm_int_info(a1);
-                    if (!imm_a0.is_imm && !imm_a1.is_imm) {
+                    if (!imm_a0.is_imm && !imm_a1.is_imm && materialized(a0)) {
                         if (a1 && a1->is_instruction()) {
                             const Instruction* s_def = a1->defining_instruction();
-                            if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl) {
+                            if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl &&
+                                materialized(s_def->operand(0))) {
                                 ImmIntInfo s_imm = get_imm_int_info(s_def->operand(1));
                                 if (s_imm.is_imm && s_imm.val >= 1 && s_imm.val <= 3) {
                                     fold.base_val = a0;
@@ -140,17 +146,19 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
                                 }
                             }
                         }
-                        fold.base_val = a0;
-                        fold.index_val = a1;
-                        fold.scale = Scale::One;
-                        fold.folded_instructions.push_back(def0);
+                        if (materialized(a1)) {
+                            fold.base_val = a0;
+                            fold.index_val = a1;
+                            fold.scale = Scale::One;
+                            fold.folded_instructions.push_back(def0);
+                        }
                         return fold;
                     }
                 }
             }
             return fold;
         }
-    } else if (imm0.is_imm && imm0.fits_i32) {
+    } else if (imm0.is_imm && imm0.fits_i32 && materialized(op1)) {
         int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val;
         if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
             fold.disp = static_cast<int32_t>(new_disp);
@@ -159,10 +167,11 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
             if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
             return fold;
         }
-    } else if (fold_two_register_sum(def, ptr, user_bb)) {
+    } else if (fold_two_register_sum(def, ptr, user_bb) && materialized(op0)) {
         if (op1 && op1->is_instruction()) {
             const Instruction* s_def = op1->defining_instruction();
-            if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl) {
+            if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl &&
+                materialized(s_def->operand(0))) {
                 ImmIntInfo s_imm = get_imm_int_info(s_def->operand(1));
                 if (s_imm.is_imm && s_imm.val >= 1 && s_imm.val <= 3) {
                     fold.base_val = op0;
@@ -175,10 +184,12 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
                 }
             }
         }
-        fold.base_val = op0;
-        fold.index_val = op1;
-        fold.scale = Scale::One;
-        fold.folded_instructions.push_back(def);
+        if (materialized(op1)) {
+            fold.base_val = op0;
+            fold.index_val = op1;
+            fold.scale = Scale::One;
+            fold.folded_instructions.push_back(def);
+        }
     }
     return fold;
 }
@@ -196,7 +207,7 @@ X64ISel::MemFold X64ISel::match_indexed_address(const Value* base, const Value* 
             ImmIntInfo imm0 = get_imm_int_info(def->operand(0));
             ImmIntInfo imm1 = get_imm_int_info(def->operand(1));
             int32_t sc = (scale == Scale::Eight ? 8 : (scale == Scale::Four ? 4 : (scale == Scale::Two ? 2 : 1)));
-            if (imm1.is_imm && imm1.fits_i32) {
+            if (imm1.is_imm && imm1.fits_i32 && materialized(def->operand(0))) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val * sc;
                 if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
                     fold.disp = static_cast<int32_t>(new_disp);
@@ -204,7 +215,7 @@ X64ISel::MemFold X64ISel::match_indexed_address(const Value* base, const Value* 
                     fold.folded_instructions.push_back(def);
                     if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
                 }
-            } else if (imm0.is_imm && imm0.fits_i32) {
+            } else if (imm0.is_imm && imm0.fits_i32 && materialized(def->operand(1))) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val * sc;
                 if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
                     fold.disp = static_cast<int32_t>(new_disp);
@@ -221,7 +232,7 @@ X64ISel::MemFold X64ISel::match_indexed_address(const Value* base, const Value* 
         if (def && def->opcode() == Opcode::add) {
             ImmIntInfo imm0 = get_imm_int_info(def->operand(0));
             ImmIntInfo imm1 = get_imm_int_info(def->operand(1));
-            if (imm1.is_imm && imm1.fits_i32) {
+            if (imm1.is_imm && imm1.fits_i32 && materialized(def->operand(0))) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val;
                 if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
                     fold.disp = static_cast<int32_t>(new_disp);
@@ -229,7 +240,7 @@ X64ISel::MemFold X64ISel::match_indexed_address(const Value* base, const Value* 
                     fold.folded_instructions.push_back(def);
                     if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
                 }
-            } else if (imm0.is_imm && imm0.fits_i32) {
+            } else if (imm0.is_imm && imm0.fits_i32 && materialized(def->operand(1))) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val;
                 if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
                     fold.disp = static_cast<int32_t>(new_disp);

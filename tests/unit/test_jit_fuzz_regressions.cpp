@@ -583,6 +583,46 @@ done:
     REQUIRE(all_tiers_agree(src, {{3, 0}, {3, 5}, {5, 1}, {10, 2}, {15, -7}, {0, 0}}));
 }
 
+// The index of a load_indexed is `i * 2 + 1`. The mul was fused into the
+// lea computing the add, so it has no register; folding the `+ 1` into the
+// displacement left the mul as the index register, and selection failed with
+// "address index has no register". (The add is also used as a value, so it
+// stays a lea and keeps the mul.) An add or shl folds into an address only
+// when the operand it leaves behind is materialized.
+TEST_CASE("JIT regression - address index through an add of a lea-fused mul") {
+    const char* src = R"(
+module @m
+func @fuzz_fn(%0: i64, %1: i64) -> i64 {
+entry:
+  %2 = alloca 1024, 8
+  %z = iconst.i64 0
+  %c1 = iconst.i64 1
+  %c2 = iconst.i64 2
+  %c63 = iconst.i64 63
+  %c128 = iconst.i64 128
+  br init(%z)
+init(%q: i64):
+  %ci = slt.i64 %q, %c128
+  br_if %ci, init_body, look
+init_body:
+  %qx = xor.i64 %q, %1
+  store_indexed.i64 %2, %q, 8, %qx
+  %qn = add.i64 %q, %c1
+  br init(%qn)
+look:
+  %i = and.i64 %0, %c63
+  %m = mul.i64 %i, %c2
+  %idx = add.i64 %m, %c1
+  %v = load_indexed.i64 %2, %idx, 8
+  %w = load_indexed.i64 %2, %i, 8
+  %vw = add.i64 %v, %w
+  %r = xor.i64 %vw, %idx
+  ret %r
+}
+)";
+    REQUIRE(all_tiers_agree(src, kIntArgs));
+}
+
 // GVN-PRE: a must-alias store on one path through a loop made the load after
 // it available but left the block "transparent", so the load was hoisted out
 // of the loop and read the value from before the stores (fuzz seed 300485).

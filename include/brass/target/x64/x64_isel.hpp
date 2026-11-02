@@ -130,6 +130,11 @@ private:
     // lower_div_mod must agree, or the divisor is left without one.
     bool divisor_unread(const Instruction& inst) const;
     MemFold match_indexed_address(const Value* base, const Value* index, Scale scale, int32_t offset) const;
+    // Whether `v` will be in a register where an address names it: anything
+    // but the result of an instruction the isel skips (a lea fusion's
+    // multiply or shift, a folded constant), which is computed inside its one
+    // user and never on its own.
+    bool materialized(const Value* v) const;
     bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
     bool is_value_dead_after(const Function& mir_fn, const BasicBlock& bb, const Instruction* inst, const Value* val) const;
