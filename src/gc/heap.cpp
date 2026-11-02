@@ -263,6 +263,12 @@ bool HeapState::eden_make_room(size_t total) noexcept {
         ++eden_frag;
         if (fresh) eden_fresh_frag = eden_frag;
         heap.alloc_->top = next.lo;
+        // The window's end moves with it. The caller may not bump (the object
+        // fits no fragment and goes old, Heap::allocate_at), and an `end`
+        // left at the last fragment's would sit below `top`: the bump paths
+        // compute end - top unsigned, and would allocate past eden, through
+        // the survivor spaces and into the mature blocks.
+        update_fast_limit();
     }
 }
 
@@ -277,6 +283,8 @@ void HeapState::build_eden_fragments() noexcept {
         eden_resident_hi = at;
     }
     if (eden_hi > at || eden_frags.empty()) eden_frags.push_back(YoungFragment{at, eden_hi});
+    eden_free_bytes = 0;
+    for (const YoungFragment& f : eden_frags) eden_free_bytes += f.hi - f.lo;
 }
 
 namespace {
@@ -491,6 +499,16 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         detail::gc_fatal("kAllocUninitialized for a layout the collector traces");
     }
     MutatorFrame frame(s, caller_fp, caller_ip);
+    // The inline bump in C++ (Heap::try_allocate_young) takes end - top
+    // unsigned, so a window whose end is below its top wraps and allocates
+    // past eden. Every path out of here leaves the window for the mutator;
+    // check it there.
+    struct WindowCheck {
+        const AllocationBuffer* w;
+        ~WindowCheck() {
+            if (w->end < w->top) detail::gc_fatal("young allocation window ends below its top");
+        }
+    } window_check{alloc_};
 
     if (s.stress != StressMode::None) {
         stress_step(0, 0);
@@ -534,6 +552,8 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
         if (s.old_critical) throw std::bad_alloc();
     }
 
+    // Eden counts as all but full of pinned objects below 1/8 of its limit free.
+    constexpr uint64_t kPinnedEdenFullFraction = 8;
     bool displaced = false;
     if (!old) {
         for (int attempt = 0; attempt < 3; ++attempt) {
@@ -541,6 +561,16 @@ uintptr_t Heap::allocate_at(size_t bytes, LayoutId layout, uint32_t flags, uint8
             // Eden was just collected and still has no room for it between
             // the pinned objects: another collection would pin them again.
             if (attempt > 0 && s.eden_frags.size() > 1) break;
+            // The last evacuation left eden all but full of objects the
+            // stacks pinned (a deep native stack of resumed coroutines names
+            // every frame on it): the next would find them named again and
+            // free nothing, at the cost of a scan of every stack per young
+            // allocation. Allocate old until the old generation's growth
+            // brings a full collection, which rebuilds eden's fragments.
+            if (attempt == 0 && s.eden_frags.size() > 1 &&
+                s.eden_free_bytes * kPinnedEdenFullFraction < static_cast<uint64_t>(s.eden_limit - s.eden_lo)) {
+                break;
+            }
             s.trigger = detail::GcTrigger::EdenFull;
             collect_at(CollectionKind::Minor, 0, 0);
         }

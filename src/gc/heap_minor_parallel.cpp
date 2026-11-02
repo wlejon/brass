@@ -793,7 +793,12 @@ unsigned parallel_minor_threads(GcState& g) {
     // serial one (the claims, the gathering, the buffers) and misses more
     // besides, so two threads measured barely faster than one (synth 200 p50
     // 0.54 against 0.55 ms; four 0.37, eight 0.24).
-    if (!reserve_room(s, young, most)) return 1;
+    // The room is for everything this collection can promote: eden's
+    // residents too (the objects an earlier evacuation pinned are promoted by
+    // the first that does not find them named again), which eden_used leaves
+    // out. eden_top covers them.
+    const uint64_t promotable = (g.eden_top - s.eden_lo) + (g.from_top - s.survivor_lo[g.from]);
+    if (!reserve_room(s, std::max(young, promotable), most)) return 1;
     return most;
 }
 

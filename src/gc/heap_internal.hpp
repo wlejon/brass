@@ -306,6 +306,7 @@ struct HeapState {
     size_t eden_frag = 0;
     size_t eden_fresh_frag = 0;
     uintptr_t eden_resident_hi = 0;      // the end of eden's highest resident (eden_lo: none)
+    uint64_t eden_free_bytes = 0;        // eden's fragments' bytes at the last build_eden_fragments
     // During a collection: [survivor_lo[to], + this) holds the residents an
     // earlier evacuation left in the to-space (GcState::in_from).
     size_t gc_to_resident_span = 0;
