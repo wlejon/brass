@@ -440,6 +440,12 @@ private:
 
     bool eliminate_trampolines() {
         bool changed = false;
+        // An identity trampoline T(p...): br Target(p...) can be bypassed only
+        // when its branch is the parameters' one use. A parameter read
+        // elsewhere (a loop-invariant step, say, merged in T and used inside
+        // the loop T enters) is defined by T alone, and once T's predecessors
+        // jump straight to Target that use is no longer dominated.
+        const UseCounts uses = compute_use_counts(fn_);
 
         for (BasicBlock* T : fn_.blocks()) {
             if (!T || T == fn_.entry_block() || resume_targets_.find(T) != resume_targets_.end()) {
@@ -460,6 +466,15 @@ private:
 
             // Identity forwarding or empty forwarding trampoline
             bool is_identity = (T->param_count() > 0 && term->branch_target().args == T->params());
+            if (is_identity) {
+                for (Value* p : T->params()) {
+                    const uint32_t* n = uses.find(p);
+                    if (n && *n > 1) {
+                        is_identity = false;
+                        break;
+                    }
+                }
+            }
             bool is_empty_forward = (T->param_count() == 0 && term->branch_target().args.empty());
 
             if (is_identity || is_empty_forward) {

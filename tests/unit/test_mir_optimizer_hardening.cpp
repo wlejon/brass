@@ -331,6 +331,57 @@ TEST_CASE("MIR Hardening - CFG Simplification renumbers the parameters it keeps"
     CHECK(verify_module(mod, &diag));
 }
 
+TEST_CASE("MIR Hardening - CFG Simplification keeps a trampoline whose parameter is read elsewhere") {
+    // `const step = c > 16 ? 5 : 1; for (let k = step; k < 30; k += step)`:
+    // the ternary merges in T(%step), which only forwards to the loop header
+    // (the counter starts at step), and the loop body reads %step again.
+    // Bypassing T left that read with no definition dominating it (bronze
+    // "SSA Dominance violation ... block parameter of block 'b3'").
+    Module mod("test_cfg_trampoline_param_use");
+    Function* fn = mod.create_function("f", Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* big = b.append_block("big");
+    BasicBlock* small = b.append_block("small");
+    BasicBlock* T = b.append_block("T");
+    BasicBlock* hdr = b.append_block("hdr");
+    BasicBlock* body = b.append_block("body");
+    BasicBlock* exit = b.append_block("exit");
+
+    b.position_at_end(entry);
+    Value* c = b.add_block_param(entry, Type::i64());
+    b.build_br_if(b.build_slt(b.build_iconst_i64(16), c), big, {}, small, {});
+
+    b.position_at_end(big);
+    b.build_br(T, {b.build_iconst_i64(5)});
+    b.position_at_end(small);
+    b.build_br(T, {b.build_iconst_i64(1)});
+
+    b.position_at_end(T);
+    Value* step = b.add_block_param(T, Type::i64());
+    b.build_br(hdr, {step});
+
+    b.position_at_end(hdr);
+    Value* k = b.add_block_param(hdr, Type::i64());
+    b.build_br_if(b.build_slt(k, b.build_iconst_i64(30)), body, {}, exit, {});
+
+    b.position_at_end(body);
+    b.build_br(hdr, {b.build_add(k, step)});
+
+    b.position_at_end(exit);
+    b.build_ret(k);
+
+    fn->rebuild_cfg_predecessors();
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(mod, &diag));
+
+    CfgSimplifyOptions opts;
+    cfg_simplify_function(*fn, opts);
+    CHECK(verify_module(mod, &diag));
+}
+
 // 6. Range Analysis: Wrapping Addition and Subtraction Degrade to Full Range
 TEST_CASE("MIR Hardening - Range Analysis Wrapping Addition Degrades To Full Range") {
     // 1. ValueRange addition overflow check
