@@ -3,6 +3,7 @@
 #include <brass/mir/alias_analysis.hpp>
 #include <brass/mir/memory_ssa.hpp>
 #include "gvn_table.hpp"
+#include "gvn_gc_free.hpp"
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -226,6 +227,11 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
 
         std::vector<Instruction*> to_remove;
         std::unordered_map<Value*, Value*> subst_map;
+        // The bitcasts of tagged values in scope, by operand: a later one
+        // with no GC point since stands for the same bits (gvn_gc_free.hpp).
+        GcFreePaths gc_free(fn);
+        std::vector<std::pair<const Value*, Instruction*>> tagged_reads;
+        std::vector<size_t> tagged_scopes;
 
         auto resolve = [&](Value* v) -> Value* {
             if (!v) return nullptr;
@@ -244,6 +250,7 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
 
         auto visit_block = [&](const BasicBlock* bb) -> void {
             table.enter_scope();
+            tagged_scopes.push_back(tagged_reads.size());
 
             Instruction* cur = const_cast<BasicBlock*>(bb)->head();
             while (cur) {
@@ -257,6 +264,30 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
                     if (r != op_val) {
                         cur->set_operand(i, r);
                     }
+                }
+
+                // 0. A re-read of a tagged value's bits with no GC point since
+                // the read in scope: the same bits.
+                if (options.enable_cse && op == Opcode::bitcast_i64_tagged && cur->operand_count() == 1) {
+                    const Value* src = cur->operand(0);
+                    Instruction* leader = nullptr;
+                    for (auto it = tagged_reads.rbegin(); it != tagged_reads.rend(); ++it) {
+                        if (it->first == src) {
+                            leader = it->second;
+                            break;
+                        }
+                    }
+                    if (leader && gc_free.between(leader, cur)) {
+                        subst_map[cur->result()] = resolve(leader->result());
+                        to_remove.push_back(cur);
+                        if (options.stats) options.stats->expressions_eliminated++;
+                        iter_changed = true;
+                        cur = next;
+                        continue;
+                    }
+                    tagged_reads.emplace_back(src, cur);
+                    cur = next;
+                    continue;
                 }
 
                 // 1. Pure Expression CSE with Commutative Canonicalization
@@ -336,7 +367,11 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
             }
         };
 
-        walk_dominator_tree(dom, entry, visit_block, [&](const BasicBlock*) { table.exit_scope(); });
+        walk_dominator_tree(dom, entry, visit_block, [&](const BasicBlock*) {
+            table.exit_scope();
+            tagged_reads.resize(tagged_scopes.back());
+            tagged_scopes.pop_back();
+        });
 
         for (Instruction* inst : to_remove) {
             if (inst && inst->parent()) {

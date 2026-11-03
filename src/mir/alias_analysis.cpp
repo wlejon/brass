@@ -1,4 +1,5 @@
 #include <brass/mir/alias_analysis.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 #include <brass/mir/escape_analysis.hpp>
 #include <ostream>
 #include <cstdlib>
@@ -289,6 +290,8 @@ bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction
     if (!is_memory_writer(w_op) || !is_memory_reader(r_op)) return false;
 
     if (is_call(w_op)) {
+        // A pure call (runtime_symbols.hpp) has no side effects.
+        if (callee_has_role(*write_inst, SymbolRole::Pure)) return false;
         // A call cannot reach an allocation whose address never left this
         // function, unless the address is one of its own arguments.
         if (is_plain_access(r_op)) {
@@ -306,6 +309,13 @@ bool AliasAnalysis::can_clobber(const Instruction* write_inst, const Instruction
     }
 
     if (!is_plain_access(w_op) || !is_plain_access(r_op)) return true;
+
+    // Two accesses of different non-zero classes never overlap: the front
+    // end named them (Instruction::alias_class).
+    if (write_inst->alias_class() != 0 && read_inst->alias_class() != 0 &&
+        write_inst->alias_class() != read_inst->alias_class()) {
+        return false;
+    }
 
     const Access w = describe(write_inst);
     const Access r = describe(read_inst);

@@ -85,6 +85,7 @@ add_executable(brass_unit_tests
     unit/test_sroa.cpp
     differential/test_sroa_differential.cpp
     unit/test_gvn.cpp
+    unit/test_gvn_gc_free.cpp
     differential/test_gvn_differential.cpp
     unit/test_pe_dll_writer.cpp
     unit/test_elf_so_writer.cpp
