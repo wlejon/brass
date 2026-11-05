@@ -6,6 +6,7 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/branch_threading.hpp>
 #include <bit>
+#include <cstring>
 #include <string>
 
 // What the allocator makes of a value in its spill slot: a copy to or from the
@@ -55,9 +56,10 @@ bool reads_slot(const LirInst& inst) {
     return false;
 }
 
-// A tagged value cannot be split, and live across a call it lives in its
-// slot for good: the bitcast that makes it is a copy into the slot, the one
-// after the call a copy out of it.
+// Live across a call, a tagged value takes a callee-saved register while
+// one is free; with six of them across the call (SysV has five), at least
+// one waits in its slot across it: the bitcast that makes it is a copy into
+// the slot, the one after the call a copy out of it.
 const char* kAcrossCall = R"(module @m
 
 func @twice(%a: i64) -> i64 {
@@ -68,10 +70,31 @@ entry:
 
 func @bits(%x: i64) -> i64 {
 entry:
-  %t = bitcast.tagged.i64 %x
+  %one = iconst.i64 1
+  %x1 = add.i64 %x, %one
+  %x2 = add.i64 %x1, %one
+  %x3 = add.i64 %x2, %one
+  %x4 = add.i64 %x3, %one
+  %x5 = add.i64 %x4, %one
+  %t0 = bitcast.tagged.i64 %x
+  %t1 = bitcast.tagged.i64 %x1
+  %t2 = bitcast.tagged.i64 %x2
+  %t3 = bitcast.tagged.i64 %x3
+  %t4 = bitcast.tagged.i64 %x4
+  %t5 = bitcast.tagged.i64 %x5
   %c = call.i64 @twice(%x)
-  %u = bitcast.i64.tagged %t
-  %r = xor.i64 %u, %c
+  %u0 = bitcast.i64.tagged %t0
+  %u1 = bitcast.i64.tagged %t1
+  %u2 = bitcast.i64.tagged %t2
+  %u3 = bitcast.i64.tagged %t3
+  %u4 = bitcast.i64.tagged %t4
+  %u5 = bitcast.i64.tagged %t5
+  %r0 = xor.i64 %u0, %c
+  %r1 = xor.i64 %r0, %u1
+  %r2 = xor.i64 %r1, %u2
+  %r3 = xor.i64 %r2, %u3
+  %r4 = xor.i64 %r3, %u4
+  %r = xor.i64 %r4, %u5
   ret %r
 }
 )";
@@ -107,16 +130,19 @@ TEST_CASE("Linear Scan - a copy out of a spill slot is the reload itself") {
     REQUIRE(fn != nullptr);
     // Small-integer bits, so the tagged value is no pointer a stack map
     // could be asked to trace.
-    for (int64_t x : {int64_t{3}, int64_t{-8}, int64_t{1} << 40}) CHECK_EQ(fn(x), x ^ (x + x));
+    for (int64_t x : {int64_t{3}, int64_t{-8}, int64_t{1} << 40}) {
+        CHECK_EQ(fn(x), x ^ (x + x) ^ (x + 1) ^ (x + 2) ^ (x + 3) ^ (x + 4) ^ (x + 5));
+    }
 }
 
 namespace {
 
 // Nine gcrefs loaded off %p and handed to a join, filling every register
 // but %p's; then twelve more loads off %p, each summed at once. A gcref
-// cannot be split and is read only by the block-argument copy; %p is read
+// is read only by the block-argument copy; %p is read
 // by every load. Short of registers at the first i64 load, the value to
-// give one up is a gcref, which then waits in its slot for the copy, not %p,
+// give one up is a gcref, which then waits in its slot for the copy (it has
+// no read that wants a register), not %p,
 // which was reloaded at each of the twelve.
 std::string gather_text() {
     std::string s = "module @m\n\nfunc @gather(%p: ptr) -> i64 {\nentry:\n";
@@ -485,6 +511,89 @@ void mark_last_call_no_gc(LirFunction& fn) {
 
 } // namespace
 
+namespace {
+
+// A loop that reads fourteen words a turn and compares three pairs of six
+// values loaded before it: more live values than registers, so the
+// allocator leaves some invariants in their slots, and some compare finds
+// both of its sides there.
+std::string cmp_loop_text() {
+    std::string s = "module @m\n\nfunc @cmps(%q: ptr, %n: i64) -> i64 {\nentry:\n";
+    for (int k = 0; k < 6; ++k) {
+        s += "  %a" + std::to_string(k) + " = load.i64 %q, " + std::to_string((14 + k) * 8) + "\n";
+    }
+    s += "  %z = iconst.i64 0\n  br head(%z, %z)\n";
+    s += "head(%i: i64, %acc: i64):\n  %c = slt.i64 %i, %n\n  br_if %c, body, done\n";
+    s += "body:\n";
+    for (int j = 0; j < 14; ++j) {
+        s += "  %w" + std::to_string(j) + " = load.i64 %q, " + std::to_string(j * 8) + "\n";
+    }
+    for (int k = 0; k < 3; ++k) {
+        const std::string n = std::to_string(k);
+        s += "  %c" + n + " = slt.i64 %a" + std::to_string(2 * k) + ", %a" + std::to_string(2 * k + 1) + "\n";
+        s += "  %m" + n + " = select.i64 %c" + n + ", %w" + n + ", %w" + std::to_string(13 - k) + "\n";
+    }
+    s += "  %x = add.i64 %w0, %i\n  %p0 = mul.i64 %x, %m0\n  %p1 = mul.i64 %p0, %m1\n  %p2 = mul.i64 %p1, %m2\n";
+    for (int j = 1; j < 13; ++j) {
+        s += "  %p" + std::to_string(j + 2) + " = mul.i64 %p" + std::to_string(j + 1) + ", %w" + std::to_string(j) + "\n";
+    }
+    s += "  %t = add.i64 %p14, %w13\n  %t2 = xor.i64 %t, %acc\n  %one = iconst.i64 1\n";
+    s += "  %i2 = add.i64 %i, %one\n  br head(%i2, %t2)\n";
+    s += "done:\n  ret %acc\n}\n";
+    return s;
+}
+
+uint64_t cmp_loop_ref(const int64_t* q, int64_t n) {
+    uint64_t acc = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        uint64_t m[3];
+        for (int k = 0; k < 3; ++k) {
+            m[k] = static_cast<uint64_t>(q[14 + 2 * k] < q[15 + 2 * k] ? q[k] : q[13 - k]);
+        }
+        uint64_t p = (static_cast<uint64_t>(q[0]) + static_cast<uint64_t>(i)) * m[0] * m[1] * m[2];
+        for (int j = 1; j < 13; ++j) p *= static_cast<uint64_t>(q[j]);
+        acc = (p + static_cast<uint64_t>(q[13])) ^ acc;
+    }
+    return acc;
+}
+
+} // namespace
+
+// A compare defines nothing, so a spilled left side takes a use scratch and
+// the right side is still read from its slot in place: `mov r10, slot; cmp
+// r10, slot`, not two reloads and a register compare.
+TEST_CASE("Linear Scan - an x64 compare of two spilled values reads the right one in place") {
+    const std::string text = cmp_loop_text();
+    Allocated a = allocate(text.c_str(), "cmps");
+    size_t both = 0;
+    for (const auto& b : a.lir->blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->opcode != LirOpcode::Cmp || inst->uses.size() != 2) continue;
+            const auto& l = inst->uses[0];
+            const auto& r = inst->uses[1];
+            CHECK_FALSE(l.is_spill_slot());
+            if (!r.is_spill_slot() || !l.is_preg()) continue;
+            const GPR g = l.preg_val.as_gpr();
+            if (g == GPR::R10 || g == GPR::R11 || g == GPR::R15) ++both;
+        }
+    }
+    CHECK(both >= 1u);
+
+    JitExecutionEngine jit;
+    auto mod = parse_module(text.c_str());
+    REQUIRE(mod != nullptr);
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<int64_t (*)(const int64_t*, int64_t)>("cmps");
+    REQUIRE(fn != nullptr);
+    int64_t q[20];
+    uint64_t h = 0x243f6a8885a308d3ull;
+    for (int i = 0; i < 20; ++i) {
+        h = h * 6364136223846793005ull + 1442695040888963407ull;
+        q[i] = static_cast<int64_t>(h);
+    }
+    for (int64_t n : {0, 1, 7}) CHECK_EQ(static_cast<uint64_t>(fn(q, n)), cmp_loop_ref(q, n));
+}
+
 TEST_CASE("Linear Scan - a call that reaches no GC point clears no dead register") {
     Allocated plain = allocate(kStaleAtCall, "stale");
     CHECK(clears_before_last_call(*plain.lir) >= 1u);
@@ -560,4 +669,87 @@ TEST_CASE("MIR - precise_stack_roots prints and parses back") {
     REQUIRE(plain != nullptr);
     CHECK(!plain->precise_stack_roots());
     CHECK(brass::to_string(*plain).find("precise_stack_roots") == std::string::npos);
+}
+
+namespace {
+
+// %f comes from either of two loads (a value with two definitions, as a
+// boxed field read on two paths) and %g from one; the loop reads both only
+// as doubles, each read a move across to an XMM register. On x64 they wait
+// in their slots, each read a `movsd xmm, slot`, where a GPR cost a
+// `movq xmm, r` per read (property_access: 19% more cycles).
+const char* kXmmReads = R"(module @m
+
+func @xs(%p: ptr, %q: ptr, %sel: i64, %n: i64, %a0: f64) -> f64 {
+entry:
+  %z = iconst.i64 0
+  %c0 = slt.i64 %z, %sel
+  br_if %c0, ta, tb
+ta:
+  %fa = load.i64 %p, 0
+  br m(%fa)
+tb:
+  %fb = load.i64 %q, 0
+  br m(%fb)
+m(%f: i64):
+  %g = load.i64 %p, 8
+  br head(%z, %a0)
+head(%i: i64, %acc: f64):
+  %c = slt.i64 %i, %n
+  br_if %c, body, done
+body:
+  %d = bitcast_f64_i64 %f
+  %a1 = add.f64 %acc, %d
+  %e = bitcast_f64_i64 %g
+  %a2 = add.f64 %a1, %e
+  %d2 = bitcast_f64_i64 %f
+  %a3 = add.f64 %a2, %d2
+  %e2 = bitcast_f64_i64 %g
+  %a4 = add.f64 %a3, %e2
+  %one = iconst.i64 1
+  %i2 = add.i64 %i, %one
+  br head(%i2, %a4)
+done:
+  ret %acc
+}
+)";
+
+} // namespace
+
+TEST_CASE("Linear Scan - an x64 value a loop reads only as a double waits in its slot") {
+    Allocated a = allocate(kXmmReads, "xs");
+    size_t from_slot = 0;
+    size_t from_gpr = 0;
+    for (const auto& b : a.lir->blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->defs.size() != 1 || inst->uses.size() != 1) continue;
+            const LirOperand& d = inst->defs[0];
+            if (!d.is_preg() || d.preg_val.reg_class == RegClass::GPR) continue;
+            const LirOperand& u = inst->uses[0];
+            if (u.is_spill_slot()) ++from_slot;
+            if (u.is_preg() && u.preg_val.reg_class == RegClass::GPR) ++from_gpr;
+        }
+    }
+    CHECK_EQ(from_gpr, size_t(0));
+    CHECK(from_slot >= 4u);
+
+    JitExecutionEngine jit;
+    auto mod = parse_module(kXmmReads);
+    REQUIRE(mod != nullptr);
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<double (*)(const uint64_t*, const uint64_t*, int64_t, int64_t, double)>("xs");
+    REQUIRE(fn != nullptr);
+    const double pv[2] = {1.5, 0.25};
+    const double qv[1] = {-3.0};
+    uint64_t pb[2], qb[1];
+    std::memcpy(pb, pv, sizeof pb);
+    std::memcpy(qb, qv, sizeof qb);
+    for (int64_t sel : {int64_t{0}, int64_t{1}}) {
+        for (int64_t n : {int64_t{0}, int64_t{1}, int64_t{9}}) {
+            const double f = sel > 0 ? pv[0] : qv[0];
+            double acc = 0.5;
+            for (int64_t i = 0; i < n; ++i) acc = acc + f + pv[1] + f + pv[1];
+            CHECK_EQ(fn(pb, qb, sel, n, 0.5), acc);
+        }
+    }
 }

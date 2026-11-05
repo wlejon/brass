@@ -1,4 +1,5 @@
 #include <brass/codegen/linear_scan.hpp>
+#include "linear_scan_internal.hpp"
 #include <algorithm>
 #include <bit>
 
@@ -379,6 +380,44 @@ bool LinearScanAllocator::try_allocate_free(uint32_t idx, std::vector<uint32_t>&
         if (c != kNever) max_q[other.reg.code] = std::min(max_q[other.reg.code], c);
     }
 
+    // A boxed number a loop only reads as a double (every read a move
+    // across to an XMM register, folded: mark_folded_uses) is read from its
+    // slot by `movsd xmm, slot`, where a GPR costs a `movq xmm, r` per read
+    // across the domains: property_access ran 19% more cycles with its
+    // fields in RBX and R12. It waits in its slot from its last definition
+    // on (a value defined on two paths keeps a register up to the merge,
+    // then one store), and reads no register after it.
+    if (only_copied_[v.id] & kXmmReadInLoop) {
+        uint32_t last_def = kNever;
+        uint32_t first_read = kNever;
+        bool reg_read = false;
+        for (const UsePosition& u : p.base->use_positions) {
+            if (u.inst_id < p.from || u.inst_id > p.to) continue;
+            if (u.is_def) {
+                if (u.requires_reg) {
+                    last_def = u.inst_id;
+                    first_read = kNever;
+                    reg_read = false;
+                }
+            } else {
+                if (first_read == kNever) first_read = u.inst_id;
+                reg_read = reg_read || u.requires_reg;
+            }
+        }
+        if (!reg_read && first_read != kNever) {
+            if (last_def == kNever || last_def <= p.start) {
+                spill_and_requeue(idx, p.start, unhandled);
+                return true;
+            }
+            const uint32_t q = unsplittable_[v.id] ? kNever : split_position(last_def + 1, first_read - 1);
+            if (q != kNever && q > p.start && q < p.end) {
+                push_unhandled(unhandled, split_piece(idx, q));
+                push_unhandled(unhandled, idx);
+                return true;
+            }
+        }
+    }
+
     const HintRegs hints = hint_regs(p);
     auto whole = [&](PReg r) { return max_q[r.code] >= p.end; };
     for (PReg r : hints) {
@@ -434,7 +473,7 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
             if (whole_only) {
                 whole_cost[r] += other.base->spill_weight;
                 holders[r].push_back(a);
-            } else if (only_copied_[other.vreg().id]) {
+            } else if (only_copied_[other.vreg().id] & kOnlyCopied) {
                 // A value that cannot be split, read only by block-argument
                 // copies, gives its register up for its whole life: it moves
                 // to its slot, its definition stores there and the copies
@@ -664,14 +703,10 @@ void LinearScanAllocator::run_scan() {
         active_.erase(std::remove_if(active_.begin(), active_.end(),
                                      [&](uint32_t a) { return pieces_[a].end <= pos; }),
                       active_.end());
-        const VReg v = pieces_[idx].vreg();
-        // A GC reference live across a call stays in its slot, where the
-        // stack map finds it.
-        if (v.is_gcref && pieces_[idx].base->spans_call) {
-            pieces_[idx].spilled = true;
-            slot_of(v);
-            continue;
-        }
+        // A GC reference is a value like any other here: across a GC point
+        // it lives in a callee-saved register (the call blocks the rest) or
+        // in its slot, piece by piece, and the stack map of each GC point
+        // names it only where it is in its slot (record_live_gcrefs).
         if (!try_allocate_free(idx, unhandled)) allocate_blocked(idx, unhandled);
     }
 }

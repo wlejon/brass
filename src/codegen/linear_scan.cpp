@@ -1,4 +1,5 @@
 #include <brass/codegen/linear_scan.hpp>
+#include "linear_scan_internal.hpp"
 #include <brass/core/env.hpp>
 #include <algorithm>
 #include <bit>
@@ -367,6 +368,14 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
     }
 }
 
+// A copy whose destination is an XMM register: a boxed number moved across.
+static bool copies_to_xmm(const LirInst& inst) {
+    if (inst.opcode == LirOpcode::Movq_xg) return true;
+    if (inst.defs.size() != 1) return false;
+    const LirOperand& d = inst.defs[0];
+    return (d.is_vreg() && !d.vreg_val.is_gpr()) || (d.is_preg() && !d.preg_val.is_gpr());
+}
+
 // An operand the x64 emitter reads straight from a spill slot costs no reload
 // when its value is spilled: `xor slot, r` is the load a reload would make,
 // in the same instruction. Counted as a register read, it made a value read
@@ -390,10 +399,49 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
 void LinearScanAllocator::mark_folded_uses() {
     if (!cc_.target().is_x64()) return;
     const auto& guard_exits = liveness_.guard_exits();
+    // Per GPR vreg, whether every read of it is a move across to an XMM
+    // register (bit 1 set: read so; bit 2 set: read otherwise), for a copy
+    // into such a value (the copy coalesces away and the move reads the
+    // source's register).
+    std::vector<uint8_t> xmm_reads(fn_.vreg_table.size(), 0);
+    for (const auto& block : fn_.blocks) {
+        for (const auto& inst : block->instructions) {
+            const bool across = copies_to_xmm(*inst) && inst->uses.size() == 1;
+            for (const auto& u : inst->uses) {
+                if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < xmm_reads.size()) {
+                    xmm_reads[u.vreg_val.id] |= across ? 1 : 2;
+                } else if (u.is_mem()) {
+                    for (VReg r : {u.mem_val.base_vreg, u.mem_val.index_vreg}) {
+                        if (r.is_valid() && r.id < xmm_reads.size()) xmm_reads[r.id] |= 2;
+                    }
+                }
+            }
+        }
+    }
+    auto feeds_xmm = [&](const LirInst& inst) {
+        if (copies_to_xmm(inst)) return true;
+        const LirOperand& d = inst.defs[0];
+        return d.is_vreg() && d.vreg_val.id < xmm_reads.size() && xmm_reads[d.vreg_val.id] == 1;
+    };
     for (const auto& block : fn_.blocks) {
         if (guard_exits.count(block->id)) continue;
         for (const auto& inst : block->instructions) {
-            const uint8_t width = slot_fold_width(inst->opcode);
+            // A 64-bit copy of a GPR value into an XMM register (or into a
+            // value read only so) reads its source from the slot as the load
+            // itself (rewrite, direct_slot_copy), so it is such a use too: a
+            // boxed number a loop only reads as a double waits in its slot,
+            // each read a `movsd xmm, slot`, where a GPR cost a `movq xmm, r`
+            // per read (property_access's fields: 18% more cycles). A copy
+            // into a GPR is not: folded, it turned an invariant receiver a
+            // loop copies into its temporaries from a register into a load at
+            // the head of the pointer chase (object_graph's searchBFS, 2%
+            // more cycles, though 1-3% fewer instructions elsewhere).
+            const bool gpr_copy = (inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Movq_xg) &&
+                                  inst->defs.size() == 1 &&
+                                  inst->uses.size() == 1 && inst->uses[0].is_vreg() &&
+                                  inst->uses[0].vreg_val.is_gpr() && (inst->defs[0].is_vreg() || inst->defs[0].is_preg()) &&
+                                  feeds_xmm(*inst);
+            const uint8_t width = gpr_copy ? 8 : slot_fold_width(inst->opcode);
             if (width == 0 || inst->uses.empty()) continue;
             const LirOperand& src = inst->uses.back();
             if (!src.is_vreg() || !src.vreg_val.is_valid() || src.size != width) continue;
@@ -430,6 +478,11 @@ void LinearScanAllocator::mark_folded_uses() {
             // it as it leaves the reads above, at its weight in
             // compute_spill_weights.
             const float len = static_cast<float>(iv->end_id - iv->start_id + 1);
+            // (A copy's read needs no register already, so the flag does not
+            // wait on one being cleared here.)
+            if (gpr_copy && use_depth > 0) {
+                only_copied_[src.vreg_val.id] |= kXmmReadInLoop;
+            }
             for (; it != uses.end() && it->inst_id == inst->id; ++it) {
                 if (it->is_def || it->fixed_reg.is_valid() || !it->requires_reg) continue;
                 it->requires_reg = false;
@@ -465,12 +518,9 @@ void LinearScanAllocator::allocate() {
     for (VReg v : mem_index_vregs_) {
         if (v.id < num_vregs) is_mem_index_[v.id] = 1;
     }
-    for (size_t id = 0; id < num_vregs; ++id) {
-        if (fn_.vreg_table[id].vreg.is_gcref) unsplittable_[id] = 1;
-    }
+    only_copied_.assign(num_vregs, 0);
     mark_folded_uses();
     def_pos_.assign(num_vregs, UINT32_MAX);
-    only_copied_.assign(num_vregs, 0);
     for (const auto& interval : liveness_.intervals()) {
         if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
         uint32_t def = UINT32_MAX;
@@ -491,7 +541,7 @@ void LinearScanAllocator::allocate() {
                 break;
             }
         }
-        only_copied_[interval.vreg.id] = only_copied;
+        if (only_copied) only_copied_[interval.vreg.id] |= kOnlyCopied;
     }
     active_.clear();
     next_seq_ = 0;
@@ -512,18 +562,21 @@ void LinearScanAllocator::allocate() {
 
     // 3. The vreg table and the intervals keep the first piece's location,
     // which is the value's only one unless it was split. After allocation
-    // only GC references are looked up there, and those are never split.
+    // only GC references are looked up there, by the stack maps, which name
+    // only references in their slots (record_live_gcrefs): a GC reference
+    // with a slot has it there, whichever piece is first.
     for (auto& interval : liveness_.intervals()) {
         if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
         const auto& list = vreg_pieces_[interval.vreg.id];
         if (list.empty()) continue;
         const AllocPiece& first = pieces_[list.front()];
+        const bool slot_named = first.spilled || (interval.vreg.is_gcref && vreg_slot_[interval.vreg.id] >= 0);
         interval.assigned_preg = first.spilled ? PReg{} : first.reg;
-        interval.assigned_spill_slot = first.spilled ? vreg_slot_[interval.vreg.id] : -1;
+        interval.assigned_spill_slot = slot_named ? vreg_slot_[interval.vreg.id] : -1;
         VRegInfo& info = fn_.get_vreg_info(interval.vreg);
         info.assigned_preg = interval.assigned_preg;
         info.assigned_spill_slot = interval.assigned_spill_slot;
-        info.is_spilled = first.spilled;
+        info.is_spilled = slot_named;
     }
 
     // 4. Update function frame info
@@ -709,12 +762,42 @@ void LinearScanAllocator::record_live_gcrefs() {
             LirInst& inst = **it;
             // A call that reaches no GC point has no stack map entry worth
             // the name: nothing walks this frame while it runs, so its roots
-            // are none, and a reference held in a callee-saved register
-            // across it needs no designated slot.
+            // are none.
+            //
+            // At one that does, the roots are the live references that are
+            // in their slots there: where the piece of each covering the
+            // site is a spilled one. Its slot then holds its current value,
+            // as every read of a spilled piece needs (a move into the slot
+            // where the value enters such a piece, or the store after its
+            // one definition, which the moves it replaces would only
+            // repeat: in between, the value's object has not moved, below).
+            // A slot whose value is in a register at the site, or dead
+            // there, is no root of it: it may hold an earlier value (a
+            // previous loop turn's, or another value that shared the slot)
+            // that no root may name.
+            //
+            // A reference live across the site in a register is in a
+            // callee-saved one (the call blocks the rest), and is no root of
+            // this frame either: wherever it is when the collector runs
+            // (still in the register, or in the save area of a frame above,
+            // a generated one or the runtime's C++), it is a word of the
+            // thread's stack or registers, which every collection that moves
+            // or marks reads first and pins (heap_pin.cpp, gc_contract.md
+            // 2.5). Its object neither moves nor dies while the register
+            // names it, so the register needs no store or reload at the
+            // site, and a copy of the value left in its slot stays current.
             if (inst.is_call() || inst.opcode == LirOpcode::Safepoint) {
                 inst.live_gcrefs.clear();
                 for (uint32_t id : gcref_ids) {
-                    if (live[id] && !inst.no_gc_point) inst.live_gcrefs.push_back(fn_.vreg_table[id].vreg);
+                    if (!live[id] || inst.no_gc_point) continue;
+                    const VReg v = fn_.vreg_table[id].vreg;
+                    const LirOperand at = location_at(v, inst.id, 8);
+                    if (at.is_spill_slot()) {
+                        inst.live_gcrefs.push_back(v);
+                    } else if (!at.is_preg() || !is_callee_saved(at.preg_val)) {
+                        throw std::logic_error("register allocation: a GC reference live across a GC point is "
+                                               "neither in its slot nor in a callee-saved register, in " + fn_.name);
+                    }
                 }
             }
             for (const auto& d : inst.defs) {

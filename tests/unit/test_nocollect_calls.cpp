@@ -10,9 +10,9 @@
 #include <string>
 
 // A call whose callee reaches no GC point (SymbolRole::NoCollect or Pure: the
-// LIR's no_gc_point) is no GC point to the register allocator: a reference
-// live across it keeps a register, and the call records no roots. A
-// reference that also spans a call that can collect still lives in its slot.
+// LIR's no_gc_point) records no roots. A reference live across a call that
+// can collect may keep a callee-saved register too, which the collector's
+// stack scan pins (gc_contract.md 1.1); only one in a slot is a root.
 // A function declared nocollect must itself reach no GC point, which the
 // verifier checks, and it gets no interrupt polls.
 
@@ -131,23 +131,26 @@ size_t call_roots(const LirFunction& fn) {
 
 } // namespace
 
-TEST_CASE("nocollect - a tagged value live across a no-GC call keeps a register") {
+TEST_CASE("nocollect - a tagged value live across a call keeps a register, and no-GC calls record no roots") {
     for (bool aarch64 : {false, true}) {
+        // Across a collecting call: a callee-saved register, which no stack
+        // map names.
         Allocated gc = allocate(kAcross, aarch64, {});
-        CHECK(slot_moves(*gc.lir) >= 1u);
-        CHECK(call_roots(*gc.lir) >= 1u);
+        CHECK_EQ(slot_moves(*gc.lir), size_t(0));
+        CHECK_EQ(call_roots(*gc.lir), size_t(0));
         Allocated quiet = allocate(kAcross, aarch64, {"g"});
         CHECK_EQ(slot_moves(*quiet.lir), size_t(0));
         CHECK_EQ(call_roots(*quiet.lir), size_t(0));
     }
 }
 
-TEST_CASE("nocollect - a value that also spans a collecting call keeps its slot") {
+TEST_CASE("nocollect - a value that also spans a collecting call keeps its register") {
     for (bool aarch64 : {false, true}) {
-        // @g reaches no GC point, @h may: %t spans both, so its slot.
+        // @g reaches no GC point, @h may: %t spans both, in a callee-saved
+        // register either way.
         Allocated one = allocate(kAcrossTwo, aarch64, {"g"});
-        CHECK(slot_moves(*one.lir) >= 1u);
-        CHECK(call_roots(*one.lir) >= 1u);
+        CHECK_EQ(slot_moves(*one.lir), size_t(0));
+        CHECK_EQ(call_roots(*one.lir), size_t(0));
         Allocated both = allocate(kAcrossTwo, aarch64, {"g", "h"});
         CHECK_EQ(slot_moves(*both.lir), size_t(0));
     }
