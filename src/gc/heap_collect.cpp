@@ -347,8 +347,9 @@ void minor(GcState& g) {
     sample.overflow = g.survivor_overflow;
     sample.at_whole_eden = g.eden_limit == s.eden_hi - s.eden_lo;
     s.adapt_eden_limit(sample);
-    s.reset_eden();
+    // Cleared first: a request shuts the window (update_fast_limit).
     s.minor_requested = false;
+    s.reset_eden();
     if (s.old_allocated_since_full > s.growth_limit()) s.full_requested = true;
     // Promote everything next time while survival stays high: after an
     // overflow, and for as long as half or more of the young data survives
@@ -463,6 +464,9 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
         s.reset_eden_limit();
         s.promote_all = false;
     }
+    // Cleared first: a request shuts the window (update_fast_limit).
+    s.full_requested = false;
+    s.minor_requested = false;
     // Eden still holds the young objects an in-place finish kept.
     if (s.young_in_place) s.update_fast_limit();
     else s.reset_eden();
@@ -471,8 +475,6 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     s.full_threshold = std::max<uint64_t>(s.config.min_full_threshold_bytes, static_cast<uint64_t>(grown));
     s.old_allocated_since_full = 0;
     s.stats.old_live_bytes = g.marked_bytes;
-    s.full_requested = false;
-    s.minor_requested = false;
     clock.lap(kPhaseSweep);
 }
 

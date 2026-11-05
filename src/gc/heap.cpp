@@ -218,7 +218,11 @@ void HeapState::update_fast_limit() noexcept {
     // end of eden's fragment (a pinned object after it). `end` is never
     // below `top`: an object allowed past eden_limit (Heap::allocate_at) puts
     // `top` above it, and the bump path computes end - top unsigned. Stress
-    // mode shuts it, so every allocation reaches the runtime. An open marking
+    // mode shuts it, so every allocation reaches the runtime, and so does a
+    // requested collection, so the next allocation runs it rather than the
+    // one after the window's next 32 KB: a host that requests one for memory
+    // the heap does not hold (an ArrayBuffer's external block) may make
+    // hundreds of megabytes of it per kilobyte of heap. An open marking
     // cycle does not: young allocation is the same during one (young objects
     // are never marked; minor collections and the finish trace them).
     //
@@ -228,7 +232,7 @@ void HeapState::update_fast_limit() noexcept {
     // the stack scan finds an object from the nearest recorded start
     // (young_object_containing) instead of walking all of eden.
     const uintptr_t top = heap.alloc_->top;
-    const bool shut = stress != StressMode::None;
+    const bool shut = stress != StressMode::None || full_requested || minor_requested;
     const uintptr_t end = std::min({eden_limit, eden_frags[eden_frag].hi, top + kPinChunkBytes});
     heap.alloc_->end = shut ? top : std::max(top, end);
 }
@@ -702,6 +706,7 @@ void Heap::stress_step(uintptr_t caller_fp, uintptr_t caller_ip) {
 void Heap::request_collection(CollectionKind kind) noexcept {
     if (kind == CollectionKind::Full) s_->full_requested = true;
     else s_->minor_requested = true;
+    if (!s_->collecting) s_->update_fast_limit();
 }
 
 bool Heap::in_collection() const noexcept { return s_->collecting; }
