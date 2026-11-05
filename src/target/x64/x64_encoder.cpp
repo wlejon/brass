@@ -142,7 +142,11 @@ void X64Encoder::mov32(GPR dst, GPR src) {
 }
 
 void X64Encoder::mov(GPR dst, int64_t imm) {
-    if (imm >= INT32_MIN && imm <= INT32_MAX) {
+    // 0..2^32-1: the 32-bit move zero-extends, in 5 bytes (6 with REX)
+    // against 7 or a 10-byte movabs.
+    if (imm >= 0 && imm <= static_cast<int64_t>(UINT32_MAX)) {
+        mov32(dst, static_cast<uint32_t>(imm));
+    } else if (imm >= INT32_MIN && imm <= INT32_MAX) {
         emit_rex(true, false, false, is_extended(dst));
         buffer_.emit8(0xC7);
         emit_modrm(3, 0, reg_code(dst));

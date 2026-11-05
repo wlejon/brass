@@ -92,6 +92,10 @@ public:
     bool is_bound(Label label) const;
     size_t label_offset(Label label) const;
     void record_label_fixup(Label label, size_t patch_offset, FixupKind kind);
+    // Rel8 fixups that do not reach are collected (their patch offsets)
+    // instead of thrown: branch relaxation emits those long and tries again.
+    void collect_rel8_overflows(bool on) noexcept { collect_rel8_overflows_ = on; }
+    const std::vector<size_t>& rel8_overflows() const noexcept { return rel8_overflows_; }
 
     // Relocations
     void add_relocation(size_t offset, RelocationKind kind, std::string symbol_name, int64_t addend = 0);
@@ -118,6 +122,8 @@ private:
     std::vector<uint8_t> bytes_;
     std::vector<Relocation> relocations_;
     std::vector<LabelFixup> pending_fixups_;
+    bool collect_rel8_overflows_ = false;
+    std::vector<size_t> rel8_overflows_;
     std::vector<size_t> label_positions_; // indexed by label id (1-based), size_t(-1) if unbound
     uint32_t next_label_id_ = 1;
 };

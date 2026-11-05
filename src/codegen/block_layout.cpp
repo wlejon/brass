@@ -180,6 +180,49 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
             cold_blocks.insert(b->id);
         }
     }
+    const uint32_t entry_id = fn.blocks[0]->id;
+
+    // Per block, how many blocks branch to it, and where it goes.
+    std::unordered_map<uint32_t, BlockBranchTargets> targets_of;
+    std::unordered_map<uint32_t, uint32_t> entries;
+    for (const auto& b : fn.blocks) {
+        if (!b) continue;
+        BlockBranchTargets t = get_branch_targets(*b);
+        std::sort(t.targets.begin(), t.targets.end());
+        t.targets.erase(std::unique(t.targets.begin(), t.targets.end()), t.targets.end());
+        for (uint32_t x : t.targets) ++entries[x];
+        targets_of.emplace(b->id, std::move(t));
+    }
+
+    // What only cold blocks branch to is cold too: the code a miss runs
+    // (the full inline cache read behind a static guard, its own hit and
+    // merge) is named for the miss only at its first block. A block some
+    // block that is not cold enters stays, so a loop entered from cold code
+    // only keeps its body where its own back edge leaves it, and every merge
+    // with the hot path stays hot.
+    {
+        std::unordered_map<uint32_t, uint32_t> warm_entries;  // entries from blocks not cold
+        for (const auto& b : fn.blocks) {
+            if (!b || cold_blocks.count(b->id)) continue;
+            for (uint32_t x : targets_of[b->id].targets) ++warm_entries[x];
+        }
+        std::vector<uint32_t> work(cold_blocks.begin(), cold_blocks.end());
+        while (!work.empty()) {
+            const uint32_t c = work.back();
+            work.pop_back();
+            for (uint32_t x : targets_of[c].targets) {
+                if (cold_blocks.count(x) || warm_entries[x] != 0 || x == entry_id) continue;
+                cold_blocks.insert(x);
+                for (uint32_t y : targets_of[x].targets) {
+                    if (warm_entries[y] > 0) --warm_entries[y];
+                }
+                work.push_back(x);
+            }
+        }
+    }
+
+    // Emission reads the mark: a cold block is not aligned.
+    for (uint32_t id : cold_blocks) id_to_block[id]->cold = true;
 
     std::vector<LirBlock*> layout;
     std::unordered_set<uint32_t> placed;
@@ -217,17 +260,34 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
         trace_starts.push({b_score, -static_cast<int64_t>(i)});
     }
 
-    // Per block, how many blocks branch to it, and where it goes.
-    std::unordered_map<uint32_t, BlockBranchTargets> targets_of;
-    std::unordered_map<uint32_t, uint32_t> entries;
-    for (const auto& b : fn.blocks) {
-        if (!b) continue;
-        BlockBranchTargets t = get_branch_targets(*b);
-        std::sort(t.targets.begin(), t.targets.end());
-        t.targets.erase(std::unique(t.targets.begin(), t.targets.end()), t.targets.end());
-        for (uint32_t x : t.targets) ++entries[x];
-        targets_of.emplace(b->id, std::move(t));
-    }
+    // Of a two-way branch, the side the MIR branch names first (its true
+    // target, or the block that carries that edge's copies): where nothing
+    // else tells the sides apart, the front end's order does — the likely
+    // side first, as a guard's hit before its miss, an Array before a typed
+    // array, two Numbers before the generic compare. Instruction selection
+    // turns a branch either way (a side's copies decide which one the `jmp`
+    // names), so the jump target says nothing.
+    auto true_side = [&](const LirBlock& from, const BlockBranchTargets& bt) -> uint32_t {
+        if (bt.targets.size() != 2 || from.instructions.empty()) return UINT32_MAX;
+        const LirInst& last = *from.instructions.back();
+        if (last.opcode != LirOpcode::Jmp || !last.mir_origin || last.mir_origin->opcode() != Opcode::br_if) {
+            return UINT32_MAX;
+        }
+        const BasicBlock* t = last.mir_origin->true_target().block;
+        const BasicBlock* f = last.mir_origin->false_target().block;
+        if (!t || !f || t == f) return UINT32_MAX;
+        for (uint32_t x : bt.targets) {
+            if (x == t->id()) return x;
+            const BlockBranchTargets& xt = targets_of[x];
+            auto xb = id_to_block.find(x);
+            if (xt.targets.size() == 1 && xt.targets[0] == t->id() && xb != id_to_block.end() &&
+                is_copy_block(*xb->second)) {
+                return x;
+            }
+        }
+        return UINT32_MAX;
+    };
+
     // With no profile, a two-way branch's sides are equally likely, so the
     // layout picks the one whose fall-through saves an instruction: the body
     // of an if without an else (entered only from here, going on to the other
@@ -247,15 +307,19 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
     // three_meshes' 9.3M a frame (docs/aot-specialization.md, "Cycle
     // accounting" in bronze).
     auto shape_score = [&](const LirBlock& from, const BlockBranchTargets& bt, const LirBlock& s) {
-        if (bt.targets.size() != 2 || entries[s.id] != 1) return 0;
+        if (bt.targets.size() != 2) return 0;
         const uint32_t other = bt.targets[0] == s.id ? bt.targets[1] : bt.targets[0];
         if (other == s.id || other == from.id) return 0;
         auto ob = id_to_block.find(other);
+        // However many branches enter the calling side: an inline cache's
+        // or an element access's one slow call is where every one of its
+        // tests fails to.
         if (ob != id_to_block.end()) {
             const bool s_call = has_call(s);
-            const bool o_call = entries[other] == 1 && has_call(*ob->second);
+            const bool o_call = has_call(*ob->second);
             if (s_call != o_call) return s_call ? -120 : 45;
         }
+        if (entries[s.id] != 1) return 0;
         const BlockBranchTargets& st = targets_of[s.id];
         if (st.targets.size() == 1 && st.targets[0] == other) return 45;
         if (ob == id_to_block.end() || entries[other] != 1) return 0;
@@ -300,7 +364,9 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
                     score -= 100;
                 }
 
-                if (s->id == bt.fallthrough_target && s->loop_depth >= curr->loop_depth) {
+                const uint32_t preferred = true_side(*curr, bt);
+                if (s->id == (preferred != UINT32_MAX ? preferred : bt.fallthrough_target) &&
+                    s->loop_depth >= curr->loop_depth) {
                     score += 40;
                 }
                 if (s->loop_depth == curr->loop_depth) score += shape_score(*curr, bt, *s);

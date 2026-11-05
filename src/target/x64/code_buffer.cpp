@@ -73,9 +73,13 @@ void CodeBuffer::bind(Label label) {
                 size_t next_off = it->patch_offset + 1;
                 int64_t disp = static_cast<int64_t>(target_offset) - static_cast<int64_t>(next_off);
                 if (disp < -128 || disp > 127) {
-                    throw std::runtime_error("CodeBuffer::bind: Rel8 branch displacement out of range [-128, 127]");
+                    if (!collect_rel8_overflows_) {
+                        throw std::runtime_error("CodeBuffer::bind: Rel8 branch displacement out of range [-128, 127]");
+                    }
+                    rel8_overflows_.push_back(it->patch_offset);
+                } else {
+                    patch8(it->patch_offset, static_cast<uint8_t>(static_cast<int8_t>(disp)));
                 }
-                patch8(it->patch_offset, static_cast<uint8_t>(static_cast<int8_t>(disp)));
             } else if (it->kind == FixupKind::Rel32) {
                 size_t next_off = it->patch_offset + 4;
                 int64_t disp = static_cast<int64_t>(target_offset) - static_cast<int64_t>(next_off);

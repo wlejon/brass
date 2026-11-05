@@ -84,6 +84,25 @@ private:
     void clear_upper_state();
     CompilationResult compile_once();
 
+    // Branch relaxation. A block-to-block branch whose target is already
+    // placed (backward) takes the 2-byte form when it reaches; a forward one
+    // takes it where `short_fwd_` (by the branch's ordinal in emission order)
+    // says the first pass, all rel32, measured it in reach, and compile()
+    // emits again with those short. Shrinking only brings a branch and its
+    // target closer, but alignment padding can grow, so a short branch that
+    // does not reach is reported (`overflow_ords_`) and emitted long once more.
+    void emit_jump(x64::Condition cond, uint32_t target_id);
+    struct ForwardBranch {
+        uint32_t ordinal = 0;
+        size_t end = 0;        // offset just past the branch
+        x64::Label label;
+    };
+    std::vector<uint8_t> short_fwd_;
+    std::vector<ForwardBranch> forward_branches_;
+    std::unordered_map<size_t, uint32_t> short_patch_ord_;  // rel8 patch offset -> ordinal
+    std::vector<uint32_t> overflow_ords_;
+    uint32_t branch_ordinal_ = 0;
+
     x64::MemAddress to_mem_address(const LirOperand& op) const;
     x64::GPR to_gpr(const LirOperand& op) const;
     x64::XMM to_xmm(const LirOperand& op) const;

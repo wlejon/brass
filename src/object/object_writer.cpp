@@ -17,6 +17,7 @@
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
 #include <unordered_set>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
@@ -139,6 +140,27 @@ ObjectSymbol* ObjectFile::find_symbol(std::string_view name) {
     auto it = symbol_index_.find(name);
     return it == symbol_index_.end() ? nullptr : &symbols[it->second];
 }
+
+namespace {
+
+// Diagnostic: BRASS_BLOCK_MAP=<file> appends each emitted function's blocks
+// as "function<TAB>offset<TAB>block name<TAB>cold", offsets from the
+// function's start, in layout order — what maps a profile's hot or
+// out-of-line address back to the IR that made it.
+void write_block_map(std::string_view fn_name, const codegen::LirFunction& lir,
+                     const std::unordered_map<uint32_t, size_t>& offsets) {
+    static const char* path = std::getenv("BRASS_BLOCK_MAP");
+    if (!path || !*path) return;
+    static std::ofstream out(path, std::ios::app);
+    for (const auto& b : lir.blocks) {
+        if (!b) continue;
+        auto it = offsets.find(b->id);
+        if (it == offsets.end()) continue;
+        out << fn_name << '\t' << it->second << '\t' << b->name << '\t' << (b->cold ? 1 : 0) << '\n';
+    }
+}
+
+} // namespace
 
 ModuleCompiler::ModuleCompiler(const Target& target)
     : target_(target), cc_(CallingConvention::for_target(target)) {}
@@ -409,6 +431,7 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             size_t fn_offset = text_sec.data.size();
             size_t fn_size = res.code_buffer.size();
             text_sec.emit_bytes(res.code_buffer.span());
+            write_block_map(fn->name(), *lir, res.block_offsets);
 
             size_t prologue_sz = 0;
             if (!lir->blocks.empty()) {

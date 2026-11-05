@@ -113,7 +113,50 @@ CompilationResult EmitContext::compile() {
         again.dirties_upper_ = true;
         return again.compile();
     }
+
+    // Branch relaxation: the forward branches the all-rel32 pass measured in
+    // reach of a 2-byte form, emitted short; any that alignment padding put
+    // out of reach after all goes long and the function is emitted again.
+    std::vector<uint8_t> fits(branch_ordinal_, 0);
+    bool any = false;
+    for (const ForwardBranch& fb : forward_branches_) {
+        const int64_t disp = static_cast<int64_t>(result.code_buffer.label_offset(fb.label)) -
+                             static_cast<int64_t>(fb.end);
+        if (disp <= 127) fits[fb.ordinal] = 1, any = true;
+    }
+    for (int attempt = 0; any && attempt < 4; ++attempt) {
+        EmitContext again(fn_, target_);
+        again.dirties_upper_ = dirties_upper_;
+        again.short_fwd_ = fits;
+        again.buffer_.collect_rel8_overflows(true);
+        CompilationResult shorter = again.compile_once();
+        if (again.overflow_ords_.empty()) return shorter;
+        for (uint32_t ord : again.overflow_ords_) fits[ord] = 0;
+    }
     return result;
+}
+
+void EmitContext::emit_jump(Condition cond, uint32_t target_id) {
+    const uint32_t ordinal = branch_ordinal_++;
+    const Label label = block_labels_[target_id];
+    const size_t start = buffer_.size();
+    if (buffer_.is_bound(label)) {
+        // Backward: the distance is known exactly.
+        const int64_t disp = static_cast<int64_t>(buffer_.label_offset(label)) - static_cast<int64_t>(start + 2);
+        if (disp >= -128) {
+            if (cond == Condition::None) enc_.jmp_short(label);
+            else enc_.j_short(cond, label);
+            return;
+        }
+    } else if (ordinal < short_fwd_.size() && short_fwd_[ordinal]) {
+        if (cond == Condition::None) enc_.jmp_short(label);
+        else enc_.j_short(cond, label);
+        short_patch_ord_[buffer_.size() - 1] = ordinal;
+        return;
+    }
+    if (cond == Condition::None) enc_.jmp_near(label);
+    else enc_.j_near(cond, label);
+    if (!buffer_.is_bound(label)) forward_branches_.push_back(ForwardBranch{ordinal, buffer_.size(), label});
 }
 
 CompilationResult EmitContext::compile_once() {
@@ -181,10 +224,12 @@ CompilationResult EmitContext::compile_once() {
             // where nothing falls into it: padding a block that the one
             // before runs straight into executes the padding on that path,
             // which on a chain of small blocks (an and-chain's tests, an
-            // inline cache's guards) was a nop or two per branch.
+            // inline cache's guards) was a nop or two per branch. A cold
+            // block (a miss, a slow call) is not aligned at all: its padding
+            // only spreads the hot code over more lines.
             if (threading.loop_head(b_idx)) {
                 buffer_.align(32);
-            } else if (!prev_falls_through) {
+            } else if (!prev_falls_through && !block->cold) {
                 buffer_.align(16);
             }
         }
@@ -232,14 +277,14 @@ CompilationResult EmitContext::compile_once() {
             uint32_t false_target = threading.target(closing.other);
 
             if (falls_to(false_target)) {
-                enc_.j(jcc.condition, block_labels_[true_target]);
+                emit_jump(jcc.condition, true_target);
                 prev_falls_through = true;
             } else if (falls_to(true_target)) {
-                enc_.j(invert(jcc.condition), block_labels_[false_target]);
+                emit_jump(invert(jcc.condition), false_target);
                 prev_falls_through = true;
             } else {
-                enc_.j(jcc.condition, block_labels_[true_target]);
-                enc_.jmp(block_labels_[false_target]);
+                emit_jump(jcc.condition, true_target);
+                emit_jump(Condition::None, false_target);
                 prev_falls_through = false;
             }
         } else if (closing.count == 1) {
@@ -249,7 +294,7 @@ CompilationResult EmitContext::compile_once() {
             }
             uint32_t target = threading.target(closing.other);
             if (!falls_to(target)) {
-                enc_.jmp(block_labels_[target]);
+                emit_jump(Condition::None, target);
                 prev_falls_through = false;
             } else {
                 prev_falls_through = true;
@@ -262,6 +307,10 @@ CompilationResult EmitContext::compile_once() {
         }
     }
 
+    for (size_t off : buffer_.rel8_overflows()) {
+        auto it = short_patch_ord_.find(off);
+        if (it != short_patch_ord_.end()) overflow_ords_.push_back(it->second);
+    }
     result.code_buffer = std::move(buffer_);
     result.safepoints = std::move(safepoints_);
     result.stack_map.function_name = fn_.name;
@@ -459,10 +508,10 @@ void EmitContext::zero_tagged_locals() {
 void EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
-            enc_.jmp(block_labels_[inst.uses[0].label_id]);
+            emit_jump(Condition::None, inst.uses[0].label_id);
             break;
         case LirOpcode::Jcc:
-            enc_.j(inst.condition, block_labels_[inst.uses[0].label_id]);
+            emit_jump(inst.condition, inst.uses[0].label_id);
             break;
         case LirOpcode::Call: {
             // A 256-bit argument travels in a YMM register; no other value

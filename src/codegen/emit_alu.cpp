@@ -135,7 +135,9 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
                     inst.uses[0].imm_int
                 );
             } else {
-                enc_.movabs(dst_gpr, static_cast<uint64_t>(inst.uses[0].imm_int));
+                // Its shortest encoding: a 32-bit or sign-extended move where
+                // the value has one (`0xffffffff` was a 10-byte movabs).
+                enc_.mov(dst_gpr, inst.uses[0].imm_int);
             }
             break;
         }

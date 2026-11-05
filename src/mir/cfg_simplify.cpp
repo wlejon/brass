@@ -9,6 +9,13 @@ namespace brass {
 
 namespace {
 
+// Rarely run, as block layout reads it (codegen/block_layout.cpp): the flag,
+// or a "cold" in the name, which is how a front end that builds no profile
+// names its misses and slow paths.
+bool cold_hint(const BasicBlock* bb) {
+    return bb && (bb->is_cold() || bb->name().find("cold") != std::string_view::npos);
+}
+
 void for_each_target_pointing_to(Instruction* term, BasicBlock* target_bb, auto&& fn) {
     if (!term || !target_bb) return;
     for_each_edge(*term, [&](BranchTarget& bt) {
@@ -478,18 +485,35 @@ private:
             bool is_empty_forward = (T->param_count() == 0 && term->branch_target().args.empty());
 
             if (is_identity || is_empty_forward) {
+                // A cold trampoline is all that says its edge is the
+                // unlikely one: bypassed, a miss whose test a dominating one
+                // made redundant (the receiver tests of two guards on one
+                // object) reached its target from a hot branch, and the
+                // layout put the hit out of line instead. So it stays
+                // between a predecessor that is not cold and the target;
+                // the cold path pays the jump.
+                const bool keep_for_hot = cold_hint(T) && !cold_hint(Target);
                 std::vector<BasicBlock*> preds = T->predecessors();
+                std::vector<BasicBlock*> kept;
+                size_t bypassed = 0;
                 for (BasicBlock* P : preds) {
                     if (P == T) continue;
                     Instruction* p_term = P ? P->terminator() : nullptr;
                     if (!p_term) continue;
+                    if (keep_for_hot && !cold_hint(P)) {
+                        kept.push_back(P);
+                        continue;
+                    }
 
                     for_each_target_pointing_to(p_term, T, [&](BranchTarget& bt) {
                         bt.block = Target;
                     });
                     Target->add_predecessor(P);
+                    ++bypassed;
                 }
+                if (bypassed == 0 && !kept.empty()) continue;
                 T->clear_predecessors();
+                for (BasicBlock* P : kept) T->add_predecessor(P);
                 if (options_.stats) options_.stats->trampolines_eliminated++;
                 changed = true;
             }
