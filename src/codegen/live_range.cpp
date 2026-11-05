@@ -176,7 +176,10 @@ void LivenessAnalysis::assign_instruction_ids() {
         bl.start_id = current_id;
         for (auto& inst : block->instructions) {
             inst->id = current_id;
-            if (inst->is_call() || inst->opcode == LirOpcode::Safepoint) {
+            // The GC points: a call that reaches none (no_gc_point: a
+            // `nocollect` or `pure` callee, the write barrier) moves no
+            // object, so a reference live across it may stay in a register.
+            if ((inst->is_call() && !inst->no_gc_point) || inst->opcode == LirOpcode::Safepoint) {
                 call_inst_ids_.push_back(current_id);
             }
             current_id += 2; // Step by 2 for split points

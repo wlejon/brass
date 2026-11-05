@@ -89,7 +89,10 @@ bool is_parallel_kernel(const Function& fn) {
 
 bool polled(const Function& fn) {
     const Module* mod = fn.parent();
-    return mod && mod->interrupt_poll() && mod->pinned_tls_register() && !is_parallel_kernel(fn);
+    // A `nocollect` function reaches no GC point by its contract, and a poll
+    // is one: its loops go unpolled.
+    return mod && mod->interrupt_poll() && mod->pinned_tls_register() && !is_parallel_kernel(fn) &&
+           !mod->has_symbol_role(fn.name(), SymbolRole::NoCollect);
 }
 
 } // namespace

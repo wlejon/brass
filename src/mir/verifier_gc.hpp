@@ -13,6 +13,17 @@ void verify_derived_gcrefs(
     const std::function<void(const std::string&)>& report_error
 );
 
+// A function its module declares `nocollect` (SymbolRole::NoCollect) is
+// called as no GC point: its callers keep references in registers across the
+// call and record no stack map there. Its body must then reach no GC point
+// either — no safepoint, no indirect call, no direct call of a callee not
+// itself `pure` or `nocollect`, no coroutine op.
+void verify_nocollect_body(
+    const Function& fn,
+    const std::string& fn_prefix,
+    const std::function<void(const std::string&)>& report_error
+);
+
 // Checks bitcast_i64_tagged / bitcast_tagged_i64; false for any other opcode.
 bool verify_tagged_bitcast(
     const Instruction& inst,

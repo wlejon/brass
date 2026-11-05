@@ -707,10 +707,14 @@ void LinearScanAllocator::record_live_gcrefs() {
         }
         for (auto it = block->instructions.rbegin(); it != block->instructions.rend(); ++it) {
             LirInst& inst = **it;
+            // A call that reaches no GC point has no stack map entry worth
+            // the name: nothing walks this frame while it runs, so its roots
+            // are none, and a reference held in a callee-saved register
+            // across it needs no designated slot.
             if (inst.is_call() || inst.opcode == LirOpcode::Safepoint) {
                 inst.live_gcrefs.clear();
                 for (uint32_t id : gcref_ids) {
-                    if (live[id]) inst.live_gcrefs.push_back(fn_.vreg_table[id].vreg);
+                    if (live[id] && !inst.no_gc_point) inst.live_gcrefs.push_back(fn_.vreg_table[id].vreg);
                 }
             }
             for (const auto& d : inst.defs) {

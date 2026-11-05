@@ -1,5 +1,6 @@
 #include "verifier_gc.hpp"
 #include <brass/mir/block.hpp>
+#include <brass/mir/module.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/runtime_symbols.hpp>
@@ -110,6 +111,25 @@ void verify_derived_gcrefs(
             }
             if (inst->result() && is_derived_gcref(inst->result())) {
                 usable[inst->result()] = true;
+            }
+        }
+    }
+}
+
+void verify_nocollect_body(
+    const Function& fn,
+    const std::string& fn_prefix,
+    const std::function<void(const std::string&)>& report_error
+) {
+    const Module* mod = fn.parent();
+    if (!mod || !mod->has_symbol_role(fn.name(), SymbolRole::NoCollect)) return;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (inst && may_trigger_gc(*inst)) {
+                report_error(fn_prefix + "Block '" + std::string(bb->name()) + "': Instruction '" +
+                             std::string(opcode_name(inst->opcode())) +
+                             "': a GC point in a function declared nocollect.");
             }
         }
     }
