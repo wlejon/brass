@@ -387,6 +387,10 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
         case LirOpcode::Bsf: enc_.bsf(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
         case LirOpcode::Bsf32: enc_.bsf32(to_gpr(inst.defs[0]), to_gpr(inst.uses[0])); break;
         case LirOpcode::Cmp: {
+            if (inst.uses[0].is_mem()) {
+                enc_.cmp(to_mem_address(inst.uses[0]), static_cast<int32_t>(inst.uses[1].imm_int));
+                break;
+            }
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
             if (op1.is_preg()) enc_.cmp(op0, to_gpr(op1));
@@ -395,6 +399,10 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::Cmp32: {
+            if (inst.uses[0].is_mem()) {
+                enc_.cmp32(to_mem_address(inst.uses[0]), static_cast<int32_t>(inst.uses[1].imm_int));
+                break;
+            }
             GPR op0 = to_gpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
             if (op1.is_preg()) enc_.cmp32(op0, to_gpr(op1));

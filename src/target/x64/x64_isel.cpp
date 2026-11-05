@@ -281,10 +281,21 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                     ImmIntInfo rhs_imm = get_imm_int_info(rhs);
                     ImmIntInfo lhs_imm = get_imm_int_info(lhs);
 
+                    // An equality with zero is a `test` of the register
+                    // (append_fused_compare), which reads no memory operand.
+                    const bool eq_op = def_inst->opcode() == Opcode::eq || def_inst->opcode() == Opcode::ne;
+                    const bool tests_zero =
+                        eq_op && ((rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0));
                     if (rhs_imm.is_imm && rhs_imm.fits_i32) {
                         folded_uses[rhs]++;
+                        if (!tests_zero && fuses_compare_imm_load(lhs, inst)) {
+                            skipped_insts_.insert(lhs->defining_instruction());
+                        }
                     } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
                         folded_uses[lhs]++;
+                        if (!tests_zero && fuses_compare_imm_load(rhs, inst)) {
+                            skipped_insts_.insert(rhs->defining_instruction());
+                        }
                     } else if (!lhs->type().is_float() && rhs && rhs->is_instruction() &&
                                can_fuse_load(rhs->defining_instruction(), inst)) {
                         skipped_insts_.insert(rhs->defining_instruction());
@@ -703,6 +714,23 @@ void X64ISel::lower_branch(const Instruction& inst, LirBlock& lir_bb) {
     lir_bb.append_inst(std::move(jmp_inst));
 }
 
+// A compare against an immediate whose other side is a load only that compare
+// reads, in the branch's block: `cmp [mem], imm`, the load folded in
+// (analyze_function marks it skipped, append_fused_compare reads it in place).
+bool X64ISel::fuses_compare_imm_load(const Value* side, const Instruction* user) const {
+    if (!side || !side->is_instruction() || side->type().is_float() || side->type().is_vector()) return false;
+    return can_fuse_load(side->defining_instruction(), user);
+}
+
+LirOperand X64ISel::compare_imm_side(const Value* side, uint8_t sz) {
+    if (side->is_instruction() && skipped_insts_.count(side->defining_instruction()) &&
+        (side->defining_instruction()->opcode() == Opcode::load ||
+         side->defining_instruction()->opcode() == Opcode::load_indexed)) {
+        return get_load_mem_operand(side->defining_instruction());
+    }
+    return LirOperand::vreg(get_vreg(side), sz);
+}
+
 // The flags of a comparison analyze_function folded into its branch `user`
 // (a br_if, or one leaf of an and-chain, x64_isel_and_chain.cpp), emitted
 // into `lir_bb`, and the condition that holds exactly when it is true.
@@ -771,13 +799,13 @@ Condition X64ISel::append_fused_compare(const Instruction& cmp, const Instructio
         } else if (rhs_imm.is_imm && rhs_imm.fits_i32) {
             branch_cond = gpr_c;
             auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-            cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
+            cmp_lir->add_use(compare_imm_side(lhs, sz));
             cmp_lir->add_use(LirOperand::imm(rhs_imm.val, sz));
             lir_bb.append_inst(std::move(cmp_lir));
         } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
             branch_cond = swap_relational_condition(gpr_c);
             auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-            cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
+            cmp_lir->add_use(compare_imm_side(rhs, sz));
             cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
             lir_bb.append_inst(std::move(cmp_lir));
         } else if (!remat_cmps_.count(cmp_inst) && rhs && rhs->is_instruction() &&

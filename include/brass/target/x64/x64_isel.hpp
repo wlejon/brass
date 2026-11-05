@@ -136,6 +136,10 @@ private:
     // user and never on its own.
     bool materialized(const Value* v) const;
     bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
+    // A compare-with-immediate's load side, folded into a `cmp [mem], imm`
+    // (x64_isel.cpp append_fused_compare).
+    bool fuses_compare_imm_load(const Value* side, const Instruction* user) const;
+    codegen::LirOperand compare_imm_side(const Value* side, uint8_t sz);
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
     bool is_value_dead_after(const Function& mir_fn, const BasicBlock& bb, const Instruction* inst, const Value* val) const;
     void analyze_function(const Function& mir_fn);
