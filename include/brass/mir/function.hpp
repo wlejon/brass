@@ -57,12 +57,25 @@ public:
     // has no blocks, and nothing may read its blocks, which another thread
     // may be building. has_body() is the question "a definition, not a
     // declaration?"; body_ready() is "may its blocks be read now?".
+    //
+    // A body the module may release (body_arena) is a definition from
+    // before the program runs to its end, whatever state its blocks are in:
+    // has_body() must not ask its blocks, which release_body empties on
+    // another thread while it is asked (it sets the lazy state first, but a
+    // reader that read the state before that and the blocks after it would
+    // take the definition for a declaration, and a tier-2 or OSR compile
+    // linking its caller would leave the call unresolved).
     bool is_lazy() const noexcept { return body_state_.load(std::memory_order_acquire) != kBodyReady; }
     bool body_ready() const noexcept { return !is_lazy(); }
-    bool has_body() const noexcept { return is_lazy() || !blocks_.empty(); }
+    bool has_body() const noexcept {
+        return provided_body_.load(std::memory_order_acquire) || is_lazy() || !blocks_.empty();
+    }
     // Called by the module's front end before the program runs, on a
     // function with no blocks yet.
-    void mark_lazy() noexcept { body_state_.store(kBodyLazy, std::memory_order_release); }
+    void mark_lazy() noexcept {
+        provided_body_.store(true, std::memory_order_release);
+        body_state_.store(kBodyLazy, std::memory_order_release);
+    }
     // Called by Module::materialize once the body is built: publishes it.
     void mark_body_ready() noexcept { body_state_.store(kBodyReady, std::memory_order_release); }
 
@@ -187,6 +200,9 @@ private:
     static constexpr uint8_t kBodyReady = 0;
     static constexpr uint8_t kBodyLazy = 1;
     std::atomic<uint8_t> body_state_{kBodyReady};
+    // Set by mark_lazy and own_body_arena, never cleared: a definition whose
+    // body may come and go (has_body).
+    std::atomic<bool> provided_body_{false};
     mutable std::atomic<bool> dispatch_referenced_{false};
     mutable std::atomic<bool> body_pinned_{false};
     bool built_before_ = false;

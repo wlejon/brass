@@ -175,6 +175,29 @@ TEST_CASE("Lazy bodies - a built body is released, and built again when next rea
     CHECK(cold->is_lazy());
 }
 
+// release_body sets the lazy state and then empties the blocks, on whichever
+// thread released them, while a tier-2 or OSR compile on another thread
+// asks has_body() of the callees it links (tier2_link.cpp). A reader that
+// read the state before the release and the blocks after it saw a ready
+// function with no blocks, took the definition for a declaration, skipped
+// linking it, and the load failed on an unresolved symbol. That interleaving,
+// in one thread: a provided body, ready, its blocks gone.
+TEST_CASE("Lazy bodies - a provided body is a definition while its blocks go") {
+    int built = 0;
+    auto mod = lazy_module(built);
+    Function* cold = mod->get_function("lb_cold");
+    mod->materialize(*cold);
+    REQUIRE(cold->body_ready());
+    while (!cold->blocks().empty()) cold->remove_block(cold->blocks().back());
+    CHECK(cold->body_ready());
+    CHECK(cold->has_body());
+    // A declaration stays one.
+    Module plain("plain");
+    Function* decl = plain.create_function("decl", Type::i64(), {});
+    REQUIRE(decl != nullptr);
+    CHECK(!decl->has_body());
+}
+
 TEST_CASE("Lazy bodies - a pinned body is never released") {
     int built = 0;
     auto mod = lazy_module(built);

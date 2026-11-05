@@ -35,6 +35,7 @@ constexpr size_t kBodyArenaMaxChunk = Arena::DefaultChunkSize;
 } // namespace
 
 void Function::own_body_arena() {
+    provided_body_.store(true, std::memory_order_release);
     // Built again, the body is the same size: one chunk holds it.
     const size_t first = body_bytes_ ? body_bytes_ + 64 : kBodyArenaFirstChunk;
     body_arena_ = std::make_unique<Arena>(first, std::max(first, kBodyArenaMaxChunk));

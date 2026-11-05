@@ -105,8 +105,10 @@ Topology read_topology() {
 
 const Topology& topology() {
     // Read once and kept: CPUs coming and going later are not followed.
-    static const Topology t = read_topology();
-    return t;
+    // Never destroyed: a compile worker still placing itself while the main
+    // thread runs exit()'s static destructors would read a freed vector.
+    static const Topology* const t = new Topology(read_topology());
+    return *t;
 }
 
 // The domain this thread was last moved away from; -1: it may run anywhere.
