@@ -34,7 +34,9 @@ void X64Encoder::emit_sib(Scale scale, uint8_t index, uint8_t base) {
 void X64Encoder::emit_mem_operand(uint8_t reg_code_val, const MemAddress& mem) {
     if (mem.is_rip_rel) {
         emit_modrm(0, reg_code_val, 5);
+        const size_t at = buffer_.size();
         buffer_.emit32(static_cast<uint32_t>(mem.disp));
+        if (mem.rip_label != 0) buffer_.record_label_fixup(Label{mem.rip_label}, at, FixupKind::Rel32);
         return;
     }
 

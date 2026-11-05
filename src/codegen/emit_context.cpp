@@ -27,28 +27,6 @@ XMM EmitContext::to_xmm(const LirOperand& op) const {
     return XMM::None;
 }
 
-MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
-    if (op.is_spill_slot()) return X64FrameLayout::spill_slot_address(op.spill_slot, frame_);
-    if (op.is_local_slot()) return X64FrameLayout::local_frame_address(op.local_offset, frame_);
-    if (op.is_mem()) {
-        const auto& m = op.mem_val;
-        GPR base = m.base_preg.is_valid() ? m.base_preg.as_gpr() : GPR::None;
-        GPR index = m.index_preg.is_valid() ? m.index_preg.as_gpr() : GPR::None;
-
-        if (base != GPR::None && index != GPR::None) {
-            return ptr(base, index, m.scale, m.disp);
-        } else if (base != GPR::None) {
-            return ptr(base, m.disp);
-        } else if (index != GPR::None) {
-            return MemAddress::index_disp(index, m.scale, m.disp);
-        } else {
-            return ptr(GPR::RBP, m.disp);
-        }
-    }
-    throw std::logic_error("x64 emission: operand of kind " + std::string(to_string(op.kind)) +
-                           " used as a memory address in " + fn_.name);
-}
-
 namespace {
 
 // Opcodes whose encoding is always VEX.256 (the FMA vector forms are 256-bit
@@ -166,6 +144,7 @@ CompilationResult EmitContext::compile_once() {
     block_labels_.clear();
     callee_gpr_to_slot_.clear();
     frame_ = fn_.frame;
+    begin_constant_pool();
 
     // 0. Allocate designated frame spill slots for unspilled callee-saved GPRs holding live GCRefs
     for (const auto& block : fn_.blocks) {
@@ -307,6 +286,7 @@ CompilationResult EmitContext::compile_once() {
         }
     }
 
+    emit_constant_pool();
     for (size_t off : buffer_.rel8_overflows()) {
         auto it = short_patch_ord_.find(off);
         if (it != short_patch_ord_.end()) overflow_ords_.push_back(it->second);

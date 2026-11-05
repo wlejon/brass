@@ -440,8 +440,43 @@ void LinearScanAllocator::mark_folded_uses() {
     }
 }
 
+// Step 4 saved R14 and R15 for any function with a spill slot, since the
+// rewrite may take either as a scratch; the rewrite has now run, and a scratch
+// it never named needs no save. Most frames spill something and few take the
+// scratches (Vector3.dot's frame saved both and named neither), so this takes
+// two stores and two reloads off a typical call. Nothing past the allocator
+// introduces a callee-saved register of its own: the emitters' scratches are
+// R10 and R11, and the peephole only renames to a register already named.
+static void trim_unused_scratch_saves(LirFunction& fn, uint32_t allocated_callee_gprs) {
+    using namespace brass::x64;
+    const uint32_t scratches = reg_mask(GPR::R14) | reg_mask(GPR::R15);
+    const uint32_t candidates =
+        fn.frame.saved_callee_gprs & scratches & ~fn.forced_saved_gprs & ~allocated_callee_gprs;
+    if (candidates == 0) return;
+    uint32_t named = 0;
+    auto note = [&](const PReg& r) {
+        if (r.is_valid() && r.is_gpr()) named |= reg_mask(r.as_gpr());
+    };
+    auto note_operand = [&](const LirOperand& op) {
+        if (op.is_preg()) note(op.preg_val);
+        else if (op.is_mem()) {
+            note(op.mem_val.base_preg);
+            note(op.mem_val.index_preg);
+        }
+    };
+    for (const auto& block : fn.blocks) {
+        for (const auto& inst : block->instructions) {
+            for (const auto& d : inst->defs) note_operand(d);
+            for (const auto& u : inst->uses) note_operand(u);
+            if ((named & candidates) == candidates) return;
+        }
+    }
+    fn.frame.saved_callee_gprs &= ~(candidates & ~named);
+}
+
 void LinearScanAllocator::allocate() {
     // 0. Build coalescing hints & detect calls
+    collect_constant_vregs();
     build_coalesce_hints();
     build_constraint_index();
     build_block_spans();
@@ -548,6 +583,7 @@ void LinearScanAllocator::allocate() {
         }
     }
 
+    const uint32_t allocated_callee_gprs = final_callee_gprs;
     if (!cc_.target().is_aarch64() && next_spill_slot_ > 0) {
         // If function spills on x64, scratch registers R14 and R15 may be used during rewrite.
         // Ensure they are marked as saved callee-saved GPRs in the frame layout.
@@ -597,6 +633,7 @@ void LinearScanAllocator::allocate() {
     collect_resolution_moves();
     // Only for a host that may scan the frame conservatively (Module::precise_stack_roots unset).
     if (fn_.clear_dead_roots_at_calls) clear_dead_callee_gprs_at_calls(final_callee_gprs);
+    find_constant_slots();
     rewrite_instructions();
     split_critical_edges();
     if (emitted_parallel_copy_ && cc_.kind() == CallingConvKind::Win64) {
@@ -645,6 +682,8 @@ void LinearScanAllocator::allocate() {
                 return i.defs.size() == 1 && i.uses.size() == 1 && same(i.defs[0], i.uses[0]);
             }), ins.end());
         }
+        pool_constant_slots();
+        trim_unused_scratch_saves(fn_, allocated_callee_gprs);
     }
 }
 

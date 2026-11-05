@@ -266,6 +266,19 @@ private:
     // across it (live after the site and not defined by it).
     void record_live_gcrefs();
     void clear_dead_callee_gprs_at_calls(uint32_t final_callee_gprs);
+    // x64: a constant spilled to a slot of its own (linear_scan_constants.cpp).
+    // find_constant_slots, before the rewrite, names the slots that only ever
+    // hold one 64-bit constant; pool_constant_slots, after it, drops their
+    // stores and records them in FrameInfo::constant_slots, from which the
+    // emitter reads them as rip-relative operands.
+    // collect_constant_vregs, before allocating, finds the values that are
+    // one constant (single def, an immediate): slot_of gives each a slot of
+    // its own, since a slot shared with another value has stores of that one.
+    void collect_constant_vregs();
+    void find_constant_slots();
+    void pool_constant_slots();
+    std::unordered_map<uint32_t, int64_t> constant_vregs_;
+    std::vector<std::pair<int32_t, int64_t>> constant_slot_candidates_;
 };
 
 // The width (8, or 4 for a 32-bit form) at which the x64 emitters encode

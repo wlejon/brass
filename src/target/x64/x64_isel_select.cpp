@@ -55,6 +55,16 @@ VReg X64ISel::recent_select_constant(const LirBlock& lir_bb, int64_t value) cons
     return it->second.vreg;
 }
 
+// The pinned TLS register as a select's false value (the guards' stand-in
+// receiver: `ptr < limit ? ptr : tls`) was copied into the result and the other
+// value moved over it, `mov r9, r13; cmovb r9, r8`. With the operands swapped
+// and the condition inverted, the result starts as the other value, which
+// usually dies here and shares its register, and the cmov reads r13 itself
+// (fold_reserved_register_copies): `cmovae r8, r13`.
+static bool is_pinned_tls(const Value* v) {
+    return v && v->is_instruction() && v->defining_instruction()->opcode() == Opcode::pinned_tls_read;
+}
+
 void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     const Value* cond_val = inst.operand(0);
     const Value* true_val = inst.operand(1);
@@ -62,6 +72,16 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
 
     VReg dst = get_vreg(inst.result());
     bool is_float = dst.is_xmm();
+    bool inverted = false;
+    if (!is_float && is_pinned_tls(false_val) && !is_pinned_tls(true_val) && !get_imm_int_info(true_val).is_imm) {
+        const Instruction* c = cond_val ? cond_val->defining_instruction() : nullptr;
+        const bool float_compare = c && fused_into(c, inst) && is_comparison(c->opcode()) &&
+                                   c->operand(0)->type().is_float();
+        if (!float_compare) {
+            std::swap(true_val, false_val);
+            inverted = true;
+        }
+    }
     uint8_t sz = dst.size;
     if (sz == 0) sz = 8;
 
@@ -261,7 +281,7 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     // 4. Emit cmovcc
     uint8_t op_sz = is_float ? (sz == 4 ? 4 : 8) : sz;
     auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
-    cmov->condition = select_cond;
+    cmov->condition = inverted ? invert(select_cond) : select_cond;
     cmov->add_def(LirOperand::vreg(target_reg, op_sz));
     cmov->add_use(LirOperand::vreg(target_reg, op_sz));
     cmov->add_use(LirOperand::vreg(src_vreg, op_sz));

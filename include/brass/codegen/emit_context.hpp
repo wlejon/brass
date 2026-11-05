@@ -67,6 +67,9 @@ private:
     std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, x64::Label> block_labels_;
     std::unordered_map<uint8_t, int32_t> callee_gpr_to_slot_;
+    // FrameInfo::constant_slots: slot -> its pool entry's label
+    // (emit_constant_pool.cpp).
+    std::unordered_map<int32_t, x64::Label> pool_labels_;
     std::vector<runtime::PatchSite> patch_sites_;
 
     struct PendingExceptionScope {
@@ -126,6 +129,8 @@ private:
     void record_gc_point(const LirInst& inst, size_t return_offset, SafepointRecord* sp);
     // Zeroes the `alloca.tagged` buffers (after the prologue).
     void zero_tagged_locals();
+    void begin_constant_pool();
+    void emit_constant_pool();
     // Guard exit with no handler or resumer: calls the exit stub as
     // stub(state values...) from the deopt record at [rsp + slots_disp]. The
     // stack arguments use the outgoing area the guard exit allocated below

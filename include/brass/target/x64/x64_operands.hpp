@@ -42,6 +42,11 @@ struct MemAddress {
     Scale scale = Scale::One;
     int32_t disp = 0;
     bool is_rip_rel = false;
+    // A rip-relative operand whose displacement is a fixup to this code
+    // buffer label (a constant pool entry), 0 for none. The fixup is relative
+    // to the end of the displacement: an instruction that names one carries
+    // no immediate after it.
+    uint32_t rip_label = 0;
 
     constexpr MemAddress() noexcept = default;
 
@@ -79,6 +84,13 @@ struct MemAddress {
         MemAddress m;
         m.is_rip_rel = true;
         m.disp = d;
+        return m;
+    }
+
+    static constexpr MemAddress rip_label_ref(uint32_t label_id) noexcept {
+        MemAddress m;
+        m.is_rip_rel = true;
+        m.rip_label = label_id;
         return m;
     }
 

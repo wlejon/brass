@@ -563,6 +563,10 @@ struct FrameInfo {
     // word is zeroed in the prologue and is a root at every GC point.
     std::vector<std::pair<uint32_t, uint32_t>> tagged_locals;
     std::vector<bool> spill_slot_is_gcref;
+    // x64: (slot, value) for spill slots that hold one constant and are never
+    // stored: the emitter reads them from the function's constant pool, after
+    // its code, as rip-relative operands (LinearScanAllocator::pool_constant_slots).
+    std::vector<std::pair<int32_t, int64_t>> constant_slots;
     uint32_t saved_callee_gprs = 0;
     uint32_t saved_callee_xmms = 0;
     size_t outgoing_arg_space = 0;

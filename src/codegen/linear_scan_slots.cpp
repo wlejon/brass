@@ -18,7 +18,7 @@ int32_t LinearScanAllocator::slot_of(VReg v) {
     int32_t& slot = vreg_slot_[v.id];
     if (slot >= 0) return slot;
     const LiveInterval* mine = liveness_.get_interval(v);
-    const bool shareable = v.size <= 8 && mine && !mine->segments.empty();
+    const bool shareable = v.size <= 8 && mine && !mine->segments.empty() && !constant_vregs_.count(v.id);
     // Inclusive at both ends: a value read by an instruction and one written
     // by it are both live there, which keeps a reload and a write-back of the
     // same instruction out of one slot.

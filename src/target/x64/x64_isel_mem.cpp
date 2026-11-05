@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace brass::x64 {
 
@@ -464,6 +465,131 @@ void X64ISel::lower_tagged_bitcast(const Instruction& inst, LirBlock& lir_bb) {
     mov->add_use(LirOperand::vreg(src, 8));
     mov->mir_origin = &inst;
     lir_bb.append_inst(std::move(mov));
+}
+
+// The pinned TLS register and the stack pointer are read into a register by a
+// plain copy (lower_pinned_tls_read, lower_read_sp). Where that copy's only
+// readers are memory operands, and for the stack pointer a compare, they can
+// name the register itself: the entry's stack check was `mov rax, r13; mov
+// rcx, rsp; cmp rcx, [rax + limit]`, and is `cmp rsp, [r13 + limit]`. A copy
+// whose readers all take the register is dropped. The stack pointer is only
+// named in the block that read it, with no call or stack adjustment between,
+// since it moves around a call's outgoing arguments; never as an index, which
+// x64 cannot encode.
+void fold_reserved_register_copies(LirFunction& fn, uint32_t pinned_mask) {
+    struct Copy {
+        PReg reg;
+        const LirBlock* block = nullptr;
+        size_t pos = 0;
+        uint32_t defs = 0;
+        bool kept = false;
+    };
+    std::unordered_map<uint32_t, Copy> copies;
+    std::unordered_map<uint32_t, uint32_t> def_count;
+    // A pinned register the function writes (the module entry setting up the
+    // TLS block, a coroutine body re-fetching it) may differ between a copy
+    // and its readers: those copies stay.
+    for (const auto& block : fn.blocks) {
+        for (const auto& in : block->instructions) {
+            for (const auto& d : in->defs) {
+                if (d.is_preg() && d.preg_val.is_gpr()) pinned_mask &= ~reg_mask(d.preg_val.as_gpr());
+            }
+        }
+    }
+    for (const auto& block : fn.blocks) {
+        for (size_t i = 0; i < block->instructions.size(); ++i) {
+            const LirInst& in = *block->instructions[i];
+            for (const auto& d : in.defs) {
+                if (d.is_vreg()) def_count[d.vreg_val.id]++;
+            }
+            if (in.opcode != LirOpcode::Mov || in.defs.size() != 1 || in.uses.size() != 1) continue;
+            const LirOperand& d = in.defs[0];
+            const LirOperand& u = in.uses[0];
+            if (!d.is_vreg() || d.size != 8 || !u.is_preg() || !u.preg_val.is_gpr() || u.size != 8) continue;
+            const GPR g = u.preg_val.as_gpr();
+            const bool pinned = (pinned_mask & reg_mask(g)) != 0;
+            if (!pinned && g != GPR::RSP) continue;
+            copies[d.vreg_val.id] = Copy{u.preg_val, block.get(), i, 0, false};
+        }
+    }
+    if (copies.empty()) return;
+    for (auto& [id, c] : copies) c.defs = def_count[id];
+    auto copy_of = [&](VReg v) -> Copy* {
+        if (!v.is_valid()) return nullptr;
+        auto it = copies.find(v.id);
+        return (it == copies.end() || it->second.defs != 1) ? nullptr : &it->second;
+    };
+    // Whether the stack pointer still holds what the copy read at `pos`.
+    auto sp_unmoved = [](const Copy& c, const LirBlock* block, size_t pos) {
+        if (block != c.block || pos <= c.pos) return false;
+        for (size_t k = c.pos + 1; k < pos; ++k) {
+            const LirInst& m = *block->instructions[k];
+            if (m.is_call() || m.opcode == LirOpcode::Push || m.opcode == LirOpcode::Pop) return false;
+            for (const auto& d : m.defs) {
+                if (d.is_preg() && d.preg_val.is_gpr() && d.preg_val.as_gpr() == GPR::RSP) return false;
+            }
+        }
+        return true;
+    };
+    for (const auto& block : fn.blocks) {
+        for (size_t i = 0; i < block->instructions.size(); ++i) {
+            LirInst& in = *block->instructions[i];
+            const bool compare = in.opcode == LirOpcode::Cmp || in.opcode == LirOpcode::Test;
+            // A cmov's moved value (its last use; the first is the result,
+            // tied to the def) is read in place, as a compare's operands are.
+            const bool cmov = in.opcode == LirOpcode::Cmovcc;
+            auto mem = [&](LirOperand& op) {
+                LirMem& m = op.mem_val;
+                if (Copy* c = copy_of(m.base_vreg)) {
+                    if (c->reg.as_gpr() != GPR::RSP || sp_unmoved(*c, block.get(), i)) {
+                        m.base_preg = c->reg;
+                        m.base_vreg = VReg{};
+                    } else {
+                        c->kept = true;
+                    }
+                }
+                if (Copy* c = copy_of(m.index_vreg)) {
+                    if (c->reg.as_gpr() != GPR::RSP) {
+                        m.index_preg = c->reg;
+                        m.index_vreg = VReg{};
+                    } else {
+                        c->kept = true;
+                    }
+                }
+            };
+            for (auto& d : in.defs) {
+                if (d.is_mem()) mem(d);
+            }
+            for (size_t k = 0; k < in.uses.size(); ++k) {
+                LirOperand& u = in.uses[k];
+                if (u.is_mem()) {
+                    mem(u);
+                    continue;
+                }
+                if (!u.is_vreg()) continue;
+                Copy* c = copy_of(u.vreg_val);
+                if (!c) continue;
+                if (c->block == block.get() && c->pos == i) continue; // the copy itself
+                const bool fixed = k < in.use_constraints.size() && in.use_constraints[k].has_fixed_preg;
+                const bool sp_ok = c->reg.as_gpr() != GPR::RSP || sp_unmoved(*c, block.get(), i);
+                const bool readable = compare || (cmov && k + 1 == in.uses.size() && k > 0);
+                if (readable && !fixed && u.size == 8 && sp_ok) {
+                    u = LirOperand::preg(c->reg, 8);
+                } else {
+                    c->kept = true;
+                }
+            }
+        }
+    }
+    for (auto& [id, c] : copies) {
+        if (c.defs != 1 || c.kept) continue;
+        auto& ins = const_cast<LirBlock*>(c.block)->instructions;
+        ins[c.pos].reset();
+    }
+    for (const auto& block : fn.blocks) {
+        auto& ins = block->instructions;
+        ins.erase(std::remove(ins.begin(), ins.end(), nullptr), ins.end());
+    }
 }
 
 } // namespace brass::x64
