@@ -434,11 +434,16 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
             if (whole_only) {
                 whole_cost[r] += other.base->spill_weight;
                 holders[r].push_back(a);
-            } else if (only_copied_[other.vreg().id]) {
+            } else if (only_copied_[other.vreg().id] ||
+                       (other.vreg().is_gcref && other.base->spans_call)) {
                 // A value that cannot be split, read only by block-argument
                 // copies, gives its register up for its whole life: it moves
                 // to its slot, its definition stores there and the copies
-                // read it there (weighed below).
+                // read it there (weighed below). So does a GC reference
+                // across a call: a callee-saved register is where it may
+                // live (record_live_gcrefs), not where it must, and one held
+                // for a whole function would otherwise keep the register
+                // from the values of a hot loop it is idle through.
                 holders[r].push_back(a);
             } else {
                 // Any other value that cannot be split keeps its register:
@@ -664,14 +669,9 @@ void LinearScanAllocator::run_scan() {
         active_.erase(std::remove_if(active_.begin(), active_.end(),
                                      [&](uint32_t a) { return pieces_[a].end <= pos; }),
                       active_.end());
-        const VReg v = pieces_[idx].vreg();
-        // A GC reference live across a call stays in its slot, where the
-        // stack map finds it.
-        if (v.is_gcref && pieces_[idx].base->spans_call) {
-            pieces_[idx].spilled = true;
-            slot_of(v);
-            continue;
-        }
+        // A GC reference live across a call competes for a callee-saved
+        // register like any other value (record_live_gcrefs, gc_contract.md
+        // 1.1): the collector's stack scan pins what such a register names.
         if (!try_allocate_free(idx, unhandled)) allocate_blocked(idx, unhandled);
     }
 }

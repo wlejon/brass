@@ -709,12 +709,23 @@ void LinearScanAllocator::record_live_gcrefs() {
             LirInst& inst = **it;
             // A call that reaches no GC point has no stack map entry worth
             // the name: nothing walks this frame while it runs, so its roots
-            // are none, and a reference held in a callee-saved register
-            // across it needs no designated slot.
+            // are none.
+            //
+            // At one that does, the roots are the live references in their
+            // slots. A reference live across it in a register is in a
+            // callee-saved one (the call clobbers the rest), and is no root
+            // of this frame: wherever it is when the collector runs (still
+            // in the register, or in the save area of a frame above, a
+            // generated one or the runtime's C++), it is a word of the
+            // thread's stack or registers, which every collection that
+            // moves or marks reads first and pins (heap_pin.cpp). Its object
+            // neither moves nor dies while the register names it, so the
+            // register stays current with no store or reload at the call.
             if (inst.is_call() || inst.opcode == LirOpcode::Safepoint) {
                 inst.live_gcrefs.clear();
                 for (uint32_t id : gcref_ids) {
-                    if (live[id] && !inst.no_gc_point) inst.live_gcrefs.push_back(fn_.vreg_table[id].vreg);
+                    if (!live[id] || inst.no_gc_point || !fn_.vreg_table[id].is_spilled) continue;
+                    inst.live_gcrefs.push_back(fn_.vreg_table[id].vreg);
                 }
             }
             for (const auto& d : inst.defs) {

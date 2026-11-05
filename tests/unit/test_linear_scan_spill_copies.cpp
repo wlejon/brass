@@ -55,9 +55,11 @@ bool reads_slot(const LirInst& inst) {
     return false;
 }
 
-// A tagged value cannot be split, and live across a call it lives in its
-// slot for good: the bitcast that makes it is a copy into the slot, the one
-// after the call a copy out of it.
+// A tagged value cannot be split. Live across a call it takes a
+// callee-saved register while one is free; with six of them across the
+// call (SysV has five), at least one lives in its slot for good: the
+// bitcast that makes it is a copy into the slot, the one after the call a
+// copy out of it.
 const char* kAcrossCall = R"(module @m
 
 func @twice(%a: i64) -> i64 {
@@ -68,10 +70,31 @@ entry:
 
 func @bits(%x: i64) -> i64 {
 entry:
-  %t = bitcast.tagged.i64 %x
+  %one = iconst.i64 1
+  %x1 = add.i64 %x, %one
+  %x2 = add.i64 %x1, %one
+  %x3 = add.i64 %x2, %one
+  %x4 = add.i64 %x3, %one
+  %x5 = add.i64 %x4, %one
+  %t0 = bitcast.tagged.i64 %x
+  %t1 = bitcast.tagged.i64 %x1
+  %t2 = bitcast.tagged.i64 %x2
+  %t3 = bitcast.tagged.i64 %x3
+  %t4 = bitcast.tagged.i64 %x4
+  %t5 = bitcast.tagged.i64 %x5
   %c = call.i64 @twice(%x)
-  %u = bitcast.i64.tagged %t
-  %r = xor.i64 %u, %c
+  %u0 = bitcast.i64.tagged %t0
+  %u1 = bitcast.i64.tagged %t1
+  %u2 = bitcast.i64.tagged %t2
+  %u3 = bitcast.i64.tagged %t3
+  %u4 = bitcast.i64.tagged %t4
+  %u5 = bitcast.i64.tagged %t5
+  %r0 = xor.i64 %u0, %c
+  %r1 = xor.i64 %r0, %u1
+  %r2 = xor.i64 %r1, %u2
+  %r3 = xor.i64 %r2, %u3
+  %r4 = xor.i64 %r3, %u4
+  %r = xor.i64 %r4, %u5
   ret %r
 }
 )";
@@ -107,7 +130,9 @@ TEST_CASE("Linear Scan - a copy out of a spill slot is the reload itself") {
     REQUIRE(fn != nullptr);
     // Small-integer bits, so the tagged value is no pointer a stack map
     // could be asked to trace.
-    for (int64_t x : {int64_t{3}, int64_t{-8}, int64_t{1} << 40}) CHECK_EQ(fn(x), x ^ (x + x));
+    for (int64_t x : {int64_t{3}, int64_t{-8}, int64_t{1} << 40}) {
+        CHECK_EQ(fn(x), x ^ (x + x) ^ (x + 1) ^ (x + 2) ^ (x + 3) ^ (x + 4) ^ (x + 5));
+    }
 }
 
 namespace {
@@ -484,6 +509,89 @@ void mark_last_call_no_gc(LirFunction& fn) {
 }
 
 } // namespace
+
+namespace {
+
+// A loop that reads fourteen words a turn and compares three pairs of six
+// values loaded before it: more live values than registers, so the
+// allocator leaves some invariants in their slots, and some compare finds
+// both of its sides there.
+std::string cmp_loop_text() {
+    std::string s = "module @m\n\nfunc @cmps(%q: ptr, %n: i64) -> i64 {\nentry:\n";
+    for (int k = 0; k < 6; ++k) {
+        s += "  %a" + std::to_string(k) + " = load.i64 %q, " + std::to_string((14 + k) * 8) + "\n";
+    }
+    s += "  %z = iconst.i64 0\n  br head(%z, %z)\n";
+    s += "head(%i: i64, %acc: i64):\n  %c = slt.i64 %i, %n\n  br_if %c, body, done\n";
+    s += "body:\n";
+    for (int j = 0; j < 14; ++j) {
+        s += "  %w" + std::to_string(j) + " = load.i64 %q, " + std::to_string(j * 8) + "\n";
+    }
+    for (int k = 0; k < 3; ++k) {
+        const std::string n = std::to_string(k);
+        s += "  %c" + n + " = slt.i64 %a" + std::to_string(2 * k) + ", %a" + std::to_string(2 * k + 1) + "\n";
+        s += "  %m" + n + " = select.i64 %c" + n + ", %w" + n + ", %w" + std::to_string(13 - k) + "\n";
+    }
+    s += "  %x = add.i64 %w0, %i\n  %p0 = mul.i64 %x, %m0\n  %p1 = mul.i64 %p0, %m1\n  %p2 = mul.i64 %p1, %m2\n";
+    for (int j = 1; j < 13; ++j) {
+        s += "  %p" + std::to_string(j + 2) + " = mul.i64 %p" + std::to_string(j + 1) + ", %w" + std::to_string(j) + "\n";
+    }
+    s += "  %t = add.i64 %p14, %w13\n  %t2 = xor.i64 %t, %acc\n  %one = iconst.i64 1\n";
+    s += "  %i2 = add.i64 %i, %one\n  br head(%i2, %t2)\n";
+    s += "done:\n  ret %acc\n}\n";
+    return s;
+}
+
+uint64_t cmp_loop_ref(const int64_t* q, int64_t n) {
+    uint64_t acc = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        uint64_t m[3];
+        for (int k = 0; k < 3; ++k) {
+            m[k] = static_cast<uint64_t>(q[14 + 2 * k] < q[15 + 2 * k] ? q[k] : q[13 - k]);
+        }
+        uint64_t p = (static_cast<uint64_t>(q[0]) + static_cast<uint64_t>(i)) * m[0] * m[1] * m[2];
+        for (int j = 1; j < 13; ++j) p *= static_cast<uint64_t>(q[j]);
+        acc = (p + static_cast<uint64_t>(q[13])) ^ acc;
+    }
+    return acc;
+}
+
+} // namespace
+
+// A compare defines nothing, so a spilled left side takes a use scratch and
+// the right side is still read from its slot in place: `mov r10, slot; cmp
+// r10, slot`, not two reloads and a register compare.
+TEST_CASE("Linear Scan - an x64 compare of two spilled values reads the right one in place") {
+    const std::string text = cmp_loop_text();
+    Allocated a = allocate(text.c_str(), "cmps");
+    size_t both = 0;
+    for (const auto& b : a.lir->blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->opcode != LirOpcode::Cmp || inst->uses.size() != 2) continue;
+            const auto& l = inst->uses[0];
+            const auto& r = inst->uses[1];
+            CHECK_FALSE(l.is_spill_slot());
+            if (!r.is_spill_slot() || !l.is_preg()) continue;
+            const GPR g = l.preg_val.as_gpr();
+            if (g == GPR::R10 || g == GPR::R11 || g == GPR::R15) ++both;
+        }
+    }
+    CHECK(both >= 1u);
+
+    JitExecutionEngine jit;
+    auto mod = parse_module(text.c_str());
+    REQUIRE(mod != nullptr);
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<int64_t (*)(const int64_t*, int64_t)>("cmps");
+    REQUIRE(fn != nullptr);
+    int64_t q[20];
+    uint64_t h = 0x243f6a8885a308d3ull;
+    for (int i = 0; i < 20; ++i) {
+        h = h * 6364136223846793005ull + 1442695040888963407ull;
+        q[i] = static_cast<int64_t>(h);
+    }
+    for (int64_t n : {0, 1, 7}) CHECK_EQ(static_cast<uint64_t>(fn(q, n)), cmp_loop_ref(q, n));
+}
 
 TEST_CASE("Linear Scan - a call that reaches no GC point clears no dead register") {
     Allocated plain = allocate(kStaleAtCall, "stale");

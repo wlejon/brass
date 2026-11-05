@@ -115,9 +115,15 @@ static bool reads_last_use_from_slot(const LirInst& inst) {
     const uint8_t want = slot_fold_width(inst.opcode);
     if (want == 0 || src.size != want) return false;
     // One memory operand an instruction: every other operand is a register
-    // or an immediate by the time this is asked.
+    // or an immediate by the time this is asked. A compare defines nothing,
+    // so its spilled left side takes a use scratch below like any other
+    // reload, and the right side can still be read in place: a bound check
+    // of two spilled values is `mov r10, slot; cmp r10, slot`, not two
+    // reloads and a register compare.
+    const bool is_compare = inst.opcode == LirOpcode::Cmp || inst.opcode == LirOpcode::Cmp32;
     for (size_t i = 0; i + 1 < inst.uses.size(); ++i) {
-        if (inst.uses[i].is_mem() || inst.uses[i].is_spill_slot()) return false;
+        if (inst.uses[i].is_mem()) return false;
+        if (inst.uses[i].is_spill_slot() && !is_compare) return false;
     }
     for (const auto& d : inst.defs) {
         if (d.is_mem() || d.is_spill_slot()) return false;

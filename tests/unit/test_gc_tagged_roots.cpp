@@ -317,8 +317,10 @@ void tier2_case(gc::StressMode stress) {
     REQUIRE(jit.compile_and_load(*mod));
     CHECK(tagged_roots_in(jit.stack_maps(), "tg_hold") > 0);
     // A tagged value no later instruction reads is dead at the call, and so
-    // no root there, until keep_alive reads it after the call.
-    CHECK(tagged_roots_in(jit.stack_maps(), "tg_keep") > 0);
+    // no root there. keep_alive keeps it live across the call, where it
+    // lives in a callee-saved register, which the collector's stack scan
+    // pins rather than a stack map reporting it (gc_contract.md 1.1), so
+    // tg_keep_run below is what shows it kept.
     CHECK_EQ(tagged_roots_in(jit.stack_maps(), "tg_nokeep"), 0u);
     for (int64_t n : kChurnSizes) {
         const size_t before = heap.collection_count();
@@ -432,6 +434,94 @@ TEST_CASE("Tagged roots - a tagged loop live-in moves into OSR code and stays a 
     CHECK_EQ(interp.run(fn, {RuntimeValue::from_i64(20000)}).as_i64(), 42 * 20000);
     CHECK(prog.osr().total_osr_migrations() > migrations);
     CHECK(interp.heap().collection_count() > collections);
+}
+
+namespace {
+
+// @many holds kMany tagged references across a call that collects, more than
+// either target has callee-saved registers: some live in those registers
+// (no root; the stack scan pins what they name) and the rest in slots (stack
+// map roots, updated if their objects move). Each object's payload word is
+// its index plus 1, and @many returns the sum over all of them read after
+// the call, plus 100 for each reference that kept its tag, so a reference
+// left stale by either path reads the heap's poison.
+constexpr int kMany = 12;
+
+std::string many_source() {
+    std::string s = R"(module @tm
+func @tm_churn(%n: i64) -> i64 {
+entry:
+  %z = iconst.i64 0
+  br loop(%z)
+loop(%i: i64):
+  %sz = iconst.i64 64
+  %kind = iconst.i32 2
+  %t = call.i64 @brass_gc_alloc(%sz, %z, %kind)
+  %one = iconst.i64 1
+  %ni = add.i64 %i, %one
+  %more = slt.i64 %ni, %n
+  br_if %more, loop(%ni), done
+done:
+  ret %n
+}
+func @tm_many(%n: i64) -> i64 {
+b0:
+  %sz = iconst.i64 32
+  %z = iconst.i64 0
+  %kind = iconst.i32 2
+  %tag = iconst.i64 -4222124650659840
+  %mask = iconst.i64 281474976710655
+  %hundred = iconst.i64 100
+)";
+    for (int i = 0; i < kMany; ++i) {
+        const std::string k = std::to_string(i);
+        s += "  %a" + k + " = call.i64 @brass_gc_alloc(%sz, %z, %kind)\n";
+        s += "  %k" + k + " = iconst.i64 " + std::to_string(i + 1) + "\n";
+        s += "  store.i64 %a" + k + ", 16, %k" + k + "\n";
+        s += "  %b" + k + " = or.i64 %a" + k + ", %tag\n";
+        s += "  %t" + k + " = bitcast.tagged.i64 %b" + k + "\n";
+    }
+    s += "  %r = call.i64 @tm_churn(%n)\n";
+    s += "  %s_init = iconst.i64 0\n";
+    std::string acc = "%s_init";
+    for (int i = 0; i < kMany; ++i) {
+        const std::string k = std::to_string(i);
+        s += "  %u" + k + " = bitcast.i64.tagged %t" + k + "\n";
+        s += "  %p" + k + " = and.i64 %u" + k + ", %mask\n";
+        s += "  %v" + k + " = load.i64 %p" + k + ", 16\n";
+        s += "  %h" + k + " = xor.i64 %u" + k + ", %p" + k + "\n";
+        s += "  %ok" + k + " = eq.i64 %h" + k + ", %tag\n";
+        s += "  %c" + k + " = select.i64 %ok" + k + ", %hundred, %z\n";
+        s += "  %x" + k + " = add.i64 " + acc + ", %v" + k + "\n";
+        s += "  %s" + k + " = add.i64 %x" + k + ", %c" + k + "\n";
+        acc = "%s" + k;
+    }
+    s += "  ret " + acc + "\n}\n";
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("Tagged roots - references across a collecting call in callee-saved registers and in slots both survive") {
+    const int64_t expected = kMany * (kMany + 1) / 2 + 100 * kMany;
+    const std::string src = many_source();
+    for (gc::StressMode stress : {gc::StressMode::None, gc::StressMode::Minor, gc::StressMode::Alternate,
+                                  gc::StressMode::Incremental}) {
+        auto mod = parse_or_fail(src);
+        gc::Heap heap(tagged_heap_config());
+        heap.set_stress(stress);
+        gc::HeapScope bind(heap);
+        codegen::JitExecutionEngine jit(Target::host());
+        REQUIRE(jit.compile_and_load(*mod));
+        // More references than callee-saved registers: some are slots, and
+        // so stack-map roots.
+        CHECK(tagged_roots_in(jit.stack_maps(), "tm_many") > 0);
+        for (int64_t n : kChurnSizes) {
+            const size_t before = heap.collection_count();
+            CHECK_EQ(jit.invoke("tm_many", {RuntimeValue::from_i64(n)}).as_i64(), expected);
+            if (n == 1000 || stress != gc::StressMode::None) CHECK(heap.collection_count() > before);
+        }
+    }
 }
 
 #endif
