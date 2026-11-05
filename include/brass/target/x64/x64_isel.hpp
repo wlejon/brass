@@ -67,6 +67,18 @@ private:
     // place of one materialized 0/1 (x64_isel_cmp.cpp, find_remat_compares).
     // Each is also in skipped_insts_.
     std::unordered_set<const Instruction*> remat_cmps_;
+    // br_if -> the comparison its condition reduces to through `and c, 1`,
+    // `eq c, 0` and `ne c, 0` of comparisons, each single-use in the branch's
+    // block (x64_isel_branch.cpp). The branch tests the comparison's flags,
+    // inverted when `negate`; `parity` is a float eq / ne, tested with the
+    // parity flag beside the zero flag. Every one of them is in skipped_insts_.
+    struct PeeledBranch {
+        const Instruction* cmp = nullptr;
+        bool negate = false;
+        bool parity = false;
+        std::vector<const Instruction*> peeled;
+    };
+    std::unordered_map<const Instruction*, PeeledBranch> peeled_branches_;
 
     struct ImmIntInfo {
         bool is_imm = false;
@@ -170,6 +182,14 @@ private:
     void lower_landing_pad(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_branch_if(const Instruction& inst, codegen::LirBlock& lir_bb);
+    // Records `br` in peeled_branches_ when its condition reduces to a
+    // comparison it can branch on directly; false leaves it to the ordinary
+    // fused or tested condition.
+    bool find_peeled_branch(const Instruction& br);
+    // The constants the peeled `and` / `eq` / `ne` instructions of `pb` read,
+    // none of which is emitted.
+    void count_peeled_folds(const PeeledBranch& pb, std::unordered_map<const Value*, uint32_t>& folded_uses) const;
+    void lower_parity_branch(const Instruction& inst, const PeeledBranch& pb, codegen::LirBlock& lir_bb);
     // The flags of a comparison folded into branch `user`, and the condition
     // true exactly when it is.
     Condition append_fused_compare(const Instruction& cmp, const Instruction& user, codegen::LirBlock& lir_bb);

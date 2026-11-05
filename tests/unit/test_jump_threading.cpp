@@ -4,6 +4,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/jump_threading.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/brass.hpp>
 
 using namespace brass;
 
@@ -222,4 +223,68 @@ TEST_CASE("Jump Threading - Loop Latch Jump Threading") {
     RuntimeValue r = interp_latch.run(*fn, {RuntimeValue::from_i64(10)});
     // First 5 iterations add 1 (5), next 5 iterations add 2 (10) => total 15
     CHECK_EQ(r.as_i64(), 15);
+}
+
+// Branch tail duplication (jump_threading.cpp, try_duplicate_branch_block):
+// a join that only tests a comparison its predecessors computed and passed
+// in is copied into each predecessor, so each branches on its own compare
+// instead of materializing a 0/1 for the join.
+TEST_CASE("Jump Threading - Join testing an incoming compare is duplicated into its predecessors") {
+    auto mod = parse_module(R"(module @dup
+
+func @h(%x: i64, %y: i64) -> i64 {
+entry:
+  %zero = iconst.i64 0
+  %p = slt.i64 %x, %zero
+  br_if %p, l, r
+l:
+  %c1 = ult.i64 %x, %y
+  br j(%c1)
+r:
+  %c2 = eq.i64 %x, %y
+  br j(%c2)
+j(%f: i32):
+  %one = iconst.i32 1
+  %a = and.i32 %f, %one
+  %z = iconst.i32 0
+  %n = eq.i32 %a, %z
+  br_if %n, t, e
+t:
+  %ten = iconst.i64 10
+  ret %ten
+e:
+  %twenty = iconst.i64 20
+  ret %twenty
+}
+)");
+    REQUIRE(mod != nullptr);
+    Function* fn = mod->functions().front();
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    auto block = [&](const char* name) -> BasicBlock* {
+        for (BasicBlock* bb : fn->blocks()) {
+            if (bb->name() == name) return bb;
+        }
+        return nullptr;
+    };
+    BasicBlock* l = block("l");
+    BasicBlock* r = block("r");
+    REQUIRE(l != nullptr);
+    REQUIRE(r != nullptr);
+
+    CHECK(run_jump_threading(*fn));
+    fn->rebuild_cfg_predecessors();
+    CHECK(verify_function(*fn));
+    CHECK(l->terminator()->opcode() == Opcode::br_if);
+    CHECK(r->terminator()->opcode() == Opcode::br_if);
+
+    Interpreter interp;
+    const int64_t vals[] = {-5, -1, 0, 3, 9};
+    for (int64_t x : vals) {
+        for (int64_t y : vals) {
+            const bool f = x < 0 ? static_cast<uint64_t>(x) < static_cast<uint64_t>(y) : x == y;
+            RuntimeValue res = interp.run(*fn, {RuntimeValue::from_i64(x), RuntimeValue::from_i64(y)});
+            CHECK_EQ(res.as_i64(), f ? 20 : 10);
+        }
+    }
 }

@@ -131,8 +131,10 @@ void X64ISel::analyze_function(const Function& mir_fn) {
         }
     };
 
+    peeled_branches_.clear();
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
+            if (inst->opcode() == Opcode::br_if && find_peeled_branch(*inst)) continue;
             if (inst->opcode() == Opcode::br_if || inst->opcode() == Opcode::guard || inst->opcode() == Opcode::select) {
                 const Value* cond = inst->operand(0);
                 if (cond && cond->is_instruction()) {
@@ -301,6 +303,11 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                         skipped_insts_.insert(rhs->defining_instruction());
                     }
                 };
+                if (auto peeled = peeled_branches_.find(inst); peeled != peeled_branches_.end()) {
+                    count_peeled_folds(peeled->second, folded_uses);
+                    if (!peeled->second.parity) count_compare_folds(peeled->second.cmp);
+                    continue;
+                }
                 if (auto chain = and_chains_.find(inst); chain != and_chains_.end()) {
                     for (const Value* leaf : chain->second) {
                         const Instruction* def_inst = leaf->defining_instruction();
@@ -824,123 +831,6 @@ Condition X64ISel::append_fused_compare(const Instruction& cmp, const Instructio
         }
     }
     return branch_cond;
-}
-
-void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
-    if (auto chain = and_chains_.find(&inst); chain != and_chains_.end()) {
-        lower_and_chain_branch(inst, chain->second, lir_bb);
-        return;
-    }
-    const Value* cond_val = inst.operand(0);
-    const auto& t_target = inst.true_target();
-    const auto& f_target = inst.false_target();
-
-    const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    // Only a comparison the analysis folded into this branch is recomputed
-    // here; any other is a value in a register like every other condition.
-    bool is_fused_cmp = fused_into(cmp_inst, inst);
-
-    Condition branch_cond = Condition::NE;
-
-    if (is_fused_cmp) {
-        branch_cond = append_fused_compare(*cmp_inst, inst, lir_bb);
-    } else {
-        VReg cond = get_vreg(cond_val);
-        uint8_t sz = cond.size;
-        auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
-        test_inst->add_use(LirOperand::vreg(cond, sz));
-        test_inst->add_use(LirOperand::vreg(cond, sz));
-        lir_bb.append_inst(std::move(test_inst));
-        branch_cond = Condition::NE;
-    }
-
-    auto emit_target_args = [&](LirBlock& bb, const BranchTarget& target) {
-        if (target.args.empty()) return;
-        if (target.args.size() == 1) {
-            VReg arg_v = get_vreg(target.args[0]);
-            VReg param_v = get_vreg(target.block->param(0));
-            uint8_t sz = param_v.size;
-            if (arg_v != param_v) {
-                auto mov_inst = std::make_unique<LirInst>(
-                    param_v.is_xmm() ? ((sz == 16) ? LirOpcode::Movaps : LirOpcode::Movsd) : (sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov)
-                );
-                mov_inst->add_def(LirOperand::vreg(param_v, sz));
-                mov_inst->add_use(LirOperand::vreg(arg_v, sz));
-                bb.append_inst(std::move(mov_inst));
-            }
-        } else {
-            auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
-            for (size_t i = 0; i < target.args.size(); ++i) {
-                VReg arg_v = get_vreg(target.args[i]);
-                VReg param_v = get_vreg(target.block->param(i));
-                uint8_t sz = param_v.size;
-                pcopy->add_def(LirOperand::vreg(param_v, sz));
-                pcopy->add_use(LirOperand::vreg(arg_v, sz));
-            }
-            bb.append_inst(std::move(pcopy));
-        }
-    };
-
-    if (t_target.args.empty() && f_target.args.empty()) {
-        auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = branch_cond;
-        jcc_inst->add_use(LirOperand::label(t_target.block->id()));
-        lir_bb.append_inst(std::move(jcc_inst));
-
-        auto jmp_inst = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_inst->add_use(LirOperand::label(f_target.block->id()));
-        jmp_inst->mir_origin = &inst;
-        lir_bb.append_inst(std::move(jmp_inst));
-    } else if (t_target.args.empty() || f_target.args.empty()) {
-        // The side with arguments gets a block of its own for their copies,
-        // so that the block ends in a `jcc` + `jmp` pair the emitter can
-        // turn either way: a loop's head whose exit carries a value falls
-        // into its body (one branch an iteration, not two), and a copy
-        // allocation leaves empty is a jump that branches thread through.
-        const bool true_side = !t_target.args.empty();
-        const auto& with_args = true_side ? t_target : f_target;
-        const auto& plain = true_side ? f_target : t_target;
-        auto* trampoline = lir_fn_->create_block(true_side ? "br_if_true" : "br_if_false");
-        link_blocks(lir_bb, *trampoline);
-        if (auto* target_lir = lir_fn_->get_block_by_id(with_args.block->id())) link_blocks(*trampoline, *target_lir);
-
-        auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = true_side ? invert(branch_cond) : branch_cond;
-        jcc_inst->add_use(LirOperand::label(plain.block->id()));
-        lir_bb.append_inst(std::move(jcc_inst));
-
-        auto jmp_inst = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_inst->add_use(LirOperand::label(trampoline->id));
-        jmp_inst->mir_origin = &inst;
-        lir_bb.append_inst(std::move(jmp_inst));
-
-        emit_target_args(*trampoline, with_args);
-        auto jmp_on = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_on->add_use(LirOperand::label(with_args.block->id()));
-        trampoline->append_inst(std::move(jmp_on));
-    } else {
-        auto* false_trampoline = lir_fn_->create_block("br_if_false");
-        link_blocks(lir_bb, *false_trampoline);
-        if (auto* f_lir = lir_fn_->get_block_by_id(f_target.block->id())) link_blocks(*false_trampoline, *f_lir);
-
-        auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
-        jcc_inst->condition = invert(branch_cond);
-        jcc_inst->add_use(LirOperand::label(false_trampoline->id));
-        lir_bb.append_inst(std::move(jcc_inst));
-
-        emit_target_args(lir_bb, t_target);
-
-        auto jmp_t = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_t->add_use(LirOperand::label(t_target.block->id()));
-        jmp_t->mir_origin = &inst;
-        lir_bb.append_inst(std::move(jmp_t));
-
-        emit_target_args(*false_trampoline, f_target);
-
-        auto jmp_f = std::make_unique<LirInst>(LirOpcode::Jmp);
-        jmp_f->add_use(LirOperand::label(f_target.block->id()));
-        false_trampoline->append_inst(std::move(jmp_f));
-    }
 }
 
 void X64ISel::lower_return(const Instruction& inst, LirBlock& lir_bb) {

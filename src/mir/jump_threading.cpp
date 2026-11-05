@@ -4,6 +4,7 @@
 #include <brass/mir/cfg_simplify.hpp>
 #include "int_fold.hpp"
 #include "ir_clone.hpp"
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -318,45 +319,154 @@ bool try_thread_edge(
     return true;
 }
 
+// BRANCH TAIL DUPLICATION. A join whose only work is a test of what came in
+// — `merge(%c): %n = eq %c, 0; br_if %n, T, F` — costs every predecessor
+// that computed %c as a comparison a setcc, a zero extension, the jump and a
+// test: the comparison's flags are gone by the time the join tests its
+// value. Copying the join's few instructions and its branch into such a
+// predecessor P (one that ends in `br merge(...)`) puts the comparison and
+// the test in one block, where instruction selection branches on the flags
+// (x64_isel_branch.cpp). The join stays for its other predecessors.
+//
+// The copy computes what the join computed, from P's arguments in place of
+// its parameters, so only pure instructions are copied, and only when no
+// value the join defines is read outside it (nothing past the join needs a
+// merge of the copies). The new edges P -> T and P -> F must not enter a
+// loop from inside (T or F dominating P), and the join must not be a loop
+// header; the join itself must not dominate P.
+constexpr size_t kMaxDuplicated = 4;
+
+// Whether `cond`, followed through B's 0/1 glue (and / eq / ne / xor with a
+// constant, zero extension, truncation), is a parameter of B whose argument
+// from P is a comparison: the case where the copy fuses.
+bool condition_is_incoming_compare(const BasicBlock* B, const Value* cond, const std::vector<Value*>& args) {
+    for (int depth = 0; depth < 6 && cond; ++depth) {
+        if (cond->is_block_param() && cond->defining_block() == B) {
+            const uint32_t idx = cond->param_index();
+            const Value* a = idx < args.size() ? args[idx] : nullptr;
+            const Instruction* d = a && a->is_instruction() ? a->defining_instruction() : nullptr;
+            return d && is_comparison(d->opcode());
+        }
+        const Instruction* def = cond->is_instruction() ? cond->defining_instruction() : nullptr;
+        if (!def || def->parent() != B) return false;
+        switch (def->opcode()) {
+            case Opcode::and_: case Opcode::eq: case Opcode::ne: case Opcode::xor_:
+                if (def->operand_count() != 2) return false;
+                if (const_int(def->operand(1))) cond = def->operand(0);
+                else if (const_int(def->operand(0))) cond = def->operand(1);
+                else return false;
+                break;
+            case Opcode::zext_i64: case Opcode::trunc_i32:
+                cond = def->operand(0);
+                break;
+            default:
+                return false;
+        }
+    }
+    return false;
+}
+
+// Values read outside the block that defines them (a block parameter's
+// block, an instruction's parent).
+std::unordered_set<const Value*> values_used_outside(const Function& fn) {
+    std::unordered_set<const Value*> out;
+    for (const BasicBlock* Z : fn.blocks()) {
+        if (!Z) continue;
+        for (const Instruction* inst : *Z) {
+            if (!inst) continue;
+            for_each_use(*inst, [&](Value* v) {
+                const BasicBlock* home = v->is_block_param() ? v->defining_block()
+                                       : v->is_instruction() && v->defining_instruction()
+                                           ? v->defining_instruction()->parent() : nullptr;
+                if (home && home != Z) out.insert(v);
+            });
+        }
+    }
+    return out;
+}
+
+bool try_duplicate_branch_block(Function& fn, BasicBlock* B, BasicBlock* P, const DominatorTree& dom,
+                                std::optional<std::unordered_set<const Value*>>& outside) {
+    if (!B || !P || B == P || B == fn.entry_block()) return false;
+    Instruction* p_term = P->terminator();
+    if (!p_term || p_term->opcode() != Opcode::br || p_term->branch_target().block != B) return false;
+    Instruction* b_term = B->terminator();
+    if (!b_term || b_term->opcode() != Opcode::br_if) return false;
+    BasicBlock* T = b_term->true_target().block;
+    BasicBlock* F = b_term->false_target().block;
+    if (!T || !F || T == B || F == B || T == F) return false;
+    const std::vector<Value*>& incoming = p_term->branch_target().args;
+    if (incoming.size() != B->param_count()) return false;
+    if (!condition_is_incoming_compare(B, b_term->operand(0), incoming)) return false;
+    if (dom.dominates(B, P) || is_loop_header(B, dom) || dom.dominates(T, P) || dom.dominates(F, P)) return false;
+
+    size_t n = 0;
+    for (Instruction* inst : *B) {
+        if (!inst || inst->is_terminator()) break;
+        if (inst->has_side_effects() || inst->is_call() || ++n > kMaxDuplicated) return false;
+    }
+    if (!outside) outside = values_used_outside(fn);
+    for (const Value* p : B->params()) {
+        if (outside->count(p)) return false;
+    }
+    for (const Instruction* inst : *B) {
+        if (inst && inst->result() && outside->count(inst->result())) return false;
+    }
+
+    ir::ValueMap vals;
+    for (size_t i = 0; i < B->param_count(); ++i) vals[B->param(i)] = incoming[i];
+    const ir::BlockMap no_blocks;
+    for (Instruction* inst : *B) {
+        if (!inst || inst->is_terminator()) break;
+        P->insert_before(ir::clone_instruction(fn, *inst, vals, no_blocks), p_term);
+    }
+    P->insert_before(ir::clone_instruction(fn, *b_term, vals, no_blocks), p_term);
+    P->remove_instruction(p_term);
+    return true;
+}
+
 } // namespace
 
 bool run_jump_threading(Function& fn, const JumpThreadingOptions& opts, JumpThreadingStats* stats) {
     if (fn.name().starts_with("__wrapper_")) return false;
     bool changed = false;
+    // Each sweep visits every block once and takes every edge it can; a
+    // change recomputes the predecessors and dominators the next decision
+    // reads, so a function with many joins is not limited to a few edges.
     for (size_t iter = 0; iter < opts.max_iterations; ++iter) {
         fn.rebuild_cfg_predecessors();
-        DominatorTree dom(fn);
+        auto dom = std::make_unique<DominatorTree>(fn);
+        std::optional<std::unordered_set<const Value*>> outside;
 
         bool iter_changed = false;
         std::vector<BasicBlock*> blocks = fn.blocks();
 
         for (BasicBlock* B : blocks) {
-            if (!B || B == fn.entry_block() || B->predecessors().empty()) continue;
-            if (B->instruction_count() > opts.max_block_size) continue;
+            bool progress = true;
+            while (progress) {
+                progress = false;
+                if (!B || B == fn.entry_block() || B->predecessors().empty()) break;
+                if (B->instruction_count() > opts.max_block_size) break;
+                Instruction* term = B->terminator();
+                if (!term || term->opcode() != Opcode::br_if) break;
 
-            Instruction* term = B->terminator();
-            if (!term || term->opcode() != Opcode::br_if) continue;
-
-            std::vector<BasicBlock*> preds = B->predecessors();
-            for (BasicBlock* P : preds) {
-                if (try_thread_edge(fn, B, P, dom)) {
-                    iter_changed = true;
-                    changed = true;
-                    if (stats) {
-                        stats->edges_threaded++;
-                    }
-                    break; // The CFG changed: dominators must be recomputed.
+                std::vector<BasicBlock*> preds = B->predecessors();
+                for (BasicBlock* P : preds) {
+                    const bool threaded = try_thread_edge(fn, B, P, *dom);
+                    if (!threaded && !try_duplicate_branch_block(fn, B, P, *dom, outside)) continue;
+                    iter_changed = changed = progress = true;
+                    if (stats && threaded) stats->edges_threaded++;
+                    // The CFG changed: what the next decision reads is
+                    // recomputed.
+                    fn.rebuild_cfg_predecessors();
+                    dom = std::make_unique<DominatorTree>(fn);
+                    outside.reset();
+                    break;
                 }
             }
-
-            if (iter_changed) break;
         }
 
-        if (iter_changed) {
-            fn.rebuild_cfg_predecessors();
-        } else {
-            break;
-        }
+        if (!iter_changed) break;
     }
 
     return changed;
