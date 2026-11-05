@@ -13,6 +13,15 @@ using namespace spvtest;
 
 namespace {
 
+// The loop control literal of the dump's first OpLoopMerge (its last operand).
+unsigned loop_control_of(const std::string& d) {
+    size_t at = d.find("OpLoopMerge");
+    if (at == std::string::npos) return ~0u;
+    size_t end = d.find('\n', at);
+    size_t sp = d.rfind(' ', end);
+    return static_cast<unsigned>(std::stoul(d.substr(sp + 1, end - sp - 1)));
+}
+
 // ---------------------------------------------------------------------------
 // ALU
 // ---------------------------------------------------------------------------
@@ -307,6 +316,27 @@ TEST_CASE("SPIR-V ISel - loop with a carried value") {
     std::string d = dump_of(*k.fn);
     CHECK_EQ(count_of(d, "OpLoopMerge"), 1u);
     CHECK(has(d, "OpPhi"));
+    CHECK_EQ(loop_control_of(d), 0u); // a small body is the driver's to unroll
+}
+
+// A loop with a large body is marked DontUnroll, so the driver does not
+// multiply it.
+TEST_CASE("SPIR-V ISel - a loop with a large body is not unrolled") {
+    Kernel k({Type::ptr(), Type::ptr(), Type::i32()});
+    codegen::KernelBuilder kb(k.b);
+    Value* tid = kb.tid_x();
+    Value* acc = kb.for_range_reduce(kb.const_i32(0), kb.const_i32(16), kb.const_i32(1), kb.const_f32(0.0f),
+                                     [&](Value* i, Value* a) {
+        Value* x = kb.load_f32_indexed(k.p(0), k.b.build_add(tid, i));
+        for (int r = 0; r < 100; ++r) x = k.b.build_fma(x, x, a);
+        return k.b.build_add(a, x);
+    });
+    kb.store_f32_indexed(k.p(1), tid, acc);
+    k.b.build_ret_void();
+    compile_checked(*k.fn);
+    std::string d = dump_of(*k.fn);
+    CHECK_EQ(count_of(d, "OpLoopMerge"), 1u);
+    CHECK_EQ(loop_control_of(d), 2u); // LoopControlDontUnrollMask
 }
 
 TEST_CASE("SPIR-V ISel - nested and unrolled loops with ifs inside") {

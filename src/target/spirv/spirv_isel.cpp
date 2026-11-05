@@ -25,6 +25,42 @@ bool is_predicate_use(const brass::Instruction& inst, size_t operand_index) {
 
 uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
 
+// A loop whose body holds more than this many MIR instructions (nested loops
+// included) is marked DontUnroll. brass's own unroller has already made its
+// choice for the loops worth unrolling; a driver that unrolls a large body
+// again (a fixed 16-step march, say) multiplies the shader's code and its
+// register pressure for no gain.
+constexpr size_t kDontUnrollBody = 64;
+
+// The loop control for the loop whose header is node `header`: the body is
+// every node that reaches the continue node without passing the header.
+uint32_t loop_control(const StructuredCfg& cfg, size_t header) {
+    std::vector<char> seen(cfg.nodes.size(), 0);
+    std::vector<size_t> work{cfg.nodes[header].cont};
+    seen[header] = 1;
+    seen[cfg.nodes[header].cont] = 1;
+    size_t body = 0;
+    while (!work.empty()) {
+        size_t n = work.back();
+        work.pop_back();
+        const CfgNode& node = cfg.nodes[n];
+        if (node.kind == CfgNode::Kind::block) {
+            for (const brass::Instruction* inst : *node.block) {
+                (void)inst;
+                if (++body > kDontUnrollBody) return spv::LoopControlDontUnrollMask;
+            }
+        }
+        for (size_t e : node.in) {
+            size_t from = cfg.edges[e].from;
+            if (!seen[from]) {
+                seen[from] = 1;
+                work.push_back(from);
+            }
+        }
+    }
+    return spv::LoopControlMaskNone;
+}
+
 } // namespace
 
 SpirvISel::SpirvISel(Module& m, const target::SpirvOptions& opts) : m_(m), opts_(opts) {
@@ -199,7 +235,7 @@ void SpirvISel::lower_node(size_t n) {
         case CfgNode::Kind::forward:
         case CfgNode::Kind::loop_continue:
             if (node.cont != kNoNode) {
-                emit(Inst(spv::OpLoopMerge).id(label_of(node.merge)).id(label_of(node.cont)).lit(spv::LoopControlMaskNone));
+                emit(Inst(spv::OpLoopMerge).id(label_of(node.merge)).id(label_of(node.cont)).lit(loop_control(*cfg_, n)));
             }
             emit(Inst(spv::OpBranch).id(label_of(cfg_->edges[node.out.at(0)].to)));
             break;
