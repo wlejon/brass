@@ -143,6 +143,13 @@ bool is_copy_block(const LirBlock& block) {
     return true;
 }
 
+bool has_call(const LirBlock& block) {
+    for (const auto& inst : block.instructions) {
+        if (inst && (inst->opcode == LirOpcode::Call || inst->opcode == LirOpcode::CallIndirect)) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
@@ -230,13 +237,27 @@ void optimize_block_layout(LirFunction& fn, const BlockLayoutOptions& opts) {
     // a phi's default), the side with work. Falling into the jump target
     // instead put every in-bounds typed array access of computeForces on a
     // taken branch and a jump back.
+    //
+    // Before either: a side that calls is the unlikely one (the call
+    // heuristic of static branch prediction). In compiled JS the call on one
+    // side of a two-way branch is nearly always the generic helper behind a
+    // type test (ToNumber, a relational compare, ToBoolean, the TDZ and
+    // stack-limit checks), and putting it on the fall-through sent the fast
+    // side out of line and back: two taken branches a test, 1.9M of
+    // three_meshes' 9.3M a frame (docs/aot-specialization.md, "Cycle
+    // accounting" in bronze).
     auto shape_score = [&](const LirBlock& from, const BlockBranchTargets& bt, const LirBlock& s) {
         if (bt.targets.size() != 2 || entries[s.id] != 1) return 0;
         const uint32_t other = bt.targets[0] == s.id ? bt.targets[1] : bt.targets[0];
         if (other == s.id || other == from.id) return 0;
+        auto ob = id_to_block.find(other);
+        if (ob != id_to_block.end()) {
+            const bool s_call = has_call(s);
+            const bool o_call = entries[other] == 1 && has_call(*ob->second);
+            if (s_call != o_call) return s_call ? -120 : 45;
+        }
         const BlockBranchTargets& st = targets_of[s.id];
         if (st.targets.size() == 1 && st.targets[0] == other) return 45;
-        auto ob = id_to_block.find(other);
         if (ob == id_to_block.end() || entries[other] != 1) return 0;
         const bool s_copies = is_copy_block(s), o_copies = is_copy_block(*ob->second);
         if (s_copies != o_copies) return s_copies ? -45 : 45;

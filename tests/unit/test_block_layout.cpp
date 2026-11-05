@@ -122,3 +122,86 @@ TEST_CASE("Block Layout - Fall-Through Maximization") {
     CHECK_EQ(fn.blocks[3]->instructions.size(), 1);
     CHECK(fn.blocks[3]->instructions[0]->opcode == LirOpcode::Ret);
 }
+
+namespace {
+
+void jmp_to(LirBlock* from, LirBlock* to) {
+    auto j = std::make_unique<LirInst>(LirOpcode::Jmp);
+    j->add_use(LirOperand::label(to->id));
+    from->append_inst(std::move(j));
+}
+
+void branch(LirBlock* from, LirBlock* taken, LirBlock* other) {
+    auto jcc = std::make_unique<LirInst>(LirOpcode::Jcc);
+    jcc->condition = x64::Condition::NE;
+    jcc->add_use(LirOperand::label(taken->id));
+    from->append_inst(std::move(jcc));
+    jmp_to(from, other);
+}
+
+void call(LirBlock* b, const char* symbol) {
+    auto c = std::make_unique<LirInst>(LirOpcode::Call);
+    c->callee_symbol = symbol;
+    b->append_inst(std::move(c));
+}
+
+void copy(LirBlock* b) {
+    auto m = std::make_unique<LirInst>(LirOpcode::Mov);
+    m->add_def(LirOperand::preg_gpr(x64::GPR::RAX));
+    m->add_use(LirOperand::preg_gpr(x64::GPR::RCX));
+    b->append_inst(std::move(m));
+}
+
+size_t index_of(const LirFunction& fn, const LirBlock* b) {
+    for (size_t i = 0; i < fn.blocks.size(); ++i) {
+        if (fn.blocks[i].get() == b) return i;
+    }
+    return fn.blocks.size();
+}
+
+} // namespace
+
+// A type test whose generic side calls a helper and whose fast side only
+// carries the edge's copy (a Number's bits as its double): the fast side
+// falls through to the join, the call goes out of line. Before, the side with
+// work (the call) fell through and every fast path went out and back.
+TEST_CASE("Block Layout - the side that calls is laid out of line") {
+    LirFunction fn;
+    fn.name = "test_call_side";
+    LirBlock* entry = fn.create_block("entry");
+    LirBlock* slow = fn.create_block("unbox_slow");
+    LirBlock* fast = fn.create_block("unbox_num");
+    LirBlock* merge = fn.create_block("unbox_merge");
+    branch(entry, slow, fast);
+    call(slow, "bronze_unbox_f64");
+    jmp_to(slow, merge);
+    copy(fast);
+    jmp_to(fast, merge);
+    merge->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+
+    optimize_block_layout(fn);
+
+    CHECK_EQ(index_of(fn, fast), 1);
+    CHECK_EQ(index_of(fn, merge), 2);
+    CHECK(index_of(fn, slow) > index_of(fn, merge));
+}
+
+// An if-body that is only a call (a stack-limit or TDZ check): the skip falls
+// through and the body is entered by the taken branch, so the check costs no
+// taken branch when it passes.
+TEST_CASE("Block Layout - an if-body that calls does not fall through") {
+    LirFunction fn;
+    fn.name = "test_call_body";
+    LirBlock* entry = fn.create_block("entry");
+    LirBlock* body = fn.create_block("check_fail");
+    LirBlock* cont = fn.create_block("cont");
+    branch(entry, cont, body);
+    call(body, "bronze_stack_overflow");
+    jmp_to(body, cont);
+    cont->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+
+    optimize_block_layout(fn);
+
+    CHECK_EQ(index_of(fn, cont), 1);
+    CHECK_EQ(index_of(fn, body), 2);
+}
