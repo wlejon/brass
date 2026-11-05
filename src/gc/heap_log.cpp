@@ -4,7 +4,9 @@
 // one it left (the adaptive eden); a line per lazy sweep once it is
 // done (its time by who did it: host slices, the allocator, the completion at
 // the next cycle's start); and a summary line per heap when the heap is
-// destroyed.
+// destroyed. A collection's line ends with `at <ms>`, the steady clock
+// (CLOCK_MONOTONIC on Linux) when it ended, so a pause lines up with a frame
+// of a host's flight recorder or a perf profile.
 
 #include "heap_internal.hpp"
 
@@ -63,7 +65,7 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
     std::fprintf(stderr,
                  "[brass gc %p] #%llu %s (%s) %.3f ms | roots %.3f cards %.3f trace %.3f weak %.3f hooks %.3f "
                  "sweep %.3f | eden %.1fM copied %.2fM/%llu promoted %.2fM/%llu marked %.1fM/%llu cards %llu | "
-                 "old %.1fM threshold %.1fM | eden limit %.1fM -> %.1fM%s | threads %u | pinned %llu\n",
+                 "old %.1fM threshold %.1fM | eden limit %.1fM -> %.1fM%s | threads %u | pinned %llu | at %.3f\n",
                  static_cast<const void*>(&s.heap), static_cast<unsigned long long>(index),
                  minor ? "minor" : "full", trigger_name(s.trigger), ms(pause_ns), ms(g.phase_ns[kPhaseRoots]),
                  ms(g.phase_ns[kPhaseCards]), ms(g.phase_ns[kPhaseTrace]), ms(g.phase_ns[kPhaseWeak]),
@@ -72,7 +74,7 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
                  static_cast<unsigned long long>(g.promoted_objects), mb(g.marked_bytes),
                  static_cast<unsigned long long>(g.marked_objects), static_cast<unsigned long long>(g.dirty_cards),
                  mb(s.heap.old_used_bytes()), mb(s.full_threshold), mb(g.eden_limit), mb(s.eden_limit - s.eden_lo), cycle,
-                 g.minor_threads, static_cast<unsigned long long>(g.pinned_objects));
+                 g.minor_threads, static_cast<unsigned long long>(g.pinned_objects), ms(gc_now_ns()));
 }
 
 void log_sweep(const HeapState& s) {

@@ -226,6 +226,10 @@ void write_tier_report(std::ostream& os, const TierTimelineSummary& s, bool even
     const std::ios::fmtflags flags = os.flags();
     const std::streamsize precision = os.precision();
     os << std::fixed << std::setprecision(3);
+    // epoch_ms: the steady clock (CLOCK_MONOTONIC on Linux) the events' at_ms
+    // count from, so an event lines up with a host's frame records.
+    const double epoch_ms =
+        std::chrono::duration<double, std::milli>(timeline().epoch.time_since_epoch()).count();
     os << "tier-timeline wall_ms=" << s.wall_ms << " first_tier2_ms=" << s.first_tier2_ms
        << " hot_tier2_ms=" << s.hot_tier2_ms << " hot_latency_ms=" << s.hot_latency_ms
        << " hot_untiered=" << s.hot_untiered
@@ -241,6 +245,7 @@ void write_tier_report(std::ostream& os, const TierTimelineSummary& s, bool even
         os << "\n";
     }
     if (events) {
+        os << "tier-timeline epoch epoch_ms=" << epoch_ms << "\n";
         for (const TierRejectedFunction& r : s.rejected) {
             os << "tier-timeline rejected " << r.name << (r.tier2 ? " tier2" : " interpreted") << ": " << r.reason
                << "\n";

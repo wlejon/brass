@@ -93,6 +93,10 @@ private:
         std::function<void()> run;
         std::function<uint64_t()> heat; // empty: none given
         uint64_t heat_at_submit = 0;
+        // The CPU of the mutator the job compiles for, when it asked: the
+        // worker runs it away from that CPU's last-level cache
+        // (src/runtime/cache_domains.hpp). -1: unknown.
+        int mutator_cpu = -1;
     };
 
     void worker_loop();

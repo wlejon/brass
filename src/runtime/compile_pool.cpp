@@ -1,6 +1,8 @@
 #include <brass/runtime/compile_pool.hpp>
 #include <brass/runtime/tier_timeline.hpp>
 
+#include "cache_domains.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -38,6 +40,14 @@ namespace {
 // themselves, earlier; this is for those that just return from main.
 void shutdown_shared_at_exit() {
     CompilePool::shared().shutdown();
+}
+
+// On a worker, the mutator CPU of the job it runs: a job a job submits (a
+// callee's tier-up, say) is for the same mutator, not for the worker.
+thread_local int t_running_for_cpu = -1;
+
+int mutator_cpu_for_submit() noexcept {
+    return detail::t_on_compile_worker ? t_running_for_cpu : detail::current_cpu();
 }
 
 } // namespace
@@ -111,7 +121,8 @@ bool CompilePool::submit(Owner owner, uint8_t priority, std::function<void()> jo
         std::lock_guard<std::mutex> lock(mutex_);
         if (closed_ || stopping_) return false;
         const uint64_t at_submit = heat ? heat() : 0;
-        queue_.push_back(Job{owner, priority, next_seq_++, std::move(job), std::move(heat), at_submit});
+        queue_.push_back(
+            Job{owner, priority, next_seq_++, std::move(job), std::move(heat), at_submit, mutator_cpu_for_submit()});
         if (is_shared_) {
             static const bool registered = [] { return std::atexit(&shutdown_shared_at_exit) == 0; }();
             (void)registered;
@@ -266,12 +277,17 @@ void CompilePool::worker_loop() {
             bulk = job.priority < kReservedPriority;
             if (bulk) ++bulk_running_;
         }
+        // Off the mutator's last-level cache (cache_domains.hpp): a compile
+        // beside it evicts the program's working set.
+        detail::place_away_from(job.mutator_cpu);
+        t_running_for_cpu = job.mutator_cpu;
         try {
             job.run();
         } catch (...) {
             // A job reports its own failures; one that throws anyway is
             // dropped rather than taking the process down.
         }
+        t_running_for_cpu = -1;
         job.run = nullptr;
         {
             std::lock_guard<std::mutex> lock(mutex_);
