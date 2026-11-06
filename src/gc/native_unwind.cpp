@@ -769,13 +769,13 @@ struct ImageTable {
 std::atomic<const ImageTable*> g_image_table{nullptr};
 
 std::mutex& image_table_mutex() {
-    static std::mutex m;
-    return m;
+    static auto* m = new std::mutex();
+    return *m;
 }
 
 std::vector<const ImageTable*>& retired_image_tables() {
-    static std::vector<const ImageTable*> v;
-    return v;
+    static auto* v = new std::vector<const ImageTable*>();
+    return *v;
 }
 
 void publish_image_table(ImageTable* next) {
