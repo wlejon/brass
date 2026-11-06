@@ -593,6 +593,11 @@ public:
     // to get back. Both are x64 GPR masks on x64 and aarch64 GPR masks on aarch64.
     uint32_t reserved_gprs = 0;
     uint32_t forced_saved_gprs = 0;
+    // x64: Module::pinned_constants, (value, offset from the pinned TLS
+    // register), for a function of a module with a pinned register. The
+    // emitter reads these constants there unless the function writes the
+    // register (forced_saved_gprs names it).
+    std::vector<std::pair<uint64_t, int32_t>> pinned_constants;
     // Whether the allocator zeroes the registers and spill slots dead at each
     // call (clear_dead_callee_gprs_at_calls). The isel turns it off for a
     // module with Module::precise_stack_roots, whose host takes what a dead

@@ -70,6 +70,9 @@ private:
     // FrameInfo::constant_slots: slot -> its pool entry's label
     // (emit_constant_pool.cpp).
     std::unordered_map<int32_t, x64::Label> pool_labels_;
+    // The constant slots whose value the host keeps at the pinned register
+    // (LirFunction::pinned_constants): slot -> offset; read there, never pooled.
+    std::unordered_map<int32_t, int32_t> pinned_slots_;
     std::vector<runtime::PatchSite> patch_sites_;
 
     struct PendingExceptionScope {
@@ -131,6 +134,12 @@ private:
     void zero_tagged_locals();
     void begin_constant_pool();
     void emit_constant_pool();
+    // The offset from the pinned register of `value` when this function may
+    // read it there (LirFunction::pinned_constants), else none.
+    std::optional<int32_t> pinned_constant(uint64_t value) const;
+    // `mov dst, imm` as a read of the pinned copy when the immediate has no
+    // shorter encoding than a movabs and the host keeps it; false otherwise.
+    bool mov_pinned_constant(x64::GPR dst, int64_t imm);
     // Guard exit with no handler or resumer: calls the exit stub as
     // stub(state values...) from the deopt record at [rsp + slots_disp]. The
     // stack arguments use the outgoing area the guard exit allocated below

@@ -1,11 +1,16 @@
 #include <brass/codegen/emit_context.hpp>
+#include <brass/target/x64/x64_isel.hpp>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
 // x64 memory operands, and the function's constant pool: the slots
 // FrameInfo::constant_slots names (linear_scan_constants.cpp) are never
 // stored, and every read of one is a rip-relative read of its constant,
-// placed 8-aligned after the function's last block.
+// placed 8-aligned after the function's last block. A constant the host
+// keeps at the pinned TLS register (Module::pinned_constants) is read there
+// instead: `[r13 + d8]` is three bytes shorter than `[rip + d32]`, and a
+// load from it seven shorter than a movabs.
 
 namespace brass::codegen {
 
@@ -16,6 +21,10 @@ MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
         if (!pool_labels_.empty()) {
             auto it = pool_labels_.find(op.spill_slot);
             if (it != pool_labels_.end()) return MemAddress::rip_label_ref(it->second.id);
+        }
+        if (!pinned_slots_.empty()) {
+            auto it = pinned_slots_.find(op.spill_slot);
+            if (it != pinned_slots_.end()) return ptr(kPinnedTlsGpr, it->second);
         }
         return X64FrameLayout::spill_slot_address(op.spill_slot, frame_);
     }
@@ -39,9 +48,35 @@ MemAddress EmitContext::to_mem_address(const LirOperand& op) const {
                            " used as a memory address in " + fn_.name);
 }
 
+std::optional<int32_t> EmitContext::pinned_constant(uint64_t value) const {
+    const uint32_t pinned = reg_mask(kPinnedTlsGpr);
+    if (fn_.pinned_constants.empty() || !(fn_.reserved_gprs & pinned) || (fn_.forced_saved_gprs & pinned)) {
+        return std::nullopt;
+    }
+    for (const auto& [v, off] : fn_.pinned_constants) {
+        if (v == value) return off;
+    }
+    return std::nullopt;
+}
+
+bool EmitContext::mov_pinned_constant(GPR dst, int64_t imm) {
+    if (imm >= INT32_MIN && imm <= static_cast<int64_t>(UINT32_MAX)) return false;
+    const std::optional<int32_t> off = pinned_constant(static_cast<uint64_t>(imm));
+    if (!off) return false;
+    enc_.mov(dst, ptr(kPinnedTlsGpr, *off));
+    return true;
+}
+
 void EmitContext::begin_constant_pool() {
     pool_labels_.clear();
-    for (const auto& [slot, value] : frame_.constant_slots) pool_labels_[slot] = buffer_.create_label();
+    pinned_slots_.clear();
+    for (const auto& [slot, value] : frame_.constant_slots) {
+        if (const std::optional<int32_t> off = pinned_constant(static_cast<uint64_t>(value))) {
+            pinned_slots_[slot] = *off;
+        } else {
+            pool_labels_[slot] = buffer_.create_label();
+        }
+    }
 }
 
 void EmitContext::emit_constant_pool() {
@@ -49,7 +84,9 @@ void EmitContext::emit_constant_pool() {
     // Never executed: the last block ends in a return, a jump or a trap.
     while (buffer_.size() % 8 != 0) buffer_.emit8(0xCC);
     for (const auto& [slot, value] : frame_.constant_slots) {
-        buffer_.bind(pool_labels_[slot]);
+        auto it = pool_labels_.find(slot);
+        if (it == pool_labels_.end()) continue;
+        buffer_.bind(it->second);
         buffer_.emit64(static_cast<uint64_t>(value));
     }
 }

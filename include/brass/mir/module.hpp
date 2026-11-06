@@ -140,6 +140,24 @@ public:
     void set_interrupt_poll(int32_t tls_offset, std::string_view handler);
     void clear_interrupt_poll() noexcept { interrupt_poll_ = {}; }
 
+    // 64-bit constants the host keeps in memory at fixed offsets from the
+    // pinned TLS register (pinned_tls_register), in every thread that runs
+    // the module's code: the NaN-box tags, payload masks and limits a guard
+    // compares with. x64 reads such a constant as `[r13 + offset]` instead of
+    // from the function's constant pool (`[rip + d32]`, 7 bytes against 4
+    // with a one-byte offset) and loads it into a register the same way
+    // instead of a 10-byte movabs: the guards that use them are a large share
+    // of the bytes hot code fetches. A function that writes the pinned
+    // register (the module entry) keeps the pool, as the register holds the
+    // caller's value before the write. Offsets in [-128, 127] get the short
+    // form; adding a value twice keeps the first offset.
+    struct PinnedConstant {
+        uint64_t value = 0;
+        int32_t tls_offset = 0;
+    };
+    const std::vector<PinnedConstant>& pinned_constants() const noexcept { return pinned_constants_; }
+    void add_pinned_constant(uint64_t value, int32_t tls_offset);
+
     bool has_loop_optimizations() const noexcept { return has_loop_optimizations_; }
     void set_has_loop_optimizations(bool opt) noexcept { has_loop_optimizations_ = opt; }
 
@@ -221,6 +239,7 @@ private:
     bool pinned_tls_register_ = false;
     bool precise_stack_roots_ = false;
     InterruptPoll interrupt_poll_;
+    std::vector<PinnedConstant> pinned_constants_;
     bool has_loop_optimizations_ = false;
     DebugContext debug_context_;
     // Last: the lazy-body state is defined in module.cpp.

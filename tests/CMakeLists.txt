@@ -32,6 +32,7 @@ add_executable(brass_unit_tests
     unit/test_linear_scan_long_values.cpp
     unit/test_nocollect_calls.cpp
     unit/test_x64_entry_cost.cpp
+    unit/test_x64_pinned_constants.cpp
     unit/test_regalloc_held_pregs.cpp
     unit/test_peephole.cpp
     unit/test_reload_reuse.cpp

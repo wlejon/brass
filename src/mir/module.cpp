@@ -56,6 +56,7 @@ Module::Module(Module&& other) noexcept
       allow_fp_reassociation_(other.allow_fp_reassociation_),
       pinned_tls_register_(other.pinned_tls_register_),
       interrupt_poll_(other.interrupt_poll_),
+      pinned_constants_(std::move(other.pinned_constants_)),
       has_loop_optimizations_(other.has_loop_optimizations_),
       debug_context_(std::move(other.debug_context_)),
       lazy_(std::move(other.lazy_)) {
@@ -95,6 +96,7 @@ Module& Module::operator=(Module&& other) noexcept {
     allow_fp_reassociation_ = other.allow_fp_reassociation_;
     pinned_tls_register_ = other.pinned_tls_register_;
     interrupt_poll_ = other.interrupt_poll_;
+    pinned_constants_ = std::move(other.pinned_constants_);
     has_loop_optimizations_ = other.has_loop_optimizations_;
     debug_context_ = std::move(other.debug_context_);
     lazy_ = std::move(other.lazy_);
@@ -384,6 +386,14 @@ void Module::copy_declarations_from(const Module& src) {
     }
     for (const auto& [sym, text] : src.string_symbols()) define_string_symbol(sym, text);
     if (src.interrupt_poll()) set_interrupt_poll(src.interrupt_poll().tls_offset, src.interrupt_poll().handler);
+    for (const PinnedConstant& c : src.pinned_constants()) add_pinned_constant(c.value, c.tls_offset);
+}
+
+void Module::add_pinned_constant(uint64_t value, int32_t tls_offset) {
+    for (const PinnedConstant& c : pinned_constants_) {
+        if (c.value == value) return;
+    }
+    pinned_constants_.push_back({value, tls_offset});
 }
 
 void Module::set_interrupt_poll(int32_t tls_offset, std::string_view handler) {

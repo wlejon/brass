@@ -21,7 +21,7 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
                 if (src.is_preg()) {
                     enc_.mov(dst_gpr, src.preg_val.as_gpr());
                 } else if (src.is_imm_int()) {
-                    enc_.mov(dst_gpr, src.imm_int);
+                    if (!mov_pinned_constant(dst_gpr, src.imm_int)) enc_.mov(dst_gpr, src.imm_int);
                 } else {
                     enc_.mov(dst_gpr, to_mem_address(src));
                 }
@@ -136,8 +136,9 @@ void EmitContext::emit_mov_instruction(const LirInst& inst) {
                 );
             } else {
                 // Its shortest encoding: a 32-bit or sign-extended move where
-                // the value has one (`0xffffffff` was a 10-byte movabs).
-                enc_.mov(dst_gpr, inst.uses[0].imm_int);
+                // the value has one (`0xffffffff` was a 10-byte movabs), else
+                // a read of the copy the host keeps at the pinned register.
+                if (!mov_pinned_constant(dst_gpr, inst.uses[0].imm_int)) enc_.mov(dst_gpr, inst.uses[0].imm_int);
             }
             break;
         }

@@ -11,6 +11,8 @@ using namespace brass::codegen;
 
 // x64_isel_mem.cpp
 void fold_reserved_register_copies(LirFunction& fn, uint32_t pinned_mask);
+// x64_isel_pinned_constants.cpp
+void fold_pinned_constants(LirFunction& fn);
 
 static std::pair<Condition, Condition> get_comparison_conditions(Opcode op) noexcept {
     switch (op) {
@@ -463,6 +465,9 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     lir_fn_->x64_avx = avx_;
     if (mir_fn.parent() && mir_fn.parent()->pinned_tls_register()) {
         lir_fn_->reserved_gprs |= reg_mask(kPinnedTlsGpr);
+        for (const Module::PinnedConstant& c : mir_fn.parent()->pinned_constants()) {
+            lir_fn_->pinned_constants.emplace_back(c.value, c.tls_offset);
+        }
     }
     lir_fn_->clear_dead_roots_at_calls = !mir_fn.parent() || !mir_fn.parent()->precise_stack_roots();
 
@@ -561,6 +566,7 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     }
 
     fold_reserved_register_copies(*lir_fn_, lir_fn_->reserved_gprs);
+    fold_pinned_constants(*lir_fn_);
     return lir;
 }
 

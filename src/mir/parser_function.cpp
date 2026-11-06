@@ -159,6 +159,14 @@ bool Parser::parse_module_attributes(Module& mod) {
             mod.set_precise_stack_roots(true);
         } else if (attr == "loop_optimizations") {
             mod.set_has_loop_optimizations(true);
+        } else if (attr == "pinned_constant") {
+            // `pinned_constant <value> <tls offset>` (Module::add_pinned_constant)
+            advance();
+            int64_t value = 0, offset = 0;
+            if (!take_int(INT64_MIN, INT64_MAX, 64, "a pinned constant's value", value)) return false;
+            if (!take_int(INT32_MIN, INT32_MAX, 32, "a pinned constant's TLS offset", offset)) return false;
+            mod.add_pinned_constant(static_cast<uint64_t>(value), static_cast<int32_t>(offset));
+            continue;
         } else if (attr == "interrupt_poll") {
             // `interrupt_poll <tls offset> @handler` (Module::set_interrupt_poll)
             advance();
