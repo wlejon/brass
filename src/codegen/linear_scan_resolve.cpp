@@ -60,6 +60,11 @@ LinearScanAllocator::EdgePlace LinearScanAllocator::classify_edge(const LirBlock
     // How control goes from pred to a block: by a Jcc, by the trailing Jmp,
     // or by falling through (a block not ending in a jump falls into the
     // next one in order).
+    // Taken from two places in the block (a float equality's `jp F; je T;
+    // jmp F`, a switch's cases sharing a target), the edge sees the value
+    // where each of them is: one location when nothing moves it between
+    // them, which split_position sees to (no_split_windows_), so the edge
+    // reads it at the first of them. A transfer other than a branch has none.
     auto transfers = [&](const LirBlock& to, bool& by_jcc, bool& unplaceable) {
         by_jcc = false;
         int ways = 0;
@@ -71,9 +76,6 @@ LinearScanAllocator::EdgePlace LinearScanAllocator::classify_edge(const LirBlock
             ++ways;
         }
         if (!is_unconditional_end(*pred.instructions.back()) && next_in_order == &to) ++ways;
-        // Taken from two places in the block, the edge sees the value where
-        // each of them is: a value moved between them has no one location.
-        if (ways > 1) unplaceable = true;
         return ways > 0;
     };
     bool jcc = false;
@@ -139,6 +141,41 @@ void LinearScanAllocator::mark_unsplittable_live_ins() {
         }
     }
     const size_t nb = fn_.blocks.size();
+    // Per block, the positions from the first to the last of two branches
+    // (or a branch and the fall-through) to one target: no value may move
+    // inside, as both edges read it where the first one is.
+    no_split_windows_.clear();
+    for (size_t i = 0; i < nb; ++i) {
+        const LirBlock* block = fn_.blocks[i].get();
+        const auto& ins = block->instructions;
+        if (ins.size() < 2 || is_guard_exit(block)) continue;
+        const LirBlock* next = i + 1 < nb ? fn_.blocks[i + 1].get() : nullptr;
+        const bool falls = !is_unconditional_end(*ins.back());
+        uint32_t w_lo = UINT32_MAX;
+        uint32_t w_hi = 0;
+        for (const LirBlock* s : block->successors) {
+            if (!s) continue;
+            uint32_t first = UINT32_MAX;
+            uint32_t last = 0;
+            int ways = 0;
+            for (const auto& inst : ins) {
+                if ((inst->opcode != LirOpcode::Jcc && inst->opcode != LirOpcode::Jmp) || !names_label(*inst, s->id)) continue;
+                first = std::min(first, inst->id);
+                last = std::max(last, inst->id);
+                ++ways;
+            }
+            if (falls && next == s) {
+                first = std::min(first, ins.back()->id);
+                last = std::max(last, ins.back()->id);
+                ++ways;
+            }
+            if (ways < 2 || first == last) continue;
+            w_lo = std::min(w_lo, first);
+            w_hi = std::max(w_hi, last);
+        }
+        if (w_lo < w_hi) no_split_windows_.emplace_back(w_lo, w_hi);
+    }
+    std::sort(no_split_windows_.begin(), no_split_windows_.end());
     for (size_t i = 0; i < nb; ++i) {
         const LirBlock* block = fn_.blocks[i].get();
         const BlockLiveness& bl = liveness_.block_liveness(block);

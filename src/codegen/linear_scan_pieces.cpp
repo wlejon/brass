@@ -235,6 +235,15 @@ uint32_t LinearScanAllocator::split_position(uint32_t lo, uint32_t hi) const {
         const uint32_t q = spans_[m].start - 1;
         if (spans_[m].entry_depth < best_depth || q == hi) best = q;
     }
+    // Not between two branches of a block to one target: a move there is
+    // seen by the later one only, and the edge reads the value where the
+    // first one is (mark_unsplittable_live_ins).
+    auto w = std::upper_bound(no_split_windows_.begin(), no_split_windows_.end(), best,
+        [](uint32_t v, const std::pair<uint32_t, uint32_t>& x) { return v < x.first; });
+    if (w != no_split_windows_.begin() && best < (w - 1)->second) {
+        const uint32_t q = (w - 1)->first - 1;
+        return q >= lo ? q : kNever;
+    }
     return best;
 }
 
@@ -640,6 +649,91 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
     }
 }
 
+// Values that live across calls, settled before the scan.
+//
+// One live across two or more calls is not split: it lives in one place for
+// its whole life, a callee-saved register or its slot. Split, the scan gave
+// such a value (a function-wide table address, a receiver read again after
+// each call) a caller-saved register between each pair of calls and moved it
+// back to its slot around each, and the moves on the edges between those
+// pieces (a reload at a join, kept only until the next value evicted it) cost
+// more than a load at each use: three_meshes ran about 0.8% fewer
+// instructions a frame unsplit, three_skinned about 1.2%.
+//
+// One read all over such a function (the address of a table its sites
+// index, held from its entry on) is worth a callee-saved register for its
+// whole life, where the scan in start order gave those to whatever started
+// first: the values whose reads (weighted by loop depth) pass
+// kPreassignWeight take the callee-saved registers no instruction in their
+// life blocks or pins, heaviest first, and keep them.
+void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled) {
+    constexpr double kPreassignWeight = 64.0;
+    constexpr uint32_t kManyCalls = 2;
+    std::vector<uint32_t> calls;
+    for (size_t i = 0; i < constrained_ids_[0].size(); ++i) {
+        if (constraint_words_[0][i].call) calls.push_back(constrained_ids_[0][i]);
+    }
+    struct Cand {
+        uint32_t idx;
+        double weight;
+    };
+    std::vector<Cand> cands;
+    for (uint32_t idx : unhandled) {
+        const AllocPiece& p = pieces_[idx];
+        const VReg v = p.vreg();
+        if (!v.is_gpr() || v.is_gcref || !p.base->spans_call) continue;
+        uint32_t n = 0;
+        for (const auto& sg : p.base->segments) {
+            n += static_cast<uint32_t>(std::upper_bound(calls.begin(), calls.end(), sg.end) -
+                                       std::lower_bound(calls.begin(), calls.end(), sg.start));
+            if (n >= kManyCalls) break;
+        }
+        if (n >= kManyCalls) unsplittable_[v.id] = 1;
+        double w = 0;
+        bool fixed = false;
+        for (const UsePosition& u : p.base->use_positions) {
+            if (u.fixed_reg.is_valid()) fixed = true;
+            w += static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(liveness_.get_loop_depth_at(u.inst_id), 6)));
+        }
+        if (fixed || w < kPreassignWeight) continue;
+        cands.push_back(Cand{idx, w});
+    }
+    if (cands.empty()) return;
+    std::sort(cands.begin(), cands.end(), [this](const Cand& a, const Cand& b) {
+        if (a.weight != b.weight) return a.weight > b.weight;
+        return pieces_[a.idx].seq < pieces_[b.idx].seq;
+    });
+    std::vector<uint32_t> taken;
+    for (const Cand& c : cands) {
+        const AllocPiece& p = pieces_[c.idx];
+        uint32_t limits[32];
+        reg_limits(p, limits);
+        for (PReg r : available_gprs_) {
+            if (!is_callee_saved(r) || limits[r.code] != kNever) continue;
+            bool clash = false;
+            for (uint32_t t : taken) {
+                if (pieces_[t].reg == r && first_intersection(pieces_[t], p) != kNever) { clash = true; break; }
+            }
+            if (clash) continue;
+            unsplittable_[p.vreg().id] = 1;
+            assign(c.idx, r);
+            taken.push_back(c.idx);
+            break;
+        }
+    }
+    if (taken.empty()) return;
+    unhandled.erase(std::remove_if(unhandled.begin(), unhandled.end(), [&](uint32_t i) {
+        return std::find(taken.begin(), taken.end(), i) != taken.end();
+    }), unhandled.end());
+    std::make_heap(unhandled.begin(), unhandled.end(), [this](uint32_t a, uint32_t b) {
+        const AllocPiece& x = pieces_[a];
+        const AllocPiece& y = pieces_[b];
+        if (x.start != y.start) return x.start > y.start;
+        if (x.end != y.end) return x.end > y.end;
+        return x.seq > y.seq;
+    });
+}
+
 void LinearScanAllocator::run_scan() {
     std::vector<uint32_t> unhandled;
     for (auto& interval : liveness_.intervals()) {
@@ -649,6 +743,7 @@ void LinearScanAllocator::run_scan() {
         vreg_pieces_[interval.vreg.id].push_back(idx);
         push_unhandled(unhandled, idx);
     }
+    settle_call_spanning(unhandled);
     auto later = [this](uint32_t a, uint32_t b) {
         const AllocPiece& x = pieces_[a];
         const AllocPiece& y = pieces_[b];

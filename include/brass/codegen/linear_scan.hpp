@@ -192,6 +192,9 @@ private:
 
     // linear_scan_pieces.cpp: the interval-splitting scan.
     void run_scan();
+    // Before the scan: values live across two or more calls are unsplittable,
+    // and the most read of them take the callee-saved registers whole.
+    void settle_call_spanning(std::vector<uint32_t>& unhandled);
     uint32_t new_piece(const LiveInterval* base, uint32_t from, uint32_t to);
     bool piece_covers(const AllocPiece& p, uint32_t id) const;
     uint32_t next_use(const AllocPiece& p, uint32_t pos, bool reg_only) const;
@@ -244,6 +247,9 @@ private:
     ScratchMap<uint32_t, std::vector<PendingMove>> moves_at_start_; // block id
     ScratchMap<uint32_t, std::vector<PendingMove>> moves_at_end_;   // block id
     std::vector<EdgeSplit> edge_splits_;
+    // Position ranges [first, last] of blocks that branch to one target from
+    // two places: split_position keeps every split out of their insides.
+    std::vector<std::pair<uint32_t, uint32_t>> no_split_windows_;
     std::vector<uint32_t> landing_pads_;
     std::vector<uint32_t> resume_targets_;
     bool emitted_parallel_copy_ = false;
