@@ -1,4 +1,5 @@
 #include <brass/object/object_writer.hpp>
+#include <brass/core/env.hpp>
 #include <brass/core/phase_times.hpp>
 #include <brass/object/aarch64_reloc.hpp>
 #include <brass/target/x64/x64_isel.hpp>
@@ -149,8 +150,8 @@ namespace {
 // out-of-line address back to the IR that made it.
 void write_block_map(std::string_view fn_name, const codegen::LirFunction& lir,
                      const std::unordered_map<uint32_t, size_t>& offsets) {
-    static const char* path = std::getenv("BRASS_BLOCK_MAP");
-    if (!path || !*path) return;
+    static const std::string path = env_value("BRASS_BLOCK_MAP");
+    if (path.empty()) return;
     static std::ofstream out(path, std::ios::app);
     for (const auto& b : lir.blocks) {
         if (!b) continue;
