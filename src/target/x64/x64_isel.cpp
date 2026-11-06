@@ -488,11 +488,32 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
         }
     }
 
+    std::vector<const Instruction*> tagged_reads;
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
             if (!inst->produces_value()) continue;
             if (skipped_insts_.count(inst)) continue;
+            if (inst->opcode() == Opcode::bitcast_i64_tagged) {
+                tagged_reads.push_back(inst);
+                continue;
+            }
             get_or_alloc_vreg(inst->result());
+        }
+    }
+    // The bits of a tagged value are its register: a read of them names the
+    // value's own register rather than a copy. A copy was a second value,
+    // live from the read to its last reader, and the IC miss call reading
+    // the receiver as its first argument gave it RDI, so every property
+    // check began `mov rdi, <receiver>` on its hit path for the miss's sake.
+    // The bits are never live across a GC point (gc_refs.hpp), where the
+    // value itself, a root, would be kept current anyway.
+    for (const Instruction* inst : tagged_reads) {
+        const Value* src = inst->operand(0);
+        const bool folded = src->is_instruction() && skipped_insts_.count(src->defining_instruction());
+        if (folded) {
+            get_or_alloc_vreg(inst->result());
+        } else {
+            val_to_vreg_[inst->result()] = get_or_alloc_vreg(src);
         }
     }
 

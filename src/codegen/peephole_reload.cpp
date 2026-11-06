@@ -19,7 +19,8 @@
 //           R11  memory-to-memory moves (Mov, Mov32, narrow stores from
 //                memory), the Fabs mask, a GuardExit's record, an exit
 //                stub's stack arguments, a ParallelCopy's memory moves
-//           R15  none (the rewriter's third use scratch, always a LIR def)
+//           R15  none (the rewriter's third use scratch where an instruction
+//                needs one, else an allocatable register: always a LIR def)
 //           XMM12, XMM13  none (XMM14 / XMM15 are the emitters'; untracked)
 //   AArch64 X12, X13  none (X14 / X15 / X16 / X17 are the emitters'; untracked)
 //           V26, V28  none (V27 / V29 / V30 / V31 untracked)

@@ -344,12 +344,35 @@ void LinearScanAllocator::collect_resolution_moves() {
     // definition, rather than each time it leaves a register (a value
     // reloaded for a loop and evicted after it would be stored back
     // unchanged): when the definition runs no deeper in loops than any of
-    // the stores it replaces. A definition that writes the slot itself
-    // (its piece spilled) needs no store at all.
+    // the stores it replaces, and is not on the hot path while every store
+    // it replaces is on a cold one. A value live across calls made only on
+    // cold paths (an inline cache's miss) leaves its register there, where
+    // a store at its definition ran on every pass. A definition that writes
+    // the slot itself (its piece spilled) needs no store at all.
+    std::unordered_map<uint32_t, const LirBlock*> block_by_id;
+    for (const auto& b : fn_.blocks) block_by_id.emplace(b->id, b.get());
+    auto candidate_cold = [&](const Candidate& c) {
+        switch (c.place) {
+            case Place::Before: {
+                auto span = block_of(c.key);
+                return span != spans_.end() && span->block->cold;
+            }
+            case Place::AtStart:
+            case Place::AtEnd: {
+                auto it = block_by_id.find(c.key);
+                return it != block_by_id.end() && it->second->cold;
+            }
+            case Place::OnEdge:
+                return edges[c.key].first->cold || edges[c.key].second->cold;
+        }
+        return false;
+    };
     std::vector<uint32_t> store_depth(vreg_pieces_.size(), UINT32_MAX);
+    std::vector<uint8_t> hot_store(vreg_pieces_.size(), 0);
     for (const auto& c : candidates) {
         if (c.move.src.is_preg() && c.move.dst.is_spill_slot()) {
             store_depth[c.vreg] = std::min(store_depth[c.vreg], c.depth);
+            if (!candidate_cold(c)) hot_store[c.vreg] = 1;
         }
     }
     std::vector<uint8_t> drop_stores(vreg_pieces_.size(), 0);
@@ -359,9 +382,11 @@ void LinearScanAllocator::collect_resolution_moves() {
         const VReg v = fn_.vreg_table[id].vreg;
         const uint8_t sz = move_size(v);
         LirOperand at_def = location_at(v, def, sz);
+        auto def_span = block_of(def);
+        const bool cold_only = !hot_store[id] && def_span != spans_.end() && !def_span->block->cold;
         if (at_def.is_spill_slot()) {
             drop_stores[id] = 1;
-        } else if (at_def.is_preg() && liveness_.get_loop_depth_at(def) <= store_depth[id]) {
+        } else if (at_def.is_preg() && !cold_only && liveness_.get_loop_depth_at(def) <= store_depth[id]) {
             drop_stores[id] = 1;
             moves_after_[def].push_back(PendingMove{LirOperand::slot(vreg_slot_[id], sz), at_def, v.is_xmm(), sz});
         }

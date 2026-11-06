@@ -285,8 +285,44 @@ void LinearScanAllocator::assign(uint32_t idx, PReg reg) {
     active_.push_back(idx);
 }
 
+// The position just before the first block in (p.start, limit] that a path
+// enters with the value in a register, from a hot predecessor ending before
+// the piece, which starts on a cold path: kNever when there is none (among
+// the next few blocks). Off the cold paths the reload at the use is cheaper
+// than one on every edge from where the value waits in its slot.
+uint32_t LinearScanAllocator::register_reentry(const AllocPiece& p, uint32_t limit) const {
+    constexpr int kScan = 16;
+    auto here = std::upper_bound(spans_.begin(), spans_.end(), p.start,
+                                 [](uint32_t x, const BlockSpan& s) { return x < s.start; });
+    if (here == spans_.begin()) return kNever;
+    const auto& list = vreg_pieces_[p.vreg().id];
+    auto in_register_at = [&](uint32_t pos) {
+        auto it = std::upper_bound(list.begin(), list.end(), pos,
+                                   [this](uint32_t x, uint32_t i) { return x < pieces_[i].from; });
+        if (it == list.begin()) return false;
+        const AllocPiece& q = pieces_[*(it - 1)];
+        return pos <= q.to && !q.spilled && q.reg.is_valid();
+    };
+    auto span = std::upper_bound(spans_.begin(), spans_.end(), p.start + 1,
+                                 [](uint32_t x, const BlockSpan& s) { return x < s.start; });
+    for (int n = 0; span != spans_.end() && span->start <= limit && n < kScan; ++span, ++n) {
+        for (const LirBlock* pred : span->block->predecessors) {
+            if (pred->instructions.empty()) continue;
+            const uint32_t e = liveness_.block_liveness(pred).end_id;
+            if (e < p.start && in_register_at(e)) return span->start - 1;
+        }
+    }
+    return kNever;
+}
+
 // Piece `idx` lives in its slot; the part of it from just before its next
-// use after `after` (moved out of loops) goes back to the scan.
+// use after `after` (moved out of loops) goes back to the scan. A block
+// before that use (or before its end, read from the slot in place from
+// there on) which a path enters with the value still in a register
+// (the hot path past a call made on a cold one) starts the part that goes
+// back instead: the reload is on the edges from where the value waits in its
+// slot, rather than a store on that path's edge (or at the definition, where
+// the store-once rule hoists it) for a slot the block expected it in.
 void LinearScanAllocator::spill_and_requeue(uint32_t idx, uint32_t after, std::vector<uint32_t>& unhandled) {
     AllocPiece& p = pieces_[idx];
     const VReg v = p.vreg();
@@ -294,10 +330,16 @@ void LinearScanAllocator::spill_and_requeue(uint32_t idx, uint32_t after, std::v
     p.reg = PReg{};
     slot_of(v);
     if (unsplittable_[v.id]) return;
-    const uint32_t lo = std::max(p.start, after) + 1;
+    uint32_t lo = std::max(p.start, after) + 1;
     const uint32_t u = next_use(p, lo + 1, true);
-    if (u == kNever) return;
-    const uint32_t q = split_position(lo, u - 1);
+    uint32_t hi = u == kNever ? kNever : u - 1;
+    const uint32_t r = register_reentry(p, u == kNever ? p.end : u);
+    if (r != kNever && r > p.start) {
+        lo = p.start + 1;
+        hi = r;
+    }
+    if (hi == kNever) return;
+    const uint32_t q = split_position(lo, hi);
     if (q == kNever || q <= p.start || q >= p.end) return;
     push_unhandled(unhandled, split_piece(idx, q));
 }
@@ -431,7 +473,7 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
     for (uint32_t& m : hard_q) m = limit_before(m);
     uint32_t use_q[32];
     std::copy(hard_q, hard_q + 32, use_q);
-    float whole_cost[32] = {};
+    double whole_cost[32] = {};
     std::vector<uint32_t> holders[32];
     for (uint32_t a : active_) {
         const AllocPiece& other = pieces_[a];
@@ -441,7 +483,7 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
         const uint8_t r = other.reg.code;
         if (unsplittable_[other.vreg().id]) {
             if (whole_only) {
-                whole_cost[r] += other.base->spill_weight;
+                whole_cost[r] += whole_life_cost_[other.vreg().id];
                 holders[r].push_back(a);
             } else if (only_copied_[other.vreg().id]) {
                 // A value that cannot be split, read only by block-argument
@@ -467,9 +509,16 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
     const HintRegs hints = hint_regs(p);
     if (whole_only) {
         // The value takes a register for its whole life, over holders that
-        // cost less to spill than it does, or its slot.
+        // cost less to spill than it does, or its slot. A whole life in the
+        // slot costs a load at each read that needs a register and a store
+        // at each definition, weighed by loop depth however long the value
+        // lives: per unit of length (spill_weight), a table base read
+        // throughout a long function weighed less than a value read twice in
+        // a few instructions, and lost the callee-saved register it had been
+        // given (settle_call_spanning) to it, setProgram reloading it 52
+        // times a draw.
         PReg best{};
-        float best_cost = p.base->spill_weight;
+        double best_cost = whole_life_cost_[v.id];
         auto consider = [&](PReg r) {
             if (hard_q[r.code] < p.end) return;
             if (whole_cost[r.code] < best_cost) { best = r; best_cost = whole_cost[r.code]; }

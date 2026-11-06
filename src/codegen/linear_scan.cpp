@@ -50,11 +50,15 @@ void LinearScanAllocator::init_register_pools() {
     } else {
         using namespace brass::x64;
 
-        // Available GPRs (excluding RSP=4, RBP=5, scratch registers R10=10, R11=11, R15=15, and def_scratch R14=14)
-        // Ordered with caller-saved first, then callee-saved
+        // Available GPRs: all but RSP, RBP and the rewrite's scratches R10
+        // and R11. R15 and R14, its third and fourth, hold values too: they
+        // are blocked only where an instruction could need them
+        // (build_constraint_index). With them, four callee-saved registers
+        // (RBX, R12, R14, R15; R13 is often the pinned TLS register) for
+        // values live across calls instead of two.
         std::vector<GPR> gprs = {
             GPR::RAX, GPR::RCX, GPR::RDX, GPR::R8, GPR::R9,
-            GPR::RBX, GPR::RSI, GPR::RDI, GPR::R12, GPR::R13
+            GPR::RBX, GPR::RSI, GPR::RDI, GPR::R12, GPR::R13, GPR::R14, GPR::R15
         };
 
         available_gprs_.clear();
@@ -185,6 +189,35 @@ void LinearScanAllocator::build_constraint_index() {
         (reg.reg_class == RegClass::GPR ? gprs : xmms) |= (1u << reg.code);
     };
 
+    // x64: the rewrite takes R10, R11, R15 and R14 in that order for an
+    // instruction's spilled general-register operands (each register use or
+    // definition, each memory operand's base and index): R15 is blocked
+    // where there are three of them, R14 where there are four, so either is
+    // free wherever the rewrite takes it.
+    const bool x64_scratches = cc_.target().is_x64();
+    auto rewrite_scratches = [&](const LirInst& inst) -> uint32_t {
+        if (!x64_scratches) return 0;
+        switch (inst.opcode) {
+            case LirOpcode::Safepoint:
+            case LirOpcode::ParallelCopy:
+            case LirOpcode::KeepAlive:
+            case LirOpcode::GuardExit:
+                return 0;
+            default:
+                break;
+        }
+        uint32_t n = 0;
+        auto count = [&](const LirOperand& op) {
+            if (op.is_vreg() && op.vreg_val.is_valid() && op.vreg_val.is_gpr()) ++n;
+            else if (op.is_mem()) n += op.mem_val.base_vreg.is_valid() + op.mem_val.index_vreg.is_valid();
+        };
+        for (const auto& d : inst.defs) count(d);
+        for (const auto& u : inst.uses) count(u);
+        uint32_t m = 0;
+        if (n >= 3) m |= x64::reg_mask(x64::GPR::R15);
+        if (n >= 4) m |= x64::reg_mask(x64::GPR::R14);
+        return m;
+    };
     std::vector<InstConstraints> held;
     // Instruction ids are assigned in block order by the liveness analysis, so
     // walking the blocks yields the instructions already sorted by id.
@@ -207,7 +240,7 @@ void LinearScanAllocator::build_constraint_index() {
             // covering it, like a clobber: no value's own fixed position
             // there may take it, since that would overwrite the held value.
             const uint32_t blocked[2] = {
-                inst->clobbered_gprs | h.clobbered_gprs | (is_call ? caller_saved[0] : 0u),
+                inst->clobbered_gprs | h.clobbered_gprs | (is_call ? caller_saved[0] : 0u) | rewrite_scratches(*inst),
                 inst->clobbered_xmms | h.clobbered_xmms | (is_call ? caller_saved[1] : 0u),
             };
             for (int c = 0; c < 2; ++c) {
@@ -504,6 +537,16 @@ void LinearScanAllocator::allocate() {
         if (fn_.vreg_table[id].vreg.is_gcref) unsplittable_[id] = 1;
     }
     mark_folded_uses();
+    whole_life_cost_.assign(num_vregs, 0.0);
+    for (const auto& interval : liveness_.intervals()) {
+        if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
+        double c = 0;
+        for (const auto& u : interval.use_positions) {
+            if (!u.is_def && !u.requires_reg) continue;
+            c += static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(liveness_.get_loop_depth_at(u.inst_id), 6)));
+        }
+        whole_life_cost_[interval.vreg.id] = c;
+    }
     def_pos_.assign(num_vregs, UINT32_MAX);
     only_copied_.assign(num_vregs, 0);
     for (const auto& interval : liveness_.intervals()) {
@@ -540,6 +583,7 @@ void LinearScanAllocator::allocate() {
     moves_at_end_.clear();
     edge_splits_.clear();
     emitted_parallel_copy_ = false;
+    def_scratch_stores_.clear();
 
     // 1-2. Split what cannot move between locations, then scan.
     mark_unsplittable_live_ins();
@@ -833,6 +877,7 @@ int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
     fn_.frame.num_spill_slots = next_spill_slot_;
     return slot;
 }
+
 
 void run_linear_scan_regalloc(
     LirFunction& fn,

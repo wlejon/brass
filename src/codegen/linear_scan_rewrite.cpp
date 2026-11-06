@@ -216,6 +216,13 @@ static bool is_xmm_opcode(LirOpcode op) {
     }
 }
 
+// The x64 rewrite's general-register scratches, in the order it takes them:
+// R10 and R11 are never allocated; R15 and R14 are, and are blocked for
+// values at an instruction with three or four general-register operands
+// (build_constraint_index), the only place the rewrite can need them.
+static const PReg kX64GprScratches[4] = {PReg::gpr(x64::GPR::R10), PReg::gpr(x64::GPR::R11), PReg::gpr(x64::GPR::R15),
+                                  PReg::gpr(x64::GPR::R14)};
+
 void LinearScanAllocator::rewrite_instructions() {
     using namespace brass::x64;
 
@@ -402,10 +409,13 @@ void LinearScanAllocator::rewrite_instructions() {
                 PReg scratch = is_xmm ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM14))
                                       : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R15));
                 if (!is_xmm) {
+                    // x64: R11 and R10 first; R15 and R14 hold values and are
+                    // free here only where both addresses take R10 and R11
+                    // (build_constraint_index blocks them there).
                     PReg candidates[] = {
-                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R15),
-                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R11),
-                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(GPR::R10),
+                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R11),
+                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R10),
+                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(GPR::R15),
                     };
                     scratch = candidates[0];
                     for (auto c : candidates) {
@@ -437,6 +447,30 @@ void LinearScanAllocator::rewrite_instructions() {
                 continue;
             }
 
+            // Whether spilled use i is reloaded into an XMM scratch.
+            auto use_is_xmm = [&](size_t i) {
+                const uint8_t sz = inst->uses[i].size;
+                bool is_xmm_use = (i < orig_use_is_xmm.size()) ? orig_use_is_xmm[i] : false;
+                if (!is_xmm_use) {
+                    if (inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq) {
+                        is_xmm_use = (i == 0);
+                    } else if (inst->opcode == LirOpcode::Movd_xg || inst->opcode == LirOpcode::Movq_xg ||
+                               inst->opcode == LirOpcode::Cvtsi2sd || inst->opcode == LirOpcode::Cvtsi2sd32 ||
+                               inst->opcode == LirOpcode::Cvtsi2ss || inst->opcode == LirOpcode::Cvtsi2ss32) {
+                        is_xmm_use = false;
+                    } else if (inst->opcode == LirOpcode::Cvttsd2si || inst->opcode == LirOpcode::Cvttsd2si32 ||
+                               inst->opcode == LirOpcode::Cvttss2si || inst->opcode == LirOpcode::Cvttss2si32 ||
+                               inst->opcode == LirOpcode::Movq_gx || inst->opcode == LirOpcode::Movd_gx ||
+                               inst->opcode == LirOpcode::Pextrd || inst->opcode == LirOpcode::Pextrq ||
+                               inst->opcode == LirOpcode::Extractps) {
+                        is_xmm_use = true;
+                    } else {
+                        is_xmm_use = is_xmm_opcode(inst->opcode) || sz == 16 || sz == 32;
+                    }
+                }
+                return is_xmm_use;
+            };
+
             bool has_spill_def = !inst->defs.empty() && inst->defs[0].is_spill_slot();
 
             // Other instructions with spill def or spill uses
@@ -451,9 +485,30 @@ void LinearScanAllocator::rewrite_instructions() {
                 if (inst->is_call()) {
                     def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V0) : PReg::xmm(XMM::XMM0))
                                              : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X0) : PReg::gpr(GPR::RAX));
-                } else {
+                } else if (is_xmm_def || is_aarch64) {
                     def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V27) : PReg::xmm(XMM::XMM15))
-                                             : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X14) : PReg::gpr(GPR::R14));
+                                             : PReg::aarch64_gpr(brass::aarch64::GPR::X14);
+                } else {
+                    // x64: the scratch after those the uses take (the loop
+                    // below takes them first, in the same order), so the
+                    // instruction needs no more of R10, R11, R15, R14 than
+                    // it has general-register operands to spill: R15 and R14
+                    // hold values elsewhere and are free here only where
+                    // build_constraint_index saw that many operands.
+                    std::vector<int32_t> slots;
+                    for (size_t i = 0; i < inst->uses.size(); ++i) {
+                        const LirOperand& u = inst->uses[i];
+                        if (!u.is_spill_slot() || u.spill_slot == original_spill_def.spill_slot || use_is_xmm(i)) continue;
+                        if (std::find(slots.begin(), slots.end(), u.spill_slot) == slots.end()) slots.push_back(u.spill_slot);
+                    }
+                    size_t skip = slots.size();
+                    for (PReg r : kX64GprScratches) {
+                        if ((base_reloaded && r == base_scratch_reg) || (idx_reloaded && r == idx_scratch_reg)) continue;
+                        if (skip-- == 0) { def_scratch = r; break; }
+                    }
+                    if (!def_scratch.is_valid()) {
+                        throw std::runtime_error("Insufficient scratch registers for a spilled definition");
+                    }
                 }
 
                 // If instruction reads from def (e.g. add dst, src), load initial value of def into scratch
@@ -478,7 +533,7 @@ void LinearScanAllocator::rewrite_instructions() {
             }
 
             // Handle any remaining spill uses with reserved scratch registers:
-            // GPR: R10/R11/R15 (x64) or X12/X13/X15 (AArch64)
+            // GPR: R10/R11/R15/R14 (x64, kX64GprScratches) or X12/X13/X15 (AArch64)
             // XMM: XMM12/XMM13/XMM14 (x64) or V26/V28/V29 (AArch64)
             std::vector<int32_t> orig_slot_indices(inst->uses.size(), -1);
             for (size_t i = 0; i < inst->uses.size(); ++i) {
@@ -487,10 +542,11 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
             }
 
-            PReg gpr_scratches[3] = {
-                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(GPR::R10),
-                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R11),
-                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R15)
+            PReg gpr_scratches[4] = {
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : kX64GprScratches[0],
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : kX64GprScratches[1],
+                is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : kX64GprScratches[2],
+                is_aarch64 ? PReg{} : kX64GprScratches[3]
             };
             PReg xmm_scratches[3] = {
                 is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V26) : PReg::xmm(XMM::XMM12),
@@ -524,24 +580,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 if (last_use_in_place && i + 1 == inst->uses.size()) continue;
                 if (inst->uses[i].is_spill_slot() && !uses_read_from_memory) {
                     uint8_t sz = inst->uses[i].size;
-                    bool is_xmm_use = (i < orig_use_is_xmm.size()) ? orig_use_is_xmm[i] : false;
-                    if (!is_xmm_use) {
-                        if (inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq) {
-                            is_xmm_use = (i == 0);
-                        } else if (inst->opcode == LirOpcode::Movd_xg || inst->opcode == LirOpcode::Movq_xg ||
-                                   inst->opcode == LirOpcode::Cvtsi2sd || inst->opcode == LirOpcode::Cvtsi2sd32 ||
-                                   inst->opcode == LirOpcode::Cvtsi2ss || inst->opcode == LirOpcode::Cvtsi2ss32) {
-                            is_xmm_use = false;
-                        } else if (inst->opcode == LirOpcode::Cvttsd2si || inst->opcode == LirOpcode::Cvttsd2si32 ||
-                                   inst->opcode == LirOpcode::Cvttss2si || inst->opcode == LirOpcode::Cvttss2si32 ||
-                                   inst->opcode == LirOpcode::Movq_gx || inst->opcode == LirOpcode::Movd_gx ||
-                                   inst->opcode == LirOpcode::Pextrd || inst->opcode == LirOpcode::Pextrq ||
-                                   inst->opcode == LirOpcode::Extractps) {
-                            is_xmm_use = true;
-                        } else {
-                            is_xmm_use = is_xmm_opcode(inst->opcode) || sz == 16 || sz == 32;
-                        }
-                    }
+                    const bool is_xmm_use = use_is_xmm(i);
                     int32_t slot = inst->uses[i].spill_slot;
 
                     // Check if this same slot was already loaded for a previous use
@@ -574,6 +613,7 @@ void LinearScanAllocator::rewrite_instructions() {
                             }
                         } else {
                             for (PReg s : gpr_scratches) {
+                                if (!s.is_valid()) continue;
                                 bool is_busy = false;
                                 for (PReg b : busy_registers) {
                                     if (s == b) { is_busy = true; break; }
@@ -628,6 +668,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 auto store_back = std::make_unique<LirInst>(store_op);
                 store_back->add_def(LirOperand::slot(original_spill_def.spill_slot, sz));
                 store_back->add_use(LirOperand::preg(def_scratch, sz));
+                def_scratch_stores_.insert(store_back.get());
                 rewritten.push_back(std::move(store_back));
             }
         }

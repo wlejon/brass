@@ -30,6 +30,7 @@ add_executable(brass_unit_tests
     unit/test_linear_scan.cpp
     unit/test_linear_scan_spill_copies.cpp
     unit/test_linear_scan_long_values.cpp
+    unit/test_linear_scan_call_spanning.cpp
     unit/test_nocollect_calls.cpp
     unit/test_x64_entry_cost.cpp
     unit/test_x64_pinned_constants.cpp

@@ -123,7 +123,6 @@ void LinearScanAllocator::pool_constant_slots() {
     }
     for (int32_t s : refused) slots.erase(s);
     if (slots.empty()) return;
-    const PReg def_scratch = PReg::gpr(brass::x64::GPR::R14);
     for (auto& block : fn_.blocks) {
         auto& ins = block->instructions;
         for (size_t i = 0; i < ins.size(); ++i) {
@@ -148,12 +147,12 @@ void LinearScanAllocator::pool_constant_slots() {
                 continue;
             }
             if (in.defs.size() != 1 || !in.defs[0].is_spill_slot() || !slots.count(in.defs[0].spill_slot)) continue;
-            // The rewrite makes a spilled constant in the def scratch and
+            // The rewrite makes a spilled constant in a def scratch and
             // stores it from there; the scratch is read by nothing else.
-            if (i > 0 && ins[i - 1] && in.uses[0].is_preg() && in.uses[0].preg_val == def_scratch) {
+            if (i > 0 && ins[i - 1] && def_scratch_stores_.count(&in) && in.uses[0].is_preg()) {
                 const LirInst& prev = *ins[i - 1];
                 if ((prev.opcode == LirOpcode::Movabs || prev.opcode == LirOpcode::Mov) && prev.defs.size() == 1 &&
-                    prev.defs[0].is_preg() && prev.defs[0].preg_val == def_scratch && prev.uses.size() == 1 &&
+                    prev.defs[0].is_preg() && prev.defs[0].preg_val == in.uses[0].preg_val && prev.uses.size() == 1 &&
                     prev.uses[0].is_imm_int()) {
                     ins[i - 1].reset();
                 }

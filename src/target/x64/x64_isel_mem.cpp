@@ -460,6 +460,7 @@ void X64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
 void X64ISel::lower_tagged_bitcast(const Instruction& inst, LirBlock& lir_bb) {
     VReg src = get_or_alloc_vreg(inst.operand(0));
     VReg dst = get_or_alloc_vreg(inst.result());
+    if (dst.id == src.id) return;  // the read names the tagged value's register (lower)
     auto mov = std::make_unique<LirInst>(LirOpcode::Mov);
     mov->add_def(LirOperand::vreg(dst, 8));
     mov->add_use(LirOperand::vreg(src, 8));

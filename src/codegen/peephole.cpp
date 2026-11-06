@@ -113,7 +113,10 @@ bool PeepholeOptimizer::is_reserved_scratch(PReg reg) const noexcept {
         // V26, V28, V29 use, V27 def, V30/V31 emitter.
         return reg.is_gpr() ? (reg.code >= 12 && reg.code <= 17) : (reg.code >= 26 && reg.code <= 31);
     }
-    // R10, R11, R15 use scratches, R14 def scratch; XMM12-XMM14 use,
+    // R10, R11, R15, R14 the rewriter's scratches in that order (reloaded
+    // uses take the first, a spilled def the next one free); R15 and R14
+    // are allocatable where an instruction needs neither, so a store from
+    // them is not forwarded even when it holds a value. XMM12-XMM14 use,
     // XMM15 def (and the emitters' vector scratch).
     return reg.is_gpr() ? (reg.code == 10 || reg.code == 11 || reg.code == 14 || reg.code == 15)
                         : (reg.code >= 12 && reg.code <= 15);

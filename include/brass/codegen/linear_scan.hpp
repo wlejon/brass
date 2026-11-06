@@ -7,6 +7,7 @@
 #include <brass/target/calling_conv.hpp>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 
 namespace brass::codegen {
@@ -139,9 +140,10 @@ private:
     };
     std::vector<SlotOwners> shared_slots_;
     // Values that keep one location for their whole life: GC references
-    // (stack maps name one place per value), and values live into a block
+    // (stack maps name one place per value), values live into a block
     // entered other than by an ordinary branch (a landing pad, a resume
-    // point, an edge no move can be placed on).
+    // point, an edge no move can be placed on), and values live across two
+    // or more calls (settle_call_spanning).
     std::vector<uint8_t> unsplittable_;
     std::vector<uint8_t> is_mem_index_;
     // Per vreg, its one definition's position (UINT32_MAX: several or none).
@@ -151,6 +153,9 @@ private:
     // value only on its way into a block parameter, which waits in its slot
     // for that copy at no cost to anything that reads it.
     std::vector<uint8_t> only_copied_;
+    // Per vreg, what keeping it in its slot for its whole life costs: each
+    // definition and each read that needs a register, at 8^loop depth.
+    std::vector<double> whole_life_cost_;
     std::vector<uint32_t> active_;   // piece indices holding a register
     uint32_t next_seq_ = 0;
 
@@ -210,6 +215,7 @@ private:
     uint32_t always_blocked(const AllocPiece& p) const;
     uint32_t split_position(uint32_t lo, uint32_t hi) const;
     uint32_t split_piece(uint32_t idx, uint32_t q);
+    uint32_t register_reentry(const AllocPiece& p, uint32_t limit) const;
     void spill_and_requeue(uint32_t idx, uint32_t after, std::vector<uint32_t>& unhandled);
     void push_unhandled(std::vector<uint32_t>& unhandled, uint32_t idx) const;
     void assign(uint32_t idx, PReg reg);
@@ -285,6 +291,10 @@ private:
     void pool_constant_slots();
     std::unordered_map<uint32_t, int64_t> constant_vregs_;
     std::vector<std::pair<int32_t, int64_t>> constant_slot_candidates_;
+    // The rewrite's stores of a spilled definition from its scratch
+    // register, which pool_constant_slots drops with the definition when
+    // the slot is pooled.
+    std::unordered_set<const LirInst*> def_scratch_stores_;
 };
 
 // The width (8, or 4 for a 32-bit form) at which the x64 emitters encode

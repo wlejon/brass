@@ -48,16 +48,10 @@ Allocated allocate(const char* text, const char* name, bool rpo = true,
     return out;
 }
 
-bool reads_slot(const LirInst& inst) {
-    for (const auto& u : inst.uses) {
-        if (u.is_spill_slot()) return true;
-    }
-    return false;
-}
-
 // A tagged value cannot be split, and live across a call it lives in its
-// slot for good: the bitcast that makes it is a copy into the slot, the one
-// after the call a copy out of it.
+// slot for good: the bitcast that makes it is a copy into the slot, and the
+// read of its bits after the call (the tagged value's own register, no copy)
+// a load out of it.
 const char* kAcrossCall = R"(module @m
 
 func @twice(%a: i64) -> i64 {
@@ -112,29 +106,31 @@ TEST_CASE("Linear Scan - a copy out of a spill slot is the reload itself") {
 
 namespace {
 
-// Nine gcrefs loaded off %p and handed to a join, filling every register
+// Ten gcrefs loaded off %p and handed to a join, filling every register
 // but %p's; then twelve more loads off %p, each summed at once. A gcref
 // cannot be split and is read only by the block-argument copy; %p is read
 // by every load. Short of registers at the first i64 load, the value to
 // give one up is a gcref, which then waits in its slot for the copy, not %p,
 // which was reloaded at each of the twelve.
+constexpr int kRefs = 10;
+
 std::string gather_text() {
     std::string s = "module @m\n\nfunc @gather(%p: ptr) -> i64 {\nentry:\n";
     std::string args, params, stores;
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < kRefs; ++i) {
         const std::string n = std::to_string(i);
         s += "  %a" + n + " = load.gcref %p, " + std::to_string(i * 8) + "\n";
         args += "%a" + n + ", ";
         params += "%b" + n + ": gcref, ";
-        stores += "  store.gcref %p, " + std::to_string((8 - i) * 8) + ", %b" + n + "\n";
+        stores += "  store.gcref %p, " + std::to_string((kRefs - 1 - i) * 8) + ", %b" + n + "\n";
     }
-    s += "  %s8 = iconst.i64 0\n";
-    for (int k = 9; k < 21; ++k) {
+    s += "  %s" + std::to_string(kRefs - 1) + " = iconst.i64 0\n";
+    for (int k = kRefs; k < kRefs + 12; ++k) {
         const std::string n = std::to_string(k);
         s += "  %v" + n + " = load.i64 %p, " + std::to_string(k * 8) + "\n";
         s += "  %s" + n + " = add.i64 %s" + std::to_string(k - 1) + ", %v" + n + "\n";
     }
-    s += "  br join(" + args + "%s20)\njoin(" + params + "%sum: i64):\n" + stores + "  ret %sum\n}\n";
+    s += "  br join(" + args + "%s" + std::to_string(kRefs + 11) + ")\njoin(" + params + "%sum: i64):\n" + stores + "  ret %sum\n}\n";
     return s;
 }
 
@@ -148,14 +144,16 @@ TEST_CASE("Linear Scan - a value read only by block-argument copies gives its re
     for (const auto& inst : entry->instructions) {
         // What follows the copy is the edge's own moves into the join.
         if (inst->opcode == LirOpcode::ParallelCopy) break;
-        // Nothing before the copy reads a slot: %p stays in its register
-        // through every load, where evicting it reloaded it at each.
-        CHECK_FALSE(reads_slot(*inst));
+        // %p stays in its argument register through every load, where
+        // evicting it reloaded it into a scratch at each. (The gcrefs' moves
+        // into the join's slots may go through a scratch here.)
         for (const auto& u : inst->uses) {
-            if (u.is_mem()) ++loads;
+            if (!u.is_mem()) continue;
+            ++loads;
+            CHECK(u.mem_val.base_preg == PReg::gpr(GPR::RDI));
         }
     }
-    CHECK(loads >= 21u);
+    CHECK(loads >= static_cast<size_t>(kRefs + 12));
     CHECK(a.lir->frame.num_spill_slots > 0);
 
     JitExecutionEngine jit;
@@ -164,14 +162,14 @@ TEST_CASE("Linear Scan - a value read only by block-argument copies gives its re
     REQUIRE(jit.compile_and_load(*mod));
     auto fn = jit.get_function_ptr<int64_t (*)(uint64_t*)>("gather");
     REQUIRE(fn != nullptr);
-    uint64_t words[21];
+    uint64_t words[kRefs + 12];
     int64_t want = 0;
-    for (int i = 0; i < 21; ++i) {
+    for (int i = 0; i < kRefs + 12; ++i) {
         words[i] = 0x1000u + 16u * static_cast<uint64_t>(i);
-        if (i >= 9) want += static_cast<int64_t>(words[i]);
+        if (i >= kRefs) want += static_cast<int64_t>(words[i]);
     }
     CHECK_EQ(fn(words), want);
-    for (int i = 0; i < 9; ++i) CHECK_EQ(words[8 - i], 0x1000u + 16u * static_cast<uint64_t>(i));
+    for (int i = 0; i < kRefs; ++i) CHECK_EQ(words[kRefs - 1 - i], 0x1000u + 16u * static_cast<uint64_t>(i));
 }
 
 namespace {
@@ -234,24 +232,24 @@ TEST_CASE("Branches - a loop-free function's join is not padded as a loop head")
 
 namespace {
 
-// Fourteen i64s loaded off %p and all read twice, xor-ed in order and then
+// Sixteen i64s loaded off %p and all read twice, xor-ed in order and then
 // added in reverse: more live values than registers, so the first reads
 // find some of them in their slots, each as the source of an xor or an add,
 // the operand x64 encodes as r/m.
 std::string fold_text() {
     std::string s = "module @m\n\nfunc @fold(%p: ptr) -> i64 {\nentry:\n";
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i < 16; ++i) {
         s += "  %v" + std::to_string(i) + " = load.i64 %p, " + std::to_string(i * 8) + "\n";
     }
     s += "  %s0 = iconst.i64 0\n";
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i < 16; ++i) {
         s += "  %s" + std::to_string(i + 1) + " = xor.i64 %s" + std::to_string(i) + ", %v" + std::to_string(i) + "\n";
     }
-    for (int i = 0; i < 14; ++i) {
-        s += "  %t" + std::to_string(i + 1) + " = add.i64 %" + (i ? "t" + std::to_string(i) : std::string("s14")) +
-             ", %v" + std::to_string(13 - i) + "\n";
+    for (int i = 0; i < 16; ++i) {
+        s += "  %t" + std::to_string(i + 1) + " = add.i64 %" + (i ? "t" + std::to_string(i) : std::string("s16")) +
+             ", %v" + std::to_string(15 - i) + "\n";
     }
-    s += "  ret %t14\n}\n";
+    s += "  ret %t16\n}\n";
     return s;
 }
 
@@ -290,13 +288,13 @@ TEST_CASE("Linear Scan - an x64 ALU source in its spill slot is read in place") 
     REQUIRE(jit.compile_and_load(*mod));
     auto fn = jit.get_function_ptr<int64_t (*)(uint64_t*)>("fold");
     REQUIRE(fn != nullptr);
-    uint64_t words[14];
+    uint64_t words[16];
     uint64_t x = 0;
-    for (int i = 0; i < 14; ++i) {
+    for (int i = 0; i < 16; ++i) {
         words[i] = 0x9e3779b97f4a7c15ull * static_cast<uint64_t>(i + 1);
         x ^= words[i];
     }
-    for (int i = 0; i < 14; ++i) x += words[13 - i];
+    for (int i = 0; i < 16; ++i) x += words[15 - i];
     CHECK_EQ(static_cast<uint64_t>(fn(words)), x);
 }
 
