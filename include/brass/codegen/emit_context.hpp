@@ -3,6 +3,7 @@
 #include <brass/target/x64/code_buffer.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/x64/x64_frame.hpp>
+#include <brass/codegen/branch_relay.hpp>
 #include <brass/codegen/lir.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/gc/stack_map.hpp>
@@ -97,7 +98,15 @@ private:
     // emits again with those short. Shrinking only brings a branch and its
     // target closer, but alignment padding can grow, so a short branch that
     // does not reach is reported (`overflow_ords_`) and emitted long once more.
+    //
+    // A long branch may instead relay through a nearby branch to the same
+    // target (codegen/branch_relay.hpp): `relay_to_` names, by ordinal, the
+    // branch it jumps onto in 2-byte form, and that branch binds a label at
+    // its first byte. A forward relay out of reach is reported like a short
+    // branch and emitted long once more; a backward one is measured exactly.
+    // Both live in emit_branches.cpp.
     void emit_jump(x64::Condition cond, uint32_t target_id);
+    CompilationResult relax_branches(CompilationResult first);
     struct ForwardBranch {
         uint32_t ordinal = 0;
         size_t end = 0;        // offset just past the branch
@@ -108,6 +117,9 @@ private:
     std::unordered_map<size_t, uint32_t> short_patch_ord_;  // rel8 patch offset -> ordinal
     std::vector<uint32_t> overflow_ords_;
     uint32_t branch_ordinal_ = 0;
+    std::vector<BranchSite> sites_;        // this emission's branches, by ordinal
+    std::vector<uint32_t> relay_to_;       // the plan emitted: ordinal -> hub ordinal, or UINT32_MAX
+    std::vector<x64::Label> hub_labels_;   // by ordinal, valid where a branch relays onto it
 
     x64::MemAddress to_mem_address(const LirOperand& op) const;
     x64::GPR to_gpr(const LirOperand& op) const;

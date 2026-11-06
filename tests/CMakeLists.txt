@@ -105,6 +105,7 @@ add_executable(brass_unit_tests
     unit/test_jump_threading.cpp
     unit/test_block_layout.cpp
     unit/test_layout_cold.cpp
+    unit/test_branch_relay.cpp
     unit/test_cold_block_order.cpp
     differential/test_unswitch_differential.cpp
     unit/test_profile_serialization.cpp

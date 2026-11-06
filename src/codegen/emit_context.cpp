@@ -92,49 +92,7 @@ CompilationResult EmitContext::compile() {
         return again.compile();
     }
 
-    // Branch relaxation: the forward branches the all-rel32 pass measured in
-    // reach of a 2-byte form, emitted short; any that alignment padding put
-    // out of reach after all goes long and the function is emitted again.
-    std::vector<uint8_t> fits(branch_ordinal_, 0);
-    bool any = false;
-    for (const ForwardBranch& fb : forward_branches_) {
-        const int64_t disp = static_cast<int64_t>(result.code_buffer.label_offset(fb.label)) -
-                             static_cast<int64_t>(fb.end);
-        if (disp <= 127) fits[fb.ordinal] = 1, any = true;
-    }
-    for (int attempt = 0; any && attempt < 4; ++attempt) {
-        EmitContext again(fn_, target_);
-        again.dirties_upper_ = dirties_upper_;
-        again.short_fwd_ = fits;
-        again.buffer_.collect_rel8_overflows(true);
-        CompilationResult shorter = again.compile_once();
-        if (again.overflow_ords_.empty()) return shorter;
-        for (uint32_t ord : again.overflow_ords_) fits[ord] = 0;
-    }
-    return result;
-}
-
-void EmitContext::emit_jump(Condition cond, uint32_t target_id) {
-    const uint32_t ordinal = branch_ordinal_++;
-    const Label label = block_labels_[target_id];
-    const size_t start = buffer_.size();
-    if (buffer_.is_bound(label)) {
-        // Backward: the distance is known exactly.
-        const int64_t disp = static_cast<int64_t>(buffer_.label_offset(label)) - static_cast<int64_t>(start + 2);
-        if (disp >= -128) {
-            if (cond == Condition::None) enc_.jmp_short(label);
-            else enc_.j_short(cond, label);
-            return;
-        }
-    } else if (ordinal < short_fwd_.size() && short_fwd_[ordinal]) {
-        if (cond == Condition::None) enc_.jmp_short(label);
-        else enc_.j_short(cond, label);
-        short_patch_ord_[buffer_.size() - 1] = ordinal;
-        return;
-    }
-    if (cond == Condition::None) enc_.jmp_near(label);
-    else enc_.j_near(cond, label);
-    if (!buffer_.is_bound(label)) forward_branches_.push_back(ForwardBranch{ordinal, buffer_.size(), label});
+    return relax_branches(std::move(result));
 }
 
 CompilationResult EmitContext::compile_once() {
