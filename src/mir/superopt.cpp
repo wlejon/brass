@@ -1,4 +1,5 @@
 #include <brass/mir/superopt.hpp>
+#include <brass/mir/egraph.hpp>
 #include "../verify/bv_solver.hpp"
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
@@ -289,12 +290,19 @@ bool run_mir_superopt(
 
     if (fn.blocks().empty() || !fn.entry_block()) return false;
 
+    bool changed = false;
+    if (opts.enable_egraph) {
+        EGraphLimits eg_limits;
+        eg_limits.max_enodes = opts.egraph_max_enodes;
+        eg_limits.max_iters = opts.egraph_max_iters;
+        eg_limits.max_sat_conflicts = opts.max_sat_conflicts;
+        changed |= run_mir_egraph_superopt(fn, mod, opts, eg_limits);
+    }
+
     fn.rebuild_cfg_predecessors();
     DominatorTree dom(fn);
     LoopAnalysis loops(fn, dom);
     RangeAnalysis ra(fn, dom, loops);
-
-    bool changed = false;
 
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;

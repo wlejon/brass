@@ -120,12 +120,13 @@ BVNodeId coerce_width(BVContext& ctx, BVNodeId node, uint32_t target_w, bool sig
 
 } // namespace
 
-SymExecOutput symbolically_execute_mir(
+SymExecOutput symbolically_execute_mir_region(
     BVContext& ctx,
     const Function& fn,
     const std::vector<BVNodeId>& param_vars,
     InitMemEnv& init_mem,
-    const EquivOptions& opts) {
+    const EquivOptions& opts,
+    const SymExecRegionConfig& region_cfg) {
 
     SymExecOutput out;
     out.completed = ctx.make_const(0, 1);
@@ -170,23 +171,38 @@ SymExecOutput symbolically_execute_mir(
     std::vector<std::vector<IncomingEdge>> incoming((max_level + 1) * rpo.size());
 
     {
-        IncomingEdge seed;
-        seed.cond = ctx.make_const(1, 1);
-        const BasicBlock* entry = fn.entry_block();
-        if (entry->param_count() != param_vars.size()) {
-            out.has_type_error = true;
-            out.error_msg = "Entry block parameter count mismatch";
+        const BasicBlock* start_bb = region_cfg.start_block ? region_cfg.start_block : fn.entry_block();
+        auto sit = rpo_pos.find(start_bb);
+        if (sit == rpo_pos.end()) {
+            out.supported = false;
+            out.error_msg = "Region start block is unreachable";
             return out;
         }
-        for (size_t i = 0; i < entry->param_count(); ++i) {
-            if (entry->param(i)->type() != fn.param_type(i)) {
+        IncomingEdge seed;
+        seed.cond = ctx.make_const(1, 1);
+        if (!region_cfg.initial_vals.empty()) {
+            seed.vals = region_cfg.initial_vals;
+        } else {
+            const BasicBlock* entry = fn.entry_block();
+            if (entry->param_count() != param_vars.size()) {
                 out.has_type_error = true;
-                out.error_msg = "Entry block parameter type mismatch";
+                out.error_msg = "Entry block parameter count mismatch";
                 return out;
             }
-            seed.vals[entry->param(i)] = param_vars[i];
+            for (size_t i = 0; i < entry->param_count(); ++i) {
+                if (entry->param(i)->type() != fn.param_type(i)) {
+                    out.has_type_error = true;
+                    out.error_msg = "Entry block parameter type mismatch";
+                    return out;
+                }
+                seed.vals[entry->param(i)] = param_vars[i];
+            }
         }
-        incoming[0].push_back(std::move(seed));
+        if (region_cfg.capture_block == start_bb && region_cfg.capture_on_first_visit) {
+            out.captured_edges.push_back({seed.cond, param_vars, seed.vals});
+            return out;
+        }
+        incoming[sit->second].push_back(std::move(seed));
     }
 
     uint64_t next_alloca_addr = 0x7FFF000000000000ULL;
@@ -209,6 +225,7 @@ SymExecOutput symbolically_execute_mir(
             out.error_msg = "Branch argument count mismatch";
         }
         size_t n_args = std::min(target.args.size(), dst->param_count());
+        std::vector<BVNodeId> arg_nodes(n_args, 0);
         for (size_t i = 0; i < n_args; ++i) {
             const Value* arg_v = target.args[i];
             const Value* param_v = dst->param(i);
@@ -217,10 +234,18 @@ SymExecOutput symbolically_execute_mir(
                 out.error_msg = "Branch argument type mismatch";
             }
             auto vit = cur_vals.find(arg_v);
-            if (vit != cur_vals.end()) next_vals[param_v] = vit->second;
+            if (vit != cur_vals.end()) {
+                arg_nodes[i] = vit->second;
+                next_vals[param_v] = vit->second;
+            }
         }
 
         uint32_t dst_level = (dst_bi <= src_bi) ? (level + 1) : level;
+        if (region_cfg.capture_block && dst == region_cfg.capture_block &&
+            (region_cfg.capture_on_first_visit || dst_level > level)) {
+            out.captured_edges.push_back({edge_cond, std::move(arg_nodes), std::move(next_vals)});
+            return;
+        }
         if (dst_level > max_level) return;
         incoming[dst_level * rpo.size() + dst_bi].push_back({edge_cond, std::move(next_vals)});
     };
@@ -686,6 +711,15 @@ SymExecOutput symbolically_execute_mir(
     }
 
     return out;
+}
+
+SymExecOutput symbolically_execute_mir(
+    BVContext& ctx,
+    const Function& fn,
+    const std::vector<BVNodeId>& param_vars,
+    InitMemEnv& init_mem,
+    const EquivOptions& opts) {
+    return symbolically_execute_mir_region(ctx, fn, param_vars, init_mem, opts, {});
 }
 
 } // namespace brass::verify

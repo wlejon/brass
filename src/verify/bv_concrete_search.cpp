@@ -38,6 +38,30 @@ float bits_to_f32(uint64_t b) noexcept {
 uint64_t f64_to_bits(double d) noexcept { uint64_t u = 0; std::memcpy(&u, &d, sizeof(double)); return u; }
 double bits_to_f64(uint64_t b) noexcept { double d = 0.0; std::memcpy(&d, &b, sizeof(double)); return d; }
 
+uint64_t eval_ieee_fmin_fmax(uint64_t va, uint64_t vb, uint32_t w, bool is_max) noexcept {
+    const uint32_t mant_bits = (w == 32) ? 23u : 52u;
+    const uint64_t exp_mask = (w == 32) ? 0xFFULL : 0x7FFULL;
+    const uint64_t mant_mask = (1ULL << mant_bits) - 1ULL;
+    const uint64_t sign_mask = 1ULL << (w - 1);
+    const uint64_t m = width_mask(w);
+    va &= m;
+    vb &= m;
+    const bool nan_a = (((va >> mant_bits) & exp_mask) == exp_mask) && ((va & mant_mask) != 0);
+    const bool nan_b = (((vb >> mant_bits) & exp_mask) == exp_mask) && ((vb & mant_mask) != 0);
+    if (nan_a && nan_b) return va | (1ULL << (mant_bits - 1));
+    if (nan_a) return vb;
+    if (nan_b) return va;
+    const bool zero_a = ((va & ~sign_mask) == 0);
+    const bool zero_b = ((vb & ~sign_mask) == 0);
+    if (zero_a && zero_b) return is_max ? (va & vb) : (va | vb);
+    if (w == 32) {
+        float fa = bits_to_f32(va), fb = bits_to_f32(vb);
+        return is_max ? ((fa > fb) ? va : vb) : ((fa < fb) ? va : vb);
+    }
+    double da = bits_to_f64(va), db = bits_to_f64(vb);
+    return is_max ? ((da > db) ? va : vb) : ((da < db) ? va : vb);
+}
+
 bool mul_u64_overflow(uint64_t a, uint64_t b) noexcept {
     return a != 0 && b != 0 && ((a * b) / a) != b;
 }
@@ -354,8 +378,8 @@ uint64_t BVContext::eval_node_concrete(const BVNode& n, uint64_t va, uint64_t vb
         case BVOp::FFloor: return (w == 32) ? f32_to_bits(std::floor(bits_to_f32(va))) : f64_to_bits(std::floor(bits_to_f64(va)));
         case BVOp::FCeil:  return (w == 32) ? f32_to_bits(std::ceil(bits_to_f32(va)))  : f64_to_bits(std::ceil(bits_to_f64(va)));
         case BVOp::FRound: return (w == 32) ? f32_to_bits(std::round(bits_to_f32(va))) : f64_to_bits(std::round(bits_to_f64(va)));
-        case BVOp::FMin:   return (w == 32) ? f32_to_bits(std::fmin(bits_to_f32(va), bits_to_f32(vb))) : f64_to_bits(std::fmin(bits_to_f64(va), bits_to_f64(vb)));
-        case BVOp::FMax:   return (w == 32) ? f32_to_bits(std::fmax(bits_to_f32(va), bits_to_f32(vb))) : f64_to_bits(std::fmax(bits_to_f64(va), bits_to_f64(vb)));
+        case BVOp::FMin:   return eval_ieee_fmin_fmax(va, vb, w, false);
+        case BVOp::FMax:   return eval_ieee_fmin_fmax(va, vb, w, true);
         case BVOp::FEq:    return (aw == 32) ? (bits_to_f32(va) == bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) == bits_to_f64(vb) ? 1 : 0);
         case BVOp::FNe:    return (aw == 32) ? (bits_to_f32(va) != bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) != bits_to_f64(vb) ? 1 : 0);
         case BVOp::FLt:    return (aw == 32) ? (bits_to_f32(va) < bits_to_f32(vb) ? 1 : 0)  : (bits_to_f64(va) < bits_to_f64(vb) ? 1 : 0);

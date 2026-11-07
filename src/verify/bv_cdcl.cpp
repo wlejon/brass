@@ -1,5 +1,6 @@
 #include "bv_solver.hpp"
 #include "bv_cdcl_solver.hpp"
+#include "bv_blast_fp.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -478,10 +479,11 @@ struct BitBlaster {
                 }
 
                 default: {
-                    // Uninterpreted bitvector abstraction for floating-point ops
-                    has_unsupported_op = true;
-                    for (uint32_t i = 0; i < w; ++i) {
-                        out[i] = CDCLSolver::mk_lit(sat.new_var());
+                    if (!blast_fp_node(sat, ctx, n, bits, out)) {
+                        has_unsupported_op = true;
+                        for (uint32_t i = 0; i < w; ++i) {
+                            out[i] = CDCLSolver::mk_lit(sat.new_var());
+                        }
                     }
                     break;
                 }

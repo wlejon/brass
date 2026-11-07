@@ -86,6 +86,14 @@ EquivResult verify_mir_equivalence(
     const EquivOptions& opts = {}
 );
 
+/// Prove equivalence of two single-loop MIR functions for unbounded trip counts via
+/// relational k-induction over the loop header block parameters (induction variables & accumulators).
+EquivResult verify_mir_loop_equivalence(
+    const Function& before,
+    const Function& after,
+    const EquivOptions& opts = {}
+);
+
 /// Verify semantic equivalence across all matching functions in two MIR modules.
 EquivResult verify_mir_module_equivalence(
     const Module& before,
@@ -141,6 +149,7 @@ using verify::LirEquivResult;
 using verify::export_mir_equivalence_smt2;
 using verify::verify_lir_equivalence;
 using verify::verify_mir_equivalence;
+using verify::verify_mir_loop_equivalence;
 using verify::verify_mir_module_equivalence;
 using verify::verify_x64_lir_block_equivalence;
 using verify::verify_x64_lir_function_equivalence;

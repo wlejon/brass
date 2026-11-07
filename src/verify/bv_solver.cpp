@@ -73,6 +73,7 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         iv.smin = iv.smax = sc;
         iv.known_zeros = ~c;
         iv.known_ones = c;
+        compute_fp_interval(n, iv);
         return iv;
     }
 
@@ -246,9 +247,11 @@ BVInterval BVContext::compute_interval(const BVNode& n) const noexcept {
         iv.smax = std::max(t.smax, f.smax);
         iv.known_zeros = t.known_zeros & f.known_zeros;
         iv.known_ones = t.known_ones & f.known_ones;
+        compute_fp_interval(n, iv);
         return iv;
     }
 
+    compute_fp_interval(n, iv);
     return iv;
 }
 
@@ -409,6 +412,8 @@ BVNodeId BVContext::make_unary(BVOp op, BVNodeId a, uint32_t res_width) {
     if (op == BVOp::Neg) {
         return make_binary(BVOp::Sub, make_const(0, w), a, w);
     }
+    BVNodeId fp_u = simplify_fp_unary(op, a, w);
+    if (fp_u != UINT32_MAX) return fp_u;
     BVNode n;
     n.op = op;
     n.width = w;
@@ -510,9 +515,14 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             if (ca.op == BVOp::Mul && nodes_[ca.b].op == BVOp::Const && cb.op == BVOp::Const) {
                 return make_binary(BVOp::Mul, ca.a, make_const(nodes_[ca.b].imm * cb.imm, w), w);
             }
-            if (ca.op == BVOp::Add && nodes_[ca.b].op == BVOp::Const && cb.op == BVOp::Const) {
+            if (ca.op == BVOp::Add && nodes_[ca.b].op == BVOp::Const) {
                 BVNodeId t1 = make_binary(BVOp::Mul, ca.a, b, w);
-                BVNodeId t2 = make_const(nodes_[ca.b].imm * cb.imm, w);
+                BVNodeId t2 = make_binary(BVOp::Mul, b, ca.b, w);
+                return make_binary(BVOp::Add, t1, t2, w);
+            }
+            if (cb.op == BVOp::Add && nodes_[cb.b].op == BVOp::Const) {
+                BVNodeId t1 = make_binary(BVOp::Mul, a, cb.a, w);
+                BVNodeId t2 = make_binary(BVOp::Mul, a, cb.b, w);
                 return make_binary(BVOp::Add, t1, t2, w);
             }
             break;
@@ -684,8 +694,11 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             break;
         }
 
-        default:
+        default: {
+            BVNodeId fp_b = simplify_fp_binary(op, a, b, w);
+            if (fp_b != UINT32_MAX) return fp_b;
             break;
+        }
     }
 
     BVNode n;
@@ -712,6 +725,8 @@ BVNodeId BVContext::make_ite(BVNodeId cond, BVNodeId t_val, BVNodeId f_val) {
         f_val = nodes_[f_val].c;
     }
     if (t_val == f_val) return t_val;
+    BVNodeId fp_ite = simplify_fp_ite(cond, t_val, f_val);
+    if (fp_ite != UINT32_MAX) return fp_ite;
     uint32_t w = nodes_[t_val].width;
     if (w == 1) {
         const BVNode nt = nodes_[t_val];

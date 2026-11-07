@@ -3,6 +3,7 @@
 #include "bv_solver.hpp"
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace brass::verify {
@@ -35,6 +36,19 @@ struct InitMemEnv {
                                      const std::vector<BVNodeId>& args, Type ret_type);
 };
 
+struct SymCapturedEdge {
+    BVNodeId cond = 0;
+    std::vector<BVNodeId> args;
+    std::unordered_map<const Value*, BVNodeId> vals;
+};
+
+struct SymExecRegionConfig {
+    const BasicBlock* start_block = nullptr;
+    const BasicBlock* capture_block = nullptr;
+    bool capture_on_first_visit = false;
+    std::unordered_map<const Value*, BVNodeId> initial_vals;
+};
+
 struct SymExecOutput {
     bool supported = true;
     bool has_type_error = false;
@@ -46,6 +60,7 @@ struct SymExecOutput {
     BVNodeId ret_val = 0;
     std::vector<SymStore> stores;
     std::vector<SymGuardExit> guard_exits;
+    std::vector<SymCapturedEdge> captured_edges;
 };
 
 BVNodeId read_byte_at(BVContext& ctx, InitMemEnv& init_mem,
@@ -60,5 +75,13 @@ SymExecOutput symbolically_execute_mir(
     const std::vector<BVNodeId>& param_vars,
     InitMemEnv& init_mem,
     const EquivOptions& opts);
+
+SymExecOutput symbolically_execute_mir_region(
+    BVContext& ctx,
+    const Function& fn,
+    const std::vector<BVNodeId>& param_vars,
+    InitMemEnv& init_mem,
+    const EquivOptions& opts,
+    const SymExecRegionConfig& region_cfg);
 
 } // namespace brass::verify

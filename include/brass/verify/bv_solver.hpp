@@ -119,6 +119,10 @@ struct BVInterval {
     int64_t smax = INT64_MAX;
     uint64_t known_zeros = 0;
     uint64_t known_ones = 0;
+    bool fp_non_nan = false;
+    bool fp_non_inf = false;
+    bool fp_non_neg_zero = false;
+    bool fp_exact_int = false;
 };
 
 struct BVCone {
@@ -180,6 +184,10 @@ public:
 private:
     BVNodeId intern(const BVNode& node);
     BVInterval compute_interval(const BVNode& n) const noexcept;
+    void compute_fp_interval(const BVNode& n, BVInterval& iv) const noexcept;
+    BVNodeId simplify_fp_unary(BVOp op, BVNodeId a, uint32_t w);
+    BVNodeId simplify_fp_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t w);
+    BVNodeId simplify_fp_ite(BVNodeId cond, BVNodeId t_val, BVNodeId f_val);
     uint64_t eval_node_concrete(const BVNode& n, uint64_t va, uint64_t vb, uint64_t vc) const noexcept;
 
     std::vector<BVNode> nodes_;

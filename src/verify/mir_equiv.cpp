@@ -200,6 +200,18 @@ EquivResult verify_mir_equivalence(
         return res;
     }
 
+    const bool b_always_done = (q.ctx.nodes()[q.out_before.completed].op == BVOp::Const &&
+                                q.ctx.nodes()[q.out_before.completed].imm == 1);
+    const bool a_always_done = (q.ctx.nodes()[q.out_after.completed].op == BVOp::Const &&
+                                q.ctx.nodes()[q.out_after.completed].imm == 1);
+    if ((!b_always_done || !a_always_done) && !q.out_before.has_type_error && !q.out_after.has_type_error) {
+        EquivResult loop_res = verify_mir_loop_equivalence(before, after, opts);
+        if (loop_res.status == EquivStatus::ProvenEquivalent ||
+            loop_res.status == EquivStatus::Counterexample) {
+            return loop_res;
+        }
+    }
+
     SolveOutcome solved = solve_nonzero(q.ctx, q.mismatch, opts.max_sat_conflicts);
     if (solved.status == SolveOutcome::Unsat) {
         res.status = EquivStatus::ProvenEquivalent;
