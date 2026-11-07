@@ -412,6 +412,15 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
     // =========================================================================
     // 2. Vectorize Standalone Contiguous Load Bundles
     // =========================================================================
+    // A bundle is formed here so that step 3 can read its lanes as one
+    // vector; one that no vector operation ends up reading is put back as
+    // its scalar loads afterwards (see below).
+    struct FormedLoadBundle {
+        Value* vload;
+        std::vector<Value*> extracts;
+        std::vector<Instruction*> loads;
+    };
+    std::vector<FormedLoadBundle> formed_loads;
     std::vector<SlpLoadBundle> load_bundles = find_slp_load_bundles(bb, options);
     for (const auto& lb : load_bundles) {
         Instruction* first_load = lb.loads.front();
@@ -420,14 +429,17 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         Value* vload = b.build_vload(lb.vec_type, lb.base, lb.base_offset);
         std::unordered_set<Instruction*> dead_loads(lb.loads.begin(), lb.loads.end());
 
+        FormedLoadBundle formed{vload, {}, lb.loads};
         for (uint32_t lane = 0; lane < lb.width; ++lane) {
             Value* extracted = b.build_vextract_lane(vload, lane);
             replace_scalar_uses(*fn, lb.loaded_values[lane], extracted, dead_loads);
+            formed.extracts.push_back(extracted);
         }
 
         for (Instruction* l : lb.loads) {
             bb.remove_instruction(l);
         }
+        formed_loads.push_back(std::move(formed));
 
         any_changed = true;
     }
@@ -464,6 +476,44 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         }
 
         any_changed = true;
+    }
+
+    // =========================================================================
+    // 4. Unpack Load Bundles No Vector Operation Reads
+    // =========================================================================
+    // Read only lane by lane, a bundle is a vector load and an extract per
+    // lane (x86: movups, then a movaps and a shufpd for the high lane) where
+    // the scalars were one load each, and its lanes leave the vector register
+    // only through those copies. The scalar loads go back where the vector
+    // load stands: the bundle was formed only if nothing between its first
+    // and last load could write what they read, so each reads what it read.
+    for (const FormedLoadBundle& fl : formed_loads) {
+        Instruction* vdef = fl.vload->defining_instruction();
+        if (!vdef || vdef->parent() != &bb) continue;
+        std::unordered_set<const Value*> extract_set(fl.extracts.begin(), fl.extracts.end());
+        bool vector_use = false;
+        for (BasicBlock* blk : fn->blocks()) {
+            for (Instruction* inst = blk->head(); inst != nullptr && !vector_use; inst = inst->next()) {
+                if (inst == vdef) continue;
+                if (inst->produces_value() && extract_set.count(inst->result()) != 0 &&
+                    inst->opcode() == Opcode::vextract_lane && inst->parent() == &bb) {
+                    continue;
+                }
+                vector_use = uses_value(*inst, fl.vload);
+            }
+            if (vector_use) break;
+        }
+        if (vector_use) continue;
+        for (size_t lane = 0; lane < fl.loads.size(); ++lane) {
+            Instruction* load = fl.loads[lane];
+            bb.insert_before(load, vdef);
+            Instruction* ext = fl.extracts[lane]->defining_instruction();
+            if (ext && ext->parent() == &bb) {
+                replace_all_uses(*fn, fl.extracts[lane], load->result());
+                bb.remove_instruction(ext);
+            }
+        }
+        bb.remove_instruction(vdef);
     }
 
     return any_changed;

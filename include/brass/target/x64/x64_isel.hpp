@@ -223,6 +223,24 @@ private:
     void lower_vector_lanes(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_fp_instruction(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_coro(const Instruction& inst, codegen::LirBlock& lir_bb);
+
+    // NaN-CANONICALIZING STORES (x64_isel_nan_canon.cpp): a store of
+    // `select(ne f, f, K, bitcast_i64_f64 f)` (a NaN-boxing front end's boxed
+    // double) as vcmpunordsd, vblendvpd with K held in an xmm, movsd.
+    struct NanCanonStore {
+        const Value* f = nullptr;
+        int64_t canon = 0;
+    };
+    std::unordered_map<const Instruction*, NanCanonStore> nan_canon_stores_;
+    struct XmmConstant {
+        const codegen::LirBlock* block = nullptr;
+        size_t end = 0;
+        codegen::VReg vreg;
+    };
+    std::unordered_map<int64_t, XmmConstant> xmm_constants_;
+    void find_nan_canon_stores(const Function& mir_fn, std::unordered_map<const Value*, uint32_t>& folded_uses);
+    // True when `inst` is such a store, emitted to `mem_op`.
+    bool lower_nan_canon_store(const Instruction& inst, const codegen::LirOperand& mem_op, codegen::LirBlock& lir_bb);
 };
 
 std::unique_ptr<codegen::LirFunction> lower_to_x64_lir(

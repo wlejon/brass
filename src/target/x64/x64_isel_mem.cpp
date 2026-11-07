@@ -290,6 +290,7 @@ void X64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
     const LirOperand mem_op = mem_operand(match_address(inst.operand(0), inst.offset(), inst.parent()), sz);
+    if (lower_nan_canon_store(inst, mem_op, lir_bb)) return;
 
     bool is_xmm = src_val->type().is_float();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {
@@ -332,6 +333,7 @@ void X64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb) {
     if (sz == 0) sz = 8;
     const LirOperand mem_op = mem_operand(
         match_indexed_address(inst.operand(0), inst.operand(1), scale_from_int(inst.scale()), inst.offset()), sz);
+    if (lower_nan_canon_store(inst, mem_op, lir_bb)) return;
 
     bool is_xmm = src_val->type().is_float();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {

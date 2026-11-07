@@ -205,6 +205,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     find_remat_compares(mir_fn);
 
     std::unordered_map<const Value*, uint32_t> folded_uses;
+    find_nan_canon_stores(mir_fn, folded_uses);
     // A rematerialized comparison's users take a 32-bit constant operand as
     // an immediate (append_fused_compare, lower_select), as step 3 counts for
     // a single-use one below: its one use of the constant is folded.

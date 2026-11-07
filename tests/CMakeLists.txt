@@ -203,6 +203,7 @@ add_executable(brass_unit_tests
     differential/test_loop_transform_differential.cpp
     unit/test_vex_encoder.cpp
     unit/test_x64_avx_scalar.cpp
+    unit/test_x64_nan_canon_store.cpp
     unit/test_v256_mir.cpp
     unit/test_vzeroupper.cpp
     unit/test_branch_threading.cpp

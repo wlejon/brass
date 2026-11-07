@@ -89,7 +89,10 @@ TEST_CASE("SLP - 4D Coordinate Operation Packetization") {
 }
 
 TEST_CASE("SLP - Contiguous Load to VLoad and Store to VStore Fusion") {
-    // 1. Contiguous 4 loads fused into vload.f32x4
+    // 1. Contiguous 4 loads read only lane by lane (a scalar sum): the
+    // bundle is put back as its four scalar loads, since no vector
+    // operation reads it (a vload and three lane extracts where four loads
+    // did).
     {
         Module mod("slp_load_fusion");
         Function* fn = mod.create_function("load_fusion", Type::f32(), {Type::ptr()});
@@ -117,14 +120,15 @@ TEST_CASE("SLP - Contiguous Load to VLoad and Store to VStore Fusion") {
         DiagnosticReporter diag;
         REQUIRE(verify_module(mod, &diag));
 
-        bool has_vload = false;
+        size_t vloads = 0, extracts = 0, loads = 0;
         for (Instruction* inst = entry->head(); inst != nullptr; inst = inst->next()) {
-            if (inst->opcode() == Opcode::vload) {
-                has_vload = true;
-                CHECK_EQ(inst->memory_type(), Type::f32x4());
-            }
+            vloads += inst->opcode() == Opcode::vload;
+            extracts += inst->opcode() == Opcode::vextract_lane;
+            loads += inst->opcode() == Opcode::load;
         }
-        CHECK(has_vload);
+        CHECK_EQ(vloads, 0u);
+        CHECK_EQ(extracts, 0u);
+        CHECK_EQ(loads, 4u);
 
         codegen::JitExecutionEngine jit(Target::host());
         REQUIRE(jit.compile_and_load(mod));
