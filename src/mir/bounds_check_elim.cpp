@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <functional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace brass {
@@ -170,8 +172,8 @@ public:
             },
             [&](const BasicBlock*) {
                 facts_.resize(marks.back().facts);
-                dom_loads_.resize(marks.back().loads);
-                dom_exprs_.resize(marks.back().exprs);
+                truncate_loads(marks.back().loads);
+                truncate_exprs(marks.back().exprs);
                 marks.pop_back();
             });
         return changed_;
@@ -203,7 +205,18 @@ private:
         return r.max_val <= max_safe;
     }
 
+    // Whether nothing between dom_load and cur_load can write what they read:
+    // a scan of the function, the same answer for a pair every time it is
+    // asked (folding only replaces comparisons with constants).
     bool is_load_preserved(const Instruction* dom_load, const Instruction* cur_load) const {
+        const auto key = std::make_pair(dom_load, cur_load);
+        if (auto it = preserved_memo_.find(key); it != preserved_memo_.end()) return it->second;
+        const bool preserved = is_load_preserved_uncached(dom_load, cur_load);
+        preserved_memo_.emplace(key, preserved);
+        return preserved;
+    }
+
+    bool is_load_preserved_uncached(const Instruction* dom_load, const Instruction* cur_load) const {
         const BasicBlock* dom_bb = dom_load->parent();
         const BasicBlock* cur_bb = cur_load->parent();
         if (!dom_bb || !cur_bb) return false;
@@ -254,8 +267,22 @@ private:
         return true;
     }
 
+    // A value's canonical form, as the dominating loads and expressions in
+    // scope now give it. One call's recursion asks the same (value, block,
+    // depth) many times over (each dominating load's base is canonicalized
+    // again under every candidate, down six levels), so a call remembers its
+    // answers; the scope only changes between calls.
     const Value* canonicalize(const Value* v, const BasicBlock* bb, int depth = 0) const {
+        if (depth == 0) canon_memo_.clear();
         if (!v || depth > 6) return v;
+        const CanonKey key{v, bb, depth};
+        if (auto it = canon_memo_.find(key); it != canon_memo_.end()) return it->second;
+        const Value* c = canonicalize_uncached(v, bb, depth);
+        canon_memo_.emplace(key, c);
+        return c;
+    }
+
+    const Value* canonicalize_uncached(const Value* v, const BasicBlock* bb, int depth) const {
         while (v && v->is_instruction()) {
             const Instruction* d = v->defining_instruction();
             if (!d) break;
@@ -271,12 +298,14 @@ private:
         if (!d) return v;
         if (d->opcode() == Opcode::load && d->offset() >= 0 && d->offset() <= 64) {
             const Value* c_base = canonicalize(d->operand(0), bb, depth + 1);
-            for (const Instruction* dl : dom_loads_) {
+            // The dominating loads of d's offset and types, in scope order
+            // (the scan stops at d itself, which is one of them once seen).
+            const auto bucket = load_index_.find(load_key(d));
+            if (bucket == load_index_.end()) return v;
+            for (const size_t i : bucket->second) {
+                const Instruction* dl = dom_loads_[i];
                 if (dl == d) return v;
-                if (dl->offset() == d->offset() && dl->memory_type() == d->memory_type() &&
-                    dl->type() == d->type() &&
-                    canonicalize(dl->operand(0), dl->parent(), depth + 1) == c_base &&
-                    is_load_preserved(dl, d)) {
+                if (canonicalize(dl->operand(0), dl->parent(), depth + 1) == c_base && is_load_preserved(dl, d)) {
                     return dl->result();
                 }
             }
@@ -288,12 +317,13 @@ private:
             const Value* c1 = d->operand_count() >= 2 ? canonicalize(d->operand(1), bb, depth + 1) : nullptr;
             int64_t c1_const = 0;
             bool has_c1 = get_const_int(c1, c1_const);
-            for (const DomExpr& de : dom_exprs_) {
-                if (de.op == d->opcode() && de.type == d->type() && de.op0 == c0) {
-                    int64_t de_const = 0;
-                    if (de.op1 == c1 || (has_c1 && get_const_int(de.op1, de_const) && de_const == c1_const)) {
-                        return de.result;
-                    }
+            const auto bucket = expr_index_.find(ExprKey{d->opcode(), d->type(), c0});
+            if (bucket == expr_index_.end()) return v;
+            for (const size_t i : bucket->second) {
+                const DomExpr& de = dom_exprs_[i];
+                int64_t de_const = 0;
+                if (de.op1 == c1 || (has_c1 && get_const_int(de.op1, de_const) && de_const == c1_const)) {
+                    return de.result;
                 }
             }
         }
@@ -526,7 +556,7 @@ private:
     void fold_checks_in(BasicBlock* bb) {
         for (Instruction* cur = bb->head(); cur; cur = cur->next()) {
             if (cur->opcode() == Opcode::load && cur->offset() >= 0 && cur->offset() <= 64) {
-                dom_loads_.push_back(cur);
+                push_load(cur);
             } else if (cur->produces_value() &&
                        (cur->opcode() == Opcode::lshr || cur->opcode() == Opcode::ashr ||
                         cur->opcode() == Opcode::shl || cur->opcode() == Opcode::add ||
@@ -534,7 +564,7 @@ private:
                         cur->opcode() == Opcode::and_)) {
                 const Value* c0 = cur->operand_count() >= 1 ? canonicalize(cur->operand(0), bb) : nullptr;
                 const Value* c1 = cur->operand_count() >= 2 ? canonicalize(cur->operand(1), bb) : nullptr;
-                dom_exprs_.push_back({cur->opcode(), cur->type(), c0, c1, cur->imm_i64(), cur->result()});
+                push_expr({cur->opcode(), cur->type(), c0, c1, cur->imm_i64(), cur->result()});
             } else if (cur->opcode() == Opcode::guard) {
                 collect_edge_facts(cur->operand(0), true, bb);
                 continue;
@@ -575,6 +605,75 @@ private:
     std::vector<const Instruction*> dom_loads_;
     std::vector<DomExpr> dom_exprs_;
     bool changed_ = false;
+
+    struct CanonKey {
+        const Value* v;
+        const BasicBlock* bb;
+        int depth;
+        bool operator==(const CanonKey& o) const { return v == o.v && bb == o.bb && depth == o.depth; }
+    };
+    struct CanonKeyHash {
+        size_t operator()(const CanonKey& k) const {
+            size_t h = std::hash<const void*>{}(k.v);
+            h ^= std::hash<const void*>{}(k.bb) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            return h ^ static_cast<size_t>(k.depth);
+        }
+    };
+    struct PairHash {
+        size_t operator()(const std::pair<const Instruction*, const Instruction*>& p) const {
+            size_t h = std::hash<const void*>{}(p.first);
+            return h ^ (std::hash<const void*>{}(p.second) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2));
+        }
+    };
+    // dom_loads_ and dom_exprs_ by what a lookup matches on, each bucket the
+    // indices in scope order; kept with the lists as scopes open and close.
+    static uint64_t load_key(const Instruction* l) {
+        return static_cast<uint32_t>(l->offset()) | (static_cast<uint64_t>(l->memory_type().kind()) << 32) |
+               (static_cast<uint64_t>(l->type().kind()) << 40);
+    }
+    struct ExprKey {
+        Opcode op;
+        Type type;
+        const Value* op0;
+        bool operator==(const ExprKey& o) const { return op == o.op && type == o.type && op0 == o.op0; }
+    };
+    struct ExprKeyHash {
+        size_t operator()(const ExprKey& k) const {
+            size_t h = std::hash<const void*>{}(k.op0);
+            const size_t tag = (static_cast<size_t>(k.op) << 8) | static_cast<size_t>(k.type.kind());
+            return h ^ (tag + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2));
+        }
+    };
+    void push_load(const Instruction* l) {
+        load_index_[load_key(l)].push_back(dom_loads_.size());
+        dom_loads_.push_back(l);
+    }
+    void push_expr(const DomExpr& e) {
+        expr_index_[ExprKey{e.op, e.type, e.op0}].push_back(dom_exprs_.size());
+        dom_exprs_.push_back(e);
+    }
+    void truncate_loads(size_t n) {
+        while (dom_loads_.size() > n) {
+            auto it = load_index_.find(load_key(dom_loads_.back()));
+            it->second.pop_back();
+            if (it->second.empty()) load_index_.erase(it);
+            dom_loads_.pop_back();
+        }
+    }
+    void truncate_exprs(size_t n) {
+        while (dom_exprs_.size() > n) {
+            const DomExpr& e = dom_exprs_.back();
+            auto it = expr_index_.find(ExprKey{e.op, e.type, e.op0});
+            it->second.pop_back();
+            if (it->second.empty()) expr_index_.erase(it);
+            dom_exprs_.pop_back();
+        }
+    }
+    std::unordered_map<uint64_t, std::vector<size_t>> load_index_;
+    std::unordered_map<ExprKey, std::vector<size_t>, ExprKeyHash> expr_index_;
+
+    mutable std::unordered_map<CanonKey, const Value*, CanonKeyHash> canon_memo_;
+    mutable std::unordered_map<std::pair<const Instruction*, const Instruction*>, bool, PairHash> preserved_memo_;
 };
 
 // ---------------------------------------------------------------------------
