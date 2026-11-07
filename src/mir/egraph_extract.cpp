@@ -491,7 +491,14 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
                             replace_all_uses(fn, res_v, repl);
                             available_ssa[cid] = repl;
                             dominating_vals.insert(repl);
-                            if (opts.stats) { opts.stats->egraph_rewrites++; opts.stats->dags_synthesized++; }
+                            if (opts.stats) {
+                                opts.stats->egraph_rewrites++;
+                                opts.stats->dags_synthesized++;
+                                if ((op == Opcode::and_ || op == Opcode::or_) && cur->operand_count() == 2 &&
+                                    (repl == cur->operand(0) || repl == cur->operand(1))) {
+                                    opts.stats->masks_elided++;
+                                }
+                            }
                             changed = true; cur = next; continue;
                         }
                     }

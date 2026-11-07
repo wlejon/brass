@@ -417,9 +417,9 @@ public:
         return false;
     }
 
-    const std::vector<ENode>& class_nodes(EClassId id) const noexcept {
+    std::vector<ENode> class_nodes(EClassId id) const {
         const EClassId cid = find(id);
-        return classes_[cid].nodes;
+        return (cid < classes_.size()) ? classes_[cid].nodes : std::vector<ENode>{};
     }
 
     const std::vector<EClass>& classes() const noexcept { return classes_; }
