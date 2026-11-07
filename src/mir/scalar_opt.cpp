@@ -61,6 +61,7 @@ bool is_pure_instruction(const Instruction* inst) {
         case Opcode::select: return true;
         case Opcode::call: return callee_has_role(*inst, SymbolRole::Pure);
         case Opcode::sdiv: case Opcode::udiv: case Opcode::smod: case Opcode::umod: {
+            if (inst->type().is_float()) return true;
             // LICM executes pure instructions speculatively, so a division is
             // pure only when its constant divisor rules out every trap.
             if (inst->operand_count() < 2 || !inst->operand(1)) return false;
@@ -371,7 +372,28 @@ bool fold_constants(Function& fn) {
                     if (int_result && width != 0) {
                         if (auto folded = int_fold::binary(op, width, c0, c1)) replacement = build_int(*folded);
                     }
-                } else if (has_c1 && width != 0) {
+                } else if (res_type == Type::f64() && op0 && op1 &&
+                           op0->type() == Type::f64() && op1->type() == Type::f64()) {
+                    const Instruction* d0 = op0->is_instruction() ? op0->defining_instruction() : nullptr;
+                    const Instruction* d1 = op1->is_instruction() ? op1->defining_instruction() : nullptr;
+                    const bool f0 = d0 && d0->opcode() == Opcode::fconst_f64;
+                    const bool f1 = d1 && d1->opcode() == Opcode::fconst_f64;
+                    if (f0 && f1) {
+                        const double v0 = d0->imm_f64(), v1 = d1->imm_f64();
+                        if (op == Opcode::add || op == Opcode::sub || op == Opcode::mul || op == Opcode::sdiv) {
+                            const double fv = (op == Opcode::add) ? (v0 + v1)
+                                            : (op == Opcode::sub) ? (v0 - v1)
+                                            : (op == Opcode::mul) ? (v0 * v1) : (v0 / v1);
+                            b.position_before(cur);
+                            replacement = b.build_fconst_f64(fv);
+                        }
+                    } else if (f1 && d1->imm_f64() == 1.0 && (op == Opcode::mul || op == Opcode::sdiv)) {
+                        replacement = op0;
+                    } else if (f0 && d0->imm_f64() == 1.0 && op == Opcode::mul) {
+                        replacement = op1;
+                    }
+                }
+                if (!replacement && has_c1 && width != 0) {
                     if ((op == Opcode::add || op == Opcode::sub || op == Opcode::or_ || op == Opcode::xor_ ||
                          op == Opcode::shl || op == Opcode::ashr || op == Opcode::lshr) && c1 == 0) {
                         if (same_type(op0)) replacement = op0;
@@ -382,6 +404,27 @@ bool fold_constants(Function& fn) {
                     } else if (op == Opcode::and_ && same_type(op0) &&
                                (c1 == -1 || (c1 == 1 && op0->is_instruction() && is_comparison(op0->defining_instruction()->opcode())))) {
                         replacement = op0;
+                    } else if (op == Opcode::shl && same_type(op0) && op0->is_instruction()) {
+                        // `((x >> s) & m) << s` -> `x & (m << s)`
+                        const uint32_t sh_mask = (width == 32) ? 31u : 63u;
+                        const uint32_t s = static_cast<uint32_t>(c1) & sh_mask;
+                        const Instruction* d_and = op0->defining_instruction();
+                        int64_t m_c = 0;
+                        if (s > 0 && d_and && d_and->opcode() == Opcode::and_ && d_and->operand_count() == 2 &&
+                            get_const_int(d_and->operand(1), m_c) && d_and->operand(0) &&
+                            d_and->operand(0)->is_instruction()) {
+                            const Instruction* d_shr = d_and->operand(0)->defining_instruction();
+                            int64_t s2_c = 0;
+                            if (d_shr && (d_shr->opcode() == Opcode::ashr || d_shr->opcode() == Opcode::lshr) &&
+                                d_shr->operand_count() == 2 && get_const_int(d_shr->operand(1), s2_c) &&
+                                (static_cast<uint32_t>(s2_c) & sh_mask) == s &&
+                                same_type(d_shr->operand(0))) {
+                                const uint64_t shifted_mask = static_cast<uint64_t>(m_c) << s;
+                                Value* mask_v = build_int(static_cast<int64_t>(shifted_mask));
+                                b.position_before(cur);
+                                replacement = b.build_and(d_shr->operand(0), mask_v);
+                            }
+                        }
                     }
                 } else if (has_c0 && op1 && int_fold::width_of(op1->type()) != 0) {
                     if ((op == Opcode::add || op == Opcode::or_ || op == Opcode::xor_) && c0 == 0) {

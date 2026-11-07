@@ -130,6 +130,18 @@ uint32_t EGraph::saturate(const EGraphLimits& limits, EGraphStats* stats) {
         }
         return false;
     };
+    auto known_nonzero_bits = [&](EClassId cid, uint32_t w) noexcept -> uint64_t {
+        const uint64_t full = mask_w(~0ULL, w);
+        uint64_t mask = full;
+        for (const ENode& m : class_nodes(cid)) {
+            uint64_t c = 0;
+            if (m.op == EOp::Const) mask &= mask_w(m.imm, w);
+            else if (m.op == EOp::And && (is_const(m.a, c) || is_const(m.b, c))) mask &= mask_w(c, w);
+            else if (m.op == EOp::Shl && is_const(m.b, c) && c < w) mask &= mask_w(full << c, w);
+            else if (m.op == EOp::LShr && is_const(m.b, c) && c < w) mask &= mask_w(full >> c, w);
+        }
+        return mask;
+    };
 
     for (uint32_t iter = 0; iter < limits.max_iters; ++iter) {
         if (!can_alloc()) break;
@@ -219,6 +231,9 @@ uint32_t EGraph::saturate(const EGraphLimits& limits, EGraphStats* stats) {
                         };
                         check_add_child(n.a, n.b);
                         check_add_child(n.b, n.a);
+                        if ((known_nonzero_bits(n.a, w) & known_nonzero_bits(n.b, w)) == 0) {
+                            apply_merge(cid, make_bin_checked(EOp::Or, w, n.a, n.b));
+                        }
                         for (const ENode& ma : class_nodes(n.a)) {
                             for (const ENode& mb : class_nodes(n.b)) {
                                 if (((ma.op == EOp::Or && mb.op == EOp::And) || (ma.op == EOp::And && mb.op == EOp::Or)) && ma.a == mb.a && ma.b == mb.b) {
@@ -321,6 +336,10 @@ uint32_t EGraph::saturate(const EGraphLimits& limits, EGraphStats* stats) {
                         if (has_one_const) {
                             if (n.op == EOp::And && c_const == 0) { apply_merge(cid, make_const_checked(0, w)); break; }
                             if (n.op == EOp::And && c_const == all_ones) { apply_merge(cid, x_nonconst); break; }
+                            if (n.op == EOp::And && (known_nonzero_bits(x_nonconst, w) & ~c_const) == 0) {
+                                apply_merge(cid, x_nonconst);
+                                break;
+                            }
                             if (n.op == EOp::Or && c_const == 0) { apply_merge(cid, x_nonconst); break; }
                             if (n.op == EOp::Or && c_const == all_ones) { apply_merge(cid, make_const_checked(all_ones, w)); break; }
                             if (n.op == EOp::Xor && c_const == 0) { apply_merge(cid, x_nonconst); break; }
@@ -408,6 +427,15 @@ uint32_t EGraph::saturate(const EGraphLimits& limits, EGraphStats* stats) {
                                 uint64_t c1 = 0;
                                 if (ma.op == n.op && is_const(ma.b, c1) && c1 < w && (c1 + cb) < w) {
                                     apply_merge(cid, make_bin_checked(n.op, w, ma.a, make_const_checked(c1 + cb, w)));
+                                }
+                                if (n.op == EOp::Shl && ma.op == EOp::And && (is_const(ma.a, c1) || is_const(ma.b, c1))) {
+                                    const EClassId inner = is_const(ma.a, c1) ? ma.b : ma.a;
+                                    for (const ENode& ms : class_nodes(inner)) {
+                                        uint64_t sh = 0;
+                                        if ((ms.op == EOp::LShr || ms.op == EOp::AShr) && is_const(ms.b, sh) && sh == cb) {
+                                            apply_merge(cid, make_bin_checked(EOp::And, w, ms.a, make_const_checked(c1 << cb, w)));
+                                        }
+                                    }
                                 }
                             }
                         }
