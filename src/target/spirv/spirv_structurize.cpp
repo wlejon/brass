@@ -26,7 +26,9 @@
 #include "spirv_structurize.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <queue>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -67,6 +69,14 @@ private:
     std::vector<size_t> loops_;     // loop header nodes, outer before inner
     std::unordered_map<size_t, std::vector<size_t>> absorbed_; // loop header -> returning exit regions taken into the loop
     std::vector<bool> claimed_;
+    // Every edit of the graph (or of absorbed_) bumps version_. The loop
+    // bodies and each node's innermost loop are computed once per version
+    // (refresh_loops), so the selections between two edits share them.
+    size_t version_ = 0;
+    size_t loops_version_ = kNoNode;
+    std::vector<std::vector<bool>> bodies_; // loop_body(loops_[i])
+    std::vector<size_t> innermost_;         // node -> index into loops_ of its innermost loop, or kNoNode
+    std::vector<uint8_t> side_;             // first_common's marks (bit 0: from a, bit 1: from b); zero between calls
 
     [[noreturn]] void fail(const std::string& what) const {
         throw std::runtime_error("SpirvISel: kernel '" + std::string(fn_.name()) + "': " + what);
@@ -84,10 +94,12 @@ private:
         node.name = std::move(name);
         g_.nodes.push_back(std::move(node));
         claimed_.push_back(false);
+        ++version_;
         return g_.nodes.size() - 1;
     }
 
     size_t add_edge(size_t from, size_t to, const BranchTarget* target) {
+        ++version_;
         g_.edges.push_back(CfgEdge{from, to, target});
         size_t e = g_.edges.size() - 1;
         g_.nodes[from].out.push_back(e);
@@ -96,6 +108,7 @@ private:
     }
 
     void redirect(size_t e, size_t to) {
+        ++version_;
         auto& old_in = g_.nodes[g_.edges[e].to].in;
         old_in.erase(std::remove(old_in.begin(), old_in.end(), e), old_in.end());
         g_.edges[e].to = to;
@@ -371,6 +384,7 @@ private:
         }
         for (size_t i : dead) {
             if (i == keep) continue;
+            ++version_;
             for (size_t n = 0; n < g_.nodes.size(); ++n) {
                 if (regions[i][n]) absorbed_[h].push_back(n);
             }
@@ -447,21 +461,37 @@ private:
         claim(h, targets[0], [&](size_t from) { return body[from]; });
     }
 
-    // The innermost loop (header node) whose body contains `n`, or kNoNode.
-    size_t innermost_loop(size_t n, std::vector<bool>* body_out) const {
-        size_t best = kNoNode;
-        size_t best_size = 0;
-        for (size_t h : loops_) {
-            std::vector<bool> body = loop_body(h);
-            if (!body[n]) continue;
+    // Recomputes bodies_ and innermost_ if the graph changed since they were.
+    // A node's innermost loop is the smallest body holding it, the first in
+    // loops_ order on a tie.
+    void refresh_loops() {
+        if (loops_version_ == version_) return;
+        loops_version_ = version_;
+        size_t n = g_.nodes.size();
+        bodies_.clear();
+        innermost_.assign(n, kNoNode);
+        std::vector<size_t> best_size(n, 0);
+        for (size_t i = 0; i < loops_.size(); ++i) {
+            bodies_.push_back(loop_body(loops_[i]));
+            const std::vector<bool>& body = bodies_.back();
             size_t size = static_cast<size_t>(std::count(body.begin(), body.end(), true));
-            if (best == kNoNode || size < best_size) {
-                best = h;
-                best_size = size;
-                *body_out = std::move(body);
+            for (size_t m = 0; m < n; ++m) {
+                if (!body[m]) continue;
+                if (innermost_[m] == kNoNode || size < best_size[m]) {
+                    innermost_[m] = i;
+                    best_size[m] = size;
+                }
             }
         }
-        return best;
+    }
+
+    // The innermost loop (header node) whose body contains `n`, or kNoNode.
+    size_t innermost_loop(size_t n, std::vector<bool>* body_out) {
+        refresh_loops();
+        size_t i = innermost_[n];
+        if (i == kNoNode) return kNoNode;
+        *body_out = bodies_[i];
+        return loops_[i];
     }
 
     void place_selection_merge(size_t x) {
@@ -490,18 +520,21 @@ private:
         if (arms.size() == 1) {
             m = arms[0];
         } else {
-            std::vector<bool> ra = reach(arms[0], loop, body);
-            std::vector<bool> rb = reach(arms[1], loop, body);
-            for (size_t n : rpo_) {
-                if (ra[n] && rb[n]) { m = n; break; }
-            }
+            m = first_common(arms[0], arms[1], loop, body);
             if (m == kNoNode) {
+                std::vector<bool> ra = reach(arms[0], loop, body);
+                std::vector<bool> rb = reach(arms[1], loop, body);
                 auto count = [](const std::vector<bool>& r) { return std::count(r.begin(), r.end(), true); };
                 m = count(ra) > count(rb) ? arms[0] : arms[1];
             }
         }
         size_t merge_target = m;
         claim(x, m, [&](size_t from) { return dominates(x, from) && !dominates(merge_target, from); });
+    }
+
+    // Whether reach() takes the edge into `to`.
+    bool reach_takes(size_t to, size_t loop, const std::vector<bool>& body) const {
+        return loop == kNoNode || (to != g_.nodes[loop].cont && to != g_.nodes[loop].merge && body[to]);
     }
 
     // Nodes reachable from `start` without taking a back edge, and, inside a
@@ -517,11 +550,47 @@ private:
             if (g_.nodes[n].kind == CfgNode::Kind::loop_continue) continue;
             for (size_t e : g_.nodes[n].out) {
                 size_t to = g_.edges[e].to;
-                if (loop != kNoNode && (to == g_.nodes[loop].cont || to == g_.nodes[loop].merge || !body[to])) continue;
-                work.push_back(to);
+                if (reach_takes(to, loop, body)) work.push_back(to);
             }
         }
         return seen;
+    }
+
+    // The first node in reverse postorder that reach(a) and reach(b) both
+    // hold, or kNoNode. Every edge but a continue node's runs forward in
+    // reverse postorder (each cycle passes a continue node), so a walk that
+    // takes nodes in that order has seen every way into a node before it
+    // takes it: the first node it takes from both is the answer, found
+    // without walking the rest of either region.
+    size_t first_common(size_t a, size_t b, size_t loop, const std::vector<bool>& body) {
+        side_.resize(g_.nodes.size(), 0);
+        std::vector<size_t> touched;
+        std::priority_queue<std::pair<size_t, size_t>, std::vector<std::pair<size_t, size_t>>, std::greater<>> heap;
+        auto visit = [&](size_t n, uint8_t side) {
+            if (side_[n] == 0) {
+                touched.push_back(n);
+                heap.emplace(rpo_index_[n], n);
+            }
+            side_[n] |= side;
+        };
+        visit(a, 1);
+        visit(b, 2);
+        size_t found = kNoNode;
+        while (!heap.empty()) {
+            size_t n = heap.top().second;
+            heap.pop();
+            if (side_[n] == 3) {
+                found = n;
+                break;
+            }
+            if (g_.nodes[n].kind == CfgNode::Kind::loop_continue) continue;
+            for (size_t e : g_.nodes[n].out) {
+                size_t to = g_.edges[e].to;
+                if (reach_takes(to, loop, body)) visit(to, side_[n]);
+            }
+        }
+        for (size_t n : touched) side_[n] = 0;
+        return found;
     }
 };
 
