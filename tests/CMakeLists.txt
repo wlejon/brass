@@ -179,6 +179,8 @@ add_executable(brass_unit_tests
     unit/test_gc_heap_marking_mutator.cpp
     unit/test_gc_heap_lazy_sweep.cpp
     unit/test_gc_heap_parallel_minor.cpp
+    unit/test_gc_heap_copy_order.cpp
+    unit/test_gc_heap_huge_pages.cpp
     unit/test_gc_heap_finish_in_place.cpp
     unit/test_gc_heap_pin.cpp
     unit/test_write_barrier_elim.cpp

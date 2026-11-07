@@ -11,8 +11,9 @@
 // (verification, walking, poisoning) and heap_mark_verify.cpp (a marking
 // cycle's check against a fresh mark).
 
+#include "heap_bits.hpp"
+
 #include <brass/gc/heap.hpp>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -20,10 +21,6 @@
 #include <memory>
 #include <unordered_map>
 #include <vector>
-
-#if defined(_MSC_VER) && !defined(__clang__)
-#include <intrin.h>
-#endif
 
 namespace brass::gc::detail {
 
@@ -34,32 +31,12 @@ void* vm_reserve(size_t bytes, size_t alignment);
 void vm_commit(void* address, size_t bytes);
 void vm_decommit(void* address, size_t bytes);
 void vm_release(void* address, size_t bytes);
+// A hint that [address, address + bytes) be backed by huge pages (Linux THP).
+void vm_advise_huge(void* address, size_t bytes);
+// The mature space's commit granule and the reservation's alignment.
+inline constexpr size_t kHugePageBytes = size_t{2} << 20;
 
 [[noreturn]] void gc_fatal(const char* message);
-
-// Index of the lowest set bit of a nonzero word.
-inline unsigned ctz64(uint64_t word) noexcept {
-#if defined(_MSC_VER) && !defined(__clang__)
-    unsigned long index;
-    _BitScanForward64(&index, word);
-    return static_cast<unsigned>(index);
-#else
-    return static_cast<unsigned>(__builtin_ctzll(word));
-#endif
-}
-
-inline unsigned popcount64(uint64_t word) noexcept { return static_cast<unsigned>(std::popcount(word)); }
-
-// Index of the highest set bit of a nonzero word.
-inline unsigned clz_index64(uint64_t word) noexcept {
-#if defined(_MSC_VER) && !defined(__clang__)
-    unsigned long index;
-    _BitScanReverse64(&index, word);
-    return static_cast<unsigned>(index);
-#else
-    return 63u - static_cast<unsigned>(__builtin_clzll(word));
-#endif
-}
 
 // A young object a parallel minor collection's thread is copying
 // (heap_minor_parallel.cpp): claimed with a compare-and-swap of its gc_bits,
@@ -326,6 +303,8 @@ struct HeapState {
     // Mature blocks.
     uintptr_t mature_lo = 0;
     size_t mature_reserve = 0;
+    // The end of the mature space's committed prefix (commit_block).
+    uintptr_t mature_committed_hi = 0;
     std::vector<std::unique_ptr<BlockMeta>> blocks;  // one per block below the frontier
     std::vector<uint32_t> free_blocks;               // committed, empty
     std::vector<uint32_t> recyclable_blocks;         // in use, with free lines
@@ -536,6 +515,7 @@ struct HeapState {
     void mark_lines(BlockMeta& meta, uintptr_t block_lo, uintptr_t header, size_t total, bool mark) noexcept;
     // Commits (and cleans) the cards covering old addresses [lo, hi).
     void commit_cards(uintptr_t lo, uintptr_t hi);
+    void commit_block(uint32_t index);
     bool refill_region(BumpRegion& region, bool whole_block);
     // A free block, swept or fresh from the frontier; UINT32_MAX when none
     // may be had. `holes_will_do` (the small region's refill): kHolesFiled
@@ -701,6 +681,11 @@ struct EphemeronEntry {
 };
 
 // One collection's working state (Tracer::state()).
+// The bytes each object taken from the grey stack may copy depth first, and
+// how deep (heap_collect.cpp, "A copy made just now").
+inline constexpr size_t kCopyBudget = 4096;
+inline constexpr unsigned kCopyDepth = 16;
+
 struct GcState {
     HeapState& s;
     Heap& heap;
@@ -717,6 +702,9 @@ struct GcState {
     // old object naming an old target is left to the cycle (heap_weak.cpp).
     bool shade = false;
     std::vector<uintptr_t> gray;
+    // Copies being scanned as they are made, and the bytes left (kCopyBudget).
+    unsigned copy_depth = 0;
+    size_t copy_budget = 0;
     std::vector<WeakEntry> weak;
     std::vector<EphemeronEntry> ephemerons;  // keys not (yet) known alive
     uint64_t copied_bytes = 0;

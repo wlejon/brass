@@ -90,7 +90,10 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     const size_t mature = round_up(std::max<size_t>(s.config.mature_reserve_bytes, 64 * kBlockBytes), kBlockBytes);
     const size_t large = round_up(std::max<size_t>(s.config.large_reserve_bytes, 64 * kPageBytes), kBlockBytes);
     s.reserve_bytes = young + mature + large;
-    s.base = reinterpret_cast<uintptr_t>(detail::vm_reserve(s.reserve_bytes, kYoungGranularity));
+    // Huge-page aligned, so the mature space's granules are huge pages
+    // (HeapState::commit_block) whenever the young generation is a multiple
+    // of one, as it is by default.
+    s.base = reinterpret_cast<uintptr_t>(detail::vm_reserve(s.reserve_bytes, detail::kHugePageBytes));
 
     s.eden_lo = s.base;
     s.eden_hi = s.base + eden;
@@ -105,6 +108,8 @@ Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
 
     s.mature_lo = s.base + young;
     s.mature_reserve = mature;
+    s.mature_committed_hi = s.mature_lo;
+    detail::vm_advise_huge(reinterpret_cast<void*>(s.mature_lo), mature);
     s.large_lo = s.mature_lo + mature;
     s.large_reserve = large;
 

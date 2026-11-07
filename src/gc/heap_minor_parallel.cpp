@@ -130,6 +130,11 @@ struct alignas(kApart) Worker {
     ParMinor& pm;
     Tracer tracer;
     std::vector<uintptr_t> stack;
+    // Copies being scanned as they are made, and the bytes the object taken
+    // from the stack may still copy so (kCopyBudget; heap_collect.cpp's
+    // drain, minor_visit).
+    unsigned copy_depth = 0;
+    size_t copy_budget = 0;
     std::vector<WeakEntry> weak;
     std::vector<EphemeronEntry> ephemerons;
     // During a cycle: what this thread shaded, and old owners' weak slots and
@@ -520,8 +525,24 @@ void par_visit(Tracer& t, uint64_t* slot, uint64_t word) {
     const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
     uintptr_t now = a;
     if (g.in_from(a)) {
+        const size_t grey = w.stack.size();
         now = forward(w, a);
         *slot = (word & ~kAddressMask) | now;
+        // Copied by this thread just now: scanned at once, as the serial
+        // evacuation does (minor_visit), so its parts follow it in this
+        // thread's buffers. Never while the roots or a card are visited
+        // (no budget then): the threads share what those copy.
+        const size_t total = kHeaderBytes + header_of(now)->size;
+        if (w.stack.size() > grey && total <= w.copy_budget && w.copy_depth < kCopyDepth) {
+            const uintptr_t owner = t.owner();
+            const bool owner_old = t.owner_old();
+            w.copy_budget -= total;
+            w.stack.pop_back();
+            ++w.copy_depth;
+            scan_object(t, now, g.heap.is_old(now));
+            --w.copy_depth;
+            t.set_owner(owner, owner_old);
+        }
     } else if (g.shade && !g.heap.is_young(a)) {
         // minor_visit: an old object an old one names is shaded.
         if (t.owner_old()) shade_old(w, a);
@@ -651,7 +672,9 @@ void work(Worker& w) {
         while (!w.stack.empty()) {
             const uintptr_t object = w.stack.back();
             w.stack.pop_back();
+            w.copy_budget = kCopyBudget;
             scan_object(w.tracer, object, heap.is_old(object));
+            w.copy_budget = 0;
             if (++since_share >= kShareEvery) {
                 since_share = 0;
                 share(w);

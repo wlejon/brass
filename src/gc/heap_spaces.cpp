@@ -46,6 +46,27 @@ void HeapState::mark_lines(BlockMeta& meta, uintptr_t block_lo, uintptr_t header
     for (size_t l = first; l <= last; ++l) lines[l] = 1;
 }
 
+// A block past the committed prefix commits the prefix on to the end of the
+// huge-page granule the block ends in; a block inside it (one the sweep
+// released) commits itself and asks again for huge pages, which its release
+// dropped, so the granule can be collapsed into one once it is whole again.
+void HeapState::commit_block(uint32_t index) {
+    const uintptr_t lo = block_base(index);
+    const uintptr_t hi = lo + kBlockBytes;
+    if (mature_committed_hi < mature_lo) mature_committed_hi = mature_lo;
+    if (hi <= mature_committed_hi) {
+        vm_commit(reinterpret_cast<void*>(lo), kBlockBytes);
+        vm_advise_huge(reinterpret_cast<void*>(lo), kBlockBytes);
+        return;
+    }
+    // Blocks and granules are aligned so that no block straddles a granule's
+    // end: the prefix stays one range.
+    const uintptr_t granule = (hi + kHugePageBytes - 1) & ~(uintptr_t{kHugePageBytes} - 1);
+    const uintptr_t to = std::min(granule, mature_lo + mature_reserve);
+    vm_commit(reinterpret_cast<void*>(mature_committed_hi), to - mature_committed_hi);
+    mature_committed_hi = to;
+}
+
 uint32_t HeapState::acquire_free_block(bool holes_will_do) {
     // While the last cycle's sweep is pending, some unswept blocks are free
     // ones the eager sweep would have listed: a few are looked at before a
@@ -87,7 +108,7 @@ uint32_t HeapState::acquire_free_block(bool holes_will_do) {
     }
     BlockMeta& meta = *blocks[index];
     if (!meta.committed) {
-        vm_commit(reinterpret_cast<void*>(block_base(index)), kBlockBytes);
+        commit_block(index);
         meta.committed = true;
     }
     meta.in_use = true;

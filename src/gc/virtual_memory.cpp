@@ -121,6 +121,19 @@ void vm_decommit(void* address, size_t bytes) {
 #endif
 }
 
+void vm_advise_huge(void* address, size_t bytes) {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    const size_t page = os_page_bytes();
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t aligned_addr = addr & ~(uintptr_t{page} - 1);
+    const uintptr_t aligned_end = (addr + bytes + page - 1) & ~(uintptr_t{page} - 1);
+    (void)madvise(reinterpret_cast<void*>(aligned_addr), aligned_end - aligned_addr, MADV_HUGEPAGE);
+#else
+    (void)address;
+    (void)bytes;
+#endif
+}
+
 void vm_release(void* address, size_t bytes) {
     if (!address || bytes == 0) return;
 #if defined(_WIN32)
