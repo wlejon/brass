@@ -4,6 +4,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace brass::x64 {
 
@@ -441,6 +443,34 @@ void X64ISel::analyze_function(const Function& mir_fn) {
         if (def && (def->opcode() == Opcode::load || def->opcode() == Opcode::load_indexed)) {
             skipped_insts_.erase(def);
         }
+    }
+    // 7. A two-register sum `base + (index << k)` folded into every memory
+    // operation that reads it (step 4) is never computed, and each address
+    // took the shift as its scale, reading `index` itself: a shift whose
+    // only readers are such sums is computed for nothing (`mov; shl` with
+    // no reader, three per dense-array cursor). It is skipped too, unless
+    // some address reads it as a register part (address_regs).
+    std::unordered_set<const Value*> address_reg_set(address_regs.begin(), address_regs.end());
+    std::unordered_map<const Value*, uint32_t> dead_sum_uses;
+    for (const auto& [val, fold_count] : folded_uses) {
+        if (!val->is_instruction()) continue;
+        const Instruction* sum = val->defining_instruction();
+        if (!sum || sum->opcode() != Opcode::add || !skipped_insts_.count(sum)) continue;
+        auto it = use_count_.find(val);
+        if (it == use_count_.end() || it->second != fold_count) continue;
+        for (const Value* op : sum->operands()) {
+            if (op && op->is_instruction() && op->defining_instruction()->opcode() == Opcode::shl) {
+                dead_sum_uses[op]++;
+            }
+        }
+    }
+    for (const auto& [shift, n] : dead_sum_uses) {
+        const Instruction* def = shift->defining_instruction();
+        if (address_reg_set.count(shift) || skipped_insts_.count(def)) continue;
+        const ImmIntInfo amount = get_imm_int_info(def->operand(1));
+        if (!amount.is_imm || amount.val < 1 || amount.val > 3) continue;
+        auto it = use_count_.find(shift);
+        if (it != use_count_.end() && it->second == n) skipped_insts_.insert(def);
     }
 }
 
