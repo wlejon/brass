@@ -291,11 +291,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                     ImmIntInfo rhs_imm = get_imm_int_info(rhs);
                     ImmIntInfo lhs_imm = get_imm_int_info(lhs);
 
-                    // An equality with zero is a `test` of the register
-                    // (append_fused_compare), which reads no memory operand.
-                    const bool eq_op = def_inst->opcode() == Opcode::eq || def_inst->opcode() == Opcode::ne;
+                    // A comparison with zero, equality or relational, is a
+                    // `test` of the register (append_fused_compare), which
+                    // reads no memory operand: its other side keeps its load
+                    // and its register. (An and-chain's bounds check of a
+                    // constant index 0, `ult 0, length`, is this shape.)
                     const bool tests_zero =
-                        eq_op && ((rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0));
+                        (rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0);
                     if (rhs_imm.is_imm && rhs_imm.fits_i32) {
                         folded_uses[rhs]++;
                         if (!tests_zero && fuses_compare_imm_load(lhs, inst)) {
