@@ -98,6 +98,8 @@ add_executable(brass_unit_tests
     unit/test_elf_so_writer.cpp
     unit/test_aot_shared_library.cpp
     unit/test_aot_imports.cpp
+    unit/test_artifact_cache.cpp
+    unit/test_native_module_cache.cpp
     unit/test_pic_x64.cpp
     unit/test_loop_tile.cpp
     differential/test_loop_tile_differential.cpp
@@ -336,6 +338,11 @@ add_executable(test_superopt unit/test_superopt.cpp)
 target_compile_definitions(test_superopt PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_superopt PRIVATE brass)
 target_include_directories(test_superopt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_artifact_cache unit/test_artifact_cache.cpp unit/test_native_module_cache.cpp)
+target_compile_definitions(test_artifact_cache PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_artifact_cache PRIVATE brass)
+target_include_directories(test_artifact_cache PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 add_executable(test_tv_corpus unit/test_tv_corpus.cpp differential/fuzz_generator.cpp)
 target_compile_definitions(test_tv_corpus PRIVATE BRASS_STANDALONE_TEST)
