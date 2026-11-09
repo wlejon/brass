@@ -70,7 +70,11 @@ public:
                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h_ == INVALID_HANDLE_VALUE) {
             const DWORD e = GetLastError();
-            absent_ = e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
+            // Denied or a sharing violation: the entry is being replaced or
+            // deleted this instant (a delete-pending file opens as denied).
+            // To this reader it is not there.
+            absent_ = e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND || e == ERROR_ACCESS_DENIED ||
+                      e == ERROR_SHARING_VIOLATION;
         }
 #else
         fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -393,11 +397,55 @@ bool write_new_file(const std::filesystem::path& path, std::span<const uint8_t> 
     return ok;
 }
 
+#if defined(_WIN32)
+// Rename `tmp` over `path` while other handles may be open on `path`.
+// MoveFileEx refuses a destination anyone has open, readers with delete
+// sharing included, so the first try is the rename with POSIX semantics
+// (FileRenameInfoEx, Windows 10 1607 on): the old file is unlinked at once
+// and lives on for the handles that have it. Where that is not supported, or
+// another writer holds the destination this instant, MoveFileEx is retried
+// briefly.
+bool replace_file_windows(const std::filesystem::path& tmp, const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::wstring target = std::filesystem::absolute(path, ec).native();
+    if (!ec) {
+        HANDLE h = CreateFileW(tmp.c_str(), DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            // FILE_RENAME_INFO with its Flags member: REPLACE_IF_EXISTS (1) |
+            // POSIX_SEMANTICS (2). The name is not NUL-terminated in the count.
+            const size_t name_bytes = target.size() * sizeof(wchar_t);
+            std::vector<uint8_t> buf(sizeof(FILE_RENAME_INFO) + name_bytes + sizeof(wchar_t), 0);
+            auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buf.data());
+            info->Flags = 0x1 | 0x2;
+            info->RootDirectory = nullptr;
+            info->FileNameLength = static_cast<DWORD>(name_bytes);
+            std::memcpy(info->FileName, target.data(), name_bytes);
+            const BOOL done = SetFileInformationByHandle(h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(22) /* FileRenameInfoEx */,
+                                                         info, static_cast<DWORD>(buf.size()));
+            CloseHandle(h);
+            if (done) return true;
+        }
+    }
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+        const DWORD e = GetLastError();
+        if (e != ERROR_ACCESS_DENIED && e != ERROR_SHARING_VIOLATION) break;
+        Sleep(1);
+    }
+    return false;
+}
+#endif
+
 bool write_file_atomically(const std::filesystem::path& path, std::span<const uint8_t> bytes, std::string* error) {
     const std::filesystem::path tmp = temp_path_for(path);
     if (!write_new_file(tmp, bytes, error)) return false;
     std::error_code ec;
+#if defined(_WIN32)
+    if (!replace_file_windows(tmp, path)) ec = std::make_error_code(std::errc::permission_denied);
+#else
     std::filesystem::rename(tmp, path, ec);
+#endif
     if (ec) {
         set_error(error, "cannot rename into " + path.string() + ": " + ec.message());
         std::error_code rm;
