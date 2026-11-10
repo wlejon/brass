@@ -949,6 +949,7 @@ bool Verifier::verify_function(const Function& fn) {
 
     verify_derived_gcrefs(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
     verify_nocollect_body(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
+    verify_tagged_allocations(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
     verify_guard_resume_state(fn, fn_prefix, [this](const std::string& msg) { report_error(msg); });
 
     // Verify resume points

@@ -165,6 +165,33 @@ public:
         young_range_ = (base_offset >= 0 && span_offset >= 0) ? YoungRange{base_offset, span_offset} : YoungRange{};
     }
 
+    // The module's tagged allocator (tagged_alloc.hpp, gc_contract.md 2.13):
+    // `call.tagged @symbol(%bytes, %header)` allocates an object of `bytes`
+    // payload bytes (a multiple of 8) whose collector header word is
+    // `header | bytes` (gc_contract.md 2.1: the layout, gc and host bits
+    // above the size), and answers its payload address ORed with `tag`. The
+    // payload's contents are unspecified: the caller stores every word
+    // before its next GC point. The symbol is the out-of-line allocator, a
+    // GC point, which every tier may call; when `top_offset` and
+    // `end_offset` name where the pinned TLS block holds the thread's
+    // allocation window ({top, end}, Heap::bind_allocation_buffer), Tier 2,
+    // OSR and AOT code bump the window inline and call the symbol only when
+    // it is full. The optimizer sees one call and knows its result is a
+    // fresh object reached through the tag arithmetic: escape analysis,
+    // scalar replacement and barrier elimination follow it.
+    struct TaggedAllocator {
+        std::string_view symbol;
+        int32_t top_offset = -1;
+        int32_t end_offset = -1;
+        uint64_t tag = 0;
+        explicit operator bool() const noexcept { return !symbol.empty(); }
+        bool inline_window() const noexcept { return top_offset >= 0 && end_offset >= 0; }
+    };
+    const TaggedAllocator& tagged_allocator() const noexcept { return tagged_allocator_; }
+    // Declares `symbol` external. An empty symbol clears the declaration;
+    // negative offsets leave the allocator without an inline window.
+    void set_tagged_allocator(std::string_view symbol, int32_t top_offset, int32_t end_offset, uint64_t tag);
+
     // 64-bit constants the host keeps in memory at fixed offsets from the
     // pinned TLS register (pinned_tls_register), in every thread that runs
     // the module's code: the NaN-box tags, payload masks and limits a guard
@@ -265,6 +292,7 @@ private:
     bool precise_stack_roots_ = false;
     InterruptPoll interrupt_poll_;
     YoungRange young_range_;
+    TaggedAllocator tagged_allocator_;
     std::vector<PinnedConstant> pinned_constants_;
     bool has_loop_optimizations_ = false;
     DebugContext debug_context_;

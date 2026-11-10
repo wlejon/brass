@@ -25,6 +25,12 @@ struct SroaOptions {
 bool sroa_function(Function& fn);
 bool sroa_function(Function& fn, const SroaOptions& options);
 
+// Scalar replacement of the module's tagged allocations (tagged_alloc.hpp)
+// that do not escape and have a constant size: each becomes SSA values, one
+// per word read (sroa_tagged.cpp). sroa_function runs it after the pointer
+// objects. Returns how many objects it removed.
+size_t scalar_replace_tagged_allocations(Function& fn, const SroaOptions& options);
+
 // Scalar replacement of aggregates across an entire module
 bool sroa_module(Module& mod);
 bool sroa_module(Module& mod, const SroaOptions& options);

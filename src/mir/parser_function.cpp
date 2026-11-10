@@ -184,6 +184,18 @@ bool Parser::parse_module_attributes(Module& mod) {
             if (!take_unsigned(INT32_MAX, "the young range's span TLS offset", span)) return false;
             mod.set_young_range(static_cast<int32_t>(base), static_cast<int32_t>(span));
             continue;
+        } else if (attr == "tagged_allocator") {
+            // `tagged_allocator @sym <top offset> <end offset> <tag>`
+            // (Module::set_tagged_allocator; -1 offsets: no inline window)
+            advance();
+            std::string_view sym = parse_symbol_name();
+            if (sym.empty()) return false;
+            int64_t top = 0, end = 0, tag = 0;
+            if (!take_int(-1, INT32_MAX, 32, "the tagged allocator's window top offset", top)) return false;
+            if (!take_int(-1, INT32_MAX, 32, "the tagged allocator's window end offset", end)) return false;
+            if (!take_int(INT64_MIN, INT64_MAX, 64, "the tagged allocator's tag", tag)) return false;
+            mod.set_tagged_allocator(sym, static_cast<int32_t>(top), static_cast<int32_t>(end), static_cast<uint64_t>(tag));
+            continue;
         } else {
             error(peek().location, "Unknown module attribute '" + std::string(attr) + "'");
             return false;

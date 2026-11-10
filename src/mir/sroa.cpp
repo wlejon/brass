@@ -11,6 +11,7 @@ bool sroa_function(Function& fn) {
 bool sroa_function(Function& fn, const SroaOptions& options) {
     SroaTransformer transformer(fn, options, options.stats);
     bool changed = transformer.run();
+    changed |= scalar_replace_tagged_allocations(fn, options) != 0;
     if (changed) {
         fn.rebuild_cfg_predecessors();
     }

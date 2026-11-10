@@ -2,6 +2,7 @@
 #include <brass/gc/gc_limits.hpp>
 #include <brass/gc/object.hpp>
 #include <brass/mir/gc_refs.hpp>
+#include <brass/mir/tagged_alloc.hpp>
 #include <brass/mir/uses.hpp>
 #include <algorithm>
 #include <iostream>
@@ -106,6 +107,11 @@ const Value* reference_base(const Value* v, int64_t& offset) noexcept {
     offset = 0;
     for (int steps = 0; steps < 8 && v && v->is_instruction(); ++steps) {
         const Instruction* def = v->defining_instruction();
+        // A tagged value's bits, or bits made a tagged value: the same word.
+        if (def && (def->opcode() == Opcode::bitcast_i64_tagged || def->opcode() == Opcode::bitcast_tagged_i64)) {
+            v = def->operand(0);
+            continue;
+        }
         if (!def || def->operand_count() != 2) break;
         int64_t c = 0;
         const Opcode op = def->opcode();
@@ -118,8 +124,9 @@ const Value* reference_base(const Value* v, int64_t& offset) noexcept {
         } else if (op == Opcode::and_ && constant_integer(def->operand(1), c) &&
                    (static_cast<uint64_t>(c) & gc::kAddressMask) == gc::kAddressMask) {
             v = def->operand(0);
-        } else if (op == Opcode::or_ && constant_integer(def->operand(1), c) &&
+        } else if ((op == Opcode::or_ || op == Opcode::xor_) && constant_integer(def->operand(1), c) &&
                    (static_cast<uint64_t>(c) & gc::kAddressMask) == 0) {
+            // A tag put on (or) or taken off (xor) above the address bits.
             v = def->operand(0);
         } else {
             break;
@@ -181,6 +188,12 @@ bool WriteBarrierElimination::is_non_pointer_value(const Value* val) const noexc
 
 bool WriteBarrierElimination::is_allocation_inst(const Instruction* inst) const noexcept {
     if (!inst || inst->opcode() != Opcode::call) return false;
+    // The module's tagged allocator promises the same placement
+    // (Module::tagged_allocator, gc_contract.md 2.13).
+    if (is_tagged_allocation(inst)) {
+        const int64_t size = tagged_allocation_bytes(inst);
+        return size >= 0 && static_cast<uint64_t>(size) <= kMaxAlwaysYoungPayloadBytes;
+    }
     // Only brass's own allocator has a known placement policy. A request
     // larger than half the nursery goes straight to tenured space, so the
     // result is young only for a constant size below the guaranteed bound.
@@ -196,6 +209,7 @@ int64_t WriteBarrierElimination::young_allocation_bytes(const Instruction* inst)
     constant_integer(inst->operand(0), size);
     return size;
 }
+
 
 bool WriteBarrierElimination::run_on_function(Function& fn) {
     const std::vector<BasicBlock*>& blocks = fn.blocks();

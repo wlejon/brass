@@ -1,6 +1,7 @@
 #include <brass/mir/escape_analysis.hpp>
 #include "escape_graph.hpp"
 #include <brass/mir/module.hpp>
+#include <brass/mir/tagged_alloc.hpp>
 #include <ostream>
 
 namespace brass {
@@ -66,7 +67,7 @@ bool EscapeAnalysis::is_allocation(const Value* val) const {
     const Instruction* inst = val->defining_instruction();
     if (!inst) return false;
     if (inst->opcode() == Opcode::alloca_) return true;
-    return is_allocation_call(inst);
+    return is_allocation_call(inst) || is_tagged_allocation(inst);
 }
 
 namespace {
@@ -404,6 +405,19 @@ void EscapeAnalysis::run() {
         if (st == EscapeState::NoEscape) {
             non_escaping_allocations_.push_back(alloc_val);
         }
+    }
+
+    // 5. The module's tagged allocations, whose objects are reached through
+    // tag arithmetic on integers rather than through pointers: their own
+    // analysis follows them (tagged_alloc.hpp), and any escape it finds is a
+    // global one.
+    TaggedAllocations tagged(*fn_);
+    for (const TaggedAllocSite& site : tagged.sites()) {
+        const Value* res = site.call->result();
+        allocations_.push_back(res);
+        const EscapeState st = site.escapes() ? EscapeState::GlobalEscape : EscapeState::NoEscape;
+        escape_states_[res] = st;
+        if (st == EscapeState::NoEscape) non_escaping_allocations_.push_back(res);
     }
 }
 

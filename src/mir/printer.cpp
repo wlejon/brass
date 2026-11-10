@@ -816,7 +816,7 @@ void print_module(const Module& mod, std::ostream& os) {
     // Module attributes.
     if (mod.allow_fp_reassociation() || mod.pinned_tls_register() || mod.precise_stack_roots() ||
         mod.has_loop_optimizations() || mod.interrupt_poll() || mod.young_range() ||
-        !mod.pinned_constants().empty()) {
+        mod.tagged_allocator() || !mod.pinned_constants().empty()) {
         os << "attributes";
         if (mod.allow_fp_reassociation()) os << " fp_reassociation";
         if (mod.pinned_tls_register()) os << " pinned_tls_register";
@@ -827,6 +827,11 @@ void print_module(const Module& mod, std::ostream& os) {
         }
         if (mod.young_range()) {
             os << " young_range " << mod.young_range().base_offset << " " << mod.young_range().span_offset;
+        }
+        if (const Module::TaggedAllocator& a = mod.tagged_allocator()) {
+            char hex[24];
+            std::snprintf(hex, sizeof(hex), "0x%016llx", static_cast<unsigned long long>(a.tag));
+            os << " tagged_allocator " << sym_ref(a.symbol) << " " << a.top_offset << " " << a.end_offset << " " << hex;
         }
         for (const Module::PinnedConstant& c : mod.pinned_constants()) {
             char hex[24];

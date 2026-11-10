@@ -12,6 +12,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/superopt.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/mir/tagged_alloc_lowering.hpp>
 #include <brass/mir/write_barrier_lowering.hpp>
 #include <brass/target/aarch64/aarch64_emit.hpp>
 #include <brass/target/aarch64/aarch64_frame.hpp>
@@ -214,6 +215,17 @@ EmittedFunction compile_function(const Module& mod, const Function& fn, const Fu
             fn_to_lower = opt_fn_mut;
         }
         expand_write_barriers(*opt_fn_mut);
+    }
+
+    // The tagged allocator's inline window (Module::tagged_allocator), after
+    // the optimizer, which sees each allocation as one call.
+    if (needs_tagged_allocation_expansion(*fn_to_lower)) {
+        if (!opt_fn_mut) {
+            opt_mod = private_module(mod);
+            opt_fn_mut = clone_function(fn, *opt_mod);
+            fn_to_lower = opt_fn_mut;
+        }
+        expand_tagged_allocations(*opt_fn_mut);
     }
 
     // 1. ISel to LIR

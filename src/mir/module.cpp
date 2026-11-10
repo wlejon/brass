@@ -76,7 +76,10 @@ Module::Module(Module&& other) noexcept
       string_symbols_(std::move(other.string_symbols_)),
       allow_fp_reassociation_(other.allow_fp_reassociation_),
       pinned_tls_register_(other.pinned_tls_register_),
+      precise_stack_roots_(other.precise_stack_roots_),
       interrupt_poll_(other.interrupt_poll_),
+      young_range_(other.young_range_),
+      tagged_allocator_(other.tagged_allocator_),
       pinned_constants_(std::move(other.pinned_constants_)),
       has_loop_optimizations_(other.has_loop_optimizations_),
       debug_context_(std::move(other.debug_context_)),
@@ -116,7 +119,10 @@ Module& Module::operator=(Module&& other) noexcept {
     string_symbols_ = std::move(other.string_symbols_);
     allow_fp_reassociation_ = other.allow_fp_reassociation_;
     pinned_tls_register_ = other.pinned_tls_register_;
+    precise_stack_roots_ = other.precise_stack_roots_;
     interrupt_poll_ = other.interrupt_poll_;
+    young_range_ = other.young_range_;
+    tagged_allocator_ = other.tagged_allocator_;
     pinned_constants_ = std::move(other.pinned_constants_);
     has_loop_optimizations_ = other.has_loop_optimizations_;
     debug_context_ = std::move(other.debug_context_);
@@ -408,6 +414,9 @@ void Module::copy_declarations_from(const Module& src) {
     for (const auto& [sym, text] : src.string_symbols()) define_string_symbol(sym, text);
     if (src.interrupt_poll()) set_interrupt_poll(src.interrupt_poll().tls_offset, src.interrupt_poll().handler);
     young_range_ = src.young_range();
+    if (const TaggedAllocator& a = src.tagged_allocator()) {
+        set_tagged_allocator(a.symbol, a.top_offset, a.end_offset, a.tag);
+    }
     for (const PinnedConstant& c : src.pinned_constants()) add_pinned_constant(c.value, c.tls_offset);
 }
 
@@ -416,6 +425,20 @@ void Module::add_pinned_constant(uint64_t value, int32_t tls_offset) {
         if (c.value == value) return;
     }
     pinned_constants_.push_back({value, tls_offset});
+}
+
+void Module::set_tagged_allocator(std::string_view symbol, int32_t top_offset, int32_t end_offset,
+                                  uint64_t tag) {
+    if (symbol.empty()) {
+        tagged_allocator_ = {};
+        return;
+    }
+    add_external_symbol(symbol);
+    tagged_allocator_.symbol = string_pool_.intern(symbol);
+    const bool window = top_offset >= 0 && end_offset >= 0;
+    tagged_allocator_.top_offset = window ? top_offset : -1;
+    tagged_allocator_.end_offset = window ? end_offset : -1;
+    tagged_allocator_.tag = tag;
 }
 
 void Module::set_interrupt_poll(int32_t tls_offset, std::string_view handler) {

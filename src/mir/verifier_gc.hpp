@@ -24,6 +24,16 @@ void verify_nocollect_body(
     const std::function<void(const std::string&)>& report_error
 );
 
+// A constant-size tagged allocation (Module::tagged_allocator) has every
+// word of its payload stored, on every path from the call, before a GC
+// point, a return or a throw: a collection that found it half written would
+// trace words the allocator left unspecified.
+void verify_tagged_allocations(
+    const Function& fn,
+    const std::string& fn_prefix,
+    const std::function<void(const std::string&)>& report_error
+);
+
 // Checks bitcast_i64_tagged / bitcast_tagged_i64; false for any other opcode.
 bool verify_tagged_bitcast(
     const Instruction& inst,
