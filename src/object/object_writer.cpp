@@ -9,6 +9,7 @@
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
+#include <brass/codegen/shrink_wrap.hpp>
 #include <brass/codegen/block_layout.hpp>
 #include <brass/codegen/instruction_scheduler.hpp>
 #include <brass/codegen/software_pipeline.hpp>
@@ -296,6 +297,13 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             codegen::schedule_function(*lir, sched_opts_);
         }
 
+        // 1.7 Values split at the frame regions of a function that may run
+        // without a frame on some path (codegen/shrink_wrap.hpp).
+        if (target_.is_x64()) {
+            PhaseTimeScope timing("backend: shrink-wrap split");
+            codegen::split_for_shrink_wrap(*lir, cc_);
+        }
+
         {
             PhaseTimeScope timing("backend: liveness + register allocation");
             // 2. Liveness Analysis
@@ -453,6 +461,11 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
             x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
             cfi.cc = cc_;
             cfi.stack_adjust_regions = std::move(res.stack_adjust_regions);
+            if (!cfi.frame_info.is_leaf && phase_times_enabled()) {
+                record_phase_time("x64 shrink-wrap: functions with a frame", 0);
+                if (!res.frame_rows.empty()) record_phase_time("x64 shrink-wrap: functions wrapped", 0);
+            }
+            cfi.frame_rows = std::move(res.frame_rows);
             cfi.safepoints = std::move(res.safepoints);
             cfi.stack_map = std::move(res.stack_map);
             cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);

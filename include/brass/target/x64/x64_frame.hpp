@@ -17,6 +17,10 @@ public:
 
     static void emit_prologue(X64Encoder& enc, const codegen::FrameInfo& frame, const CallingConvention& cc);
     static void emit_epilogue(X64Encoder& enc, const codegen::FrameInfo& frame, const CallingConvention& cc);
+    // The epilogue but its `ret`: callee-saved registers back, the frame
+    // released, rbp popped. With keep_flags the frame is released by `mov
+    // rsp, rbp` (a shrink-wrapped region's exit edge, where flags may be live).
+    static void emit_teardown(X64Encoder& enc, const codegen::FrameInfo& frame, bool keep_flags);
 
     static MemAddress spill_slot_address(int32_t slot_idx, const codegen::FrameInfo& frame);
     static MemAddress local_frame_address(int32_t offset, const codegen::FrameInfo& frame);

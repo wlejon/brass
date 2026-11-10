@@ -31,6 +31,21 @@ struct StackAdjustRegion {
     uint32_t bytes = 0;
 };
 
+// A shrink-wrapped function's frame states (codegen/shrink_wrap.hpp), from
+// `offset` on until the next row: the CFI rows the unwind info describes it
+// with. Before the first row the function has no frame.
+enum class FrameState : uint8_t {
+    Frameless,  // CFA = rsp + 8
+    Pushed,     // rbp pushed: CFA = rsp + 16, rbp at CFA - 16
+    Framed,     // the prologue's frame: CFA = rbp + 16, callee-saved in their slots
+    Lowered,    // no frame, rsp `lowered` bytes down for a read of rsp: CFA = rsp + 8 + lowered
+};
+struct FrameRow {
+    uint32_t offset = 0;
+    FrameState state = FrameState::Frameless;
+    uint32_t lowered = 0;
+};
+
 struct SafepointRecord {
     size_t code_offset = 0;
     uint32_t safepoint_id = 0;
@@ -49,7 +64,11 @@ struct CompilationResult {
     FunctionDebugTable debug_table;
     runtime::FunctionExceptionTable exception_table;
     std::vector<StackAdjustRegion> stack_adjust_regions;
+    // Empty unless the function is shrink-wrapped.
+    std::vector<FrameRow> frame_rows;
 };
+
+class BranchThreading;
 
 class EmitContext {
 public:
@@ -158,6 +177,38 @@ private:
     // the record; RSP does not move.
     void emit_exit_stub_call(const LirInst& inst, int32_t slots_disp);
     void pad_invoke_return();
+
+    // Shrink-wrapping (codegen/shrink_wrap.hpp; emit_shrink_wrap.cpp).
+    // plan_shrink_wrap decides from the allocated code which blocks run with
+    // the frame; wrapped_ false, the function has its prologue at entry.
+    bool wrapped_ = false;
+    bool cur_framed_ = true;           // the code being emitted has the frame
+    std::vector<uint8_t> framed_;      // by block position
+    std::vector<uint8_t> save_point_;  // by block position: the prologue at its top
+    std::vector<uint8_t> exits_frame_; // by block position: framed, a successor not
+    std::unordered_map<uint32_t, size_t> pos_of_id_;
+    // Frameless targets of conditional branches from framed code: each gets
+    // a stub after the blocks (teardown, jmp) known by a pseudo block id.
+    std::vector<uint32_t> stub_targets_;
+    std::unordered_map<uint32_t, uint32_t> stub_of_;
+    std::vector<FrameRow> frame_rows_;
+    void plan_shrink_wrap(const BranchThreading& threading);
+    // Whether the block is entered with the frame (a save point is not).
+    bool framed_at(uint32_t block_id) const;
+    // A branch from the current code to block_id: the block, or the stub
+    // that tears the frame down on the way when the edge leaves it.
+    uint32_t edge_target(uint32_t block_id);
+    void note_frame_state(FrameState state, uint32_t lowered = 0);
+    void note_frame_state_at(size_t offset, FrameState state, uint32_t lowered = 0);
+    void enter_block_frame_state(size_t block_pos);
+    void emit_frame_exit();
+    void emit_frame_exit_stubs();
+    // The epilogue of a return from framed code (Ret, a guard exit's).
+    void emit_return_epilogue();
+    // An instruction without a frame that reads rsp reads it as the prologue
+    // would have left it: rsp is lowered around it (lea, no flags).
+    bool lower_rsp_for(const LirInst& inst);
+    void raise_rsp();
 };
 
 CompilationResult compile_lir_to_x64(const LirFunction& fn, const Target& target);

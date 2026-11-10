@@ -131,17 +131,25 @@ CompilationResult EmitContext::compile_once() {
         block_labels_[block->id] = buffer_.create_label();
     }
 
-    // 3. Emit prologue at entry
-    X64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
-    zero_tagged_locals();
+    // 3. Emit prologue at entry, unless the function is shrink-wrapped
+    // (codegen/shrink_wrap.hpp): then at the top of each save point.
+    const BranchThreading threading(fn_);
+    plan_shrink_wrap(threading);
+    if (!wrapped_) {
+        X64FrameLayout::emit_prologue(enc_, frame_, fn_.calling_conv);
+        zero_tagged_locals();
+    }
 
     // 4. Emit blocks
-    const BranchThreading threading(fn_);
     // A target is the fall-through when only blocks that emit nothing lie
-    // between: skipped ones, empty ones, and a jump to the block after.
+    // between: skipped ones, empty ones, and a jump to the block after. A
+    // save point emits its prologue, and a block leaving the frame its
+    // teardown.
     auto emits_nothing = [&](size_t i) {
         const auto& ins = fn_.blocks[i]->instructions;
-        if (threading.skipped(i) || ins.empty()) return true;
+        if (threading.skipped(i)) return true;
+        if (wrapped_ && (save_point_[i] || exits_frame_[i])) return false;
+        if (ins.empty()) return true;
         const ClosingBranches c = closing_branches(fn_, i);
         return ins.size() == 1 && c.count == 1 && !c.conditional && i + 1 < fn_.blocks.size() &&
                threading.target(c.other) == fn_.blocks[i + 1]->id;
@@ -172,6 +180,7 @@ CompilationResult EmitContext::compile_once() {
         }
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
+        enter_block_frame_state(b_idx);
 
         if (block->is_landing_pad) {
             if (frame_.total_frame_size > 0) {
@@ -202,7 +211,9 @@ CompilationResult EmitContext::compile_once() {
             if (loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(cur_offset), loc);
             }
+            const bool lowered = lower_rsp_for(inst);
             emit_instruction(inst, b_idx == 0, i_idx == 0);
+            if (lowered) raise_rsp();
         }
 
         if (closing.conditional) {
@@ -210,8 +221,8 @@ CompilationResult EmitContext::compile_once() {
             if (jcc.loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jcc.loc);
             }
-            uint32_t true_target = threading.target(closing.taken);
-            uint32_t false_target = threading.target(closing.other);
+            uint32_t true_target = edge_target(threading.target(closing.taken));
+            uint32_t false_target = edge_target(threading.target(closing.other));
 
             if (falls_to(false_target)) {
                 emit_jump(jcc.condition, true_target);
@@ -230,6 +241,7 @@ CompilationResult EmitContext::compile_once() {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jmp.loc);
             }
             uint32_t target = threading.target(closing.other);
+            if (wrapped_ && cur_framed_ && !framed_at(target)) emit_frame_exit();
             if (!falls_to(target)) {
                 emit_jump(Condition::None, target);
                 prev_falls_through = false;
@@ -241,9 +253,16 @@ CompilationResult EmitContext::compile_once() {
             // only skips padding.
             const LirOpcode last = n_insts > 0 ? block->instructions[n_insts - 1]->opcode : LirOpcode::Nop;
             prev_falls_through = !(last == LirOpcode::Ret || last == LirOpcode::Trap);
+            if (wrapped_ && cur_framed_ && last != LirOpcode::GuardExit && prev_falls_through) {
+                // Runs on into a block without the frame.
+                size_t next = b_idx + 1;
+                while (next < fn_.blocks.size() && threading.skipped(next)) ++next;
+                if (next < fn_.blocks.size() && !framed_at(fn_.blocks[next]->id)) emit_frame_exit();
+            }
         }
     }
 
+    emit_frame_exit_stubs();
     emit_constant_pool();
     for (size_t off : buffer_.rel8_overflows()) {
         auto it = short_patch_ord_.find(off);
@@ -270,6 +289,11 @@ CompilationResult EmitContext::compile_once() {
     }
     result.patch_sites = std::move(patch_sites_);
     result.stack_adjust_regions = std::move(stack_adjust_regions_);
+    if (wrapped_) {
+        // A row at the end describes no code (the state after a final ret).
+        while (!frame_rows_.empty() && frame_rows_.back().offset >= result.code_buffer.size()) frame_rows_.pop_back();
+        result.frame_rows = std::move(frame_rows_);
+    }
 
     // 6. Build exception table
     result.exception_table.set_function_name(std::string(fn_.name));
@@ -446,10 +470,10 @@ void EmitContext::zero_tagged_locals() {
 void EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
-            emit_jump(Condition::None, inst.uses[0].label_id);
+            emit_jump(Condition::None, edge_target(inst.uses[0].label_id));
             break;
         case LirOpcode::Jcc:
-            emit_jump(inst.condition, inst.uses[0].label_id);
+            emit_jump(inst.condition, edge_target(inst.uses[0].label_id));
             break;
         case LirOpcode::Call: {
             // A 256-bit argument travels in a YMM register; no other value
@@ -517,7 +541,7 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
         case LirOpcode::Ret: {
             // A 256-bit result is returned in YMM0; its caller clears.
             if (!fn_.return_type.is_v256()) clear_upper_state();
-            X64FrameLayout::emit_epilogue(enc_, frame_, fn_.calling_conv);
+            emit_return_epilogue();
             break;
         }
         case LirOpcode::Push: enc_.push(to_gpr(inst.uses[0])); break;
@@ -656,11 +680,9 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
             clear_upper_state();
             enc_.call("brass_deopt_exit_record");
 
-            auto emit_epilogue = [&]() {
-                codegen::FrameInfo mutable_frame = fn_.frame;
-                X64FrameLayout::compute_layout(mutable_frame, fn_.calling_conv);
-                X64FrameLayout::emit_epilogue(enc_, mutable_frame, fn_.calling_conv);
-            };
+            // The prologue's frame_ (with the slots of callee-saved roots,
+            // which fn_.frame lacks).
+            auto emit_epilogue = [&]() { emit_return_epilogue(); };
             // RAX points at the lower tier's result bits for this frame.
             auto emit_return_rax_result = [&]() {
                 enc_.mov(GPR::RAX, ptr(GPR::RAX, 0));

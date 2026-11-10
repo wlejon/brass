@@ -377,6 +377,7 @@ LinearScanAllocator::HintRegs LinearScanAllocator::hint_regs(const AllocPiece& p
     }
     HintRegs hints;
     uint32_t added = 0;
+    const bool frameless = v.id < fn_.frameless_vregs.size() && fn_.frameless_vregs[v.id];
     // Only a register the allocator could have picked anyway: a copy from
     // the stack pointer (`read_sp`) hints its destination at SP, and a value
     // that lives in SP is not a value. AArch64's register 31 is SP only to
@@ -386,6 +387,7 @@ LinearScanAllocator::HintRegs LinearScanAllocator::hint_regs(const AllocPiece& p
         if (!r.is_valid() || r.reg_class != v.reg_class || r.code >= 32) return;
         const uint32_t bit = 1u << r.code;
         if (!(pool_mask & bit) || (added & bit)) return;
+        if (frameless && is_callee_saved(r)) return;
         added |= bit;
         hints.regs[hints.count++] = r;
     };

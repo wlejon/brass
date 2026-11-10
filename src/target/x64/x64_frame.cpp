@@ -143,7 +143,11 @@ void X64FrameLayout::emit_epilogue(
         enc.ret();
         return;
     }
+    emit_teardown(enc, frame, false);
+    enc.ret();
+}
 
+void X64FrameLayout::emit_teardown(X64Encoder& enc, const codegen::FrameInfo& frame, bool keep_flags) {
     // 1. Restore callee-saved XMMs
     auto saved_xmms = get_saved_callee_xmms(frame);
     for (XMM x : saved_xmms) {
@@ -156,16 +160,16 @@ void X64FrameLayout::emit_epilogue(
         enc.mov(g, callee_gpr_address(g, frame));
     }
 
-    // 3. add rsp, total_frame_size (if > 0)
-    if (frame.total_frame_size > 0) {
+    // 3. Release the frame: rsp is rbp - total_frame_size here, so
+    // `mov rsp, rbp` is the `add` that leaves the flags alone.
+    if (keep_flags) {
+        enc.mov(GPR::RSP, GPR::RBP);
+    } else if (frame.total_frame_size > 0) {
         enc.add(GPR::RSP, static_cast<int32_t>(frame.total_frame_size));
     }
 
     // 4. pop rbp
     enc.pop(GPR::RBP);
-
-    // 5. ret
-    enc.ret();
 }
 
 } // namespace brass::x64

@@ -123,6 +123,64 @@ size_t emit_cie(Section& sec, bool is_aarch64, bool personality, bool via_got = 
     return cie_start;
 }
 
+// A shrink-wrapped x64 function (codegen/shrink_wrap.hpp): one row per frame
+// state change, each stating the whole state, so the table is exact at every
+// instruction — before a save point, inside a region, between a teardown
+// and its `ret` or `jmp`, and around a read of rsp without a frame.
+void emit_frame_rows(Section& sec, const CompiledFunctionInfo& fn) {
+    const auto saved = X64FrameLayout::get_saved_callee_gprs(fn.frame_info);
+    uint32_t loc = 0;
+    auto advance = [&](uint32_t to) {
+        const uint32_t delta = to - loc;
+        if (delta == 0) {
+        } else if (delta < 0x40) {
+            sec.emit8(static_cast<uint8_t>(elf::DW_CFA_advance_loc | delta));
+        } else if (delta <= 0xFF) {
+            sec.emit8(elf::DW_CFA_advance_loc1);
+            sec.emit8(static_cast<uint8_t>(delta));
+        } else if (delta <= 0xFFFF) {
+            sec.emit8(elf::DW_CFA_advance_loc2);
+            sec.emit8(static_cast<uint8_t>(delta & 0xFF));
+            sec.emit8(static_cast<uint8_t>(delta >> 8));
+        } else {
+            sec.emit8(elf::DW_CFA_advance_loc4);
+            sec.emit32(delta);
+        }
+        loc = to;
+    };
+    constexpr uint8_t kRestore = 0xC0;  // DW_CFA_restore | reg
+    auto def_cfa = [&](uint8_t reg, uint64_t offset) {
+        sec.emit8(elf::DW_CFA_def_cfa);
+        sec.emit8(reg);
+        emit_uleb128(sec, offset);
+    };
+    for (const codegen::FrameRow& row : fn.frame_rows) {
+        advance(row.offset);
+        switch (row.state) {
+            case codegen::FrameState::Frameless:
+            case codegen::FrameState::Lowered:
+                def_cfa(7, 8 + uint64_t{row.lowered});  // rsp
+                sec.emit8(kRestore | 6);                 // rbp
+                for (GPR g : saved) sec.emit8(static_cast<uint8_t>(kRestore | to_dwarf_gpr(g)));
+                break;
+            case codegen::FrameState::Pushed:
+                def_cfa(7, 16);
+                sec.emit8(elf::DW_CFA_offset | 6);
+                sec.emit8(2);
+                break;
+            case codegen::FrameState::Framed:
+                def_cfa(6, 16);  // rbp
+                sec.emit8(elf::DW_CFA_offset | 6);
+                sec.emit8(2);
+                for (size_t i = 0; i < saved.size(); ++i) {
+                    sec.emit8(static_cast<uint8_t>(elf::DW_CFA_offset | to_dwarf_gpr(saved[i])));
+                    sec.emit8(static_cast<uint8_t>(i + 3));  // [rbp - (i+1)*8]
+                }
+                break;
+        }
+    }
+}
+
 } // namespace
 
 std::vector<size_t> ElfCfiBuilder::emit_lsdas(ObjectFile& obj) {
@@ -230,7 +288,9 @@ void ElfCfiBuilder::build_eh_frame(
             eh_frame_sec.emit32(0);
         }
 
-        if (!fn.frame_info.is_leaf) {
+        if (!is_aarch64 && !fn.frame_rows.empty()) {
+            emit_frame_rows(eh_frame_sec, fn);
+        } else if (!fn.frame_info.is_leaf) {
             if (is_aarch64) {
                 uint64_t total_size = fn.frame_info.total_frame_size > 0 ? fn.frame_info.total_frame_size : 16;
                 uint64_t outgoing_bytes = (fn.frame_info.outgoing_arg_space + 15) & ~size_t(15);

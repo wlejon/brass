@@ -147,6 +147,9 @@ struct CompiledFunctionInfo {
     // x64: code that runs with RSP below the prologue's frame (guard exits),
     // in ascending order; described by chained unwind entries.
     std::vector<codegen::StackAdjustRegion> stack_adjust_regions;
+    // x64, a shrink-wrapped function's frame states (codegen::FrameRow);
+    // empty when the prologue is at entry.
+    std::vector<codegen::FrameRow> frame_rows;
 };
 
 struct ObjectFile {

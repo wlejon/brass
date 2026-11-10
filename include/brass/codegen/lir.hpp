@@ -607,6 +607,11 @@ public:
     // any loop), so a function whose depths are all zero is known loop-free
     // rather than unanalysed.
     bool loop_depths_computed = false;
+    // By vreg id: a value split_for_shrink_wrap (codegen/shrink_wrap.hpp)
+    // left in code meant to run without a frame. Linear scan takes no
+    // callee-saved register for it from a hint, so a copy into a region's
+    // callee-saved register does not pull it into one. Empty: none.
+    std::vector<uint8_t> frameless_vregs;
     // x64: the function may encode scalar float arithmetic in the three-
     // operand VEX form, so an Addsd-family instruction whose first use is a
     // register other than its def (the isel emits that only when this is

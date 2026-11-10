@@ -127,6 +127,7 @@ add_executable(brass_unit_tests
     unit/test_stack_args_tiers.cpp
     unit/test_narrow_int_tiers.cpp
     unit/test_jit_unwind.cpp
+    unit/test_x64_shrink_wrap.cpp
     unit/test_software_pipeline.cpp
     differential/test_sched_differential.cpp
     unit/test_source_loc.cpp
