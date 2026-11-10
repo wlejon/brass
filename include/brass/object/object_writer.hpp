@@ -19,6 +19,7 @@
 #include <memory>
 #include <span>
 #include <unordered_map>
+#include <utility>
 
 namespace brass::object {
 
@@ -193,6 +194,30 @@ private:
     void sync_symbol_index() const;
 };
 
+// Where each function goes in .text (ModuleCompiler::set_placement). With no
+// placement a module's functions are laid out in module order, which puts a
+// program's hot code wherever its source happened to put it: scattered over
+// the text, sharing L1 instruction-cache sets and op-cache lines with code
+// that never runs, so its speed changes with every edit anywhere in the
+// module. A front end that knows which functions ran says so here:
+//
+//   - `hot`: laid out first, contiguous, in exactly this order (put a caller
+//     before the callee it calls most, so they share lines and pages), each
+//     aligned as the target aligns every function (32 on x64, whose emitter
+//     aligns loop heads to 32 from the function's start; 16 on aarch64);
+//   - `cold`: laid out last, in this order (code that ran once, or never);
+//   - every other function between them, in module order.
+//
+// A name that is not one of the module's functions is ignored, as is a
+// repeat (the first mention wins; hot before cold). Placement only moves
+// code: the instructions of every function are what they are without it, and
+// the object is still byte-identical at any thread count.
+struct FunctionPlacement {
+    std::vector<std::string> hot;
+    std::vector<std::string> cold;
+    bool empty() const noexcept { return hot.empty() && cold.empty(); }
+};
+
 class ModuleCompiler {
 public:
     explicit ModuleCompiler(const Target& target);
@@ -245,6 +270,11 @@ public:
     // starting a thread costs more than it saves.
     void set_min_blocks_per_thread(size_t blocks) { min_blocks_per_thread_ = blocks; }
 
+    // The order of the functions in .text (FunctionPlacement above). Empty,
+    // the default, is module order.
+    void set_placement(FunctionPlacement placement) { placement_ = std::move(placement); }
+    const FunctionPlacement& placement() const noexcept { return placement_; }
+
     ObjectFile compile(const Module& mod);
 
 private:
@@ -252,6 +282,7 @@ private:
     CallingConvention cc_;
     codegen::SchedOptions sched_opts_;
     DeoptStressPlan deopt_stress_;
+    FunctionPlacement placement_;
     size_t threads_ = 0;
     size_t min_blocks_per_thread_ = 2000;
     bool enable_trace_layout_ = false;

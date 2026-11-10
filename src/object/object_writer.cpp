@@ -168,9 +168,14 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     // Stack maps appended by name without add_function's linear search for
     // an existing map (quadratic over a large module); a repeated name still
     // replaces through it.
+    // Placement: the front end's hot functions first, in its order, its cold
+    // ones last, the rest in module order between them (FunctionPlacement).
+    // Decided here, after every function is compiled and on one thread, so
+    // the order is the same at any thread count.
     std::unordered_set<std::string> mapped;
     detail::ObjectPlacement placement{obj, text_sec, mapped};
-    for (detail::EmittedFunction& fn : emitted) {
+    for (size_t k : detail::placement_order(fns, placement_)) {
+        detail::EmittedFunction& fn = emitted[k];
         if (!fn.emitted) continue;
         detail::write_block_map(fn.block_map);
         detail::place_function(placement, std::move(fn));

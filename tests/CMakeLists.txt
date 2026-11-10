@@ -242,6 +242,7 @@ add_executable(brass_unit_tests
     unit/test_mir_roundtrip_all.cpp
     unit/test_pass_manager.cpp
     unit/test_parallel_build.cpp
+    unit/test_function_placement.cpp
     unit/test_mir_uses.cpp
     unit/test_loop_ivsr.cpp
     unit/test_range_check_version.cpp

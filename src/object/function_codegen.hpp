@@ -60,6 +60,10 @@ struct ObjectPlacement {
 // symbol, tables and relocations at that offset.
 void place_function(ObjectPlacement& at, EmittedFunction&& fn);
 
+// The order compile() places `fns` in (indices into it), as `placement` asks
+// (object_writer.hpp, FunctionPlacement).
+std::vector<size_t> placement_order(const std::vector<const Function*>& fns, const FunctionPlacement& placement);
+
 // Appends BRASS_BLOCK_MAP's lines (the diagnostic's file, in function order).
 void write_block_map(const std::string& lines);
 

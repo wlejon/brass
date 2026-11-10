@@ -21,6 +21,8 @@
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
+#include <unordered_map>
 
 namespace brass::object::detail {
 
@@ -314,6 +316,36 @@ EmittedFunction compile_function(const Module& mod, const Function& fn, const Fu
     }
     out.info.cc = cfg.cc;
     return out;
+}
+
+std::vector<size_t> placement_order(const std::vector<const Function*>& fns, const FunctionPlacement& placement) {
+    std::vector<size_t> order;
+    order.reserve(fns.size());
+    if (placement.empty()) {
+        for (size_t i = 0; i < fns.size(); ++i) order.push_back(i);
+        return order;
+    }
+    // The first function of a name answers for it, as get_function does.
+    std::unordered_map<std::string_view, size_t> index;
+    index.reserve(fns.size());
+    for (size_t i = 0; i < fns.size(); ++i) index.try_emplace(fns[i]->name(), i);
+    std::vector<uint8_t> placed(fns.size(), 0);
+    const auto take = [&](const std::vector<std::string>& names, std::vector<size_t>& into) {
+        for (const std::string& name : names) {
+            const auto it = index.find(name);
+            if (it == index.end() || placed[it->second]) continue;
+            placed[it->second] = 1;
+            into.push_back(it->second);
+        }
+    };
+    take(placement.hot, order);
+    std::vector<size_t> cold;
+    take(placement.cold, cold);
+    for (size_t i = 0; i < fns.size(); ++i) {
+        if (!placed[i]) order.push_back(i);
+    }
+    order.insert(order.end(), cold.begin(), cold.end());
+    return order;
 }
 
 void place_function(ObjectPlacement& at, EmittedFunction&& fn) {
