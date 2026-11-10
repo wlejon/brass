@@ -261,3 +261,61 @@ TEST_CASE("Reload reuse - AArch64: X12 reloads are reused, the same writes keep 
     const PReg x15 = PReg::aarch64_gpr(aarch64::GPR::X15);
     CHECK_EQ(reloads_left(nullptr, x15, true), size_t(2));
 }
+
+TEST_CASE("Reload reuse - XMM14 and XMM15 reloads are reused unless implicitly clobbered") {
+    auto xmm_reloads_left = [](std::unique_ptr<LirInst> between, PReg scratch) {
+        LirFunction fn;
+        fn.calling_conv = CallingConvention::sysv64();
+        LirBlock* bb = fn.create_block("entry");
+        const PReg xmm0 = PReg::xmm(x64::XMM::XMM0);
+        const PReg xmm1 = PReg::xmm(x64::XMM::XMM1);
+        bb->append_inst(reload(scratch, 3, LirOpcode::Movsd, 8));
+        auto use1 = std::make_unique<LirInst>(LirOpcode::Addsd);
+        use1->add_def(LirOperand::preg(xmm0, 8));
+        use1->add_use(LirOperand::preg(xmm0, 8));
+        use1->add_use(LirOperand::preg(scratch, 8));
+        bb->append_inst(std::move(use1));
+        if (between) bb->append_inst(std::move(between));
+        bb->append_inst(reload(scratch, 3, LirOpcode::Movsd, 8));
+        auto use2 = std::make_unique<LirInst>(LirOpcode::Addsd);
+        use2->add_def(LirOperand::preg(xmm1, 8));
+        use2->add_use(LirOperand::preg(xmm1, 8));
+        use2->add_use(LirOperand::preg(scratch, 8));
+        bb->append_inst(std::move(use2));
+        run_lir_peephole_optimizations(fn);
+        return count_reloads(*bb, scratch, 3);
+    };
+
+    const PReg xmm14 = PReg::xmm(x64::XMM::XMM14);
+    const PReg xmm15 = PReg::xmm(x64::XMM::XMM15);
+    CHECK_EQ(xmm_reloads_left(nullptr, xmm14), size_t(1));
+    CHECK_EQ(xmm_reloads_left(nullptr, xmm15), size_t(1));
+
+    // A slot-to-slot Movsd implicitly clobbers XMM15 in emit_sse.cpp, not XMM14.
+    {
+        auto mm = std::make_unique<LirInst>(LirOpcode::Movsd);
+        mm->add_def(LirOperand::slot(7, 8));
+        mm->add_use(LirOperand::slot(8, 8));
+        CHECK_EQ(xmm_reloads_left(std::move(mm), xmm15), size_t(2));
+    }
+    {
+        auto mm = std::make_unique<LirInst>(LirOpcode::Movsd);
+        mm->add_def(LirOperand::slot(7, 8));
+        mm->add_use(LirOperand::slot(8, 8));
+        CHECK_EQ(xmm_reloads_left(std::move(mm), xmm14), size_t(1));
+    }
+
+    // Fabs64 implicitly clobbers both XMM14 and XMM15 in emit_sse.cpp.
+    {
+        auto fabs = std::make_unique<LirInst>(LirOpcode::Fabs64);
+        fabs->add_def(LirOperand::preg(PReg::xmm(x64::XMM::XMM2), 8));
+        fabs->add_use(LirOperand::preg(PReg::xmm(x64::XMM::XMM2), 8));
+        CHECK_EQ(xmm_reloads_left(std::move(fabs), xmm14), size_t(2));
+    }
+    {
+        auto fabs = std::make_unique<LirInst>(LirOpcode::Fabs64);
+        fabs->add_def(LirOperand::preg(PReg::xmm(x64::XMM::XMM2), 8));
+        fabs->add_use(LirOperand::preg(PReg::xmm(x64::XMM::XMM2), 8));
+        CHECK_EQ(xmm_reloads_left(std::move(fabs), xmm15), size_t(2));
+    }
+}

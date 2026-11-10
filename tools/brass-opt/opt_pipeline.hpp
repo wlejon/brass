@@ -5,6 +5,7 @@
 #include <brass/mir/gvn_pre.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/pass_manager.hpp>
+#include <brass/mir/write_barrier_elim.hpp>
 #include <iosfwd>
 
 namespace brass::opt {
@@ -16,6 +17,7 @@ struct OptStats {
     GvnPreStats pre;
     RangeAnalysisStats range;
     FmaOptStats fma;
+    WbeStats wbe;
 };
 
 // The pipeline brass-opt's transform flags select, as one declared list;

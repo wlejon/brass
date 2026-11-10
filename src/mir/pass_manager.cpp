@@ -32,14 +32,18 @@ bool admitted(const PassStep& step, const Function& fn) {
     return true;
 }
 
-bool run_on_function(const PassStep& step, Function& fn) {
+bool run_on_function(const PassStep& step, Function& fn, uint8_t& preds_valid) {
     if (!admitted(step, fn)) return false;
-    fn.rebuild_cfg_predecessors();
-    bool changed = step.run_function(fn);
-    fn.rebuild_cfg_predecessors();
-    if (changed && step.follow_up) {
-        step.follow_up(fn);
+    if (!preds_valid) {
         fn.rebuild_cfg_predecessors();
+        preds_valid = 1;
+    }
+    bool changed = step.run_function(fn);
+    if (changed) {
+        fn.rebuild_cfg_predecessors();
+        if (step.follow_up) {
+            if (step.follow_up(fn)) fn.rebuild_cfg_predecessors();
+        }
     }
     return changed;
 }
@@ -102,38 +106,40 @@ bool loop_eligible(const Function& fn) {
 
 namespace {
 
-// The snapshot's functions still in the module (a module step may have
-// removed some).
-std::vector<Function*> live_functions(const Module& mod, const std::vector<Function*>& fns) {
+// Indices of the snapshot's functions still in the module (a module step may
+// have removed some).
+std::vector<size_t> live_function_indices(const Module& mod, const std::vector<Function*>& fns) {
     const std::unordered_set<const Function*> live(mod.functions().begin(), mod.functions().end());
-    std::vector<Function*> out;
+    std::vector<size_t> out;
     out.reserve(fns.size());
-    for (Function* fn : fns) {
-        if (fn && live.count(fn)) out.push_back(fn);
+    for (size_t i = 0; i < fns.size(); ++i) {
+        if (fns[i] && live.count(fns[i])) out.push_back(i);
     }
     return out;
 }
 
-// Runs steps [first, last) of a concurrent stage on every function of `fns`:
+// Runs steps [first, last) of a concurrent stage on every live function:
 // each function through all of them, functions on up to `threads` threads.
 // The changed flags land per function and are or-ed in function order.
 bool run_concurrent(const std::vector<PassStep>& steps, size_t first, size_t last,
-                    const std::vector<Function*>& fns, const PipelineRunOptions& run) {
-    std::vector<size_t> weights(fns.size());
+                    const std::vector<Function*>& fns, const std::vector<size_t>& live,
+                    std::vector<uint8_t>& preds_valid, const PipelineRunOptions& run) {
+    std::vector<size_t> weights(live.size());
     size_t total = 0;
-    for (size_t i = 0; i < fns.size(); ++i) {
-        weights[i] = fns[i]->block_count() + 1;
+    for (size_t i = 0; i < live.size(); ++i) {
+        weights[i] = fns[live[i]]->block_count() + 1;
         total += weights[i];
     }
-    const size_t n = threads_for_work(run.threads, fns.size(), total, run.min_blocks_per_thread);
-    std::vector<uint8_t> changed(fns.size(), 0);
+    const size_t n = threads_for_work(run.threads, live.size(), total, run.min_blocks_per_thread);
+    std::vector<uint8_t> changed(live.size(), 0);
     parallel_for_each(heaviest_first(weights), n, [&](size_t i) {
-        Function& fn = *fns[i];
+        const size_t fn_idx = live[i];
+        Function& fn = *fns[fn_idx];
         FunctionWorkScope work(fn);
         bool any = false;
         for (size_t s = first; s < last; ++s) {
             PhaseTimeScope timing(steps[s].name);
-            any |= run_on_function(steps[s], fn);
+            any |= run_on_function(steps[s], fn, preds_valid[fn_idx]);
         }
         changed[i] = any ? 1 : 0;
     });
@@ -149,6 +155,7 @@ PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPip
     PipelineResult result;
     if (pipeline.marks_loop_optimized()) mod.set_has_loop_optimizations(true);
     const std::vector<Function*> fns = mod.functions();
+    std::vector<uint8_t> preds_valid(fns.size(), 0);
     const std::vector<PassStep>& steps = pipeline.steps();
     const bool stepwise = static_cast<bool>(hooks.before_pass) || static_cast<bool>(hooks.after_pass);
     // Runs the hooks around one step; false: a hook stopped the pipeline.
@@ -161,9 +168,13 @@ PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPip
             {
                 PhaseTimeScope timing(step.name);
                 if (step.scope == PassScope::Module) {
-                    result.changed |= step.run_module(mod);
+                    const bool mod_changed = step.run_module(mod);
+                    result.changed |= mod_changed;
+                    if (mod_changed) preds_valid.assign(fns.size(), 0);
                 } else {
-                    for (Function* fn : live_functions(mod, fns)) result.changed |= run_on_function(step, *fn);
+                    for (size_t fn_idx : live_function_indices(mod, fns)) {
+                        result.changed |= run_on_function(step, *fns[fn_idx], preds_valid[fn_idx]);
+                    }
                 }
             }
             if (!after(step)) {
@@ -179,15 +190,15 @@ PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPip
         for (size_t s = i; s < end; ++s) {
             if (steps[s].prepare) steps[s].prepare(mod);
         }
-        const std::vector<Function*> stage_fns = live_functions(mod, fns);
+        const std::vector<size_t> stage_live = live_function_indices(mod, fns);
         if (!stepwise) {
-            result.changed |= run_concurrent(steps, i, end, stage_fns, run);
+            result.changed |= run_concurrent(steps, i, end, fns, stage_live, preds_valid, run);
             i = end;
             continue;
         }
         for (; i < end; ++i) {
             if (hooks.before_pass) hooks.before_pass(steps[i].name);
-            result.changed |= run_concurrent(steps, i, i + 1, stage_fns, run);
+            result.changed |= run_concurrent(steps, i, i + 1, fns, stage_live, preds_valid, run);
             if (!after(steps[i])) {
                 result.completed = false;
                 return result;
@@ -204,11 +215,12 @@ PipelineResult run_pipeline(Function& fn, const Pipeline& pipeline, const PassPi
         }
     }
     PipelineResult result;
+    uint8_t preds_valid = 0;
     for (const PassStep& step : pipeline.steps()) {
         if (hooks.before_pass) hooks.before_pass(step.name);
         {
             PhaseTimeScope timing(step.name);
-            result.changed |= run_on_function(step, fn);
+            result.changed |= run_on_function(step, fn, preds_valid);
         }
         if (hooks.after_pass && !hooks.after_pass(step.name)) {
             result.completed = false;

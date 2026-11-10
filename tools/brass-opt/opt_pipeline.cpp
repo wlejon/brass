@@ -51,7 +51,8 @@ Pipeline build_pipeline(const OptCli& cli, OptStats& stats, std::ostream& report
     if (cli.enable_jump_threading) p.add(passes::jump_threading(loops, false));
     if (cli.enable_bce) p.add(passes::bce("bce", cli.dump_range_stats, &stats.range, false));
     if (cli.any_loop_transform()) p.append(loop_pipeline(loops));
-    if (cli.enable_wbe) p.add(passes::write_barrier_elim(cli.dump_wbe_stats, cli.dump_wbe_stats ? &report : nullptr));
+    (void)report;
+    if (cli.enable_wbe) p.add(passes::write_barrier_elim(false, nullptr, cli.dump_wbe_stats ? &stats.wbe : nullptr));
     return p;
 }
 
@@ -65,6 +66,7 @@ void dump_stats(const OptCli& cli, const OptStats& stats, std::ostream& os) {
     if (cli.dump_fma_stats) os << stats.fma.format_report() << "\n";
     if (cli.dump_parallel_stats) os << stats.loops.parallel_stats.format_report();
     if (cli.dump_range_stats) stats.range.dump(os);
+    if (cli.dump_wbe_stats) stats.wbe.dump(os);
 }
 
 } // namespace brass::opt

@@ -63,7 +63,13 @@ TEST_CASE("F64 Demote - Loop-Invariant Step Versioned On Its Sign, Counter Demot
     CHECK_EQ(b1->param(0)->type(), Type::i64());
     bool has_copy = false;
     for (const BasicBlock* bb : fn->blocks()) {
-        if (bb && std::string_view(bb->name()).find("_f64c") != std::string_view::npos) has_copy = true;
+        if (!bb) continue;
+        if (std::string_view(bb->name()).find("_f64c") != std::string_view::npos) {
+            has_copy = true;
+            CHECK(bb->is_cold());
+        } else {
+            CHECK_FALSE(bb->is_cold());
+        }
     }
     CHECK(has_copy);
 
@@ -82,4 +88,55 @@ TEST_CASE("F64 Demote - Loop-Invariant Step Versioned On Its Sign, Counter Demot
     CHECK_EQ(strided(-5), -6125.0);      // the copy: 0, -5, ..., -245
     CHECK_EQ(strided(2147483647), 0.0);  // one trip, then past the limit
     CHECK_EQ(strided(-2147483647 - 1), -2147483648.0 * 1225.0);
+}
+
+TEST_CASE("F64 Demote - Entry-Param Value Versioning Marks Fallback _f64v Blocks Cold") {
+    Module mod("test_demote_entry_cold");
+    Builder b(mod);
+    Function* fn = mod.create_function("scaled_sum", Type::f64(), {Type::f64()});
+    b.set_function(fn);
+
+    BasicBlock* b0 = b.append_block("b0");
+    Value* n = b.add_block_param(b0, Type::f64());
+    BasicBlock* b1 = b.create_block("b1");
+    BasicBlock* b2 = b.create_block("b2");
+    BasicBlock* b3 = b.create_block("b3");
+
+    Value* zero = b.build_fconst_f64(0.0);
+    b.build_br(b1, {zero, zero});
+
+    fn->append_block(b1);
+    b.position_at_end(b1);
+    Value* acc = b.add_block_param(b1, Type::f64());
+    Value* i = b.add_block_param(b1, Type::f64());
+    b.build_br_if(b.build_slt(i, n), b2, {}, b3, {acc});
+
+    fn->append_block(b2);
+    b.position_at_end(b2);
+    Value* scaled = b.build_mul(i, b.build_fconst_f64(3.0));
+    Value* as_int = b.build_sitofp_f64_i64(b.build_fptosi_i64(scaled));
+    b.build_br(b1, {b.build_add(acc, as_int), b.build_add(i, b.build_fconst_f64(1.0))});
+
+    fn->append_block(b3);
+    b.position_at_end(b3);
+    Value* r = b.add_block_param(b3, Type::f64());
+    b.build_ret(r);
+
+    fn->rebuild_cfg_predecessors();
+    DiagnosticReporter diag;
+    REQUIRE(verify_function(*fn, &diag));
+
+    CHECK(f64_demote_pass(*fn, {}));
+    REQUIRE(verify_function(*fn, &diag));
+    size_t cold_f64v = 0;
+    for (const BasicBlock* bb : fn->blocks()) {
+        if (!bb) continue;
+        if (std::string_view(bb->name()).find("_f64v") != std::string_view::npos) {
+            ++cold_f64v;
+            CHECK(bb->is_cold());
+        } else {
+            CHECK_FALSE(bb->is_cold());
+        }
+    }
+    CHECK(cold_f64v > size_t{0});
 }

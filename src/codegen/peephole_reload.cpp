@@ -21,7 +21,10 @@
 //                stub's stack arguments, a ParallelCopy's memory moves
 //           R15  none (the rewriter's third use scratch where an instruction
 //                needs one, else an allocatable register: always a LIR def)
-//           XMM12, XMM13  none (XMM14 / XMM15 are the emitters'; untracked)
+//           XMM14  a ParallelCopy's cycle temporary, and Fabs's mask when dst
+//                  is XMM15
+//           XMM15  memory-to-memory moves (Movsd, Movss, Movups, Vmovups, a
+//                  ParallelCopy's memory moves), and Fabs's mask
 //   AArch64 X12, X13  none (X14 / X15 / X16 / X17 are the emitters'; untracked)
 //           V26, V28  none (V27 / V29 / V30 / V31 untracked)
 // A call, safepoint, guard exit, parallel copy, write barrier or trap ends
@@ -134,7 +137,7 @@ bool PeepholeOptimizer::reuse_scratch_reloads() {
                 Held{PReg{}}};
     } else {
         held = {Held{PReg::gpr(x64::GPR::R10)}, Held{PReg::gpr(x64::GPR::R11)}, Held{PReg::gpr(x64::GPR::R15)},
-                Held{PReg::xmm(x64::XMM::XMM12)}, Held{PReg::xmm(x64::XMM::XMM13)}};
+                Held{PReg::xmm(x64::XMM::XMM14)}, Held{PReg::xmm(x64::XMM::XMM15)}};
     }
     const PReg r11 = a64 ? PReg{} : PReg::gpr(x64::GPR::R11);
     const PReg fp = a64 ? PReg::aarch64_gpr(aarch64::GPR::X29) : PReg::gpr(x64::GPR::RBP);
@@ -191,13 +194,16 @@ bool PeepholeOptimizer::reuse_scratch_reloads_block(LirBlock& block, std::array<
         for (Held& h : held) {
             if (h.slot >= 0 && defines_register(inst, h.reg)) h.slot = -1;
         }
-        // R11 behind the LIR's back (see the audit above); the rewriter
-        // notes most of these as clobbers, but not the resolution moves.
+        // R11 and XMM15/XMM14 behind the LIR's back (see the audit above); the
+        // rewriter notes most of these as clobbers, but not the resolution moves.
         if (r11.is_valid() && !inst.defs.empty() && !inst.uses.empty() &&
             ((in_memory(inst.defs[0]) && in_memory(inst.uses[0])) || inst.opcode == LirOpcode::Fabs32 ||
              inst.opcode == LirOpcode::Fabs64)) {
+            const bool is_fabs = inst.opcode == LirOpcode::Fabs32 || inst.opcode == LirOpcode::Fabs64;
+            const PReg xmm15 = PReg::xmm(x64::XMM::XMM15);
+            const PReg xmm14 = PReg::xmm(x64::XMM::XMM14);
             for (Held& h : held) {
-                if (h.reg == r11) h.slot = -1;
+                if (h.reg == r11 || h.reg == xmm15 || (is_fabs && h.reg == xmm14)) h.slot = -1;
             }
         }
         for (const LirOperand& d : inst.defs) {

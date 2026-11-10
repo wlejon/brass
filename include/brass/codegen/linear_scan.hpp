@@ -139,6 +139,12 @@ private:
         std::vector<uint32_t> vregs;
     };
     std::vector<SlotOwners> shared_slots_;
+    struct AllocatedSlot {
+        int32_t slot = -1;
+        uint8_t words = 1;
+        bool is_gcref = false;
+    };
+    std::vector<AllocatedSlot> allocated_slots_;
     // Values that keep one location for their whole life: GC references
     // (stack maps name one place per value), values live into a block
     // entered other than by an ordinary branch (a landing pad, a resume
@@ -194,6 +200,7 @@ private:
     int32_t allocate_spill_slot(bool is_gcref, uint8_t size);
     int32_t allocate_spill_slot(bool is_gcref) { return allocate_spill_slot(is_gcref, 8); }
     int32_t slot_of(VReg v);
+    void reorder_spill_slots();
 
     // linear_scan_pieces.cpp: the interval-splitting scan.
     void run_scan();

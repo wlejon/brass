@@ -440,7 +440,12 @@ bool version_loop(Function& fn, LoopInfo& loop) {
                                         Span<Value* const>(args.data(), args.size()));
     preheader->remove_instruction(ph_term);
     fn.rebuild_cfg_predecessors();
-    if (verify_function(fn)) return true;
+    if (verify_function(fn)) {
+        // The cloned loop is the fast check-free path; the original loop
+        // runs only when the preheader range check fails, so mark it cold.
+        for (BasicBlock* bb : ordered) bb->set_cold();
+        return true;
+    }
 
     // A shape this did not foresee: take the copy back out (the condition's
     // instructions are dead).

@@ -4,6 +4,7 @@
 // a bronze-shaped loop actually vectorizes.
 
 #include "test_framework.hpp"
+#include <brass/mir/write_barrier_elim.hpp>
 #include <brass/brass.hpp>
 #include <brass/mir/pass_pipeline.hpp>
 #include <brass/interpreter/interpreter.hpp>
@@ -198,10 +199,17 @@ TEST_CASE("Pass manager - filters, follow-ups and hooks") {
     CHECK(!run_pipeline(*mod, p, hooks).completed);
     CHECK_EQ(all_runs, 2);
 
-    // Module steps cannot run on one function.
+    // Module steps cannot run on one function; wbe is function-scoped and concurrent.
     Pipeline with_module;
-    with_module.add(passes::write_barrier_elim());
+    with_module.add(passes::devirtualize());
     CHECK(throws_logic_error([&] { run_pipeline(*mod->get_function("f"), with_module); }));
+
+    const PassStep wbe = passes::write_barrier_elim();
+    CHECK(wbe.scope == PassScope::Function);
+    CHECK(wbe.concurrent);
+    Pipeline with_wbe;
+    with_wbe.add(wbe);
+    CHECK(run_pipeline(*mod->get_function("f"), with_wbe).completed);
 
     Pipeline loops = loop_pipeline(LoopOptOptions{});
     CHECK(loops.marks_loop_optimized());
@@ -288,4 +296,148 @@ TEST_CASE("Pass manager - production pipeline vectorizes a bronze-shaped loop") 
         auto fresh = parse(kBronzeLoop);
         CHECK_EQ(run_main(*mod, n, 100), run_main(*fresh, n, 100));
     }
+}
+
+TEST_CASE("Pass manager - concurrent write_barrier_elim matches serial and accumulates stats") {
+    constexpr const char* kMultiWbe = R"(
+extern @brass_gc_alloc
+
+func @f0(%o: gcref, %v: gcref) -> gcref {
+entry:
+  %sz = iconst.i64 16
+  %m = iconst.i64 1
+  %t = iconst.i32 1
+  %y = call.gcref @brass_gc_alloc(%sz, %m, %t)
+  write_barrier %y, %v
+  write_barrier %o, %v
+  write_barrier %o, %v
+  ret %y
+}
+
+func @f1(%o: gcref, %v: gcref) -> void {
+entry:
+  %i = iconst.i64 7
+  write_barrier %o, %i
+  write_barrier %o, %v
+  ret
+}
+
+func @f2(%o: gcref, %v: gcref) -> gcref {
+entry:
+  %sz = iconst.i64 32
+  %m = iconst.i64 1
+  %t = iconst.i32 1
+  %y = call.gcref @brass_gc_alloc(%sz, %m, %t)
+  write_barrier %y, %o
+  write_barrier %y, %v
+  ret %y
+}
+
+func @f3(%o: gcref, %v: gcref) -> void {
+entry:
+  write_barrier %o, %v
+  write_barrier %o, %v
+  write_barrier %o, %v
+  ret
+}
+)";
+    auto serial_mod = parse(kMultiWbe);
+    auto parallel_mod = parse(kMultiWbe);
+
+    WbeStats serial_stats;
+    Pipeline p_serial;
+    p_serial.add(passes::write_barrier_elim(/*dump_stats=*/false, nullptr, &serial_stats));
+    PipelineRunOptions opts1;
+    opts1.threads = 1;
+    run_pipeline(*serial_mod, p_serial, {}, opts1);
+
+    Pipeline p_parallel;
+    const PassStep wbe = passes::write_barrier_elim();
+    REQUIRE(wbe.concurrent);
+    p_parallel.add(wbe);
+    PipelineRunOptions opts4;
+    opts4.threads = 4;
+    opts4.min_blocks_per_thread = 1;
+    run_pipeline(*parallel_mod, p_parallel, {}, opts4);
+
+    for (const char* name : {"f0", "f1", "f2", "f3"}) {
+        CHECK_EQ(count_opcode(*parallel_mod->get_function(name), Opcode::write_barrier),
+                 count_opcode(*serial_mod->get_function(name), Opcode::write_barrier));
+    }
+    CHECK_EQ(serial_stats.eliminated_young_provenance, 3u);
+    CHECK_EQ(serial_stats.eliminated_redundant, 3u);
+    CHECK_EQ(serial_stats.eliminated_non_pointer, 1u);
+    CHECK_EQ(serial_stats.remaining_barriers, 3u);
+}
+
+TEST_CASE("Pass manager - CFG predecessors remain valid across unchanged and mutating steps") {
+    auto mod = parse(R"(
+func @f(%c: i64) -> i64 {
+entry:
+  %z = iconst.i64 0
+  %ok = eq.i64 %c, %z
+  br_if %ok, left, right
+left:
+  br join(%z)
+right:
+  %one = iconst.i64 1
+  br join(%one)
+join(%r: i64):
+  ret %r
+}
+)");
+    Function& fn = *mod->get_function("f");
+    // Clear predecessors before running so the initial lazy build is exercised.
+    for (BasicBlock* bb : fn.blocks()) bb->clear_predecessors();
+
+    PassStep check_preds_unchanged;
+    check_preds_unchanged.name = "check_preds_unchanged";
+    check_preds_unchanged.scope = PassScope::Function;
+    check_preds_unchanged.run_function = [](Function& f) {
+        for (BasicBlock* bb : f.blocks()) {
+            if (bb->name() == "join") CHECK_EQ(bb->predecessors().size(), size_t{2});
+        }
+        return false;
+    };
+
+    PassStep collapse_diamond;
+    collapse_diamond.name = "collapse_diamond";
+    collapse_diamond.scope = PassScope::Function;
+    collapse_diamond.run_function = [](Function& f) {
+        BasicBlock* entry = f.entry_block();
+        BasicBlock* join = nullptr;
+        for (BasicBlock* bb : f.blocks()) {
+            if (bb->name() == "join") join = bb;
+        }
+        REQUIRE(join != nullptr);
+        Builder b(*f.parent());
+        b.set_function(&f);
+        Instruction* term = entry->terminator();
+        b.position_before(term);
+        Value* z = b.build_iconst_i64(0);
+        b.build_br(join, {z});
+        entry->remove_instruction(term);
+        // Corrupt predecessors transiently; returning true must trigger rebuild before next step.
+        join->clear_predecessors();
+        return true;
+    };
+
+    PassStep check_after_mutate;
+    check_after_mutate.name = "check_after_mutate";
+    check_after_mutate.scope = PassScope::Function;
+    check_after_mutate.run_function = [](Function& f) {
+        for (BasicBlock* bb : f.blocks()) {
+            if (bb->name() == "join") CHECK_EQ(bb->predecessors().size(), size_t{3});
+        }
+        return false;
+    };
+
+    Pipeline p;
+    p.add(check_preds_unchanged);
+    PassStep check_preds_unchanged2 = check_preds_unchanged;
+    check_preds_unchanged2.name = "check_preds_unchanged 2";
+    p.add(check_preds_unchanged2);
+    p.add(collapse_diamond);
+    p.add(check_after_mutate);
+    CHECK(run_pipeline(fn, p).completed);
 }

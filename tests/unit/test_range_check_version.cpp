@@ -41,6 +41,16 @@ void version(Module& mod, Function& fn) {
     if (!verified) std::cerr << diag.format_all() << "\n" << to_string(fn) << "\n";
     REQUIRE(verified);
     CHECK(has_block_named(fn, "_rcv"));
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        const std::string_view name = bb->name();
+        if (name.find("_rcv") != std::string_view::npos || name == "b0" || name == "b_exit") {
+            CHECK_FALSE(bb->is_cold());
+        } else {
+            // Original bounds-checked loop blocks are the slow fallback version.
+            CHECK(bb->is_cold());
+        }
+    }
 }
 
 } // namespace

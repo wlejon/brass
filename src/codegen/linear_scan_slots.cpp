@@ -1,12 +1,57 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <algorithm>
 #include <bit>
+#include <numeric>
+#include <unordered_map>
 
-// The allocator's stack slots: which value goes in which slot (slot_of) and
-// the zeroing of dead slots and callee-saved registers before calls
-// (clear_dead_callee_gprs_at_calls).
+// The allocator's stack slots: allocation, sharing (slot_of), hot-first
+// slot ordering (reorder_spill_slots), and the zeroing of dead slots and
+// callee-saved registers before calls (clear_dead_callee_gprs_at_calls).
 
 namespace brass::codegen {
+
+// A value wider than 8 bytes takes 2 (16 bytes) or 4 (32 bytes) adjacent
+// 8-byte slots, and the slot index it is known by is the one whose address
+// is lowest, where the whole value is stored. x64 slots grow downward from
+// RBP (slot i at rbp - (i + 1) * 8), so that is the highest of the run;
+// AArch64 slots grow upward from FP (AArch64FrameLayout::spill_slot_address),
+// so it is the lowest. Getting this backwards stores a vector over the next
+// value's slot.
+int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
+    const bool slots_grow_up = cc_.target().is_aarch64();
+    if (size == 32) {
+        while ((next_spill_slot_ % 4) != 0) {
+            next_spill_slot_++;
+            fn_.frame.spill_slot_is_gcref.push_back(false);
+        }
+        for (int i = 0; i < 4; ++i) {
+            fn_.frame.spill_slot_is_gcref.push_back(false);
+        }
+        next_spill_slot_ += 4;
+        fn_.frame.num_spill_slots = next_spill_slot_;
+        int32_t slot = static_cast<int32_t>(slots_grow_up ? next_spill_slot_ - 4 : next_spill_slot_ - 1);
+        allocated_slots_.push_back(AllocatedSlot{slot, 4, false});
+        return slot;
+    }
+    if (size == 16) {
+        while ((next_spill_slot_ % 2) != 0) {
+            next_spill_slot_++;
+            fn_.frame.spill_slot_is_gcref.push_back(false);
+        }
+        fn_.frame.spill_slot_is_gcref.push_back(false);
+        fn_.frame.spill_slot_is_gcref.push_back(false);
+        next_spill_slot_ += 2;
+        fn_.frame.num_spill_slots = next_spill_slot_;
+        int32_t slot = static_cast<int32_t>(slots_grow_up ? next_spill_slot_ - 2 : next_spill_slot_ - 1);
+        allocated_slots_.push_back(AllocatedSlot{slot, 2, false});
+        return slot;
+    }
+    int32_t slot = static_cast<int32_t>(next_spill_slot_++);
+    fn_.frame.spill_slot_is_gcref.push_back(is_gcref);
+    fn_.frame.num_spill_slots = next_spill_slot_;
+    allocated_slots_.push_back(AllocatedSlot{slot, 1, is_gcref});
+    return slot;
+}
 
 // One spill slot per value, shared by all its spilled pieces, and by any
 // value whose live interval meets none of the slot's other owners': a slot
@@ -102,6 +147,242 @@ int32_t LinearScanAllocator::slot_of(VReg v) {
     slot = allocate_spill_slot(v.is_gcref, v.size);
     if (shareable) shared_slots_.push_back(SlotOwners{slot, v.is_gcref, v.is_gpr(), v.size, {v.id}});
     return slot;
+}
+
+// Spill slots are allocated in interval-encounter order, which often puts
+// function-wide or cold values in the lowest indices while hot loop spills
+// land past x64's signed 8-bit displacement window ([-128, +127] from RBP,
+// four code bytes per access instead of one) or past bit 63 of
+// clear_dead_callee_gprs_at_calls's GPR slot mask. Score each allocated
+// logical slot by the loop-weighted stack accesses of its spilled pieces and
+// split moves, deprioritizing x64 single-constant slots that pool into RIP
+// operands without touching the stack, and repack highest-frequency first.
+void LinearScanAllocator::reorder_spill_slots() {
+    const size_t m = allocated_slots_.size();
+    if (m <= 1) return;
+
+    std::vector<int32_t> old_to_group(next_spill_slot_, -1);
+    for (size_t g = 0; g < m; ++g) {
+        const int32_t s = allocated_slots_[g].slot;
+        if (s >= 0 && static_cast<size_t>(s) < old_to_group.size()) {
+            old_to_group[static_cast<size_t>(s)] = static_cast<int32_t>(g);
+        }
+    }
+
+    auto block_weight = [](bool cold, uint32_t depth) -> double {
+        const double base = cold ? (1.0 / 1024.0) : 1.0;
+        return base * static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(depth, 10)));
+    };
+    auto inst_weight = [&](uint32_t pos) -> double {
+        auto it = std::upper_bound(spans_.begin(), spans_.end(), pos,
+                                   [](uint32_t v, const BlockSpan& s) { return v < s.start; });
+        if (it == spans_.begin()) return 1.0;
+        const BlockSpan& sp = *std::prev(it);
+        return block_weight(sp.block->cold || is_guard_exit(sp.block), sp.depth);
+    };
+
+    std::unordered_map<uint32_t, const LirBlock*> block_by_id;
+    block_by_id.reserve(fn_.blocks.size());
+    for (const auto& b : fn_.blocks) block_by_id.emplace(b->id, b.get());
+
+    std::vector<double> score(m, 0.0);
+    auto add_slot = [&](int32_t s, double w) {
+        if (s < 0 || static_cast<size_t>(s) >= old_to_group.size()) return;
+        const int32_t g = old_to_group[static_cast<size_t>(s)];
+        if (g >= 0) score[static_cast<size_t>(g)] += w;
+    };
+    auto add_vreg = [&](VReg v, uint32_t at, double w) {
+        if (!v.is_valid()) return;
+        const LirOperand loc = location_at(v, at, 8);
+        if (loc.is_spill_slot()) add_slot(loc.spill_slot, w);
+    };
+
+    auto poolable_opcode = [](const LirInst& in) -> bool {
+        switch (in.opcode) {
+            case LirOpcode::Mov:
+            case LirOpcode::Add:
+            case LirOpcode::Sub:
+            case LirOpcode::And:
+            case LirOpcode::Or:
+            case LirOpcode::Xor:
+            case LirOpcode::Cmp:
+            case LirOpcode::Test:
+            case LirOpcode::Cmovcc:
+            case LirOpcode::Movsd:
+            case LirOpcode::Movq_gx:
+                break;
+            default:
+                return false;
+        }
+        for (const auto& u : in.uses) {
+            if (u.is_imm_int() || u.is_imm_float()) return false;
+        }
+        return true;
+    };
+
+    std::vector<uint8_t> constant_refused(fn_.vreg_table.size(), 0);
+    for (const auto& block : fn_.blocks) {
+        const bool cold = block->cold || is_guard_exit(block.get());
+        const double w = block_weight(cold, block->loop_depth);
+        uint32_t exit_at = UINT32_MAX;
+        if (is_guard_exit(block.get())) {
+            if (auto g = guard_exit_at_.find(block->id); g != guard_exit_at_.end()) exit_at = g->second;
+        }
+        for (const auto& inst : block->instructions) {
+            if (inst->opcode == LirOpcode::Safepoint || inst->opcode == LirOpcode::KeepAlive) continue;
+            const uint32_t at = (exit_at != UINT32_MAX && inst->opcode == LirOpcode::GuardExit) ? exit_at : inst->id;
+            for (const auto& d : inst->defs) {
+                if (d.is_vreg()) add_vreg(d.vreg_val, at, w);
+                else if (d.is_spill_slot()) add_slot(d.spill_slot, w);
+                else if (d.is_mem()) {
+                    add_vreg(d.mem_val.base_vreg, at, w);
+                    add_vreg(d.mem_val.index_vreg, at, w);
+                }
+            }
+            for (const auto& u : inst->uses) {
+                if (u.is_vreg()) {
+                    add_vreg(u.vreg_val, at, w);
+                    if (inst->opcode == LirOpcode::GuardExit && u.vreg_val.id < constant_refused.size()) {
+                        constant_refused[u.vreg_val.id] = 1;
+                    }
+                } else if (u.is_spill_slot()) {
+                    add_slot(u.spill_slot, w);
+                } else if (u.is_mem()) {
+                    add_vreg(u.mem_val.base_vreg, at, w);
+                    add_vreg(u.mem_val.index_vreg, at, w);
+                }
+            }
+            if (!constant_vregs_.empty() && !inst->uses.empty() && slot_fold_width(inst->opcode) != 0) {
+                const LirOperand& last = inst->uses.back();
+                if (last.is_vreg() && last.vreg_val.id < constant_refused.size() &&
+                    constant_vregs_.count(last.vreg_val.id) && !poolable_opcode(*inst)) {
+                    constant_refused[last.vreg_val.id] = 1;
+                }
+            }
+        }
+    }
+
+    auto score_moves = [&](const auto& moves, double w) {
+        for (const PendingMove& pm : moves) {
+            if (pm.dst.is_spill_slot()) add_slot(pm.dst.spill_slot, w);
+            if (pm.src.is_spill_slot()) add_slot(pm.src.spill_slot, w);
+        }
+    };
+    for (const auto& [inst_id, moves] : moves_before_) score_moves(moves, inst_weight(inst_id));
+    for (const auto& [inst_id, moves] : moves_after_) score_moves(moves, inst_weight(inst_id));
+    for (const auto& [block_id, moves] : moves_at_start_) {
+        auto it = block_by_id.find(block_id);
+        const double w = it != block_by_id.end()
+                             ? block_weight(it->second->cold || is_guard_exit(it->second), it->second->loop_depth)
+                             : 1.0;
+        score_moves(moves, w);
+    }
+    for (const auto& [block_id, moves] : moves_at_end_) {
+        auto it = block_by_id.find(block_id);
+        const double w = it != block_by_id.end()
+                             ? block_weight(it->second->cold || is_guard_exit(it->second), it->second->loop_depth)
+                             : 1.0;
+        score_moves(moves, w);
+    }
+    for (const EdgeSplit& e : edge_splits_) {
+        const double w = block_weight(e.pred->cold || e.succ->cold,
+                                      std::min(e.pred->loop_depth, e.succ->loop_depth));
+        score_moves(e.moves, w);
+    }
+
+    if (!constant_vregs_.empty()) {
+        std::vector<uint32_t> owners(m, 0);
+        for (int32_t s : vreg_slot_) {
+            if (s >= 0 && static_cast<size_t>(s) < old_to_group.size()) {
+                const int32_t g = old_to_group[static_cast<size_t>(s)];
+                if (g >= 0) owners[static_cast<size_t>(g)]++;
+            }
+        }
+        for (const auto& [id, _] : constant_vregs_) {
+            if (id >= vreg_slot_.size() || vreg_slot_[id] < 0 || constant_refused[id]) continue;
+            const int32_t s = vreg_slot_[id];
+            if (static_cast<size_t>(s) >= old_to_group.size()) continue;
+            const int32_t g = old_to_group[static_cast<size_t>(s)];
+            if (g >= 0 && owners[static_cast<size_t>(g)] == 1 && !allocated_slots_[static_cast<size_t>(g)].is_gcref) {
+                score[static_cast<size_t>(g)] = -1.0;
+            }
+        }
+    }
+
+    std::vector<size_t> order(m);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        if (score[a] != score[b]) return score[a] > score[b];
+        return allocated_slots_[a].slot < allocated_slots_[b].slot;
+    });
+
+    const bool slots_grow_up = cc_.target().is_aarch64();
+    std::vector<uint8_t> placed(m, 0);
+    std::vector<int32_t> remap(next_spill_slot_, -1);
+    std::vector<bool> new_is_gcref;
+    new_is_gcref.reserve(next_spill_slot_);
+    std::vector<AllocatedSlot> new_allocated;
+    new_allocated.reserve(m);
+
+    size_t placed_count = 0;
+    size_t head = 0;
+    while (placed_count < m) {
+        while (head < m && placed[order[head]]) ++head;
+        const size_t primary = order[head];
+        const uint8_t need_align = allocated_slots_[primary].words;
+        size_t pick = primary;
+        if ((new_is_gcref.size() % need_align) != 0) {
+            // Fill an alignment gap before a 16B/32B vector slot with the
+            // hottest remaining narrower slot instead of dead padding.
+            const size_t gap = need_align - (new_is_gcref.size() % need_align);
+            for (size_t k = head + 1; k < m; ++k) {
+                const size_t cand = order[k];
+                if (placed[cand]) continue;
+                const uint8_t w = allocated_slots_[cand].words;
+                if (w <= gap && (new_is_gcref.size() % w) == 0) {
+                    pick = cand;
+                    break;
+                }
+            }
+        }
+        const AllocatedSlot info = allocated_slots_[pick];
+        while ((new_is_gcref.size() % info.words) != 0) {
+            new_is_gcref.push_back(false);
+        }
+        const size_t base = new_is_gcref.size();
+        for (uint8_t k = 0; k < info.words; ++k) {
+            new_is_gcref.push_back(info.words == 1 ? info.is_gcref : false);
+        }
+        const int32_t new_slot = static_cast<int32_t>(slots_grow_up ? base : (base + info.words - 1));
+        remap[static_cast<size_t>(info.slot)] = new_slot;
+        new_allocated.push_back(AllocatedSlot{new_slot, info.words, info.is_gcref});
+        placed[pick] = 1;
+        ++placed_count;
+    }
+
+    fn_.frame.spill_slot_is_gcref = std::move(new_is_gcref);
+    next_spill_slot_ = fn_.frame.spill_slot_is_gcref.size();
+    fn_.frame.num_spill_slots = next_spill_slot_;
+    allocated_slots_ = std::move(new_allocated);
+
+    auto map_slot = [&](int32_t& s) {
+        if (s >= 0 && static_cast<size_t>(s) < remap.size() && remap[static_cast<size_t>(s)] >= 0) {
+            s = remap[static_cast<size_t>(s)];
+        }
+    };
+    auto map_moves = [&](std::vector<PendingMove>& moves) {
+        for (PendingMove& pm : moves) {
+            if (pm.dst.is_spill_slot()) map_slot(pm.dst.spill_slot);
+            if (pm.src.is_spill_slot()) map_slot(pm.src.spill_slot);
+        }
+    };
+    for (int32_t& s : vreg_slot_) map_slot(s);
+    for (SlotOwners& so : shared_slots_) map_slot(so.slot);
+    for (auto& [_, moves] : moves_before_) map_moves(moves);
+    for (auto& [_, moves] : moves_after_) map_moves(moves);
+    for (auto& [_, moves] : moves_at_start_) map_moves(moves);
+    for (auto& [_, moves] : moves_at_end_) map_moves(moves);
+    for (EdgeSplit& e : edge_splits_) map_moves(e.moves);
 }
 
 void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_gprs) {

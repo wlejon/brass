@@ -32,8 +32,8 @@
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/pgo/profile_data.hpp>
+#include <iostream>
 #include <memory>
-#include <ostream>
 #include <utility>
 
 namespace brass::passes {
@@ -375,13 +375,16 @@ PassStep ivsr(const LoopOptOptions& options, std::string name) {
                      std::move(follow));
 }
 
-PassStep write_barrier_elim(bool dump_stats, std::ostream* report) {
-    return module_step("wbe", [dump_stats, report](Module& mod) {
-        WriteBarrierElimination wbe(dump_stats);
-        const bool changed = wbe.run_on_module(mod);
-        if (report) wbe.dump_stats(*report);
-        return changed;
-    });
+PassStep write_barrier_elim(bool dump_stats, std::ostream* report, WbeStats* stats) {
+    return serial_when(dump_stats || report != nullptr || stats != nullptr,
+                       function_step("wbe", FunctionFilter::All, [dump_stats, report, stats](Function& fn) {
+                           WriteBarrierElimination wbe;
+                           const bool changed = wbe.run_on_function(fn);
+                           if (stats) *stats += wbe.stats();
+                           if (dump_stats) wbe.dump_stats(std::cerr);
+                           if (report) wbe.dump_stats(*report);
+                           return changed;
+                       }));
 }
 
 PassStep devirtualize() {

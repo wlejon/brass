@@ -27,6 +27,7 @@ struct GvnPreStats;
 struct RangeAnalysisStats;
 struct PartialEscapeStats;
 struct DemoteStats;
+struct WbeStats;
 
 namespace passes {
 
@@ -60,6 +61,7 @@ PassStep sincos_fuse();
 // Every function: a float division by a power of two as the multiplication
 // by its reciprocal (fdiv_pow2.hpp).
 PassStep fdiv_pow2();
+PassStep write_barrier_elim(bool dump_stats = false, std::ostream* report = nullptr, WbeStats* stats = nullptr);
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------
 PassStep f64_demote(DemoteStats* stats);
@@ -84,7 +86,6 @@ PassStep loop_unroll(const LoopOptOptions& options);
 PassStep ivsr(const LoopOptOptions& options, std::string name = "ivsr");
 
 // --- Module passes ------------------------------------------------------
-PassStep write_barrier_elim(bool dump_stats = false, std::ostream* report = nullptr);
 // Rewrites every patchable_call to a direct call (see InlinerOptions).
 PassStep devirtualize();
 // Feedback-driven devirtualization and inlining from the default program's

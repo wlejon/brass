@@ -4,6 +4,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
+#include <atomic>
 #include <cstdint>
 #include <iosfwd>
 
@@ -19,6 +20,17 @@ struct WbeStats {
     [[nodiscard]] uint32_t total_eliminated() const noexcept {
         return eliminated_non_pointer + eliminated_young_provenance + eliminated_redundant;
     }
+
+    WbeStats& operator+=(const WbeStats& o) noexcept {
+        total_barriers += o.total_barriers;
+        eliminated_non_pointer += o.eliminated_non_pointer;
+        eliminated_young_provenance += o.eliminated_young_provenance;
+        eliminated_redundant += o.eliminated_redundant;
+        remaining_barriers += o.remaining_barriers;
+        return *this;
+    }
+
+    void dump(std::ostream& os) const;
 };
 
 class WriteBarrierElimination {
@@ -29,8 +41,22 @@ public:
     bool run_on_function(Function& fn);
     bool run_on_module(Module& mod);
 
-    [[nodiscard]] const WbeStats& stats() const noexcept { return stats_; }
-    void reset_stats() noexcept { stats_ = WbeStats{}; }
+    [[nodiscard]] WbeStats stats() const noexcept {
+        return WbeStats{
+            total_barriers_.load(std::memory_order_relaxed),
+            eliminated_non_pointer_.load(std::memory_order_relaxed),
+            eliminated_young_provenance_.load(std::memory_order_relaxed),
+            eliminated_redundant_.load(std::memory_order_relaxed),
+            remaining_barriers_.load(std::memory_order_relaxed),
+        };
+    }
+    void reset_stats() noexcept {
+        total_barriers_.store(0, std::memory_order_relaxed);
+        eliminated_non_pointer_.store(0, std::memory_order_relaxed);
+        eliminated_young_provenance_.store(0, std::memory_order_relaxed);
+        eliminated_redundant_.store(0, std::memory_order_relaxed);
+        remaining_barriers_.store(0, std::memory_order_relaxed);
+    }
     void dump_stats(std::ostream& os) const;
 
     bool is_non_pointer_value(const Value* val) const noexcept;
@@ -42,7 +68,11 @@ private:
     int64_t young_allocation_bytes(const Instruction* inst) const noexcept;
 
     bool dump_stats_ = false;
-    WbeStats stats_;
+    std::atomic<uint32_t> total_barriers_{0};
+    std::atomic<uint32_t> eliminated_non_pointer_{0};
+    std::atomic<uint32_t> eliminated_young_provenance_{0};
+    std::atomic<uint32_t> eliminated_redundant_{0};
+    std::atomic<uint32_t> remaining_barriers_{0};
 };
 
 } // namespace brass

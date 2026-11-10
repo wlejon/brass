@@ -296,6 +296,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
     }
 
     bool changed = false;
+    WbeStats local;
     std::vector<Instruction*> to_remove;
     for (BasicBlock* bb : blocks) {
         if (!bb) continue;
@@ -318,7 +319,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
             }
             if (inst->opcode() != Opcode::write_barrier) continue;
 
-            stats_.total_barriers++;
+            local.total_barriers++;
             const Value* obj = inst->operand(0);
             const Value* val = inst->operand(1);
 
@@ -335,7 +336,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
             BarrierCertKind cert_kind = BarrierCertKind::None;
             if (non_pointer_value(val, 0, &params, &incoming)) {
                 // Rule 1: the stored value cannot be a young reference.
-                stats_.eliminated_non_pointer++;
+                local.eliminated_non_pointer++;
                 eliminate = true;
                 certified = is_non_pointer_value(val);
                 int64_t c_imm = 0;
@@ -345,7 +346,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
             } else if (in_young) {
                 // Rule 2: a young object needs no card mark, and nothing
                 // since its allocation could have promoted it.
-                stats_.eliminated_young_provenance++;
+                local.eliminated_young_provenance++;
                 eliminate = true;
                 certified = obj && local_young.count(obj) > 0;
                 cert_kind = BarrierCertKind::YoungGenBumpAlloc;
@@ -353,7 +354,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
                 // Rule 3: an identical barrier already ran with no collection
                 // in between on every path here, so it left the card (and
                 // the marker's shading) exactly as this one would.
-                stats_.eliminated_redundant++;
+                local.eliminated_redundant++;
                 eliminate = true;
                 certified = local_barriered.count({obj, val}) > 0;
                 cert_kind = BarrierCertKind::RedundantSameEpoch;
@@ -388,7 +389,7 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
                 to_remove.push_back(inst);
                 changed = true;
             } else {
-                stats_.remaining_barriers++;
+                local.remaining_barriers++;
                 if (obj) {
                     f.add_barrier({obj, val});
                     local_barriered.insert({obj, val});
@@ -396,6 +397,12 @@ bool WriteBarrierElimination::run_on_function(Function& fn) {
             }
         }
     }
+
+    total_barriers_.fetch_add(local.total_barriers, std::memory_order_relaxed);
+    eliminated_non_pointer_.fetch_add(local.eliminated_non_pointer, std::memory_order_relaxed);
+    eliminated_young_provenance_.fetch_add(local.eliminated_young_provenance, std::memory_order_relaxed);
+    eliminated_redundant_.fetch_add(local.eliminated_redundant, std::memory_order_relaxed);
+    remaining_barriers_.fetch_add(local.remaining_barriers, std::memory_order_relaxed);
 
     for (Instruction* inst : to_remove) {
         if (inst && inst->parent()) {
@@ -419,14 +426,18 @@ bool WriteBarrierElimination::run_on_module(Module& mod) {
     return changed;
 }
 
-void WriteBarrierElimination::dump_stats(std::ostream& os) const {
+void WbeStats::dump(std::ostream& os) const {
     os << "Write Barrier Elimination (WBE) Statistics:\n"
-       << "  Total Write Barriers:              " << stats_.total_barriers << "\n"
-       << "  Eliminated (Non-Pointer/Immediate):" << stats_.eliminated_non_pointer << "\n"
-       << "  Eliminated (Young Provenance):     " << stats_.eliminated_young_provenance << "\n"
-       << "  Eliminated (Redundant):            " << stats_.eliminated_redundant << "\n"
-       << "  Total Eliminated:                  " << stats_.total_eliminated() << "\n"
-       << "  Remaining Active Barriers:         " << stats_.remaining_barriers << "\n";
+       << "  Total Write Barriers:              " << total_barriers << "\n"
+       << "  Eliminated (Non-Pointer/Immediate):" << eliminated_non_pointer << "\n"
+       << "  Eliminated (Young Provenance):     " << eliminated_young_provenance << "\n"
+       << "  Eliminated (Redundant):            " << eliminated_redundant << "\n"
+       << "  Total Eliminated:                  " << total_eliminated() << "\n"
+       << "  Remaining Active Barriers:         " << remaining_barriers << "\n";
+}
+
+void WriteBarrierElimination::dump_stats(std::ostream& os) const {
+    stats().dump(os);
 }
 
 } // namespace brass

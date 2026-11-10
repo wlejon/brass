@@ -216,12 +216,14 @@ static bool is_xmm_opcode(LirOpcode op) {
     }
 }
 
-// The x64 rewrite's general-register scratches, in the order it takes them:
-// R10 and R11 are never allocated; R15 and R14 are, and are blocked for
-// values at an instruction with three or four general-register operands
-// (build_constraint_index), the only place the rewrite can need them.
+// The x64 rewrite's scratches, in the order it takes them: R10/R11 (GPR) and
+// XMM14/XMM15 (XMM) are never allocated; R15/R14 and XMM13/XMM12 are, and are
+// blocked for values at an instruction with three or four operands of their
+// class (build_constraint_index), the only place the rewrite can need them.
 static const PReg kX64GprScratches[4] = {PReg::gpr(x64::GPR::R10), PReg::gpr(x64::GPR::R11), PReg::gpr(x64::GPR::R15),
-                                  PReg::gpr(x64::GPR::R14)};
+                                         PReg::gpr(x64::GPR::R14)};
+static const PReg kX64XmmScratches[4] = {PReg::xmm(x64::XMM::XMM14), PReg::xmm(x64::XMM::XMM15),
+                                         PReg::xmm(x64::XMM::XMM13), PReg::xmm(x64::XMM::XMM12)};
 
 void LinearScanAllocator::rewrite_instructions() {
     using namespace brass::x64;
@@ -485,9 +487,25 @@ void LinearScanAllocator::rewrite_instructions() {
                 if (inst->is_call()) {
                     def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V0) : PReg::xmm(XMM::XMM0))
                                              : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X0) : PReg::gpr(GPR::RAX));
-                } else if (is_xmm_def || is_aarch64) {
-                    def_scratch = is_xmm_def ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V27) : PReg::xmm(XMM::XMM15))
+                } else if (is_aarch64) {
+                    def_scratch = is_xmm_def ? PReg::aarch64_fpr(brass::aarch64::FPR::V27)
                                              : PReg::aarch64_gpr(brass::aarch64::GPR::X14);
+                } else if (is_xmm_def) {
+                    // x64 XMM: take the scratch after those the uses take (the
+                    // loop below takes them first, in the same order), so the
+                    // instruction needs no more of XMM14, XMM15, XMM13, XMM12
+                    // than it has XMM operands to spill.
+                    std::vector<int32_t> slots;
+                    for (size_t i = 0; i < inst->uses.size(); ++i) {
+                        const LirOperand& u = inst->uses[i];
+                        if (!u.is_spill_slot() || u.spill_slot == original_spill_def.spill_slot || !use_is_xmm(i)) continue;
+                        if (std::find(slots.begin(), slots.end(), u.spill_slot) == slots.end()) slots.push_back(u.spill_slot);
+                    }
+                    size_t skip = slots.size();
+                    if (skip < 4) def_scratch = kX64XmmScratches[skip];
+                    if (!def_scratch.is_valid()) {
+                        throw std::runtime_error("Insufficient XMM scratch registers for a spilled definition");
+                    }
                 } else {
                     // x64: the scratch after those the uses take (the loop
                     // below takes them first, in the same order), so the
@@ -534,7 +552,7 @@ void LinearScanAllocator::rewrite_instructions() {
 
             // Handle any remaining spill uses with reserved scratch registers:
             // GPR: R10/R11/R15/R14 (x64, kX64GprScratches) or X12/X13/X15 (AArch64)
-            // XMM: XMM12/XMM13/XMM14 (x64) or V26/V28/V29 (AArch64)
+            // XMM: XMM14/XMM15/XMM13/XMM12 (x64, kX64XmmScratches) or V26/V28/V29 (AArch64)
             std::vector<int32_t> orig_slot_indices(inst->uses.size(), -1);
             for (size_t i = 0; i < inst->uses.size(); ++i) {
                 if (inst->uses[i].is_spill_slot()) {
@@ -548,10 +566,11 @@ void LinearScanAllocator::rewrite_instructions() {
                 is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : kX64GprScratches[2],
                 is_aarch64 ? PReg{} : kX64GprScratches[3]
             };
-            PReg xmm_scratches[3] = {
-                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V26) : PReg::xmm(XMM::XMM12),
-                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V28) : PReg::xmm(XMM::XMM13),
-                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM14)
+            PReg xmm_scratches[4] = {
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V26) : kX64XmmScratches[0],
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V28) : kX64XmmScratches[1],
+                is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : kX64XmmScratches[2],
+                is_aarch64 ? PReg{} : kX64XmmScratches[3]
             };
 
             std::vector<PReg> busy_registers;
@@ -598,6 +617,7 @@ void LinearScanAllocator::rewrite_instructions() {
                         bool found = false;
                         if (is_xmm_use) {
                             for (PReg s : xmm_scratches) {
+                                if (!s.is_valid()) continue;
                                 bool is_busy = false;
                                 for (PReg b : busy_registers) {
                                     if (s == b) { is_busy = true; break; }

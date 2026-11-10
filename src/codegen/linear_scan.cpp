@@ -67,9 +67,13 @@ void LinearScanAllocator::init_register_pools() {
             available_gprs_.push_back(PReg::gpr(g));
         }
 
-        // Available XMMs (excluding scratch XMM12, XMM13, XMM14, and def_scratch XMM15: XMM0..XMM11)
+        // Available XMMs: all but the rewrite's first two scratches XMM14 and
+        // XMM15 (which the emitters also take for memory-to-memory moves,
+        // ParallelCopy cycles, and Fabs masks). XMM13 and XMM12, its third
+        // and fourth scratches, hold values too and are blocked only where an
+        // instruction can need them (build_constraint_index).
         available_xmms_.clear();
-        for (int i = 0; i <= 11; ++i) {
+        for (int i = 0; i <= 13; ++i) {
             available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
         }
     }
@@ -189,34 +193,58 @@ void LinearScanAllocator::build_constraint_index() {
         (reg.reg_class == RegClass::GPR ? gprs : xmms) |= (1u << reg.code);
     };
 
-    // x64: the rewrite takes R10, R11, R15 and R14 in that order for an
-    // instruction's spilled general-register operands (each register use or
-    // definition, each memory operand's base and index): R15 is blocked
-    // where there are three of them, R14 where there are four, so either is
-    // free wherever the rewrite takes it.
+    // x64: the rewrite takes R10, R11, R15 and R14 (GPR) and XMM14, XMM15,
+    // XMM13 and XMM12 (XMM) in that order for an instruction's spilled
+    // operands (each register use or definition, and for GPRs each memory
+    // operand's base and index): the third scratch (R15 / XMM13) is blocked
+    // where there are three of them, the fourth (R14 / XMM12) where there are
+    // four, so each is free wherever the rewrite takes it.
     const bool x64_scratches = cc_.target().is_x64();
-    auto rewrite_scratches = [&](const LirInst& inst) -> uint32_t {
-        if (!x64_scratches) return 0;
+    struct ScratchPair {
+        uint32_t gpr = 0;
+        uint32_t xmm = 0;
+    };
+    auto rewrite_scratches = [&](const LirInst& inst) -> ScratchPair {
+        if (!x64_scratches) return {};
         switch (inst.opcode) {
             case LirOpcode::Safepoint:
             case LirOpcode::ParallelCopy:
             case LirOpcode::KeepAlive:
             case LirOpcode::GuardExit:
-                return 0;
+                return {};
             default:
                 break;
         }
-        uint32_t n = 0;
+        uint32_t n_gpr = 0;
+        uint32_t n_xmm = 0;
+        VReg seen_xmm[4];
+        size_t n_seen_xmm = 0;
         auto count = [&](const LirOperand& op) {
-            if (op.is_vreg() && op.vreg_val.is_valid() && op.vreg_val.is_gpr()) ++n;
-            else if (op.is_mem()) n += op.mem_val.base_vreg.is_valid() + op.mem_val.index_vreg.is_valid();
+            if (op.is_vreg() && op.vreg_val.is_valid()) {
+                if (op.vreg_val.is_gpr()) {
+                    ++n_gpr;
+                } else {
+                    for (size_t i = 0; i < n_seen_xmm; ++i) {
+                        if (seen_xmm[i] == op.vreg_val) return;
+                    }
+                    if (n_seen_xmm < 4) seen_xmm[n_seen_xmm++] = op.vreg_val;
+                    ++n_xmm;
+                }
+            } else if (op.is_mem()) {
+                n_gpr += op.mem_val.base_vreg.is_valid() + op.mem_val.index_vreg.is_valid();
+            } else if (op.is_spill_slot()) {
+                ++n_gpr;
+                ++n_xmm;
+            }
         };
         for (const auto& d : inst.defs) count(d);
         for (const auto& u : inst.uses) count(u);
-        uint32_t m = 0;
-        if (n >= 3) m |= x64::reg_mask(x64::GPR::R15);
-        if (n >= 4) m |= x64::reg_mask(x64::GPR::R14);
-        return m;
+        ScratchPair out;
+        if (n_gpr >= 3) out.gpr |= x64::reg_mask(x64::GPR::R15);
+        if (n_gpr >= 4) out.gpr |= x64::reg_mask(x64::GPR::R14);
+        if (n_xmm >= 3) out.xmm |= x64::reg_mask(x64::XMM::XMM13);
+        if (n_xmm >= 4) out.xmm |= x64::reg_mask(x64::XMM::XMM12);
+        return out;
     };
     std::vector<InstConstraints> held;
     // Instruction ids are assigned in block order by the liveness analysis, so
@@ -236,12 +264,13 @@ void LinearScanAllocator::build_constraint_index() {
                           pinned[0], pinned[1]);
             }
             const bool is_call = inst->is_call() || inst->opcode == LirOpcode::Safepoint;
+            const ScratchPair scratches = rewrite_scratches(*inst);
             // A register held across the instruction blocks every value
             // covering it, like a clobber: no value's own fixed position
             // there may take it, since that would overwrite the held value.
             const uint32_t blocked[2] = {
-                inst->clobbered_gprs | h.clobbered_gprs | (is_call ? caller_saved[0] : 0u) | rewrite_scratches(*inst),
-                inst->clobbered_xmms | h.clobbered_xmms | (is_call ? caller_saved[1] : 0u),
+                inst->clobbered_gprs | h.clobbered_gprs | (is_call ? caller_saved[0] : 0u) | scratches.gpr,
+                inst->clobbered_xmms | h.clobbered_xmms | (is_call ? caller_saved[1] : 0u) | scratches.xmm,
             };
             for (int c = 0; c < 2; ++c) {
                 if (blocked[c] == 0 && pinned[c] == 0 && !is_call) continue;
@@ -473,22 +502,28 @@ void LinearScanAllocator::mark_folded_uses() {
     }
 }
 
-// Step 4 saved R14 and R15 for any function with a spill slot, since the
-// rewrite may take either as a scratch; the rewrite has now run, and a scratch
-// it never named needs no save. Most frames spill something and few take the
-// scratches (Vector3.dot's frame saved both and named neither), so this takes
-// two stores and two reloads off a typical call. Nothing past the allocator
-// introduces a callee-saved register of its own: the emitters' scratches are
-// R10 and R11, and the peephole only renames to a register already named.
-static void trim_unused_scratch_saves(LirFunction& fn, uint32_t allocated_callee_gprs) {
+// Step 4 saved R14 and R15 (and XMM12 and XMM13 on Win64) for any function
+// with a spill slot, since the rewrite may take them as scratches; the rewrite
+// has now run, and a scratch it never named needs no save. Nothing past the
+// allocator introduces these registers behind the LIR's back: the emitters'
+// implicit scratches are R10/R11 and XMM14/XMM15, and the peephole only
+// renames to a register already named.
+static void trim_unused_scratch_saves(LirFunction& fn, uint32_t allocated_callee_gprs,
+                                      uint32_t allocated_callee_xmms, bool is_win64) {
     using namespace brass::x64;
-    const uint32_t scratches = reg_mask(GPR::R14) | reg_mask(GPR::R15);
-    const uint32_t candidates =
-        fn.frame.saved_callee_gprs & scratches & ~fn.forced_saved_gprs & ~allocated_callee_gprs;
-    if (candidates == 0) return;
-    uint32_t named = 0;
+    const uint32_t gpr_scratches = reg_mask(GPR::R14) | reg_mask(GPR::R15);
+    const uint32_t gpr_candidates =
+        fn.frame.saved_callee_gprs & gpr_scratches & ~fn.forced_saved_gprs & ~allocated_callee_gprs;
+    const uint32_t xmm_scratches = reg_mask(XMM::XMM12) | reg_mask(XMM::XMM13);
+    const uint32_t xmm_candidates =
+        is_win64 ? (fn.frame.saved_callee_xmms & xmm_scratches & ~allocated_callee_xmms) : 0u;
+    if (gpr_candidates == 0 && xmm_candidates == 0) return;
+    uint32_t named_gprs = 0;
+    uint32_t named_xmms = 0;
     auto note = [&](const PReg& r) {
-        if (r.is_valid() && r.is_gpr()) named |= reg_mask(r.as_gpr());
+        if (!r.is_valid()) return;
+        if (r.is_gpr()) named_gprs |= reg_mask(r.as_gpr());
+        else named_xmms |= reg_mask(r.as_xmm());
     };
     auto note_operand = [&](const LirOperand& op) {
         if (op.is_preg()) note(op.preg_val);
@@ -501,10 +536,14 @@ static void trim_unused_scratch_saves(LirFunction& fn, uint32_t allocated_callee
         for (const auto& inst : block->instructions) {
             for (const auto& d : inst->defs) note_operand(d);
             for (const auto& u : inst->uses) note_operand(u);
-            if ((named & candidates) == candidates) return;
+            if ((named_gprs & gpr_candidates) == gpr_candidates &&
+                (named_xmms & xmm_candidates) == xmm_candidates) {
+                return;
+            }
         }
     }
-    fn.frame.saved_callee_gprs &= ~(candidates & ~named);
+    fn.frame.saved_callee_gprs &= ~(gpr_candidates & ~named_gprs);
+    fn.frame.saved_callee_xmms &= ~(xmm_candidates & ~named_xmms);
 }
 
 void LinearScanAllocator::allocate() {
@@ -576,7 +615,9 @@ void LinearScanAllocator::allocate() {
     used_callee_gprs_ = 0;
     used_callee_xmms_ = 0;
     next_spill_slot_ = 0;
+    fn_.frame.spill_slot_is_gcref.clear();
     shared_slots_.clear();
+    allocated_slots_.clear();
     moves_before_.clear();
     moves_after_.clear();
     moves_at_start_.clear();
@@ -585,9 +626,13 @@ void LinearScanAllocator::allocate() {
     emitted_parallel_copy_ = false;
     def_scratch_stores_.clear();
 
-    // 1-2. Split what cannot move between locations, then scan.
+    // 1-2. Split what cannot move between locations, scan, build resolution
+    // moves, and permute spill slots so the hottest stack slots land at the
+    // lowest indices (disp8 on x64 and within the 64-bit dead-slot mask).
     mark_unsplittable_live_ins();
     run_scan();
+    collect_resolution_moves();
+    reorder_spill_slots();
 
     // 3. The vreg table and the intervals keep the first piece's location,
     // which is the value's only one unless it was split. After allocation
@@ -628,6 +673,7 @@ void LinearScanAllocator::allocate() {
     }
 
     const uint32_t allocated_callee_gprs = final_callee_gprs;
+    const uint32_t allocated_callee_xmms = final_callee_xmms;
     if (!cc_.target().is_aarch64() && next_spill_slot_ > 0) {
         // If function spills on x64, scratch registers R14 and R15 may be used during rewrite.
         // Ensure they are marked as saved callee-saved GPRs in the frame layout.
@@ -660,7 +706,8 @@ void LinearScanAllocator::allocate() {
                 if (uses_xmm_scratch) break;
             }
             if (uses_xmm_scratch) {
-                final_callee_xmms |= brass::x64::reg_mask(brass::x64::XMM::XMM15);
+                final_callee_xmms |= brass::x64::reg_mask(brass::x64::XMM::XMM14) |
+                                     brass::x64::reg_mask(brass::x64::XMM::XMM15);
             }
         }
     }
@@ -674,7 +721,6 @@ void LinearScanAllocator::allocate() {
 
     // 6. Rewrite all instructions in the function, with the moves between
     // the pieces of split values, and give critical edges their blocks.
-    collect_resolution_moves();
     // Only for a host that may scan the frame conservatively (Module::precise_stack_roots unset).
     if (fn_.clear_dead_roots_at_calls) clear_dead_callee_gprs_at_calls(final_callee_gprs);
     find_constant_slots();
@@ -727,7 +773,8 @@ void LinearScanAllocator::allocate() {
             }), ins.end());
         }
         pool_constant_slots();
-        trim_unused_scratch_saves(fn_, allocated_callee_gprs);
+        trim_unused_scratch_saves(fn_, allocated_callee_gprs, allocated_callee_xmms,
+                                  cc_.kind() == CallingConvKind::Win64);
     }
 }
 
@@ -837,47 +884,6 @@ bool LinearScanAllocator::fpr_wider_than_callee_saved(const VReg& vreg) const {
     if (vreg.is_gpr()) return false;
     return vreg.size > (cc_.target().is_aarch64() ? 8u : 16u);
 }
-
-// A value wider than 8 bytes takes 2 (16 bytes) or 4 (32 bytes) adjacent
-// 8-byte slots, and the slot index it is known by is the one whose address
-// is lowest, where the whole value is stored. x64 slots grow downward from
-// RBP (slot i at rbp - (i + 1) * 8), so that is the highest of the run;
-// AArch64 slots grow upward from FP (AArch64FrameLayout::spill_slot_address),
-// so it is the lowest. Getting this backwards stores a vector over the next
-// value's slot.
-int32_t LinearScanAllocator::allocate_spill_slot(bool is_gcref, uint8_t size) {
-    const bool slots_grow_up = cc_.target().is_aarch64();
-    if (size == 32) {
-        while ((next_spill_slot_ % 4) != 0) {
-            next_spill_slot_++;
-            fn_.frame.spill_slot_is_gcref.push_back(false);
-        }
-        for (int i = 0; i < 4; ++i) {
-            fn_.frame.spill_slot_is_gcref.push_back(false);
-        }
-        next_spill_slot_ += 4;
-        fn_.frame.num_spill_slots = next_spill_slot_;
-        int32_t slot = static_cast<int32_t>(slots_grow_up ? next_spill_slot_ - 4 : next_spill_slot_ - 1);
-        return slot;
-    }
-    if (size == 16) {
-        while ((next_spill_slot_ % 2) != 0) {
-            next_spill_slot_++;
-            fn_.frame.spill_slot_is_gcref.push_back(false);
-        }
-        fn_.frame.spill_slot_is_gcref.push_back(false);
-        fn_.frame.spill_slot_is_gcref.push_back(false);
-        next_spill_slot_ += 2;
-        fn_.frame.num_spill_slots = next_spill_slot_;
-        int32_t slot = static_cast<int32_t>(slots_grow_up ? next_spill_slot_ - 2 : next_spill_slot_ - 1);
-        return slot;
-    }
-    int32_t slot = static_cast<int32_t>(next_spill_slot_++);
-    fn_.frame.spill_slot_is_gcref.push_back(is_gcref);
-    fn_.frame.num_spill_slots = next_spill_slot_;
-    return slot;
-}
-
 
 void run_linear_scan_regalloc(
     LirFunction& fn,
