@@ -277,6 +277,7 @@ bool try_thread_edge(
     // jumps to the known successor.
     const std::vector<BasicBlock*> blocks_before = fn.blocks();
     BasicBlock* thread_bb = ir::new_block(fn, std::string(B->name()) + "_thread_" + std::string(P->name()));
+    thread_bb->set_cold(B->is_cold());
 
     ir::ValueMap thread_val_map;
     for (size_t p_i = 0; p_i < B->param_count(); ++p_i) {

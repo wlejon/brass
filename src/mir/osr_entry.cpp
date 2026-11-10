@@ -219,6 +219,7 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
     // instructions, then their uses.
     for (const BasicBlock* src_bb : plan.region) {
         BasicBlock* bb = ir::new_block(*out, src_bb->name());
+        bb->set_cold(src_bb->is_cold());
         blocks[src_bb] = bb;
         for (const Value* p : src_bb->params()) values[p] = ir::new_block_param(*out, bb, p->type());
     }

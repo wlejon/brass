@@ -843,6 +843,16 @@ void LirFunction::sort_blocks_rpo() {
 
     std::vector<LirBlock*> full_order = std::move(entry_po);
     full_order.insert(full_order.end(), other_po.begin(), other_po.end());
+    // Cold blocks last, as the emitted layout has them (block_layout.cpp).
+    // The scan walks positions in this order, and a value a cold block's call
+    // evicts waits in its slot from the call to the end of the order: placed
+    // where reverse post-order puts it, before the join it returns to, a
+    // cold arm's call (an inline cache's miss, an element read's helper)
+    // kept every value the loop carried on the stack for the rest of the
+    // loop, stored and reloaded on the hot path every iteration. Behind the
+    // hot blocks, only the edges into and out of the cold block move them.
+    std::stable_partition(full_order.begin(), full_order.end(),
+                          [&](const LirBlock* b) { return b == entry || !b->cold; });
 
     std::vector<std::unique_ptr<LirBlock>> new_blocks;
     new_blocks.reserve(blocks.size());

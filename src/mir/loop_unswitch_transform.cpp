@@ -152,6 +152,7 @@ bool transform_unswitch_loop(
     ir::ValueMap values;
     for (BasicBlock* bb : region) {
         BasicBlock* copy = ir::new_block(fn, std::string(bb->name()) + "_unsw_f");
+        copy->set_cold(bb->is_cold());
         blocks[bb] = copy;
         for (size_t i = 0; i < bb->param_count(); ++i) {
             values[bb->param(i)] = ir::new_block_param(fn, copy, bb->param(i)->type());
@@ -604,6 +605,7 @@ bool unswitch_fast_slow_loop(
     ir::ValueMap values;
     for (BasicBlock* bb : region) {
         BasicBlock* copy = ir::new_block(fn, std::string(bb->name()) + "_unsw_f");
+        copy->set_cold(bb->is_cold());
         blocks[bb] = copy;
         for (size_t i = 0; i < bb->param_count(); ++i) {
             values[bb->param(i)] = ir::new_block_param(fn, copy, bb->param(i)->type());

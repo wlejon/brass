@@ -370,6 +370,7 @@ bool version_loop(Function& fn, LoopInfo& loop) {
     ir::ValueMap values;
     for (BasicBlock* bb : ordered) {
         BasicBlock* copy = ir::new_block(fn, std::string(bb->name()) + kCopySuffix);
+        copy->set_cold(bb->is_cold());
         blocks[bb] = copy;
         for (size_t i = 0; i < bb->param_count(); ++i) {
             values[bb->param(i)] = ir::new_block_param(fn, copy, bb->param(i)->type());

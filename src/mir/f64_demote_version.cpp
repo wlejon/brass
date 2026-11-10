@@ -131,6 +131,7 @@ bool version_loop_on_clamp(Function& fn, const ClampedLimit& site, const std::ve
     ir::ValueMap values;
     for (BasicBlock* bb : ordered) {
         BasicBlock* copy = ir::new_block(fn, std::string(bb->name()) + "_f64c");
+        copy->set_cold(bb->is_cold());
         blocks[bb] = copy;
         for (size_t i = 0; i < bb->param_count(); ++i) {
             values[bb->param(i)] = ir::new_block_param(fn, copy, bb->param(i)->type());
@@ -189,6 +190,7 @@ BasicBlock* version_on_entry_params(Function& fn, const std::vector<Value*>& ass
     for (BasicBlock* bb : body) {
         if (!bb) continue;
         BasicBlock* copy = ir::new_block(fn, std::string(bb->name()) + "_f64v");
+        copy->set_cold(bb->is_cold());
         blocks[bb] = copy;
         for (size_t i = 0; i < bb->param_count(); ++i) {
             values[bb->param(i)] = ir::new_block_param(fn, copy, bb->param(i)->type());
