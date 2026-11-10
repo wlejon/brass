@@ -62,7 +62,12 @@ LoopAnalysis::LoopAnalysis(Function& fn, const DominatorTree& dom) {
 }
 
 void LoopAnalysis::discover_loops(Function& fn, const DominatorTree& dom) {
+    // Loops are kept in the order their headers are first found (block order),
+    // never in the map's pointer-hash order: every loop pass walks them in the
+    // order built here, so an address-dependent order would make the output
+    // depend on where the allocator put the blocks.
     std::unordered_map<BasicBlock*, std::unique_ptr<LoopInfo>> header_to_loop;
+    std::vector<BasicBlock*> header_order;
 
     // 1. Find all back-edges Tail -> Header where Header dominates Tail
     for (BasicBlock* bb : fn.blocks()) {
@@ -82,6 +87,7 @@ void LoopAnalysis::discover_loops(Function& fn, const DominatorTree& dom) {
                     loop->add_block(header);
                     loop->add_latch(latch);
                     header_to_loop[header] = std::move(loop);
+                    header_order.push_back(header);
                 } else {
                     it->second->add_latch(latch);
                 }
@@ -114,13 +120,14 @@ void LoopAnalysis::discover_loops(Function& fn, const DominatorTree& dom) {
     // 3. Collect all discovered loops
     std::vector<std::unique_ptr<LoopInfo>> all_loops;
     all_loops.reserve(header_to_loop.size());
-    for (auto& [hdr, loop] : header_to_loop) {
-        all_loops.push_back(std::move(loop));
+    for (BasicBlock* hdr : header_order) {
+        all_loops.push_back(std::move(header_to_loop[hdr]));
     }
 
     // 4. Build loop hierarchy
     // Sort loops by block count ascending (smaller inner loops first)
-    std::sort(all_loops.begin(), all_loops.end(), [](const auto& a, const auto& b) {
+    // (stable: loops of one size stay in header order)
+    std::stable_sort(all_loops.begin(), all_loops.end(), [](const auto& a, const auto& b) {
         return a->blocks().size() < b->blocks().size();
     });
 

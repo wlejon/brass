@@ -40,7 +40,28 @@ void forget_provider_module(Module* mod) {
     std::erase(provider_modules(), mod);
 }
 
+// The function the calling thread works on (FunctionWorkScope), or null.
+thread_local Function* t_work_function = nullptr;
+
 } // namespace
+
+Arena& Module::arena() noexcept {
+    Function* fn = t_work_function;
+    if (fn && fn->parent() == this) return fn->work_arena();
+    return arena_;
+}
+
+StringPool& Module::string_pool() noexcept {
+    Function* fn = t_work_function;
+    if (fn && fn->parent() == this) return fn->work_strings();
+    return string_pool_;
+}
+
+FunctionWorkScope::FunctionWorkScope(Function& fn) noexcept : previous_(t_work_function) {
+    t_work_function = &fn;
+}
+
+FunctionWorkScope::~FunctionWorkScope() { t_work_function = previous_; }
 
 Module::Module() noexcept = default;
 

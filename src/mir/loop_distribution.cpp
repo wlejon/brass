@@ -117,21 +117,14 @@ bool is_pure_computation(const Instruction& inst) {
 
 // A call to a module function of one block that only computes from its
 // arguments: it can run at any point relative to memory operations.
-bool is_pure_leaf_call(const Function& fn, const Instruction& inst) {
+// With `leaves` recorded for fn's module, the callee as the record saw it:
+// the caller may be optimized while the callee is, on another thread.
+bool is_pure_leaf_call(const Function& fn, const Instruction& inst, const PureLeafFunctions* leaves) {
     if (inst.opcode() != Opcode::call || !fn.parent()) return false;
     const Function* callee = fn.parent()->get_function(inst.symbol());
-    if (!callee || callee == &fn || callee->blocks().size() != 1) return false;
-    const BasicBlock* only = callee->blocks().front();
-    if (!only) return false;
-    for (const Instruction* ci : *only) {
-        if (!ci) return false;
-        if (ci->is_terminator()) {
-            if (ci->opcode() != Opcode::ret) return false;
-            continue;
-        }
-        if (!is_pure_computation(*ci)) return false;
-    }
-    return true;
+    if (!callee || callee == &fn) return false;
+    if (leaves && leaves->module == fn.parent()) return leaves->functions.count(callee) != 0;
+    return pure_leaf_function(*callee);
 }
 
 struct DistributableLoopInfo {
@@ -223,7 +216,8 @@ struct Plan {
 
 class Planner {
 public:
-    Planner(Function& fn, Plan& plan) : fn_(fn), plan_(plan), info_(plan.info) {}
+    Planner(Function& fn, Plan& plan, const PureLeafFunctions* leaves)
+        : fn_(fn), plan_(plan), info_(plan.info), leaves_(leaves) {}
 
     Reject run() {
         std::unordered_set<const Instruction*> part2;
@@ -233,7 +227,7 @@ public:
             if (!inst || inst->is_terminator() || inst == info_.iv_inc_inst) continue;
             const Opcode op = inst->opcode();
             if (op == Opcode::call) {
-                if (!is_pure_leaf_call(fn_, *inst)) return Reject::Illegal;
+                if (!is_pure_leaf_call(fn_, *inst, leaves_)) return Reject::Illegal;
                 part2.insert(inst);
                 ++scalar;
             } else if (is_memory_access(op)) {
@@ -386,11 +380,12 @@ private:
     Function& fn_;
     Plan& plan_;
     DistributableLoopInfo& info_;
+    const PureLeafFunctions* leaves_;
 };
 
-Reject plan_distribution(Function& fn, LoopInfo& loop, Plan& plan) {
+Reject plan_distribution(Function& fn, LoopInfo& loop, Plan& plan, const PureLeafFunctions* leaves) {
     if (!extract_distributable_loop(loop, plan.info)) return Reject::Illegal;
-    return Planner(fn, plan).run();
+    return Planner(fn, plan, leaves).run();
 }
 
 void record_rejection(Reject r, const LoopDistributionOptions& options) {
@@ -405,6 +400,31 @@ void record_rejection(Reject r, const LoopDistributionOptions& options) {
 
 } // namespace
 
+// A module function of one block that only computes from its arguments: a
+// call to it can run at any point relative to memory operations.
+bool pure_leaf_function(const Function& fn) {
+    if (fn.blocks().size() != 1) return false;
+    const BasicBlock* only = fn.blocks().front();
+    if (!only) return false;
+    for (const Instruction* ci : *only) {
+        if (!ci) return false;
+        if (ci->is_terminator()) {
+            if (ci->opcode() != Opcode::ret) return false;
+            continue;
+        }
+        if (!is_pure_computation(*ci)) return false;
+    }
+    return true;
+}
+
+void PureLeafFunctions::record(const Module& mod) {
+    module = &mod;
+    functions.clear();
+    for (const Function* fn : mod.functions()) {
+        if (fn && pure_leaf_function(*fn)) functions.insert(fn);
+    }
+}
+
 bool can_distribute_loop(
     Function& fn,
     LoopInfo& loop,
@@ -414,7 +434,7 @@ bool can_distribute_loop(
     (void)dom;
     if (options.stats) options.stats->candidates_checked++;
     Plan plan;
-    const Reject r = plan_distribution(fn, loop, plan);
+    const Reject r = plan_distribution(fn, loop, plan, options.pure_leaves);
     record_rejection(r, options);
     return r == Reject::None;
 }
@@ -428,7 +448,7 @@ bool distribute_loop(
     (void)dom;
     if (!fn.parent()) return false;
     Plan plan;
-    if (plan_distribution(fn, loop, plan) != Reject::None) return false;
+    if (plan_distribution(fn, loop, plan, options.pure_leaves) != Reject::None) return false;
     const DistributableLoopInfo& info = plan.info;
 
     // ph -> hdr <-> body, hdr -> exit1 -> hdr2 <-> body2, hdr2 -> original exit

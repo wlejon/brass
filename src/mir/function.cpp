@@ -43,6 +43,18 @@ void Function::own_body_arena() {
     body_first_block_id_ = next_block_id_;
 }
 
+Arena& Function::work_arena() {
+    // Most functions need a few kilobytes; the largest grow to the module
+    // arena's chunk size and past it.
+    if (!work_arena_) work_arena_ = std::make_unique<Arena>(4 * 1024, 4 * Arena::DefaultChunkSize);
+    return *work_arena_;
+}
+
+StringPool& Function::work_strings() {
+    if (!work_strings_) work_strings_ = std::make_unique<StringPool>(4 * 1024);
+    return *work_strings_;
+}
+
 size_t Function::release_body() {
     if (!body_releasable()) return 0;
     body_state_.store(kBodyLazy, std::memory_order_release);

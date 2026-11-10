@@ -32,6 +32,7 @@
 #include <brass/mir/sroa.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/pgo/profile_data.hpp>
+#include <memory>
 #include <ostream>
 #include <utility>
 
@@ -47,7 +48,18 @@ PassStep function_step(std::string name, FunctionFilter filter, std::function<bo
     s.filter = filter;
     s.run_function = std::move(run);
     s.follow_up = std::move(follow_up);
+    // The catalog's function passes read and write only their function
+    // (pass_manager.hpp, "Threads"); a step that writes a shared stats sink
+    // is made serial below (serial_when).
+    s.concurrent = true;
     return s;
+}
+
+// `step`, run one function at a time when `serial` (it writes statistics
+// every function adds to, or prints as it goes).
+PassStep serial_when(bool serial, PassStep step) {
+    if (serial) step.concurrent = false;
+    return step;
 }
 
 PassStep loop_step(std::string name, std::function<bool(Function&)> run,
@@ -120,11 +132,11 @@ PassStep gvn(FunctionFilter filter) {
 }
 
 PassStep gvn_pre(GvnPreStats* stats, FunctionFilter filter) {
-    return function_step("gvn_pre", filter, [stats](Function& fn) {
+    return serial_when(stats != nullptr, function_step("gvn_pre", filter, [stats](Function& fn) {
         GvnPreOptions o;
         o.stats = stats;
         return gvn_pre_function(fn, o);
-    });
+    }));
 }
 
 PassStep sccp(bool guard_elim, FunctionFilter filter) {
@@ -145,25 +157,26 @@ PassStep loop_unswitch(const LoopOptOptions& options, bool cfg_follow_up, std::s
     LoopUnswitchStats* stats = options.stats ? &options.stats->unswitch_stats : nullptr;
     const pgo::ProfileData* profile = options.profile_data;
     const uint64_t min_count = options.min_pgo_unswitch_count;
-    return function_step(std::move(name), FunctionFilter::All, [=](Function& fn) {
+    return serial_when(stats != nullptr, function_step(std::move(name), FunctionFilter::All, [=](Function& fn) {
         if (!has_hot_loop(fn, profile, min_count, 0)) return false;
         return unswitch_loops_in_function(fn, uo, stats);
-    }, cfg_cleanup(cfg_follow_up));
+    }, cfg_cleanup(cfg_follow_up)));
 }
 
 PassStep jump_threading(const LoopOptOptions& options, bool cfg_follow_up, std::string name) {
     const JumpThreadingOptions jo = options.jump_threading_options;
     JumpThreadingStats* stats = options.stats ? &options.stats->jump_threading_stats : nullptr;
-    return function_step(std::move(name), FunctionFilter::All,
-                         [=](Function& fn) { return run_jump_threading(fn, jo, stats); },
-                         cfg_cleanup(cfg_follow_up));
+    return serial_when(stats != nullptr,
+                       function_step(std::move(name), FunctionFilter::All,
+                                     [=](Function& fn) { return run_jump_threading(fn, jo, stats); },
+                                     cfg_cleanup(cfg_follow_up)));
 }
 
 PassStep bce(std::string name, bool dump_stats, RangeAnalysisStats* stats, bool cleanup_follow_up,
              FunctionFilter filter) {
     std::function<bool(Function&)> follow;
     if (cleanup_follow_up) follow = [](Function& fn) { return brass::loop_cleanup(fn); };
-    return function_step(std::move(name), filter, [=](Function& fn) {
+    return serial_when(dump_stats || stats != nullptr, function_step(std::move(name), filter, [=](Function& fn) {
         if (!fn.parent()) return false;
         RangeAnalysisOptions o;
         o.enable_bce = true;
@@ -171,15 +184,15 @@ PassStep bce(std::string name, bool dump_stats, RangeAnalysisStats* stats, bool 
         o.dump_stats = dump_stats;
         o.stats = stats;
         return run_bounds_check_elimination(fn, *fn.parent(), o);
-    }, std::move(follow));
+    }, std::move(follow)));
 }
 
 PassStep allocation_sinking(PartialEscapeStats* stats, FunctionFilter filter, bool cfg_follow_up) {
-    return function_step("allocation_sinking", filter, [stats](Function& fn) {
+    return serial_when(stats != nullptr, function_step("allocation_sinking", filter, [stats](Function& fn) {
         AllocationSinkingOptions o;
         o.stats = stats;
         return sink_allocations(fn, o);
-    }, cfg_cleanup(cfg_follow_up));
+    }, cfg_cleanup(cfg_follow_up)));
 }
 
 PassStep dce(std::string name, FunctionFilter filter) {
@@ -202,11 +215,11 @@ PassStep unbox_double_params() {
 }
 
 PassStep f64_demote(DemoteStats* stats) {
-    return loop_step("f64_demote", [stats](Function& fn) {
+    return serial_when(stats != nullptr, loop_step("f64_demote", [stats](Function& fn) {
         F64DemoteOptions o;
         o.stats = stats;
         return f64_demote_pass(fn, o);
-    });
+    }));
 }
 
 PassStep float_rem_inline() {
@@ -249,29 +262,36 @@ PassStep loop_tile(const LoopOptOptions& options) {
 PassStep loop_distribution(const LoopOptOptions& options) {
     LoopDistributionOptions o;
     if (options.stats) o.stats = &options.stats->distribution_stats;
-    return loop_step("loop_distribution", [o](Function& fn) {
+    // It reads its callees (is a call to a pure leaf?): over a module, as
+    // they were when the step's concurrent run began.
+    auto leaves = std::make_shared<PureLeafFunctions>();
+    PassStep s = loop_step("loop_distribution", [o, leaves](Function& fn) {
+        LoopDistributionOptions with = o;
+        with.pure_leaves = leaves.get();
         DominatorTree dom(fn);
-        return loop_distribution_pass(fn, dom, o);
+        return loop_distribution_pass(fn, dom, with);
     }, dce_only(options));
+    s.prepare = [leaves](Module& mod) { leaves->record(mod); };
+    return serial_when(o.stats != nullptr, std::move(s));
 }
 
 PassStep loop_fusion(const LoopOptOptions& options) {
     LoopFusionOptions o;
     if (options.stats) o.stats = &options.stats->fusion_stats;
-    return loop_step("loop_fusion", [o](Function& fn) {
+    return serial_when(o.stats != nullptr, loop_step("loop_fusion", [o](Function& fn) {
         DominatorTree dom(fn);
         return loop_fusion_pass(fn, dom, o);
-    }, dce_only(options));
+    }, dce_only(options)));
 }
 
 PassStep array_contraction(const LoopOptOptions& options) {
     ArrayContractionOptions o;
     o.fuse_loops_first = options.enable_loop_fusion;
     if (options.stats) o.stats = &options.stats->contraction_stats;
-    return loop_step("array_contraction", [o](Function& fn) {
+    return serial_when(o.stats != nullptr, loop_step("array_contraction", [o](Function& fn) {
         DominatorTree dom(fn);
         return array_contraction_pass(fn, dom, o);
-    }, dce_only(options));
+    }, dce_only(options)));
 }
 
 PassStep parallel_loops(const LoopOptOptions& options) {
@@ -281,12 +301,15 @@ PassStep parallel_loops(const LoopOptOptions& options) {
     base.stats = options.parallel_stats ? options.parallel_stats
                                         : (options.stats ? &options.stats->parallel_stats : nullptr);
     const bool forced = options.enable_fp_reassociation;
-    return loop_step("parallel_loops", [base, forced](Function& fn) {
+    // Serial: an outlined loop becomes a new function of the module
+    // (Module::create_function), named and placed in the order the loops
+    // are found.
+    return serial_when(true, loop_step("parallel_loops", [base, forced](Function& fn) {
         ParallelLoopOptions o = base;
         o.allow_fp_reassociation = fp_reassociation_allowed(fn, forced);
         DominatorTree dom(fn);
         return auto_parallelize_function(fn, dom, o);
-    }, dce_only(options));
+    }, dce_only(options)));
 }
 
 PassStep slp_vectorize(const LoopOptOptions& options) {
@@ -314,7 +337,8 @@ PassStep loop_vectorize(const LoopOptOptions& options) {
 PassStep fma(const LoopOptOptions& options) {
     FmaOptOptions o;
     o.stats = options.fma_stats;
-    return loop_step("fma", [o](Function& fn) { return fma_opt_pass(fn, o); }, dce_only(options));
+    return serial_when(o.stats != nullptr,
+                       loop_step("fma", [o](Function& fn) { return fma_opt_pass(fn, o); }, dce_only(options)));
 }
 
 PassStep loop_unroll(const LoopOptOptions& options) {

@@ -33,10 +33,15 @@ public:
     std::string_view name() const noexcept { return name_; }
     void set_name(std::string_view name);
 
-    Arena& arena() noexcept { return arena_; }
+    // Where new IR and interned names of this module go. Inside a
+    // FunctionWorkScope for one of its functions, on the scope's thread, that
+    // function's own work arena and pool (Function::work_arena): the optimizer
+    // runs function-local passes on many functions at once, and the module's
+    // arena and pool are not thread-safe. The const forms are the module's own.
+    Arena& arena() noexcept;
     const Arena& arena() const noexcept { return arena_; }
 
-    StringPool& string_pool() noexcept { return string_pool_; }
+    StringPool& string_pool() noexcept;
     const StringPool& string_pool() const noexcept { return string_pool_; }
 
     Function* create_function(std::string_view name, Type return_type, Span<const Type> param_types);
@@ -245,6 +250,24 @@ private:
     // Last: the lazy-body state is defined in module.cpp.
     struct LazyBodies;
     std::unique_ptr<LazyBodies> lazy_;
+};
+
+// While it lives, the calling thread works on `fn` alone: its module's
+// arena() and string_pool() answer `fn`'s work arena and pool on this thread
+// (other threads, and other modules, are unaffected). What a pass builds is
+// then owned by `fn` and freed with its module, as before. Scopes nest; the
+// innermost wins. The pass manager opens one around every function-step run
+// (pass_manager.hpp, "Threads"), in serial runs too, so a build places its IR
+// the same way at any thread count.
+class FunctionWorkScope {
+public:
+    explicit FunctionWorkScope(Function& fn) noexcept;
+    ~FunctionWorkScope();
+    FunctionWorkScope(const FunctionWorkScope&) = delete;
+    FunctionWorkScope& operator=(const FunctionWorkScope&) = delete;
+
+private:
+    Function* previous_;
 };
 
 } // namespace brass

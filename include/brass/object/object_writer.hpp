@@ -233,6 +233,18 @@ public:
     void set_deopt_stress(const DeoptStressPlan& plan) { deopt_stress_ = plan; }
     const DeoptStressPlan& deopt_stress() const noexcept { return deopt_stress_; }
 
+    // Threads compile() may use: 0 (the default) is the machine's hardware
+    // threads, 1 compiles every function on the calling thread. Each
+    // function is selected, allocated and emitted on its own (reading the
+    // module, which compile() does not change), and the results are placed
+    // in the object in module order, so the object's bytes do not depend on
+    // the count. A small module uses fewer threads than it may.
+    void set_threads(size_t threads) { threads_ = threads; }
+    size_t threads() const noexcept { return threads_; }
+    // A thread per this many MIR blocks, at most threads(): below it,
+    // starting a thread costs more than it saves.
+    void set_min_blocks_per_thread(size_t blocks) { min_blocks_per_thread_ = blocks; }
+
     ObjectFile compile(const Module& mod);
 
 private:
@@ -240,6 +252,8 @@ private:
     CallingConvention cc_;
     codegen::SchedOptions sched_opts_;
     DeoptStressPlan deopt_stress_;
+    size_t threads_ = 0;
+    size_t min_blocks_per_thread_ = 2000;
     bool enable_trace_layout_ = false;
     bool enable_mir_opts_ = true;
     bool x64_avx_ = false;

@@ -238,6 +238,7 @@ add_executable(brass_unit_tests
     unit/test_fuzz_pipelines.cpp
     unit/test_mir_roundtrip_all.cpp
     unit/test_pass_manager.cpp
+    unit/test_parallel_build.cpp
     unit/test_mir_uses.cpp
     unit/test_loop_ivsr.cpp
     unit/test_range_check_version.cpp
@@ -308,6 +309,13 @@ add_executable(test_egraph_superopt unit/test_egraph_superopt.cpp)
 target_compile_definitions(test_egraph_superopt PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_egraph_superopt PRIVATE brass)
 target_include_directories(test_egraph_superopt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+# Standalone too, so a ThreadSanitizer build can build and run just this
+# (-DCMAKE_CXX_FLAGS=-fsanitize=thread, target test_parallel_build).
+add_executable(test_parallel_build unit/test_parallel_build.cpp)
+target_compile_definitions(test_parallel_build PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_parallel_build PRIVATE brass)
+target_include_directories(test_parallel_build PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 add_executable(test_fp_loop_equiv unit/test_fp_loop_equiv.cpp)
 target_compile_definitions(test_fp_loop_equiv PRIVATE BRASS_STANDALONE_TEST)

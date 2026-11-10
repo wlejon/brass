@@ -3,6 +3,7 @@
 #include <brass/mir/types.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/core/arena.hpp>
+#include <brass/core/string_pool.hpp>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -196,6 +197,13 @@ public:
 
     void rebuild_cfg_predecessors();
 
+    // Where IR built for this function inside a FunctionWorkScope goes
+    // (module.hpp): made on first use, by the one thread working on the
+    // function, and freed with the function. A body arena (above), when the
+    // function has one, still comes first for a Builder.
+    Arena& work_arena();
+    StringPool& work_strings();
+
 private:
     static constexpr uint8_t kBodyReady = 0;
     static constexpr uint8_t kBodyLazy = 1;
@@ -237,6 +245,8 @@ private:
     uint32_t coro_frame_slot_count_ = 0;
     std::vector<uint64_t> coro_frame_ref_bits_;
     std::vector<GuardElimCert> guard_elim_certs_;
+    std::unique_ptr<Arena> work_arena_;
+    std::unique_ptr<StringPool> work_strings_;
 };
 
 } // namespace brass

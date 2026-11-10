@@ -1,50 +1,16 @@
 #include <brass/object/object_writer.hpp>
-#include <brass/core/env.hpp>
-#include <brass/core/phase_times.hpp>
+#include <brass/core/parallel_for.hpp>
 #include <brass/object/aarch64_reloc.hpp>
-#include <brass/target/x64/x64_isel.hpp>
-#include <brass/target/aarch64/aarch64_isel.hpp>
-#include <brass/target/aarch64/aarch64_emit.hpp>
-#include <brass/target/aarch64/aarch64_frame.hpp>
-#include <brass/codegen/live_range.hpp>
-#include <brass/codegen/linear_scan.hpp>
-#include <brass/codegen/peephole.hpp>
-#include <brass/codegen/block_layout.hpp>
-#include <brass/codegen/instruction_scheduler.hpp>
-#include <brass/codegen/software_pipeline.hpp>
-#include <brass/mir/interrupt_poll.hpp>
 #include <brass/mir/loop_opt.hpp>
-#include <brass/mir/superopt.hpp>
-#include <brass/mir/verifier.hpp>
+#include "function_codegen.hpp"
 #include <algorithm>
+#include <memory>
 #include <unordered_set>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
-#include <iostream>
-#include <fstream>
 
 namespace brass::object {
-
-namespace {
-
-// The calls of `lir` whose callee never reaches a GC point: one declared
-// `pure` or `nocollect`, and the write barrier, which by its contract
-// (runtime_gc.hpp) only marks a card. The allocator clears the frame's dead
-// spill slots and callee-saved registers for a conservative scan only at the
-// others: no collection, so no scan of this frame, runs inside these.
-void mark_no_gc_calls(codegen::LirFunction& lir, const Module& mod) {
-    for (auto& block : lir.blocks) {
-        for (auto& inst : block->instructions) {
-            if (!inst->is_call() || inst->callee_symbol.empty() || inst->is_patchable) continue;
-            const std::string_view sym = inst->callee_symbol;
-            inst->no_gc_point = sym == "brass_gc_write_barrier" || mod.has_symbol_role(sym, SymbolRole::Pure) ||
-                                mod.has_symbol_role(sym, SymbolRole::NoCollect);
-        }
-    }
-}
-
-} // namespace
 
 namespace {
 // The x64 emitter aligns a loop's head to 32 bytes from the start of its
@@ -142,26 +108,6 @@ ObjectSymbol* ObjectFile::find_symbol(std::string_view name) {
     return it == symbol_index_.end() ? nullptr : &symbols[it->second];
 }
 
-namespace {
-
-// Diagnostic: BRASS_BLOCK_MAP=<file> appends each emitted function's blocks
-// as "function<TAB>offset<TAB>block name<TAB>cold", offsets from the
-// function's start, in layout order — what maps a profile's hot or
-// out-of-line address back to the IR that made it.
-void write_block_map(std::string_view fn_name, const codegen::LirFunction& lir,
-                     const std::unordered_map<uint32_t, size_t>& offsets) {
-    static const std::string path = env_value("BRASS_BLOCK_MAP");
-    if (path.empty()) return;
-    static std::ofstream out(path, std::ios::app);
-    for (const auto& b : lir.blocks) {
-        if (!b) continue;
-        auto it = offsets.find(b->id);
-        if (it == offsets.end()) continue;
-        out << fn_name << '\t' << it->second << '\t' << b->name << '\t' << (b->cold ? 1 : 0) << '\n';
-    }
-}
-
-} // namespace
 
 ModuleCompiler::ModuleCompiler(const Target& target)
     : target_(target), cc_(CallingConvention::for_target(target)) {}
@@ -183,332 +129,51 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     // The loop pipeline, built once per FP-reassociation setting rather than
     // once per function (a module of thousands of small functions spent
     // more building step lists than running most of them).
+    detail::FunctionCodegenConfig cfg;
+    cfg.target = target_;
+    cfg.cc = cc_;
+    cfg.sched = sched_opts_;
+    cfg.deopt_stress = deopt_stress_;
+    cfg.enable_trace_layout = enable_trace_layout_;
+    cfg.x64_avx = x64_avx_;
     std::unique_ptr<Pipeline> loop_pipes[2];
-    // Stack maps appended by name without add_function's linear search for
-    // an existing map (quadratic over a large module); a repeated name
-    // still replaces through it.
-    std::unordered_set<std::string> mapped;
-    auto add_stack_map = [&](const FunctionStackMap& m) {
-        if (mapped.insert(m.function_name).second) obj.stack_maps.functions().push_back(m);
-        else obj.stack_maps.add_function(m);
-    };
-    for (const auto* fn : mod.functions()) {
-        if (!fn) continue;
-
-        const bool reassoc = fn->allow_fp_reassociation() || mod.allow_fp_reassociation();
-        if (enable_mir_opts_ && !loop_pipes[reassoc]) {
+    if (enable_mir_opts_ && !mod.has_loop_optimizations()) {
+        for (int reassoc = 0; reassoc < 2; ++reassoc) {
             LoopOptOptions loop_opts;
             loop_opts.enable_f64_demote = false;
-            loop_opts.enable_fp_reassociation = reassoc;
+            loop_opts.enable_fp_reassociation = reassoc != 0;
             loop_pipes[reassoc] = std::make_unique<Pipeline>(loop_pipeline(loop_opts));
+            cfg.loop_pipes[reassoc] = loop_pipes[reassoc].get();
         }
+    }
 
-        const Function* fn_to_lower = fn;
-        Function* opt_fn_mut = nullptr;
-        std::unique_ptr<Module> opt_mod;
-        if (enable_mir_opts_ && !mod.has_loop_optimizations()) {
-            opt_mod = std::make_unique<Module>(mod.name());
-            opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
-            opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
-            opt_mod->set_precise_stack_roots(mod.precise_stack_roots());
-            // Externs with their roles (passes rely on them: a Pure or
-            // Allocator callee, Data symbols) and the module's string data.
-            opt_mod->copy_declarations_from(mod);
-            Function* opt_fn = clone_function(*fn, *opt_mod);
-            // The optimizer's guarantees hold only for well-formed input;
-            // IR the verifier rejects is lowered as given, unoptimized.
-            const bool input_valid = verify_function(*opt_fn);
-            const bool optimized = input_valid && run_pipeline(*opt_fn, *loop_pipes[reassoc]).changed;
-            opt_fn->rebuild_cfg_predecessors();
-            opt_fn->sort_blocks_rpo();
-            opt_fn->rebuild_cfg_predecessors();
-            // Lowering broken IR would emit wrong code silently; an
-            // optimizer bug has to surface here instead. A function the
-            // optimizer left unchanged is the valid input, reordered.
-            DiagnosticReporter diag;
-            if (optimized && !verify_function(*opt_fn, &diag)) {
-                throw std::runtime_error("MIR loop optimization produced invalid IR for '" +
-                                         std::string(fn->name()) + "':\n" + diag.format_all());
-            }
-            fn_to_lower = opt_fn;
-            opt_fn_mut = opt_fn;
-        }
+    // Every function compiled on its own (detail::compile_function reads the
+    // module and writes only its result), then placed in module order: the
+    // object is the same whatever the thread count.
+    std::vector<const Function*> fns;
+    std::vector<size_t> weights;
+    size_t total_weight = 0;
+    for (const Function* fn : mod.functions()) {
+        if (!fn) continue;
+        fns.push_back(fn);
+        weights.push_back(fn->block_count() + 1);
+        total_weight += weights.back();
+    }
+    std::vector<detail::EmittedFunction> emitted(fns.size());
+    const size_t threads = threads_for_work(threads_, fns.size(), total_weight, min_blocks_per_thread_);
+    parallel_for_each(heaviest_first(weights), threads, [&](size_t i) {
+        emitted[i] = detail::compile_function(mod, *fns[i], cfg);
+    });
 
-        // Deopt stress guards go in after the optimizer, into the copy that
-        // is lowered (a copy made for them when there is none yet).
-        if (has_deopt_stress_guards(*fn_to_lower, &mod, deopt_stress_)) {
-            if (!opt_fn_mut) {
-                opt_mod = std::make_unique<Module>(mod.name());
-                opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
-                opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
-                opt_mod->set_precise_stack_roots(mod.precise_stack_roots());
-                opt_mod->copy_declarations_from(mod);
-                opt_fn_mut = clone_function(*fn, *opt_mod);
-                fn_to_lower = opt_fn_mut;
-            }
-            insert_deopt_stress_guards(*opt_fn_mut, &mod, deopt_stress_);
-            opt_fn_mut->rebuild_cfg_predecessors();
-        }
-
-        // Interrupt polls on the back edges (Module::interrupt_poll), last,
-        // so neither the optimizer nor the stress guards see them.
-        if (mod.interrupt_poll() && needs_interrupt_polls(*fn_to_lower)) {
-            if (!opt_fn_mut) {
-                opt_mod = std::make_unique<Module>(mod.name());
-                opt_mod->set_allow_fp_reassociation(mod.allow_fp_reassociation());
-                opt_mod->set_pinned_tls_register(mod.pinned_tls_register());
-                opt_mod->set_precise_stack_roots(mod.precise_stack_roots());
-                opt_mod->copy_declarations_from(mod);
-                opt_fn_mut = clone_function(*fn, *opt_mod);
-                fn_to_lower = opt_fn_mut;
-            }
-            insert_interrupt_polls(*opt_fn_mut);
-        }
-
-        // 1. ISel to LIR
-        std::unique_ptr<codegen::LirFunction> lir;
-        {
-            PhaseTimeScope timing("backend: isel");
-            if (target_.is_aarch64()) {
-                aarch64::AArch64ISel isel(target_, cc_);
-                isel.set_callee_module(&mod);
-                lir = isel.lower(*fn_to_lower);
-            } else {
-                x64::X64ISel isel(target_, cc_);
-                isel.set_callee_module(&mod);
-                isel.set_avx(x64_avx_);
-                lir = isel.lower(*fn_to_lower);
-            }
-            if (lir) lir->sort_blocks_rpo();
-        }
-        if (!lir) continue;
-        mark_no_gc_calls(*lir, mod);
-
-        // 1.5 Loop Software Pipelining (if enabled)
-        if (sched_opts_.enable_software_pipelining) {
-            PhaseTimeScope timing("backend: software pipelining");
-            codegen::run_software_pipelining(*lir);
-        }
-
-        // 1.6 Pre-RA Instruction Scheduling (if enabled)
-        if (sched_opts_.enable_pre_ra) {
-            PhaseTimeScope timing("backend: pre-RA scheduling");
-            codegen::schedule_function(*lir, sched_opts_);
-        }
-
-        {
-            PhaseTimeScope timing("backend: liveness + register allocation");
-            // 2. Liveness Analysis
-            codegen::LivenessAnalysis liveness(*lir);
-            liveness.run();
-
-            // 3. Linear Scan Register Allocation
-            codegen::LinearScanAllocator regalloc(*lir, liveness, cc_);
-            regalloc.allocate();
-        }
-
-        // 3.4 Post-RA Instruction Scheduling (if enabled)
-        if (sched_opts_.enable_post_ra) {
-            PhaseTimeScope timing("backend: post-RA scheduling");
-            codegen::schedule_function(*lir, sched_opts_);
-        }
-
-        // 3.5 LIR Trace Scheduling & Fall-Through Block Layout
-        // (The loop options' enable_trace_layout was always its default,
-        // false, here.)
-        if (enable_trace_layout_) {
-            PhaseTimeScope timing("backend: block layout");
-            codegen::optimize_block_layout(*lir);
-        }
-
-        // 3.6 LIR Peephole Optimization
-        PhaseTimeScope peephole_timing("backend: peephole + emit");
-        codegen::run_lir_peephole_optimizations(*lir);
-        if (sched_opts_.enable_lir_superopt && target_.is_x64()) {
-            SuperoptOptions sopts;
-            sopts.lir_check_flags = true;
-            for (auto& blk : lir->blocks) {
-                if (blk && blk->instructions.size() <= 128) {
-                    run_x64_lir_superopt(*blk, sopts);
-                }
-            }
-        }
-
-        if (target_.is_aarch64()) {
-            // 4. AArch64 Machine Code Emission
-            aarch64::AArch64EmitContext emit_ctx(*lir, target_);
-            aarch64::AArch64CompilationResult res = emit_ctx.compile();
-
-            // 5. Place in .text
-            text_sec.align_to(16);
-            size_t fn_offset = text_sec.data.size();
-            size_t fn_size = res.code_buffer.size();
-            text_sec.emit_bytes(res.code_buffer.span());
-
-            size_t prologue_sz = 0;
-            if (!lir->blocks.empty()) {
-                auto it = res.block_offsets.find(lir->blocks.front()->id);
-                if (it != res.block_offsets.end()) {
-                    prologue_sz = it->second;
-                }
-            }
-
-            CompiledFunctionInfo cfi;
-            cfi.name = std::string(fn->name());
-            cfi.text_offset = fn_offset;
-            cfi.text_size = fn_size;
-            cfi.prologue_size = prologue_sz;
-            cfi.return_type = fn->return_type();
-            cfi.param_types = fn->param_types();
-            cfi.frame_info = lir->frame;
-            aarch64::AArch64FrameLayout::compute_layout(cfi.frame_info, cc_);
-            cfi.cc = cc_;
-            cfi.safepoints = std::move(res.safepoints);
-            cfi.stack_map = std::move(res.stack_map);
-            cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
-            cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
-            add_stack_map(cfi.stack_map);
-
-            cfi.resume_table = std::move(res.resume_table);
-            obj.resume_tables.register_table(cfi.name, cfi.resume_table);
-
-            cfi.exception_table = std::move(res.exception_table);
-            cfi.exception_table.set_code_offset(static_cast<uint32_t>(fn_offset));
-            obj.exception_tables.register_table(cfi.name, cfi.exception_table);
-
-            for (const auto& ps : res.patch_sites) {
-                runtime::PatchSite global_ps = ps;
-                global_ps.code_offset += fn_offset;
-                obj.patch_sites.register_site(global_ps);
-                cfi.patch_sites.push_back(std::move(global_ps));
-            }
-
-            obj.functions.push_back(std::move(cfi));
-            res.debug_table.set_prologue_size(static_cast<uint32_t>(prologue_sz));
-            obj.debug_tables.push_back(std::move(res.debug_table));
-
-            int32_t text_idx = obj.get_section_index(".text");
-            ObjectSymbol fn_sym;
-            fn_sym.name = std::string(fn->name());
-            fn_sym.section_index = text_idx;
-            fn_sym.value = fn_offset;
-            fn_sym.size = fn_size;
-            fn_sym.binding = SymbolBinding::Global;
-            fn_sym.type = SymbolType::Function;
-            obj.add_symbol(std::move(fn_sym));
-
-            for (const auto& r : res.code_buffer.relocations()) {
-                ObjectRelocation obj_r;
-                obj_r.offset = fn_offset + r.offset;
-                switch (r.kind) {
-                    case aarch64::RelocationKind::Call26:
-                    case aarch64::RelocationKind::Jump26:
-                        obj_r.kind = RelocKind::Plt32;
-                        break;
-                    case aarch64::RelocationKind::Page21:      obj_r.kind = RelocKind::AdrPage21; break;
-                    case aarch64::RelocationKind::AddLo12:     obj_r.kind = RelocKind::AddLo12; break;
-                    case aarch64::RelocationKind::LdSt8Lo12:   obj_r.kind = RelocKind::LdSt8Lo12; break;
-                    case aarch64::RelocationKind::LdSt16Lo12:  obj_r.kind = RelocKind::LdSt16Lo12; break;
-                    case aarch64::RelocationKind::LdSt32Lo12:  obj_r.kind = RelocKind::LdSt32Lo12; break;
-                    case aarch64::RelocationKind::LdSt64Lo12:  obj_r.kind = RelocKind::LdSt64Lo12; break;
-                    case aarch64::RelocationKind::LdSt128Lo12: obj_r.kind = RelocKind::LdSt128Lo12; break;
-                    case aarch64::RelocationKind::GotPage21:   obj_r.kind = RelocKind::GotPage21; break;
-                    case aarch64::RelocationKind::GotLo12:     obj_r.kind = RelocKind::GotLo12; break;
-                    case aarch64::RelocationKind::Abs64:
-                        obj_r.kind = RelocKind::Abs64;
-                        break;
-                }
-                obj_r.symbol_name = r.symbol_name;
-                obj_r.addend = r.addend;
-                text_sec.relocations.push_back(std::move(obj_r));
-            }
-        } else {
-            // 4. Machine Code Emission
-            codegen::EmitContext emit_ctx(*lir, target_);
-            codegen::CompilationResult res = emit_ctx.compile();
-
-            // 5. Place in .text, where the loop heads' alignment holds.
-            text_sec.align_to(kTextAlignment);
-            size_t fn_offset = text_sec.data.size();
-            size_t fn_size = res.code_buffer.size();
-            text_sec.emit_bytes(res.code_buffer.span());
-            write_block_map(fn->name(), *lir, res.block_offsets);
-
-            size_t prologue_sz = 0;
-            if (!lir->blocks.empty()) {
-                auto it = res.block_offsets.find(lir->blocks.front()->id);
-                if (it != res.block_offsets.end()) {
-                    prologue_sz = it->second;
-                }
-            }
-
-            CompiledFunctionInfo cfi;
-            cfi.name = std::string(fn->name());
-            cfi.text_offset = fn_offset;
-            cfi.text_size = fn_size;
-            cfi.prologue_size = prologue_sz;
-            cfi.return_type = fn->return_type();
-            cfi.param_types = fn->param_types();
-            cfi.frame_info = lir->frame;
-            x64::X64FrameLayout::compute_layout(cfi.frame_info, cc_);
-            cfi.cc = cc_;
-            cfi.stack_adjust_regions = std::move(res.stack_adjust_regions);
-            cfi.safepoints = std::move(res.safepoints);
-            cfi.stack_map = std::move(res.stack_map);
-            cfi.stack_map.code_offset = static_cast<uint32_t>(fn_offset);
-            cfi.stack_map.code_size = static_cast<uint32_t>(fn_size);
-            add_stack_map(cfi.stack_map);
-
-            cfi.resume_table = std::move(res.resume_table);
-            obj.resume_tables.register_table(cfi.name, cfi.resume_table);
-
-            cfi.exception_table = std::move(res.exception_table);
-            cfi.exception_table.set_code_offset(static_cast<uint32_t>(fn_offset));
-            obj.exception_tables.register_table(cfi.name, cfi.exception_table);
-
-            for (const auto& ps : res.patch_sites) {
-                runtime::PatchSite global_ps = ps;
-                global_ps.code_offset += fn_offset;
-                obj.patch_sites.register_site(global_ps);
-                cfi.patch_sites.push_back(std::move(global_ps));
-            }
-
-            obj.functions.push_back(std::move(cfi));
-            res.debug_table.set_prologue_size(static_cast<uint32_t>(prologue_sz));
-            obj.debug_tables.push_back(std::move(res.debug_table));
-
-            int32_t text_idx = obj.get_section_index(".text");
-            ObjectSymbol fn_sym;
-            fn_sym.name = std::string(fn->name());
-            fn_sym.section_index = text_idx;
-            fn_sym.value = fn_offset;
-            fn_sym.size = fn_size;
-            fn_sym.binding = SymbolBinding::Global;
-            fn_sym.type = SymbolType::Function;
-            obj.add_symbol(std::move(fn_sym));
-
-            for (const auto& r : res.code_buffer.relocations()) {
-                ObjectRelocation obj_r;
-                obj_r.offset = fn_offset + r.offset;
-                switch (r.kind) {
-                    case x64::RelocationKind::PCRel32:
-                        obj_r.kind = RelocKind::Plt32;
-                        break;
-                    case x64::RelocationKind::Abs64:
-                        obj_r.kind = RelocKind::Abs64;
-                        break;
-                    case x64::RelocationKind::SecRel32:
-                        obj_r.kind = RelocKind::SecRel32;
-                        break;
-                    case x64::RelocationKind::GotPCRel32:
-                        obj_r.kind = RelocKind::GotPCRel32;
-                        break;
-                }
-                obj_r.symbol_name = r.symbol_name;
-                obj_r.addend = r.addend;
-                text_sec.relocations.push_back(std::move(obj_r));
-            }
-        }
+    // Stack maps appended by name without add_function's linear search for
+    // an existing map (quadratic over a large module); a repeated name still
+    // replaces through it.
+    std::unordered_set<std::string> mapped;
+    detail::ObjectPlacement placement{obj, text_sec, mapped};
+    for (detail::EmittedFunction& fn : emitted) {
+        if (!fn.emitted) continue;
+        detail::write_block_map(fn.block_map);
+        detail::place_function(placement, std::move(fn));
     }
 
     // Emit compact binary stack maps to .rdata / .rodata / __const section

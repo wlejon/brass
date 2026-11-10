@@ -5,6 +5,7 @@
 #include <brass/mir/dominators.hpp>
 #include <cstddef>
 #include <string>
+#include <unordered_set>
 
 namespace brass {
 
@@ -18,8 +19,23 @@ struct LoopDistributionStats {
     std::string format_report() const;
 };
 
+// The module's functions a loop may call and still be distributed: one block
+// of computation from the arguments alone (pure_leaf_function). Recorded for
+// a whole module at once, before its functions are optimized in parallel, so
+// that a caller never reads a callee another thread is changing.
+struct PureLeafFunctions {
+    const Module* module = nullptr;
+    std::unordered_set<const Function*> functions;
+    void record(const Module& mod);
+};
+
+bool pure_leaf_function(const Function& fn);
+
 struct LoopDistributionOptions {
     LoopDistributionStats* stats = nullptr;
+    // When set and recorded for the function's module, what a call's callee
+    // is taken to be; otherwise the callee's body is read as it is now.
+    const PureLeafFunctions* pure_leaves = nullptr;
 };
 
 // Check if a loop can be legally distributed into vectorizable and unvectorizable loops

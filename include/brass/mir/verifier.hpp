@@ -23,6 +23,10 @@ private:
 };
 
 bool verify_module(const Module& mod, DiagnosticReporter* diag = nullptr);
+// The same check and the same report, the functions verified on up to
+// `threads` threads (0: the machine's hardware threads; a small module uses
+// one). verifier_parallel.cpp.
+bool verify_module(const Module& mod, DiagnosticReporter* diag, size_t threads);
 bool verify_function(const Function& fn, DiagnosticReporter* diag = nullptr);
 
 // The proof certificates alone: each write barrier the optimizer elided and

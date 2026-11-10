@@ -538,9 +538,19 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
     fn.rebuild_cfg_predecessors();
 
     // 9. Reload each crossing value on entry to every block that uses it
-    // and that its definition does not dominate in the lowered CFG.
+    // and that its definition does not dominate in the lowered CFG. Values
+    // are taken in slot order (the arguments, then `spilled`), never in the
+    // map's pointer-hash order: a block's reloads, and the ids they get,
+    // would otherwise depend on where the allocator put the values.
     DominatorTree dom(fn);
-    for (const auto& [v, slot] : slot_map) {
+    std::vector<std::pair<Value*, uint32_t>> reloads;
+    reloads.reserve(slot_map.size());
+    for (uint32_t i = 0; i < arg_count; ++i) {
+        auto it = slot_map.find(orig_params[i + 1]);
+        if (it != slot_map.end()) reloads.emplace_back(it->first, it->second);
+    }
+    for (Value* v : spilled) reloads.emplace_back(v, slot_map[v]);
+    for (const auto& [v, slot] : reloads) {
         BasicBlock* def_bb = def_block_of(v);
         if (!def_bb) {
             throw std::logic_error(fn_desc(fn) + "a value live across a suspend has no defining block");

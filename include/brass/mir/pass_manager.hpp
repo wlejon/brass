@@ -41,6 +41,16 @@ struct PassStep {
     // needs, such as DCE after vectorization). Part of the step, reported
     // under its name.
     std::function<bool(Function&)> follow_up;
+    // A function step that may run on many functions at once ("Threads",
+    // below): it reads and writes only the function it is given, plus what
+    // its `prepare` recorded. Off by default: a step not known to keep that
+    // contract runs on one function at a time, in module order.
+    bool concurrent = false;
+    // Optional, for a concurrent step that reads other functions: runs on the
+    // module, on the calling thread, before any step of the step's run of
+    // concurrent steps starts, and records what the step will read of them.
+    // Not run by run_pipeline(Function&); the step must then manage without.
+    std::function<void(Module&)> prepare;
 };
 
 class Pipeline {
@@ -85,11 +95,50 @@ struct PipelineResult {
     bool changed = false;   // some step reported a change
 };
 
-// Runs `pipeline` on `mod`, step by step. Function steps visit the functions
-// the module had when the pipeline started (functions a step adds, such as
-// auto-parallelization's kernels, are not optimized by later steps), with
-// CFG predecessors rebuilt around every call.
-PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPipelineHooks& hooks = {});
+struct PipelineRunOptions {
+    // Threads the function steps may use: 0 is the machine's hardware
+    // threads, 1 runs everything on the calling thread. The output does not
+    // depend on it ("Threads", below). A small module uses fewer than it may.
+    size_t threads = 0;
+    // A thread per this many blocks of the functions a stage runs on, at
+    // most `threads`: below it, starting a thread costs more than it saves.
+    size_t min_blocks_per_thread = 2000;
+};
+
+// Runs `pipeline` on `mod`. Function steps visit the functions the module had
+// when the pipeline started (functions a step adds, such as
+// auto-parallelization's kernels, are not optimized by later steps), with CFG
+// predecessors rebuilt around every call.
+//
+// Threads. The steps fall into stages, run one after another: a module
+// step; a function step that is not `concurrent`, run on each function in
+// module order; or a maximal run of consecutive
+// concurrent function steps, where each function runs the whole run's steps in
+// pipeline order, functions in parallel. Within that run a step on one
+// function sees every other function as it was when the run began (its
+// `prepare` recorded that, and nothing else of them may be read), so the
+// order functions run in, and the number of threads, cannot change the
+// module the stage leaves. Each function runs inside a FunctionWorkScope
+// (module.hpp): the IR and names its steps make go to its own arena and
+// pool, not the module's, which are not thread-safe. With `before_pass` or
+// `after_pass` hooks, a concurrent run is taken a step at a time instead
+// (all functions through one step, then the hooks, then the next step): the
+// same module results, with the hooks seeing it between steps.
+//
+// What a concurrent step must not do, and what keeps a step serial: add,
+// remove or rename functions or declarations (Module::create_function,
+// add_symbol_role, define_string_symbol ...); read another function's body
+// or attributes that a step of the same run may change, other than through
+// `prepare`; write shared statistics or caches (a step given a stats sink is
+// built serial); depend on the addresses of IR objects for anything but
+// identity (an order of pointers changes with where the arenas lie).
+// That last rule binds every step and analysis, serial ones too: the arenas
+// of a parallel run lie elsewhere than a serial run's, and under ASLR every
+// run's do, so a walk of a pointer-keyed hash map that decides an order
+// (LoopAnalysis's loops and lower_coroutines' reloads did) makes a build
+// differ from run to run. Order by block or value order, or by id.
+PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPipelineHooks& hooks = {},
+                            const PipelineRunOptions& run = {});
 
 // Runs `pipeline` on one function. Every step must be function-scoped;
 // a module step is a std::logic_error.

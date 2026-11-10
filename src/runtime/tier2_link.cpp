@@ -210,7 +210,10 @@ bool run_tier2_optimization_pipeline(Module& mod, FunctionDispatchTable& table, 
             return true;
         };
     }
-    run_pipeline(mod, pipeline, hooks);
+    // On the compile thread that runs this job, without fanning out.
+    PipelineRunOptions run;
+    run.threads = 1;
+    run_pipeline(mod, pipeline, hooks, run);
     DiagnosticReporter diag;
     if (verify_module(mod, &diag)) return true;
     errors = diag.format_all();
