@@ -145,6 +145,26 @@ public:
     void set_interrupt_poll(int32_t tls_offset, std::string_view handler);
     void clear_interrupt_poll() noexcept { interrupt_poll_ = {}; }
 
+    // The young generation of the heap the running thread allocates in, as
+    // two 64-bit words of the pinned TLS block: [base, base + span) at
+    // [block + base_offset] and [block + span_offset] (gc::Heap::young_base
+    // and young_span, which the host copies into its block when the thread
+    // binds to a heap; span 0 while it is bound to none). When set, compiled
+    // code (Tier 1, Tier 2, OSR, AOT) tests a write_barrier's target against
+    // the range inline and calls brass_gc_write_barrier only for a target
+    // outside it: the barrier does nothing for a young target
+    // (gc_contract.md 2.4). Requires pinned_tls_register; without it a
+    // barrier is always the call.
+    struct YoungRange {
+        int32_t base_offset = -1;
+        int32_t span_offset = -1;
+        explicit operator bool() const noexcept { return base_offset >= 0 && span_offset >= 0; }
+    };
+    const YoungRange& young_range() const noexcept { return young_range_; }
+    void set_young_range(int32_t base_offset, int32_t span_offset) noexcept {
+        young_range_ = (base_offset >= 0 && span_offset >= 0) ? YoungRange{base_offset, span_offset} : YoungRange{};
+    }
+
     // 64-bit constants the host keeps in memory at fixed offsets from the
     // pinned TLS register (pinned_tls_register), in every thread that runs
     // the module's code: the NaN-box tags, payload masks and limits a guard
@@ -244,6 +264,7 @@ private:
     bool pinned_tls_register_ = false;
     bool precise_stack_roots_ = false;
     InterruptPoll interrupt_poll_;
+    YoungRange young_range_;
     std::vector<PinnedConstant> pinned_constants_;
     bool has_loop_optimizations_ = false;
     DebugContext debug_context_;

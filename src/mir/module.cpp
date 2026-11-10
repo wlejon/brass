@@ -407,6 +407,7 @@ void Module::copy_declarations_from(const Module& src) {
     }
     for (const auto& [sym, text] : src.string_symbols()) define_string_symbol(sym, text);
     if (src.interrupt_poll()) set_interrupt_poll(src.interrupt_poll().tls_offset, src.interrupt_poll().handler);
+    young_range_ = src.young_range();
     for (const PinnedConstant& c : src.pinned_constants()) add_pinned_constant(c.value, c.tls_offset);
 }
 

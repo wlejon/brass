@@ -434,8 +434,16 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 case Opcode::write_barrier: {
                     RuntimeValue obj = frame.get_value(inst->operand(0));
                     RuntimeValue val = frame.get_value(inst->operand(1));
-                    heap_->write_barrier_interior(static_cast<uintptr_t>(obj.raw_bits() & gc::kAddressMask),
-                                                  val.raw_bits());
+                    // A host's own barrier when it registered one under the
+                    // name compiled code calls (gc_contract.md 3), else the
+                    // heap's.
+                    auto it = external_functions_.find("brass_gc_write_barrier");
+                    if (it != external_functions_.end()) {
+                        it->second(*this, {obj, val});
+                    } else {
+                        heap_->write_barrier_interior(static_cast<uintptr_t>(obj.raw_bits() & gc::kAddressMask),
+                                                      val.raw_bits());
+                    }
                     break;
                 }
 

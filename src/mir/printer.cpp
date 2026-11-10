@@ -815,7 +815,8 @@ void print_module(const Module& mod, std::ostream& os) {
 
     // Module attributes.
     if (mod.allow_fp_reassociation() || mod.pinned_tls_register() || mod.precise_stack_roots() ||
-        mod.has_loop_optimizations() || mod.interrupt_poll() || !mod.pinned_constants().empty()) {
+        mod.has_loop_optimizations() || mod.interrupt_poll() || mod.young_range() ||
+        !mod.pinned_constants().empty()) {
         os << "attributes";
         if (mod.allow_fp_reassociation()) os << " fp_reassociation";
         if (mod.pinned_tls_register()) os << " pinned_tls_register";
@@ -823,6 +824,9 @@ void print_module(const Module& mod, std::ostream& os) {
         if (mod.has_loop_optimizations()) os << " loop_optimizations";
         if (mod.interrupt_poll()) {
             os << " interrupt_poll " << mod.interrupt_poll().tls_offset << " " << sym_ref(mod.interrupt_poll().handler);
+        }
+        if (mod.young_range()) {
+            os << " young_range " << mod.young_range().base_offset << " " << mod.young_range().span_offset;
         }
         for (const Module::PinnedConstant& c : mod.pinned_constants()) {
             char hex[24];

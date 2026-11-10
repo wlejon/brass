@@ -332,10 +332,25 @@ bool emit_baseline_x64_op(X64BaselineEmitter& emitter, const Instruction& inst) 
             // called, as it is from optimized code.
             void* wb = emitter.resolve_sym("brass_gc_write_barrier");
             if (!wb) throw_unsupported(kX64BaselineStage, "write_barrier: brass_gc_write_barrier is not registered");
+            // A target in the thread's young range needs no call
+            // (Module::young_range, write_barrier_lowering.hpp): the
+            // address under its tag, less the base, unsigned below the span.
+            const Module* mod = inst.parent()->parent()->parent();
+            Label done = emitter.buffer.create_label();
+            const bool filtered = mod && mod->young_range() && mod->pinned_tls_register();
+            if (filtered) {
+                enc.mov(GPR::RAX, slot_addr(inst.operand(0)));
+                enc.shl(GPR::RAX, 16);
+                enc.shr(GPR::RAX, 16);
+                enc.sub(GPR::RAX, MemAddress::base_disp(GPR::R13, mod->young_range().base_offset));
+                enc.cmp(GPR::RAX, MemAddress::base_disp(GPR::R13, mod->young_range().span_offset));
+                enc.jb(done);
+            }
             const bool win = emitter.target.is_windows();
             enc.mov(win ? GPR::RCX : GPR::RDI, slot_addr(inst.operand(0)));
             enc.mov(win ? GPR::RDX : GPR::RSI, slot_addr(inst.operand(1)));
             emitter.call_abs(wb);
+            emitter.buffer.bind(done);
             return true;
         }
 

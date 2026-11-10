@@ -374,9 +374,24 @@ bool emit_baseline_aarch64_op(AArch64BaselineEmitter& emitter, const Instruction
             // optimized code.
             void* wb = emitter.resolve_sym("brass_gc_write_barrier");
             if (!wb) throw_unsupported(kA64BaselineStage, "write_barrier: brass_gc_write_barrier is not registered");
+            // A target in the thread's young range needs no call
+            // (Module::young_range, write_barrier_lowering.hpp): the
+            // address under its tag, less the base, unsigned below the span.
+            const Module* mod = emitter.fn.parent();
+            Label done = emitter.buffer.create_label();
+            if (mod && mod->young_range() && mod->pinned_tls_register()) {
+                enc.ldr(GPR::X16, emitter.slot_addr(inst.operand(0), 8));
+                enc.and_imm(GPR::X16, GPR::X16, 0x0000FFFFFFFFFFFFULL);
+                enc.ldr(GPR::X17, MemAddress::base_disp(kPinnedTlsGpr, mod->young_range().base_offset));
+                enc.sub(GPR::X16, GPR::X16, GPR::X17);
+                enc.ldr(GPR::X17, MemAddress::base_disp(kPinnedTlsGpr, mod->young_range().span_offset));
+                enc.cmp(GPR::X16, GPR::X17);
+                enc.b(Condition::CC, done);
+            }
             enc.ldr(GPR::X0, emitter.slot_addr(inst.operand(0), 8));
             enc.ldr(GPR::X1, emitter.slot_addr(inst.operand(1), 8));
             emitter.call_abs(wb);
+            emitter.buffer.bind(done);
             return true;
         }
 

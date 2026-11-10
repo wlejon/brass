@@ -96,7 +96,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `store.<type> <base:ptr|gcref> [, <offset:i32>], <val>`
 - `load_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8> [, <offset:i32>]` -> `<type>`
 - `store_indexed.<type> <base>, <index:i64>, <scale:1|2|4|8> [, <offset:i32>], <val>`
-- `write_barrier <obj:gcref>, <val:gcref>` (marks generational card table for old-to-young references)
+- `write_barrier <obj>, <val>` (after a store of `val` into the object `obj` names: a `gcref`, a pointer, or an i64 holding a raw or tagged address anywhere inside it. Calls `brass_gc_write_barrier`, which dirties the card of an old object given a young reference and shades an old one while a marking cycle is open, gc_contract.md 2.4. It is no memory access to the optimizer and no GC point; `write_barrier_elim` drops one it proves does nothing. With the module attribute `young_range <base> <span>` (`Module::set_young_range`) and a pinned TLS register, compiled code tests an i64 target against the thread's young range read at those TLS offsets and calls only for a target outside it)
 - `alloca.tagged <size>, <align>` -> `ptr` (a frame block of `size / 8` words, zeroed on entry. Every word is a tagged root at each GC point in the function, so values stored into it stay current across collections)
 
 ### Function Calls, Addresses & Safepoints

@@ -1,8 +1,13 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
+
+#include <iostream>
+#include <memory>
+#include <string>
 
 using namespace brass;
 
@@ -143,4 +148,87 @@ TEST_CASE("WBE - Preserving required cross-generation barrier") {
 
     DiagnosticReporter diag;
     CHECK(verify_module(mod, &diag));
+}
+
+// The facts flow across blocks: they hold at a block when they hold at the
+// end of every predecessor, and any GC point (a call that may collect)
+// clears them on its path.
+namespace {
+
+std::unique_ptr<Module> parse_wbe(const char* src) {
+    DiagnosticReporter diag;
+    auto mod = parse_module(src, &diag);
+    if (!mod) std::cerr << diag.format_all() << "\n";
+    REQUIRE(mod != nullptr);
+    DiagnosticReporter vdiag;
+    REQUIRE(verify_module(*mod, &vdiag));
+    return mod;
+}
+
+// `@f`: a barrier in entry (FIRST), a diamond whose left arm holds LEFT, and
+// a barrier at the join.
+std::string diamond(const char* first, const char* left) {
+    std::string s = R"(module @wbe_cfg
+extern @wbe_ext
+
+func @f(%o: gcref, %v: gcref, %c: i64) -> i64 {
+entry:
+  %sz = iconst.i64 48
+  %z = iconst.i64 0
+  %k = iconst.i32 2
+  %y = call.gcref @brass_gc_alloc(%sz, %z, %k)
+)";
+    s += first;
+    s += R"(
+  %one = iconst.i64 1
+  %two = iconst.i64 2
+  %go = eq.i64 %c, %z
+  br_if %go, a, b
+a:
+)";
+    s += left;
+    s += R"(
+  br j(%one)
+b:
+  br j(%two)
+j(%p: i64):
+  write_barrier %o, %v
+  write_barrier %y, %v
+  write_barrier %o, %p
+  ret %z
+}
+)";
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("WBE - Facts cross blocks when every path keeps them") {
+    auto mod = parse_wbe(diamond("  write_barrier %o, %v", "  %w = add.i64 %c, %c").c_str());
+    Function* fn = mod->get_function("f");
+    WriteBarrierElimination wbe;
+    CHECK(wbe.run_on_function(*fn));
+    // (o, v) is barriered on every path; y is young on every path; p is an
+    // integer on both incoming edges.
+    CHECK_EQ(wbe.stats().eliminated_redundant, 1U);
+    CHECK_EQ(wbe.stats().eliminated_young_provenance, 1U);
+    CHECK_EQ(wbe.stats().eliminated_non_pointer, 1U);
+    CHECK_EQ(count_write_barriers(*fn), 1ULL);
+    DiagnosticReporter diag;
+    CHECK(verify_module(*mod, &diag));
+}
+
+TEST_CASE("WBE - A GC point on one path keeps the join's barriers") {
+    auto mod = parse_wbe(diamond("  write_barrier %o, %v", "  %w = call.i64 @wbe_ext(%c)").c_str());
+    Function* fn = mod->get_function("f");
+    WriteBarrierElimination wbe;
+    wbe.run_on_function(*fn);
+    // A collection may promote y and must see the card of (o, v) marked
+    // again; p is still an integer.
+    CHECK_EQ(wbe.stats().eliminated_redundant, 0U);
+    CHECK_EQ(wbe.stats().eliminated_young_provenance, 0U);
+    CHECK_EQ(wbe.stats().eliminated_non_pointer, 1U);
+    CHECK_EQ(count_write_barriers(*fn), 3ULL);
+    DiagnosticReporter diag;
+    CHECK(verify_module(*mod, &diag));
 }

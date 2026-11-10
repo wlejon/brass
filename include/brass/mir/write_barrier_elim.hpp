@@ -37,6 +37,9 @@ public:
 
 private:
     bool is_allocation_inst(const Instruction* inst) const noexcept;
+    // The payload bytes of a young allocation `inst` makes, or -1 when it
+    // is none.
+    int64_t young_allocation_bytes(const Instruction* inst) const noexcept;
 
     bool dump_stats_ = false;
     WbeStats stats_;

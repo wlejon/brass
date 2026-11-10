@@ -176,6 +176,14 @@ bool Parser::parse_module_attributes(Module& mod) {
             if (handler.empty()) return false;
             mod.set_interrupt_poll(static_cast<int32_t>(offset), handler);
             continue;
+        } else if (attr == "young_range") {
+            // `young_range <base offset> <span offset>` (Module::set_young_range)
+            advance();
+            uint32_t base = 0, span = 0;
+            if (!take_unsigned(INT32_MAX, "the young range's base TLS offset", base)) return false;
+            if (!take_unsigned(INT32_MAX, "the young range's span TLS offset", span)) return false;
+            mod.set_young_range(static_cast<int32_t>(base), static_cast<int32_t>(span));
+            continue;
         } else {
             error(peek().location, "Unknown module attribute '" + std::string(attr) + "'");
             return false;

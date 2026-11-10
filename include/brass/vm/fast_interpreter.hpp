@@ -342,6 +342,12 @@ private:
     BytecodeCompiler compiler_;
     std::unordered_map<const BytecodeFunction*, std::unique_ptr<FastFnInfo>> fn_infos_;
     uint64_t resolve_epoch_ = 1;
+    // The barrier write_barrier calls, resolved at resolve epoch
+    // `barrier_epoch_`: the host's brass_gc_write_barrier when it registered
+    // one (by address, else as a host function), else none (the heap's own).
+    void (*barrier_fn_)(uint64_t, uint64_t) = nullptr;
+    const FastHostFn* barrier_host_ = nullptr;
+    uint64_t barrier_epoch_ = 0;
     // Compiled code and infos dropped while frames may still use them;
     // freed once no frame is active.
     std::vector<std::shared_ptr<const BytecodeFunction>> retired_bytecode_;

@@ -142,8 +142,23 @@ void FastInterpreter::register_builtin_host_functions() {
 }
 
 void FastInterpreter::handle_write_barrier(FastFrame& frame, uint32_t obj_reg, uint32_t val_reg) {
-    heap_->write_barrier_interior(static_cast<uintptr_t>(frame.registers[obj_reg] & gc::kAddressMask),
-                                  frame.registers[val_reg]);
+    // A host's own barrier when it registered one under the name compiled
+    // code calls (gc_contract.md 3), else the heap's.
+    if (BRASS_UNLIKELY(barrier_epoch_ != resolve_epoch_)) {
+        barrier_epoch_ = resolve_epoch_;
+        barrier_fn_ = reinterpret_cast<void (*)(uint64_t, uint64_t)>(find_external_symbol("brass_gc_write_barrier"));
+        auto it = external_functions_.find("brass_gc_write_barrier");
+        barrier_host_ = it != external_functions_.end() ? &it->second : nullptr;
+    }
+    const uint64_t obj = frame.registers[obj_reg];
+    const uint64_t val = frame.registers[val_reg];
+    if (barrier_fn_) {
+        barrier_fn_(obj, val);
+    } else if (barrier_host_) {
+        (*barrier_host_)(*this, {RuntimeValue::from_bits(Type::i64(), obj), RuntimeValue::from_bits(Type::i64(), val)});
+    } else {
+        heap_->write_barrier_interior(static_cast<uintptr_t>(obj & gc::kAddressMask), val);
+    }
 }
 
 void FastInterpreter::handle_safepoint(FastFrame& /*frame*/) {

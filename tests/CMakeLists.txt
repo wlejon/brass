@@ -172,6 +172,7 @@ add_executable(brass_unit_tests
     unit/test_gc_heap.cpp
     unit/test_gc_fiber.cpp
     unit/test_interrupt_poll.cpp
+    unit/test_write_barrier_lowering.cpp
     unit/test_gc_heap_weak.cpp
     unit/test_gc_heap_finalize.cpp
     unit/test_gc_heap_roots.cpp
