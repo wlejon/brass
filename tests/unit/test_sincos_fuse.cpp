@@ -234,6 +234,134 @@ TEST_CASE("Fast trig - sincos_f64 is sin_f64 and cos_f64 bit for bit") {
     CHECK_EQ(mismatches, 0);
 }
 
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC optimize("fp-contract=off")
+#endif
+TEST_CASE("Fast trig - quadrant-spanning random phases and edge ranges match V8 bit for bit") {
+    auto from_u64 = [](uint64_t u) {
+        double d;
+        std::memcpy(&d, &u, sizeof d);
+        return d;
+    };
+    auto mix = [](uint64_t h, uint64_t b) { return (h ^ b) * 0x100000001b3ULL; };
+
+    // V8 (node) rolling FNV-1a hashes over the 24 boundary bit patterns and
+    // 50,000 deterministic inputs below: any 1-ULP or sign-bit drift in any
+    // quadrant, reduction tier, or special value alters these 64-bit digests.
+    constexpr uint64_t kWantSinHash = 0x9e578276e5ca4eefULL;
+    constexpr uint64_t kWantCosHash = 0xd020b4867da2226bULL;
+
+    const uint64_t specials[] = {
+        0x0000000000000000ULL, // +0.0
+        0x8000000000000000ULL, // -0.0
+        0x0000000000000001ULL, // +min subnormal
+        0x8000000000000001ULL, // -min subnormal
+        0x000fffffffffffffULL, // +max subnormal
+        0x800fffffffffffffULL, // -max subnormal
+        0x0010000000000000ULL, // +min normal
+        0x8010000000000000ULL, // -min normal
+        0x3e3fffffffffffffULL, // just below 2^-27
+        0xbe3fffffffffffffULL,
+        0x3e40000000000000ULL, // 2^-27
+        0xbe40000000000000ULL,
+        0x3fe921fb54442d18ULL, // +pi/4
+        0xbfe921fb54442d18ULL, // -pi/4
+        0x3ff921fb54442d18ULL, // +pi/2 (ix == 0x3ff921fb)
+        0xbff921fb54442d18ULL, // -pi/2
+        0x419921fb54000000ULL, // +105414357.0 (Payne-Hanek threshold)
+        0xc19921fb54000000ULL, // -105414357.0
+        0x7fefffffffffffffULL, // +DBL_MAX
+        0xffefffffffffffffULL, // -DBL_MAX
+        0x7ff0000000000000ULL, // +Inf
+        0xfff0000000000000ULL, // -Inf
+        0x7ff8000000000000ULL, // canonical qNaN
+        0xfff8000000000001ULL, // negative NaN with payload
+    };
+
+    uint64_t hash_sin = 0xcbf29ce484222325ULL;
+    uint64_t hash_cos = 0x84222325cbf29ce4ULL;
+    int entry_mismatches = 0;
+
+    auto check_one = [&](double x) {
+        const uint64_t sb = bits(math::sin_f64(x));
+        const uint64_t cb = bits(math::cos_f64(x));
+        double sc[2], c_sc[2];
+        math::sincos_f64(x, sc);
+        brass_sincos_f64(x, c_sc);
+        if (bits(sc[0]) != sb || bits(sc[1]) != cb || bits(brass_sin_f64(x)) != sb ||
+            bits(brass_cos_f64(x)) != cb || bits(c_sc[0]) != sb || bits(c_sc[1]) != cb) {
+            ++entry_mismatches;
+        }
+        hash_sin = mix(hash_sin, sb);
+        hash_cos = mix(hash_cos, cb);
+    };
+
+    for (uint64_t u : specials) check_one(from_u64(u));
+
+    uint64_t state = 0x243f6a8885a308d3ULL;
+    auto next_u64 = [&] {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        return state;
+    };
+
+    constexpr double kInvTwo53 = 1.0 / 9007199254740992.0;
+    for (int i = 0; i < 50000; ++i) {
+        const uint64_t r = next_u64();
+        double x = 0.0;
+        switch (i % 5) {
+            case 0: {
+                // Uniform phases in [-64, +64]: all 4 positive and negative quadrants.
+                const double frac = static_cast<double>(r >> 11) * kInvTwo53;
+                x = (frac * 128.0) - 64.0;
+                break;
+            }
+            case 1: {
+                // Multiples of pi/2 in [-500000, +500000] nudged by -8..+8 ULPs.
+                const int64_t k = static_cast<int64_t>(r % 1000001ULL) - 500000;
+                const double base = static_cast<double>(k) * 1.5707963267948966;
+                const uint64_t nudge = static_cast<uint64_t>(static_cast<int64_t>((r >> 32) % 17ULL) - 8);
+                x = from_u64(bits(base) + nudge);
+                break;
+            }
+            case 2: {
+                // Full medium reduction range [-823549, +823549].
+                const double frac = static_cast<double>(r >> 11) * kInvTwo53;
+                x = (frac * 1647098.0) - 823549.0;
+                break;
+            }
+            case 3: {
+                // Huge Payne-Hanek angles: |x| in [2^27, 2^996).
+                const uint64_t sign = (r & 1ULL) ? 0x8000000000000000ULL : 0ULL;
+                const uint64_t exp = 1050ULL + ((r >> 1) % 970ULL);
+                const uint64_t mant = (r >> 12) & 0x000fffffffffffffULL;
+                x = from_u64(sign | (exp << 52) | mant);
+                break;
+            }
+            default: {
+                // Subnormals and tiny normals: biased exponent 0..996.
+                const uint64_t sign = (r & 1ULL) ? 0x8000000000000000ULL : 0ULL;
+                const uint64_t exp = (r >> 1) % 997ULL;
+                const uint64_t mant = (r >> 12) & 0x000fffffffffffffULL;
+                x = from_u64(sign | (exp << 52) | mant);
+                break;
+            }
+        }
+        check_one(x);
+    }
+
+    CHECK_EQ(entry_mismatches, 0);
+    CHECK_EQ(hash_sin, kWantSinHash);
+    CHECK_EQ(hash_cos, kWantCosHash);
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
+
 TEST_CASE("Sincos fuse - a sine and a cosine of one value become one call, same bits") {
     Module mod("sincos");
     declare(mod);

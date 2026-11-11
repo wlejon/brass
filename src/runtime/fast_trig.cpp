@@ -21,17 +21,15 @@
 // only once the reduction's chain is done, so a miss throws that chain away.
 // Here the medium reduction serves |x| < 3pi/4 too (fn = 1 multiplies
 // exactly, so y0, y1 and n are fdlibm's +-1 step's), signs are applied by the
-// bits, qx is chosen in the integer registers, and the quadrant's parity is
-// the one branch left: one kernel is evaluated, its sign set by the bits.
+// bits, qx is chosen in the integer registers, and the quadrant's parity
+// indexes a two-row table of the shared degree-4 Horner coefficients in z =
+// y0^2 so sin_f64 and cos_f64 evaluate one polynomial chain and select the
+// sin/cos reconstruction in XMM registers without branching on n. sincos_f64
+// interleaves both polynomials on one z and swaps/signs the pair by the bits.
 // Every expression is fdlibm's, so the results are its bits. What the fast
 // path cannot give the same bits for (the cancellation steps, x by pi/2's
 // own high word, |x| > 2^19 * pi/2) takes fdlibm_rem_pio2 whole, on a branch
 // taken about never.
-//
-// Evaluating both kernels and selecting by the bits would remove the
-// parity's misses too, but twice the operations would wait on the
-// reduction's chain, and where the branches are predicted that costs twice
-// the cycles.
 
 #include <brass/runtime/fast_trig.hpp>
 #include <bit>
@@ -51,17 +49,27 @@ inline int32_t high_word(double x) noexcept { return static_cast<int32_t>(to_bit
 inline double abs_f64(double x) noexcept { return from_bits(to_bits(x) & ~kSignMask); }
 inline double qnan() noexcept { return from_bits(kCanonicalNaNBits); }
 
-// A sign applied by the bits, not by a branch on the data. On x86-64 with GCC
-// or Clang it is one xorpd on the register the double is in: the intrinsics
-// zero its upper lane first and integer operations take it through a general
-// register and back, each an operation more waiting on the chain.
+// Signs and selections applied by the bits, not by a branch on the data. On
+// x86-64 with GCC or Clang, baseline SSE2 lacks a scalar FP blend or cmov, so
+// a C++ ternary on doubles compiles to a conditional jump; xorpd/andpd stay on
+// the XMM registers the doubles are already in, without zeroing upper lanes or
+// round-tripping through general registers.
 #if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
 inline double bit_xor(double a, double m) noexcept {
     asm("xorpd %1, %0" : "+x"(a) : "x"(m));
     return a;
 }
+inline double bit_and(double a, double m) noexcept {
+    asm("andpd %1, %0" : "+x"(a) : "x"(m));
+    return a;
+}
+inline double select_f64(uint32_t choose_b, double a, double b) noexcept {
+    const double m = from_bits(0ULL - static_cast<uint64_t>(choose_b));
+    return bit_xor(a, bit_and(bit_xor(a, b), m));
+}
 #else
 inline double bit_xor(double a, double m) noexcept { return from_bits(to_bits(a) ^ to_bits(m)); }
+inline double select_f64(uint32_t choose_b, double a, double b) noexcept { return choose_b ? b : a; }
 #endif
 inline uint64_t mask_if(bool c) noexcept { return 0 - static_cast<uint64_t>(c); }
 
@@ -280,6 +288,21 @@ constexpr double S4 = 2.75573137070700676789e-06;
 constexpr double S5 = -2.50507602534068634195e-08;
 constexpr double S6 = 1.58969099521155010221e-10;
 
+constexpr double C1 = 4.16666666666666019037e-02;
+constexpr double C2 = -1.38888888888741095749e-03;
+constexpr double C3 = 2.48015872894767294178e-05;
+constexpr double C4 = -2.75573143513906633035e-07;
+constexpr double C5 = 2.08757232129817482790e-09;
+constexpr double C6 = -1.13596475577881948265e-11;
+
+// Row 0 is kernel_sin's S2..S6, row 1 is kernel_cos's C2..C6: both evaluate
+// the same degree-4 Horner chain in z = y0^2, so indexing by the quadrant's
+// parity evaluates one polynomial instead of branching on n & 1.
+alignas(64) constexpr double kPoly[2][5] = {
+    {S2, S3, S4, S5, S6},
+    {C2, C3, C4, C5, C6},
+};
+
 // sin(x) for 2^-27 <= |x| <= pi/4: kernel_sin with no tail (iy = 0).
 inline double kernel_sin_small(double x) noexcept {
     const double z = x * x;
@@ -300,18 +323,16 @@ inline double kernel_sin(double x, double y) noexcept {
 // 0.28125 above 0.78125, and 0 below 0.3, where a = 1.0 - 0 and hz = 0.5 * z - 0
 // make the last line fdlibm's 1.0 - (0.5 * z - (z * r - x * y)) exactly. It is
 // chosen by masks in the integer registers, off the polynomial's chain.
-inline double kernel_cos(double x, double y) noexcept {
-    constexpr double C1 = 4.16666666666666019037e-02;
-    constexpr double C2 = -1.38888888888741095749e-03;
-    constexpr double C3 = 2.48015872894767294178e-05;
-    constexpr double C4 = -2.75573143513906633035e-07;
-    constexpr double C5 = 2.08757232129817482790e-09;
-    constexpr double C6 = -1.13596475577881948265e-11;
+inline double cos_qx(double x) noexcept {
     const uint32_t ix = static_cast<uint32_t>(high_word(x)) & 0x7fffffffu;
     uint64_t q = static_cast<uint64_t>(ix - 0x00200000u) << 32;
     q ^= (q ^ 0x3fd2000000000000ULL) & mask_if(ix > 0x3fe90000u); // 0.28125
     q &= ~mask_if(ix < 0x3fd33333u);
-    const double qx = from_bits(q);
+    return from_bits(q);
+}
+
+inline double kernel_cos(double x, double y) noexcept {
+    const double qx = cos_qx(x);
     const double z = x * x;
     const double r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
     const double hz = 0.5 * z - qx;
@@ -417,8 +438,26 @@ inline bool reduce_medium(double x, int32_t hx, int32_t ix, double& y0, double& 
 
 // v negated where bit 1 of flip is set: flip = n for sin, whose quadrants
 // give s, c, -s, -c, and n + 1 for cos, whose give c, -s, -c, s.
-inline double sign_by(double v, int32_t flip) noexcept {
-    return bit_xor(v, from_bits(static_cast<uint64_t>(flip & 2) << 62));
+inline double sign_by(double v, uint32_t flip) noexcept {
+    return bit_xor(v, from_bits(static_cast<uint64_t>(flip & 2u) << 62));
+}
+
+// Evaluates kernel_sin(y0, y1) when use_cos == 0 or kernel_cos(y0, y1) when
+// use_cos == 1 without branching on use_cos: one degree-4 Horner chain runs on
+// kPoly[use_cos], both short tail reconstructions finish in parallel, and the
+// result is selected and signed in XMM registers.
+inline double eval_quadrant(double y0, double y1, uint32_t use_cos, uint32_t flip) noexcept {
+    const double* K = kPoly[use_cos];
+    const double qx = cos_qx(y0);
+    const double z = y0 * y0;
+    const double v = z * y0;
+    const double p = K[0] + z * (K[1] + z * (K[2] + z * (K[3] + z * K[4])));
+    const double sin_val = y0 - ((z * (0.5 * y1 - v * p) - y1) - v * S1);
+    const double rc = z * (C1 + z * p);
+    const double hz = 0.5 * z - qx;
+    const double a = 1.0 - qx;
+    const double cos_val = a - (hz - (z * rc - y0 * y1));
+    return sign_by(select_f64(use_cos, sin_val, cos_val), flip);
 }
 
 // Out of line, so the fast path takes no local's address: one would give it
@@ -437,16 +476,16 @@ inline bool tiny(double y0) noexcept { return (high_word(y0) & 0x7fffffff) < 0x3
 
 BRASS_TRIG_NOINLINE double sin_slow(double x) noexcept {
     double y0, y1;
-    const int32_t n = fdlibm_rem_pio2(x, y0, y1);
-    if (tiny(y0)) return sign_by((n & 1) ? 1.0 : y0, n);
-    return sign_by((n & 1) ? kernel_cos(y0, y1) : kernel_sin(y0, y1), n);
+    const uint32_t un = static_cast<uint32_t>(fdlibm_rem_pio2(x, y0, y1));
+    if (tiny(y0)) return sign_by((un & 1u) ? 1.0 : y0, un);
+    return sign_by((un & 1u) ? kernel_cos(y0, y1) : kernel_sin(y0, y1), un);
 }
 
 BRASS_TRIG_NOINLINE double cos_slow(double x) noexcept {
     double y0, y1;
-    const int32_t n = fdlibm_rem_pio2(x, y0, y1);
-    if (tiny(y0)) return sign_by((n & 1) ? y0 : 1.0, n + 1);
-    return sign_by((n & 1) ? kernel_sin(y0, y1) : kernel_cos(y0, y1), n + 1);
+    const uint32_t un = static_cast<uint32_t>(fdlibm_rem_pio2(x, y0, y1));
+    if (tiny(y0)) return sign_by((un & 1u) ? y0 : 1.0, un + 1u);
+    return sign_by((un & 1u) ? kernel_sin(y0, y1) : kernel_cos(y0, y1), un + 1u);
 }
 
 } // namespace
@@ -459,7 +498,8 @@ double sin_f64(double x) noexcept {
     double y0, y1;
     int32_t n;
     if (ix > 0x413921fb || !reduce_medium(x, hx, ix, y0, y1, n)) return sin_slow(x);
-    return sign_by((n & 1) ? kernel_cos(y0, y1) : kernel_sin(y0, y1), n);
+    const uint32_t un = static_cast<uint32_t>(n);
+    return eval_quadrant(y0, y1, un & 1u, un);
 }
 
 double cos_f64(double x) noexcept {
@@ -470,7 +510,8 @@ double cos_f64(double x) noexcept {
     double y0, y1;
     int32_t n;
     if (ix > 0x413921fb || !reduce_medium(x, hx, ix, y0, y1, n)) return cos_slow(x);
-    return sign_by((n & 1) ? kernel_sin(y0, y1) : kernel_cos(y0, y1), n + 1);
+    const uint32_t un = static_cast<uint32_t>(n);
+    return eval_quadrant(y0, y1, (un ^ 1u) & 1u, un + 1u);
 }
 
 // sin_f64(x) and cos_f64(x) from one reduction: each branch below is the two
@@ -500,11 +541,32 @@ void sincos_f64(double x, double* out) noexcept {
         out[1] = cos_slow(x);
         return;
     }
-    const double ks = kernel_sin(y0, y1);
-    const double kc = kernel_cos(y0, y1);
-    const bool odd = (n & 1) != 0;
-    out[0] = sign_by(odd ? kc : ks, n);
-    out[1] = sign_by(odd ? ks : kc, n + 1);
+    const uint32_t un = static_cast<uint32_t>(n);
+    const double qx = cos_qx(y0);
+    const double z = y0 * y0;
+    const double v = z * y0;
+    double ps = S5 + z * S6;
+    double pc = C5 + z * C6;
+    ps = S4 + z * ps;
+    pc = C4 + z * pc;
+    ps = S3 + z * ps;
+    pc = C3 + z * pc;
+    ps = S2 + z * ps;
+    pc = C2 + z * pc;
+    const double rc = z * (C1 + z * pc);
+    const double ks = y0 - ((z * (0.5 * y1 - v * ps) - y1) - v * S1);
+    const double hz = 0.5 * z - qx;
+    const double a = 1.0 - qx;
+    const double kc = a - (hz - (z * rc - y0 * y1));
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+    const double swap = bit_and(bit_xor(ks, kc), from_bits(0ULL - static_cast<uint64_t>(un & 1u)));
+    out[0] = sign_by(bit_xor(ks, swap), un);
+    out[1] = sign_by(bit_xor(kc, swap), un + 1u);
+#else
+    const uint32_t odd = un & 1u;
+    out[0] = sign_by(odd ? kc : ks, un);
+    out[1] = sign_by(odd ? ks : kc, un + 1u);
+#endif
 }
 
 } // namespace brass::math
