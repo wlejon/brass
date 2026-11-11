@@ -58,6 +58,9 @@ PassStep float_rem_inline();
 // Every function: a sine and a cosine of one value as one call
 // (sincos_fuse.hpp).
 PassStep sincos_fuse();
+// Every function: a pure computation only one outgoing edge needs moves to
+// that edge (code_sinking.hpp).
+PassStep code_sinking();
 // Every function: a float division by a power of two as the multiplication
 // by its reciprocal (fdiv_pow2.hpp).
 PassStep fdiv_pow2();

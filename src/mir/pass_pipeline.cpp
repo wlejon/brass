@@ -41,6 +41,9 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     // the fused call, which writes its slot, is no pure call they could move.
     p.add(passes::sincos_fuse());
     if (options.enable_wbe) p.add(passes::write_barrier_elim(options.dump_wbe_stats));
+    // Last: every pass that reads a block's computations where the front end
+    // put them has run.
+    p.add(passes::code_sinking());
     return p;
 }
 

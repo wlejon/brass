@@ -228,7 +228,8 @@ TEST_CASE("Pass manager - the declared pipelines have no accidental repeats") {
     CHECK(index_of(prod, "inline") < index_of(prod, "sroa 2"));
     CHECK(index_of(prod, "bce") < index_of(prod, "loop_cleanup"));
     CHECK(index_of(prod, "loop_cleanup") < index_of(prod, "bce 2"));
-    CHECK_EQ(index_of(prod, "wbe"), prod.size() - 1);
+    CHECK_EQ(index_of(prod, "wbe"), prod.size() - 2);
+    CHECK_EQ(index_of(prod, "code_sinking"), prod.size() - 1);
 
     // optimize_function: SROA and allocation sinking once each.
     LoopOptOptions o;

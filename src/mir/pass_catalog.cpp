@@ -11,6 +11,7 @@
 #include <brass/mir/f64_demote.hpp>
 #include <brass/mir/float_rem_inline.hpp>
 #include <brass/mir/sincos_fuse.hpp>
+#include <brass/mir/code_sinking.hpp>
 #include <brass/mir/fdiv_pow2.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
@@ -230,6 +231,11 @@ PassStep float_rem_inline() {
 PassStep sincos_fuse() {
     return function_step("sincos_fuse", FunctionFilter::All,
                          [](Function& fn) { return fuse_sincos(fn) != 0; });
+}
+
+PassStep code_sinking() {
+    return function_step("code_sinking", FunctionFilter::All,
+                         [](Function& fn) { return sink_code(fn) != 0; });
 }
 
 PassStep fdiv_pow2() {
