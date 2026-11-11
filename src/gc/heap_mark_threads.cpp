@@ -4,24 +4,48 @@
 
 #include <algorithm>
 
+#if defined(__linux__)
+#include <sched.h>
+#endif
+
 namespace brass::gc::detail {
 
 void MarkThreadsDeleter::operator()(MarkThreads* threads) const noexcept { delete threads; }
 
+namespace {
+
+// The cores this process may run on: its affinity mask where the platform has
+// one (a process pinned to one core gains nothing from helpers, and pays a
+// scheduler round trip for each one it wakes: pixi_graphics pinned ran its
+// card scans at 0.6 us a card across 8 threads against 0.1 us on one), the
+// machine's count elsewhere. Read once: glibc's hardware_concurrency reads
+// /sys each call, ~20 us that every quiet minor collection would pay (the
+// planet's measured).
+unsigned usable_cores() {
+    static const unsigned cores = [] {
+#if defined(__linux__)
+        cpu_set_t set;
+        if (sched_getaffinity(0, sizeof set, &set) == 0) {
+            if (const int count = CPU_COUNT(&set); count > 0) return static_cast<unsigned>(count);
+        }
+#endif
+        return std::max(std::thread::hardware_concurrency(), 1u);
+    }();
+    return cores;
+}
+
+}  // namespace
+
 unsigned configured_threads(unsigned configured) {
     if (configured != 0) return configured;
-    // Read once: glibc's hardware_concurrency reads /sys each call, ~20 us
-    // that every quiet minor collection would pay (the planet's measured).
-    static const unsigned hardware = std::thread::hardware_concurrency();
-    return std::clamp(hardware / 2, 1u, 8u);
+    return std::clamp(usable_cores() / 2, 1u, 8u);
 }
 
 unsigned large_minor_thread_count(const HeapConfig& config) {
     // A host that set the minor collection's count has said how many cores
     // it gives the collector; only the default widens.
     if (config.minor_threads != 0) return 1;
-    static const unsigned hardware = std::thread::hardware_concurrency();
-    return std::max(hardware / 2, 1u);
+    return std::max(usable_cores() / 2, 1u);
 }
 
 MarkThreads& heap_helpers(HeapState& s) {
