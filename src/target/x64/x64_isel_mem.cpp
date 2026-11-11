@@ -92,8 +92,28 @@ bool X64ISel::materialized(const Value* v) const {
 
 X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const {
     MemFold fold;
-    fold.base_val = ptr;
     fold.disp = offset;
+    // `(x + c1) + c2`: the outer constant joins the displacement and the
+    // address is matched on the inner sum (a cell of a table that is itself
+    // a constant past the module's base).
+    while (ptr && ptr->is_instruction()) {
+        const Instruction* outer = ptr->defining_instruction();
+        if (!outer || outer->opcode() != Opcode::add) break;
+        const ImmIntInfo c2 = get_imm_int_info(outer->operand(1));
+        const Value* inner = outer->operand(0);
+        const Instruction* inner_def = inner && inner->is_instruction() ? inner->defining_instruction() : nullptr;
+        if (!c2.is_imm || !c2.fits_i32 || !inner_def || inner_def->opcode() != Opcode::add || !materialized(inner)) {
+            break;
+        }
+        const ImmIntInfo c1 = get_imm_int_info(inner_def->operand(1));
+        const int64_t new_disp = static_cast<int64_t>(fold.disp) + c2.val;
+        if (!c1.is_imm || !c1.fits_i32 || new_disp < INT32_MIN || new_disp > INT32_MAX) break;
+        fold.disp = static_cast<int32_t>(new_disp);
+        fold.folded_instructions.push_back(outer);
+        if (c2.def_inst) fold.folded_instructions.push_back(c2.def_inst);
+        ptr = inner;
+    }
+    fold.base_val = ptr;
     if (!ptr || !ptr->is_instruction()) return fold;
 
     const Instruction* def = ptr->defining_instruction();
@@ -110,7 +130,11 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
             // `(a + b) + imm` from another block: the inner sum is one lea
             // with the constant (analyze_function's lea fusion skips it
             // as a value), so the address takes that lea's result whole.
-            if (op0 && op0->is_instruction()) {
+            // An inner sum with other uses is a value of its own whatever
+            // happens here (a module's base, held in a register through the
+            // function): the constant folds onto it.
+            const auto uses0 = use_count_.find(op0);
+            if (op0 && op0->is_instruction() && (uses0 == use_count_.end() || uses0->second <= 1)) {
                 const Instruction* def0 = op0->defining_instruction();
                 if (def0 && def0->opcode() == Opcode::add && def0->parent() == def->parent() &&
                     !get_imm_int_info(def0->operand(0)).is_imm && !get_imm_int_info(def0->operand(1)).is_imm &&
@@ -122,6 +146,8 @@ X64ISel::MemFold X64ISel::match_address(const Value* ptr, int32_t offset, const 
             fold.base_val = op0;
             fold.folded_instructions.push_back(def);
             if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
+            // That inner sum is the base, whole: its addends stay out of it.
+            if (uses0 != use_count_.end() && uses0->second > 1) return fold;
 
             if (op0 && op0->is_instruction()) {
                 const Instruction* def0 = op0->defining_instruction();
