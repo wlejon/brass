@@ -366,3 +366,253 @@ TEST_CASE("Sincos fuse - a nocollect call is no GC point to the MIR passes") {
     CHECK(!may_trigger_gc(*calls[0]));
     CHECK(may_trigger_gc(*calls[1]));
 }
+
+TEST_CASE("Sincos fuse - canon_arg sees through NaN-canonicalizing boxes and bitcast roundtrips") {
+    Module mod("canon_box");
+    declare(mod);
+    Builder b(mod);
+
+    // f_ne(x): cos and sin unpack separate NaN-canonicalized tagged boxes of x.
+    Function* f_ne = mod.create_function("f_ne", Type::f64(), {Type::f64()});
+    {
+        b.set_function(f_ne);
+        BasicBlock* e = b.append_block("entry");
+        Value* x = b.add_block_param(e, Type::f64());
+        b.position_at_end(e);
+        Value* qnan = b.build_iconst_i64(static_cast<int64_t>(0x7ff8000000000000ULL));
+        Value* box1 = b.build_bitcast_tagged_i64(
+            b.build_select(b.build_ne(x, x), qnan, b.build_bitcast_i64_f64(x)));
+        Value* box2 = b.build_bitcast_tagged_i64(
+            b.build_select(b.build_ne(x, x), qnan, b.build_bitcast_i64_f64(x)));
+        Value* xc = b.build_bitcast_f64_i64(b.build_bitcast_i64_tagged(box1));
+        Value* xs = b.build_bitcast_f64_i64(b.build_bitcast_i64_tagged(box2));
+        Value* c = b.build_call("host_cos", Type::f64(), {xc});
+        Value* s = b.build_call("host_sin", Type::f64(), {xs});
+        b.build_ret(b.build_sub(b.build_mul(s, b.build_fconst_f64(3.0)), c));
+        f_ne->rebuild_cfg_predecessors();
+    }
+
+    // f_eq(x): ordered `eq(x, x)` NaN-box on one call, plain i64 bitcast roundtrip on the other.
+    Function* f_eq = mod.create_function("f_eq", Type::f64(), {Type::f64()});
+    {
+        b.set_function(f_eq);
+        BasicBlock* e = b.append_block("entry");
+        Value* x = b.add_block_param(e, Type::f64());
+        b.position_at_end(e);
+        Value* qnan = b.build_iconst_i64(static_cast<int64_t>(0x7ff8000000000000ULL));
+        Value* xc = b.build_bitcast_f64_i64(
+            b.build_select(b.build_eq(x, x), b.build_bitcast_i64_f64(x), qnan));
+        Value* xs = b.build_bitcast_f64_i64(b.build_bitcast_i64_f64(x));
+        Value* c = b.build_call("host_cos", Type::f64(), {xc});
+        Value* s = b.build_call("host_sin", Type::f64(), {xs});
+        b.build_ret(b.build_sub(b.build_mul(s, b.build_fconst_f64(3.0)), c));
+        f_eq->rebuild_cfg_predecessors();
+    }
+
+    CHECK_EQ(fuse_sincos(*f_ne), 1u);
+    CHECK_EQ(fuse_sincos(*f_eq), 1u);
+    for (Function* fn : {f_ne, f_eq}) {
+        CHECK_EQ(count_calls(*fn, "host_sin"), 0u);
+        CHECK_EQ(count_calls(*fn, "host_cos"), 0u);
+        CHECK_EQ(count_calls(*fn, "host_sincos"), 1u);
+    }
+    DiagnosticReporter diag;
+    REQUIRE(verify_function(*f_ne, &diag));
+    REQUIRE(verify_function(*f_eq, &diag));
+
+    codegen::JitExecutionEngine jit(Target::host());
+    jit.register_external_symbol("host_sin", reinterpret_cast<void*>(&host_sin));
+    jit.register_external_symbol("host_cos", reinterpret_cast<void*>(&host_cos));
+    jit.register_external_symbol("host_sincos", reinterpret_cast<void*>(&host_sincos));
+    REQUIRE(jit.compile_and_load(mod));
+    auto p_ne = jit.get_function_ptr<double (*)(double)>("f_ne");
+    auto p_eq = jit.get_function_ptr<double (*)(double)>("f_eq");
+    REQUIRE(p_ne && p_eq);
+    for (double x : kInputs) {
+        const double want = math::sin_f64(x) * 3.0 - math::cos_f64(x);
+        sin_calls = cos_calls = sincos_calls = 0;
+        CHECK(same(p_ne(x), want));
+        CHECK(same(p_eq(x), want));
+        CHECK_EQ(sincos_calls, 2);
+        CHECK_EQ(sin_calls + cos_calls, 0);
+    }
+}
+
+TEST_CASE("Sincos fuse - diamond-guarded cos/sin pairs fuse at nearest common dominator") {
+    Module mod("diamond_euler");
+    declare(mod);
+    Builder b(mod);
+
+    // Quaternion.setFromEuler spine: three guarded cos(x/2), cos(y/2), cos(z/2)
+    // diamonds followed by three guarded sin(x/2), sin(y/2), sin(z/2) diamonds,
+    // each with a cold slow fallback arm.
+    Function* euler = mod.create_function("euler", Type::f64(),
+                                          {Type::f64(), Type::f64(), Type::f64(), Type::i64(), Type::i64()});
+    {
+        b.set_function(euler);
+        BasicBlock* cur = b.append_block("entry");
+        Value* x = b.add_block_param(cur, Type::f64());
+        Value* y = b.add_block_param(cur, Type::f64());
+        Value* z = b.add_block_param(cur, Type::f64());
+        Value* is_cos = b.add_block_param(cur, Type::i64());
+        Value* is_sin = b.add_block_param(cur, Type::i64());
+        b.position_at_end(cur);
+        Value* half = b.build_fconst_f64(0.5);
+        Value* hx = b.build_mul(x, half);
+        Value* hy = b.build_mul(y, half);
+        Value* hz = b.build_mul(z, half);
+
+        auto emit_guarded_trig = [&](const char* tag, Value* ok_flag, const char* sym, Value* arg,
+                                     double fallback, bool cold_by_name) -> Value* {
+            BasicBlock* fast = b.append_block(std::string(tag) + "_fast");
+            BasicBlock* slow = b.append_block(cold_by_name ? std::string(tag) + "_slow_cold"
+                                                           : std::string(tag) + "_slow");
+            if (!cold_by_name) slow->set_cold();
+            BasicBlock* merge = b.append_block(std::string(tag) + "_merge");
+            Value* res = b.add_block_param(merge, Type::f64());
+
+            b.position_at_end(cur);
+            Value* cond = b.build_ne(ok_flag, b.build_iconst_i64(0));
+            b.build_br_if(cond, fast, slow);
+
+            b.position_at_end(fast);
+            Value* unboxed = b.build_bitcast_f64_i64(b.build_bitcast_i64_f64(arg));
+            Value* fast_v = b.build_call(sym, Type::f64(), {unboxed});
+            b.build_br(merge, {fast_v});
+
+            b.position_at_end(slow);
+            b.build_br(merge, {b.build_fconst_f64(fallback)});
+
+            cur = merge;
+            return res;
+        };
+
+        Value* c1 = emit_guarded_trig("c1", is_cos, "host_cos", hx, -11.0, false);
+        Value* c2 = emit_guarded_trig("c2", is_cos, "host_cos", hy, -12.0, true);
+        Value* c3 = emit_guarded_trig("c3", is_cos, "host_cos", hz, -13.0, false);
+        Value* s1 = emit_guarded_trig("s1", is_sin, "host_sin", hx, -21.0, false);
+        Value* s2 = emit_guarded_trig("s2", is_sin, "host_sin", hy, -22.0, true);
+        Value* s3 = emit_guarded_trig("s3", is_sin, "host_sin", hz, -23.0, false);
+
+        b.position_at_end(cur);
+        Value* qx = b.build_add(b.build_mul(s1, b.build_mul(c2, c3)),
+                                b.build_mul(c1, b.build_mul(s2, s3)));
+        b.build_ret(qx);
+        euler->rebuild_cfg_predecessors();
+    }
+
+    CHECK_EQ(fuse_sincos(*euler), 3u);
+    CHECK_EQ(count_calls(*euler, "host_sin"), 0u);
+    CHECK_EQ(count_calls(*euler, "host_cos"), 0u);
+    CHECK_EQ(count_calls(*euler, "host_sincos"), 3u);
+    DiagnosticReporter diag;
+    REQUIRE(verify_function(*euler, &diag));
+
+    codegen::JitExecutionEngine jit(Target::host());
+    jit.register_external_symbol("host_sin", reinterpret_cast<void*>(&host_sin));
+    jit.register_external_symbol("host_cos", reinterpret_cast<void*>(&host_cos));
+    jit.register_external_symbol("host_sincos", reinterpret_cast<void*>(&host_sincos));
+    REQUIRE(jit.compile_and_load(mod));
+    auto pe = jit.get_function_ptr<double (*)(double, double, double, int64_t, int64_t)>("euler");
+    REQUIRE(pe);
+    for (double v : kInputs) {
+        const double hx = v * 0.5, hy = -v * 0.5 + 0.25, hz = v * 0.5 - 0.75;
+        const double want_hit = math::sin_f64(hx) * (math::cos_f64(hy) * math::cos_f64(hz)) +
+                                math::cos_f64(hx) * (math::sin_f64(hy) * math::sin_f64(hz));
+        sin_calls = cos_calls = sincos_calls = 0;
+        CHECK(same(pe(v, -v + 0.5, v - 1.5, 1, 1), want_hit));
+        CHECK_EQ(sincos_calls, 3);
+        CHECK_EQ(sin_calls + cos_calls, 0);
+
+        // When the second guard misses to its cold fallback, cos values come from
+        // sincos_f64 and sin values come from the slow arms without clobbering.
+        const double want_sin_miss = -21.0 * (math::cos_f64(hy) * math::cos_f64(hz)) +
+                                     math::cos_f64(hx) * (-22.0 * -23.0);
+        CHECK(same(pe(v, -v + 0.5, v - 1.5, 1, 0), want_sin_miss));
+    }
+}
+
+TEST_CASE("Sincos fuse - diamond hoist refuses non-cold branches and cold-only pairs") {
+    Module mod("diamond_reject");
+    declare(mod);
+    Builder b(mod);
+
+    // Two sequential uncertain (non-cold) `if` diamonds: neither arm is cold, so
+    // hoisting sincos_f64 to entry would speculate trig when both conditions are 0.
+    Function* non_cold_ifs = mod.create_function("non_cold_ifs", Type::f64(),
+                                                 {Type::f64(), Type::i64(), Type::i64()});
+    {
+        b.set_function(non_cold_ifs);
+        BasicBlock* e = b.append_block("entry");
+        BasicBlock* c_then = b.append_block("c_then");
+        BasicBlock* c_else = b.append_block("c_else");
+        BasicBlock* mid = b.append_block("mid");
+        BasicBlock* s_then = b.append_block("s_then");
+        BasicBlock* s_else = b.append_block("s_else");
+        BasicBlock* done = b.append_block("done");
+        Value* x = b.add_block_param(e, Type::f64());
+        Value* ca = b.add_block_param(e, Type::i64());
+        Value* cb = b.add_block_param(e, Type::i64());
+        Value* cv = b.add_block_param(mid, Type::f64());
+        Value* sv = b.add_block_param(done, Type::f64());
+
+        b.position_at_end(e);
+        b.build_br_if(b.build_ne(ca, b.build_iconst_i64(0)), c_then, c_else);
+        b.position_at_end(c_then);
+        b.build_br(mid, {b.build_call("host_cos", Type::f64(), {x})});
+        b.position_at_end(c_else);
+        b.build_br(mid, {b.build_fconst_f64(0.0)});
+
+        b.position_at_end(mid);
+        b.build_br_if(b.build_ne(cb, b.build_iconst_i64(0)), s_then, s_else);
+        b.position_at_end(s_then);
+        b.build_br(done, {b.build_call("host_sin", Type::f64(), {x})});
+        b.position_at_end(s_else);
+        b.build_br(done, {b.build_fconst_f64(0.0)});
+
+        b.position_at_end(done);
+        b.build_ret(b.build_add(cv, sv));
+        non_cold_ifs->rebuild_cfg_predecessors();
+    }
+
+    // Cold-guarded cos(x) followed by an uncertain non-cold `if (cb) sin(x)`.
+    Function* half_cold = mod.create_function("half_cold", Type::f64(),
+                                              {Type::f64(), Type::i64(), Type::i64()});
+    {
+        b.set_function(half_cold);
+        BasicBlock* e = b.append_block("entry");
+        BasicBlock* c_fast = b.append_block("c_fast");
+        BasicBlock* c_slow = b.append_block("c_slow");
+        c_slow->set_cold();
+        BasicBlock* mid = b.append_block("mid");
+        BasicBlock* s_then = b.append_block("s_then");
+        BasicBlock* s_else = b.append_block("s_else");
+        BasicBlock* done = b.append_block("done");
+        Value* x = b.add_block_param(e, Type::f64());
+        Value* ca = b.add_block_param(e, Type::i64());
+        Value* cb = b.add_block_param(e, Type::i64());
+        Value* cv = b.add_block_param(mid, Type::f64());
+        Value* sv = b.add_block_param(done, Type::f64());
+
+        b.position_at_end(e);
+        b.build_br_if(b.build_ne(ca, b.build_iconst_i64(0)), c_fast, c_slow);
+        b.position_at_end(c_fast);
+        b.build_br(mid, {b.build_call("host_cos", Type::f64(), {x})});
+        b.position_at_end(c_slow);
+        b.build_br(mid, {b.build_fconst_f64(0.0)});
+
+        b.position_at_end(mid);
+        b.build_br_if(b.build_ne(cb, b.build_iconst_i64(0)), s_then, s_else);
+        b.position_at_end(s_then);
+        b.build_br(done, {b.build_call("host_sin", Type::f64(), {x})});
+        b.position_at_end(s_else);
+        b.build_br(done, {b.build_fconst_f64(0.0)});
+
+        b.position_at_end(done);
+        b.build_ret(b.build_add(cv, sv));
+        half_cold->rebuild_cfg_predecessors();
+    }
+
+    CHECK_EQ(fuse_sincos(*non_cold_ifs), 0u);
+    CHECK_EQ(fuse_sincos(*half_cold), 0u);
+}
