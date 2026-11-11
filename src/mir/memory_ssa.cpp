@@ -1,5 +1,6 @@
 #include <brass/mir/memory_ssa.hpp>
 #include <brass/mir/escape_analysis.hpp>
+#include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
 
@@ -94,19 +95,72 @@ MemoryPhi* MemorySSA::get_memory_phi(const BasicBlock* bb) const {
     return (it != block_to_phi_.end()) ? it->second : nullptr;
 }
 
+namespace {
+
+// One query's walk up the def chain, through the merges it can see past.
+//
+// A MemoryPhi stands for "some write happened on some path into this block".
+// For one load that is often not so: the writes on those paths are stores the
+// load cannot overlap (another alias class, another field), and then every
+// incoming path carries the same state up from one access above the merge,
+// which is the load's real clobber. `resolve` answers that access for a phi:
+// each incoming chain is walked to its first clobber, and when all of them
+// end at one access the phi is transparent and the walk goes on from there.
+// A chain that comes back to the phi being resolved went round a cycle with
+// no clobber on it and says nothing; one that ends at another phi still being
+// resolved ends there, which is sound (nothing clobbers between the two) and
+// only stops short. The steps are bounded, so a function of many merges costs
+// a load a fixed amount; out of steps, the phi stands as the clobber.
+struct ClobberWalk {
+    const AliasAnalysis& aa;
+    const Instruction* load;
+    uint32_t steps_left = 256;
+    std::unordered_map<const MemoryPhi*, MemoryAccess*> resolved;  // nullptr: in progress
+
+    MemoryAccess* from(MemoryAccess* cur) {
+        while (cur) {
+            if (cur->is_def()) {
+                MemoryDef* def = cur->as_def();
+                if (steps_left == 0 || aa.can_clobber(def->origin_instruction(), load)) return cur;
+                --steps_left;
+                cur = def->defining_access();
+            } else if (cur->is_phi()) {
+                MemoryAccess* above = resolve(cur->as_phi());
+                if (above == cur) return cur;
+                cur = above;
+            } else {
+                return cur;
+            }
+        }
+        return cur;
+    }
+
+    // The access every path into `phi` carries, or `phi` itself.
+    MemoryAccess* resolve(MemoryPhi* phi) {
+        auto [it, fresh] = resolved.try_emplace(phi, nullptr);
+        if (!fresh) return it->second ? it->second : phi;  // in progress: the walk ends here
+        MemoryAccess* common = nullptr;
+        bool transparent = steps_left != 0;
+        for (const auto& [pred, incoming] : phi->incoming()) {
+            if (!transparent) break;
+            --steps_left;
+            MemoryAccess* end = from(incoming);
+            if (end == phi) continue;  // round a clobber-free cycle
+            if (steps_left == 0 || !end || (common && end != common)) transparent = false;
+            common = end;
+        }
+        MemoryAccess* answer = transparent && common ? common : phi;
+        resolved[phi] = answer;
+        return answer;
+    }
+};
+
+}  // namespace
+
 MemoryAccess* MemorySSA::find_clobbering_access(const Instruction* load_inst, MemoryAccess* starting_access) const {
     if (!load_inst || !starting_access) return starting_access;
-
-    MemoryAccess* cur = starting_access;
-    while (cur && cur->is_def()) {
-        MemoryDef* def = cur->as_def();
-        const Instruction* write_inst = def->origin_instruction();
-        if (aa_->can_clobber(write_inst, load_inst)) {
-            return cur;
-        }
-        cur = def->defining_access();
-    }
-    return cur;
+    ClobberWalk walk{*aa_, load_inst};
+    return walk.from(starting_access);
 }
 
 void MemorySSA::compute_dominance_frontiers(std::unordered_map<const BasicBlock*, std::vector<BasicBlock*>>& df) {
@@ -179,6 +233,7 @@ void MemorySSA::build() {
 
     std::vector<MemoryAccess*> version_stack;
     version_stack.push_back(live_on_entry_.get());
+    std::vector<MemoryUse*> uses;
 
     // Each open block's version_stack height on entry; leaving it pops back to that.
     std::vector<size_t> version_marks;
@@ -195,11 +250,12 @@ void MemorySSA::build() {
             Opcode op = inst->opcode();
 
             if (op == Opcode::load || op == Opcode::load_indexed || op == Opcode::vload) {
-                MemoryAccess* starting_def = version_stack.back();
-                // Optimize use using alias analysis
-                MemoryAccess* clobber = find_clobbering_access(inst, starting_def);
-                auto use = std::make_unique<MemoryUse>(next_access_id_++, const_cast<BasicBlock*>(bb), inst, clobber);
+                // The reaching def for now; narrowed to the load's clobber
+                // below, once every phi has its incoming accesses.
+                auto use = std::make_unique<MemoryUse>(next_access_id_++, const_cast<BasicBlock*>(bb), inst,
+                                                       version_stack.back());
                 inst_to_access_[inst] = use.get();
+                uses.push_back(use.get());
                 all_accesses_.push_back(std::move(use));
             } else if (op == Opcode::store || op == Opcode::store_indexed || op == Opcode::vstore) {
                 MemoryAccess* current_def = version_stack.back();
@@ -243,6 +299,11 @@ void MemorySSA::build() {
                 phi->add_incoming(pred, live_on_entry_.get());
             }
         }
+    }
+
+    // Each use's defining access is its load's clobber (find_clobbering_access).
+    for (MemoryUse* use : uses) {
+        use->set_defining_access(find_clobbering_access(use->origin_instruction(), use->defining_access()));
     }
 }
 

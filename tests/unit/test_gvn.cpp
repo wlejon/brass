@@ -279,6 +279,89 @@ TEST_CASE("GVN - Clobber Safety: Aliasing Store & Non-Pure Call Prevent Load Eli
     CHECK_EQ(count_opcodes(*fn, Opcode::load), 2ULL);
 }
 
+namespace {
+
+// load p+0; if (c) { <arm> }; load p+0. `arm` fills the taken side.
+template <typename Arm>
+size_t loads_left_across_diamond(const char* name, Arm arm) {
+    Module mod(name);
+    Builder b(mod);
+    Function* fn = mod.create_function(name, Type::i64(), {Type::ptr(), Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* taken = b.append_block("taken");
+    BasicBlock* join = b.append_block("join");
+    b.position_at_end(entry);
+    Value* p = b.add_block_param(entry, Type::ptr());
+    Value* c = b.add_block_param(entry, Type::i32());
+    Value* v1 = b.build_load(Type::i64(), p, 0);
+    b.build_br_if(c, taken, join);
+    b.position_at_end(taken);
+    arm(b, p);
+    b.build_br(join);
+    b.position_at_end(join);
+    Value* v2 = b.build_load(Type::i64(), p, 0);
+    b.build_ret(b.build_add(v1, v2));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    gvn_function(*fn);
+    REQUIRE(verify_function(*fn));
+    return count_opcodes(*fn, Opcode::load);
+}
+
+} // namespace
+
+TEST_CASE("GVN - a load is shared across a merge whose arms cannot write it, and only then") {
+    // A store to another field on one arm: the merge's memory phi is
+    // transparent to the load, whose clobber is above the branch.
+    CHECK_EQ(loads_left_across_diamond("diamond_other_field", [](Builder& b, Value* p) {
+        b.build_store(Type::i64(), p, 8, b.build_iconst_i64(7));
+    }), 1ULL);
+    // A store to the field itself, or a call, on one arm: the phi stands.
+    CHECK_EQ(loads_left_across_diamond("diamond_same_field", [](Builder& b, Value* p) {
+        b.build_store(Type::i64(), p, 0, b.build_iconst_i64(7));
+    }), 2ULL);
+    CHECK_EQ(loads_left_across_diamond("diamond_call", [](Builder& b, Value* p) {
+        b.build_call("external_mutate_side_effect", Type::void_type(), {p});
+    }), 2ULL);
+}
+
+TEST_CASE("GVN - a load in a loop is not shared past a write on the back edge") {
+    // entry: v0 = load p; loop: v1 = load p; store p (other field) ; if (c) { store p+0 }; br loop / exit
+    Module mod("loop_clobber");
+    Builder b(mod);
+    Function* fn = mod.create_function("loop_clobber", Type::i64(), {Type::ptr(), Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* loop = b.append_block("loop");
+    BasicBlock* write = b.append_block("write");
+    BasicBlock* latch = b.append_block("latch");
+    BasicBlock* exit = b.append_block("exit");
+    b.position_at_end(entry);
+    Value* p = b.add_block_param(entry, Type::ptr());
+    Value* c = b.add_block_param(entry, Type::i32());
+    Value* v0 = b.build_load(Type::i64(), p, 0);
+    b.build_br(loop);
+    b.position_at_end(loop);
+    Value* v1 = b.build_load(Type::i64(), p, 0);
+    b.build_store(Type::i64(), p, 8, v1);
+    b.build_br_if(c, write, latch);
+    b.position_at_end(write);
+    b.build_store(Type::i64(), p, 0, b.build_add(v1, b.build_iconst_i64(1)));
+    b.build_br(latch);
+    b.position_at_end(latch);
+    Value* v2 = b.build_load(Type::i64(), p, 0);
+    b.build_br_if(b.build_slt(v2, v0), loop, exit);
+    b.position_at_end(exit);
+    b.build_ret(v2);
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    gvn_function(*fn);
+    REQUIRE(verify_function(*fn));
+    // The loop's load sees the back edge's write and the latch's the arm's.
+    CHECK_EQ(count_opcodes(*fn, Opcode::load), 3ULL);
+}
+
 TEST_CASE("GVN - Dead Store Elimination Within a Block and Across Simple CFGs") {
     Module mod("test_dse");
     Builder b(mod);
