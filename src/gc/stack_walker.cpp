@@ -240,6 +240,8 @@ size_t walk_stack(
             m.rsp = 0;
             m.rbp = rbp;
             m.ip = ip;
+            m.entry_sp = 0;
+            m.entry_ip = 0;
         }
         npending = 0;
     };
@@ -250,14 +252,15 @@ size_t walk_stack(
     // beneath them, or learn the answer this unwind finds.
     enum class UnwindResult { Generated, Nothing, GaveUp };
     GeneratedCodeEntryScope* entry = innermost_entry;
-    auto unwind_to_generated = [&](Cursor& cur, bool& used_memo) -> UnwindResult {
+    auto on_this_stack = [&](const GeneratedCodeEntryScope* e) {
+        return e->address() >= stack_low && e->address() < stack_high;
+    };
+    auto unwind_to_generated = [&](Cursor& cur, bool& used_memo,
+                                   uintptr_t entry_sp, uintptr_t entry_ip) -> UnwindResult {
         used_memo = false;
         constexpr size_t MAX_PENDING = 16;
         GeneratedCodeEntryScope* pending[MAX_PENDING];
         size_t npending = 0;
-        auto on_this_stack = [&](const GeneratedCodeEntryScope* e) {
-            return e->address() >= stack_low && e->address() < stack_high;
-        };
         while (entry && (!on_this_stack(entry) || entry->address() < cur.sp())) entry = entry->outer();
         UnwindResult result = UnwindResult::GaveUp;
         for (;;) {
@@ -278,6 +281,10 @@ size_t walk_stack(
                 GeneratedCodeEntryScope::Memo& m = entry->memo;
                 if (on_this_stack(entry) && m.beneath != GeneratedCodeEntryScope::Beneath::Unknown &&
                     m.maps == &stack_maps) {
+                    if (entry_sp != 0 && npending == 0) {
+                        m.entry_sp = entry_sp;
+                        m.entry_ip = entry_ip;
+                    }
                     if (m.beneath == GeneratedCodeEntryScope::Beneath::Generated) {
                         cur.set(m.ip, m.rsp, m.rbp);
                         used_memo = true;
@@ -306,6 +313,8 @@ size_t walk_stack(
                 m.rsp = cur.sp();
                 m.rbp = cur.fp();
                 m.ip = cur.ip();
+                m.entry_sp = (i == 0) ? entry_sp : 0;
+                m.entry_ip = (i == 0) ? entry_ip : 0;
             }
         }
         return result;
@@ -319,7 +328,7 @@ size_t walk_stack(
         cur = *start;
         bool used_memo = false;
         if (find_map(cur.ip()) == nullptr) {
-            if (unwind_to_generated(cur, used_memo) != UnwindResult::Generated) return 0;
+            if (unwind_to_generated(cur, used_memo, 0, 0) != UnwindResult::Generated) return 0;
         }
 #if defined(_WIN32) && defined(_M_X64)
         if (cur.sp() >= stop_at || cur.fp() < cur.sp()) return 0;
@@ -345,6 +354,26 @@ size_t walk_stack(
             }
             const uintptr_t target_sp = callee_rbp + 16;
             if (target_sp >= stop_at) break;
+            while (entry && (!on_this_stack(entry) || entry->address() < target_sp)) entry = entry->outer();
+            if (entry && on_this_stack(entry) &&
+                entry->memo.beneath != GeneratedCodeEntryScope::Beneath::Unknown &&
+                entry->memo.maps == &stack_maps &&
+                entry->memo.entry_sp != 0 &&
+                entry->memo.entry_sp == target_sp &&
+                entry->memo.entry_ip == cur_return_ip) {
+                const auto& m = entry->memo;
+                entry = entry->outer();
+                if (m.beneath != GeneratedCodeEntryScope::Beneath::Generated) break;
+                if (m.rsp >= stop_at) break;
+#if defined(_WIN32) && defined(_M_X64)
+                if (m.rbp < m.rsp) break;
+                have_live_ctx = false;
+#endif
+                cur_rbp = m.rbp;
+                cur_return_ip = m.ip;
+                callee_rbp = 0;
+                continue;
+            }
 #if defined(_WIN32) && defined(_M_X64)
             // Generated frames save callee-saved GPRs (RBX, RSI, RDI, R12..R15)
             // in their own frames while the fast path followed only [rbp]. An
@@ -386,7 +415,7 @@ size_t walk_stack(
             cur.set(cur_return_ip, target_sp, cur_rbp);
 #endif
             bool used_memo = false;
-            const UnwindResult res = unwind_to_generated(cur, used_memo);
+            const UnwindResult res = unwind_to_generated(cur, used_memo, target_sp, cur_return_ip);
             if (res != UnwindResult::Generated) break;
             if (cur.sp() >= stop_at) break;
 #if defined(_WIN32) && defined(_M_X64)

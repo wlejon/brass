@@ -120,6 +120,7 @@ public:
         Beneath beneath = Beneath::Unknown;
         const void* maps = nullptr;  // the stack maps the answer was found with
         uintptr_t rsp = 0, rbp = 0, ip = 0;  // the generated frame found
+        uintptr_t entry_sp = 0, entry_ip = 0;  // compiled boundary where unwind started
     };
     Memo memo;
     GeneratedCodeEntryScope* outer() const noexcept { return prev_; }
