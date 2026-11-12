@@ -1,3 +1,4 @@
+#include <string_view>
 #include <brass/codegen/lir.hpp>
 #include <sstream>
 #include <iomanip>
@@ -699,10 +700,18 @@ void LirFunction::sort_blocks_rpo() {
     }
     // A block its front end named cold is one (block_layout.cpp reads the
     // same name): an inline cache's miss, which is not `is_cold` to the
-    // MIR passes.
+    // MIR passes. So is one named as the off path of an inline fast path:
+    // a slow arm, a miss, an allocation's fallback, the stack-overflow call.
+    // A slow arm that does run often (string `+` behind the number arm) pays
+    // a jump out and back; the fast paths beside it stop jumping over it.
+    static constexpr std::string_view kOffPathNames[] = {"cold", "_slow", "_miss", "_fallback", "stack_overflow"};
     for (uint32_t i = 0; i < n; ++i) {
-        if (blocks[i] && blocks[i].get() != entry && blocks[i]->name.find("cold") != std::string::npos) {
-            blocks[i]->cold = true;
+        if (!blocks[i] || blocks[i].get() == entry) continue;
+        for (std::string_view name : kOffPathNames) {
+            if (blocks[i]->name.find(name) != std::string::npos) {
+                blocks[i]->cold = true;
+                break;
+            }
         }
     }
     // An edge block (one way in, one way out) into a cold block is cold:

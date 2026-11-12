@@ -122,6 +122,32 @@ TEST_CASE("Block order - a miss named cold and the rest of its arm are ordered a
     CHECK(position(fn, join) < position(fn, done));
 }
 
+TEST_CASE("Block order - a slow arm, a miss and a fallback are off the path by name") {
+    // site: fast or off; off -> join; fast -> join, for each name a front
+    // end gives the off path of an inline fast path.
+    for (const char* name : {"unbox_3_slow", "ic_set_7_miss", "tlab_2_fallback", "stack_overflow"}) {
+        LirFunction fn;
+        fn.name = "off_path";
+        LirBlock* site = fn.create_block("site");
+        LirBlock* off = fn.create_block(name);
+        LirBlock* fast = fn.create_block("fast");
+        LirBlock* join = fn.create_block("join");
+        branch(site, fast, off);
+        work(off);
+        jmp(off, join);
+        work(fast);
+        jmp(fast, join);
+        join->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+
+        fn.sort_blocks_rpo();
+
+        CHECK(off->cold);
+        CHECK_FALSE(fast->cold);
+        CHECK(position(fn, fast) < position(fn, join));
+        CHECK(position(fn, join) < position(fn, off));
+    }
+}
+
 TEST_CASE("Block layout - an if's body falls through, not the join") {
     // cond: then or join; then -> join. Falling into the join left a taken
     // branch to the body and a jump back from it.
