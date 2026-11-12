@@ -707,8 +707,8 @@ void LirFunction::sort_blocks_rpo() {
     static constexpr std::string_view kOffPathNames[] = {"cold", "_slow", "_miss", "_fallback", "stack_overflow"};
     for (uint32_t i = 0; i < n; ++i) {
         if (!blocks[i] || blocks[i].get() == entry) continue;
-        for (std::string_view name : kOffPathNames) {
-            if (blocks[i]->name.find(name) != std::string::npos) {
+        for (std::string_view marker : kOffPathNames) {
+            if (blocks[i]->name.find(marker) != std::string::npos) {
                 blocks[i]->cold = true;
                 break;
             }
