@@ -51,7 +51,9 @@ Allocated allocate(const char* text, const char* name, bool rpo = true,
 // A tagged value cannot be split, and live across a call it lives in its
 // slot for good: the bitcast that makes it is a copy into the slot, and the
 // read of its bits after the call (the tagged value's own register, no copy)
-// a load out of it.
+// a load out of it. The word is tagged past a call, so the two are two
+// registers (one made in the tagged value's block with no GC point between
+// would be the tagged value's own: x64_isel_mem.cpp, name_tagged_sources).
 const char* kAcrossCall = R"(module @m
 
 func @twice(%a: i64) -> i64 {
@@ -62,8 +64,9 @@ entry:
 
 func @bits(%x: i64) -> i64 {
 entry:
+  %b = call.i64 @twice(%x)
   %t = bitcast.tagged.i64 %x
-  %c = call.i64 @twice(%x)
+  %c = call.i64 @twice(%b)
   %u = bitcast.i64.tagged %t
   %r = xor.i64 %u, %c
   ret %r
@@ -101,7 +104,7 @@ TEST_CASE("Linear Scan - a copy out of a spill slot is the reload itself") {
     REQUIRE(fn != nullptr);
     // Small-integer bits, so the tagged value is no pointer a stack map
     // could be asked to trace.
-    for (int64_t x : {int64_t{3}, int64_t{-8}, int64_t{1} << 40}) CHECK_EQ(fn(x), x ^ (x + x));
+    for (int64_t x : {int64_t{3}, int64_t{-8}, int64_t{1} << 40}) CHECK_EQ(fn(x), x ^ (4 * x));
 }
 
 namespace {

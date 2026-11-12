@@ -516,6 +516,7 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
     }
 
     // 2. Allocate VRegs for all block parameters and instructions
+    name_tagged_sources(mir_fn);
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* param : bb->params()) {
             get_or_alloc_vreg(param);

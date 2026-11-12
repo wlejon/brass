@@ -1,10 +1,12 @@
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace brass::x64 {
 
@@ -483,6 +485,33 @@ void X64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
     lea_inst->add_use(LirOperand::local_slot(static_cast<int32_t>(aligned_cur), 8));
     lea_inst->mir_origin = &inst;
     lir_bb.append_inst(std::move(lea_inst));
+}
+
+// A tagged value made of raw bits is those bits' own register where the bits
+// are made in the same block with no GC point before the tagged value
+// stands: the word a join receives, or a load's result, and the value read
+// off it. As two registers the tagged one was a copy of a word still read
+// after it (`mov t, x; cmp x, K; ja` for a number test, the test reading the
+// raw word), so the two overlapped, no register could hold both, and every
+// such test kept its copy. The one register is a root from where the bits
+// are made, which is what they are, and a raw read of it past a GC point
+// reads where the object is now.
+void X64ISel::name_tagged_sources(const Function& mir_fn) {
+    for (const auto* bb : mir_fn.blocks()) {
+        std::unordered_set<const Value*> fresh(bb->params().begin(), bb->params().end());
+        for (const auto* inst : *bb) {
+            if (may_trigger_gc(*inst)) fresh.clear();
+            if (inst->opcode() == Opcode::bitcast_tagged_i64) {
+                const Value* src = inst->operand(0);
+                if (src && src->type() == Type::i64() && fresh.count(src) && !val_to_vreg_.count(src)) {
+                    val_to_vreg_[src] = lir_fn_->allocate_vreg(RegClass::GPR, 8, false, true);
+                }
+                if (auto it = val_to_vreg_.find(src); it != val_to_vreg_.end()) val_to_vreg_[inst->result()] = it->second;
+                continue;
+            }
+            if (inst->produces_value() && !skipped_insts_.count(inst)) fresh.insert(inst->result());
+        }
+    }
 }
 
 void X64ISel::lower_tagged_bitcast(const Instruction& inst, LirBlock& lir_bb) {

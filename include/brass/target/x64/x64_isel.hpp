@@ -207,6 +207,9 @@ private:
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_alloca(const Instruction& inst, codegen::LirBlock& lir_bb);
     // bitcast_i64_tagged / bitcast_tagged_i64: a 64-bit register move.
+    // Gives a raw word and the tagged value made of it one register
+    // (x64_isel_mem.cpp).
+    void name_tagged_sources(const Function& mir_fn);
     void lower_tagged_bitcast(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_pinned_tls_read(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_pinned_tls_write(const Instruction& inst, codegen::LirBlock& lir_bb);
