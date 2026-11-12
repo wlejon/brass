@@ -430,5 +430,41 @@ TEST_CASE("Diamond to Select - Rejects sdiv/smod by -1, derived gcrefs, and resu
         CHECK(!simplify_cfg_diamonds(*fn));
         CHECK_EQ(fn->blocks().size(), size_t{4});
     }
-}
 
+    // 4. A diamond with a cold arm stays a branch: the select would compute
+    // the arm the front end says is almost never taken on every pass.
+    {
+        Module mod("test_diamond_cold_arm");
+        Builder b(mod);
+        Function* fn = mod.create_function("cold_diamond", Type::i64(), {Type::i32(), Type::i64()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* bb_then = b.append_block("bb_then");
+        BasicBlock* bb_else = b.append_block("bb_else");
+        BasicBlock* bb_join = b.append_block("bb_join");
+
+        b.position_at_end(entry);
+        Value* cond = b.add_block_param(entry, Type::i32());
+        Value* x = b.add_block_param(entry, Type::i64());
+        b.build_br_if(cond, bb_then, {}, bb_else, {});
+
+        b.position_at_end(bb_then);
+        Value* v1 = b.build_add(x, b.build_iconst_i64(1));
+        b.build_br(bb_join, {v1});
+
+        b.position_at_end(bb_else);
+        Value* v2 = b.build_add(x, b.build_iconst_i64(2));
+        b.build_br(bb_join, {v2});
+
+        b.position_at_end(bb_join);
+        Value* res = b.add_block_param(bb_join, Type::i64());
+        b.build_ret(res);
+
+        bb_else->set_cold();
+        fn->rebuild_cfg_predecessors();
+        CHECK(!simplify_cfg_diamonds(*fn));
+        CHECK_EQ(fn->blocks().size(), size_t{4});
+        bb_else->set_cold(false);
+        CHECK(simplify_cfg_diamonds(*fn));
+    }
+}

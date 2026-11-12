@@ -62,7 +62,8 @@ void EmitContext::emit_jump(Condition cond, uint32_t target_id) {
         else enc_.j_short(cond, to);
     };
     auto record = [&](bool is_long) {
-        sites_.push_back(BranchSite{cond, target_id, start, is_long});
+        const bool to_cold = target_id < block_cold_.size() && block_cold_[target_id];
+        sites_.push_back(BranchSite{cond, target_id, start, is_long, emitting_cold_ || to_cold});
     };
     if (buffer_.is_bound(label)) {
         // Backward: the distance is known exactly.

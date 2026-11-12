@@ -67,6 +67,16 @@ TEST_CASE("Branch relay - the plan relays long branches onto near ones to the sa
     CHECK_EQ(r[4], 5u);
     CHECK_EQ(r[5], UINT32_MAX);
     CHECK_EQ(r[6], UINT32_MAX);
+    // A branch taken on the hot path (a latch back to its loop's head) keeps
+    // its long form: relayed, the hub's jump would run on every pass.
+    s[1].seldom = false;
+    s[4].seldom = false;
+    r = plan_branch_relays(s, 104);
+    CHECK_EQ(r[1], UINT32_MAX);
+    CHECK_EQ(r[4], UINT32_MAX);
+    s[1].seldom = true;
+    s[4].seldom = true;
+    r = plan_branch_relays(s, 104);
     // A hub never relays itself, so no relay chains or cycles.
     for (uint32_t i = 0; i < r.size(); ++i) {
         if (r[i] != UINT32_MAX) CHECK_EQ(r[r[i]], UINT32_MAX);

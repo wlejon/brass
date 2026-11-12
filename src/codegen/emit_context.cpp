@@ -127,8 +127,11 @@ CompilationResult EmitContext::compile_once() {
     X64FrameLayout::compute_layout(frame_, fn_.calling_conv);
 
     // 2. Create labels for all blocks
+    block_cold_.clear();
     for (const auto& block : fn_.blocks) {
         block_labels_[block->id] = buffer_.create_label();
+        if (block->id >= block_cold_.size()) block_cold_.resize(size_t{block->id} + 1, 0);
+        block_cold_[block->id] = block->cold ? 1 : 0;
     }
 
     // 3. Emit prologue at entry
@@ -172,6 +175,7 @@ CompilationResult EmitContext::compile_once() {
         }
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
+        emitting_cold_ = block->cold;
 
         if (block->is_landing_pad) {
             if (frame_.total_frame_size > 0) {

@@ -32,10 +32,14 @@ struct BranchSite {
     uint32_t target = 0;   // the block it goes to
     size_t start = 0;      // its offset
     bool is_long = false;  // emitted in its rel32 form
+    // Whether it is seldom taken: it goes to a cold block or stands in one.
+    // Only such a branch relays. A loop's latch back to its head, or a hot
+    // block's branch to a join, would run the hub's jump on every pass.
+    bool seldom = true;
 };
 
 // For each branch, the ordinal of the branch it relays to, or UINT32_MAX.
-// Only a long branch relays, never onto one that itself relays (so a relay
+// Only a long, seldom-taken branch relays, never onto one that itself relays (so a relay
 // is one hop), and only to a branch whose start lies within `reach` bytes of
 // where its 2-byte form would end, measured on `sites` as emitted; the
 // caller emits the plan and drops any relay the new offsets put out of reach.

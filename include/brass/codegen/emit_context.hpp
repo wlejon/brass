@@ -118,6 +118,8 @@ private:
     std::vector<uint32_t> overflow_ords_;
     uint32_t branch_ordinal_ = 0;
     std::vector<BranchSite> sites_;        // this emission's branches, by ordinal
+    std::vector<uint8_t> block_cold_;      // by block id: LirBlock::cold
+    bool emitting_cold_ = false;           // the block being emitted is cold
     std::vector<uint32_t> relay_to_;       // the plan emitted: ordinal -> hub ordinal, or UINT32_MAX
     std::vector<x64::Label> hub_labels_;   // by ordinal, valid where a branch relays onto it
 

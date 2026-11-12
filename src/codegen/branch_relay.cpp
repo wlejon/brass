@@ -41,7 +41,7 @@ std::vector<uint32_t> plan_branch_relays(const std::vector<BranchSite>& sites, i
         // can reach a hub (one not relaying already).
         for (uint32_t b : group) {
             const BranchSite& s = sites[b];
-            if (!s.is_long || hub[b]) continue;
+            if (!s.is_long || !s.seldom || hub[b]) continue;
             const int64_t from = static_cast<int64_t>(s.start) + 2;
             uint32_t best = none;
             bool best_hub = false;

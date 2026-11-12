@@ -99,6 +99,9 @@ bool is_valid_branch_arm(
 ) {
     if (!arm || arm == pred || arm == join) return false;
     if (resume_targets.count(arm) > 0) return false;
+    // A cold arm is one the front end says the branch almost never takes: a
+    // select would compute it on every pass for a branch that predicts.
+    if (arm->is_cold()) return false;
     if (arm->predecessors().size() != 1 || arm->predecessors()[0] != pred) return false;
     if (arm->successors().size() != 1 || arm->successors()[0] != join) return false;
 
