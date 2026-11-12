@@ -668,3 +668,63 @@ TEST_CASE("AArch64 Baseline JIT - GC Roots and Stack Map Generation") {
         CHECK(root.offset_from_rbp < 0);
     }
 }
+
+TEST_CASE("AArch64 Emit - ParallelCopy FPR spill-slot 3-cycle and duplicate-def termination") {
+    // 1. A 3-cycle of 8-byte f64 values starting at a slot-to-slot move
+    //    [slot(0) <- slot(1), slot(1) <- v0, v0 <- slot(0)] must park slot(0)
+    //    in FPR scratch V30 (not GPR X14, whose as_aarch64_fpr() is 0xFF).
+    {
+        LirFunction fn;
+        fn.name = "pcopy_fpr_slot_cycle";
+        fn.frame.total_frame_size = 32;
+        fn.frame.num_spill_slots = 2;
+        fn.frame.is_leaf = true;
+
+        auto bb = std::make_unique<LirBlock>(0, "entry");
+        auto pc = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        pc->add_def(LirOperand::slot(0, 8));
+        pc->add_use(LirOperand::slot(1, 8));
+        pc->add_def(LirOperand::slot(1, 8));
+        pc->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        pc->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        pc->add_use(LirOperand::slot(0, 8));
+        bb->append_inst(std::move(pc));
+        bb->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+        fn.blocks.push_back(std::move(bb));
+
+        AArch64EmitContext emitter(fn, Target::aarch64_macos());
+        AArch64CompilationResult res = emitter.compile();
+        CHECK(res.code_buffer.size() > 0);
+        CHECK_EQ(res.code_buffer.size() % 4, size_t(0));
+        // fmov d0, d30 is 0x1E604000 | (30 << 5) | 0 = 0x1E6043C0.
+        CHECK(contains_words(res.code_buffer.data(), res.code_buffer.size(), {0x1E6043C0u}));
+    }
+
+    // 2. A ParallelCopy with a shadowed duplicate destination (rho-shaped raw
+    //    move graph) must deduplicate and terminate in bounded code size.
+    {
+        LirFunction fn;
+        fn.name = "pcopy_shadowed_dst";
+        fn.frame.total_frame_size = 16;
+        fn.frame.is_leaf = true;
+
+        auto bb = std::make_unique<LirBlock>(0, "entry");
+        auto pc = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        pc->add_def(LirOperand::preg_aarch64_fpr(FPR::V8, 8));
+        pc->add_use(LirOperand::preg_aarch64_fpr(FPR::V14, 8));
+        pc->add_def(LirOperand::preg_aarch64_fpr(FPR::V10, 8));
+        pc->add_use(LirOperand::preg_aarch64_fpr(FPR::V8, 8));
+        pc->add_def(LirOperand::preg_aarch64_fpr(FPR::V12, 8));
+        pc->add_use(LirOperand::preg_aarch64_fpr(FPR::V10, 8));
+        pc->add_def(LirOperand::preg_aarch64_fpr(FPR::V10, 8));
+        pc->add_use(LirOperand::preg_aarch64_fpr(FPR::V12, 8));
+        bb->append_inst(std::move(pc));
+        bb->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+        fn.blocks.push_back(std::move(bb));
+
+        AArch64EmitContext emitter(fn, Target::aarch64_macos());
+        AArch64CompilationResult res = emitter.compile();
+        CHECK(res.code_buffer.size() > 0);
+        CHECK(res.code_buffer.size() <= 64u);
+    }
+}

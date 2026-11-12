@@ -680,3 +680,105 @@ TEST_CASE("MIR - precise_stack_roots prints and parses back") {
     CHECK(!plain->precise_stack_roots());
     CHECK(brass::to_string(*plain).find("precise_stack_roots") == std::string::npos);
 }
+
+TEST_CASE("Linear Scan - eviction split before a hot join never rewinds scan cursor") {
+    // Regression test for convertBufferAttribute (three.js on aarch64):
+    // when an active interval is evicted at a later loop/call site and its
+    // split point moves earlier than a hot join whose predecessor held the
+    // value in a register, spill_and_requeue must not rewind unhandled behind
+    // scan_pos_ (which previously reused registers of already-retired pieces).
+    Module mod("m");
+    {
+        Function* sink = mod.create_function("sink", Type::f64(), {Type::f64()});
+        Builder sb(*sink);
+        sb.append_block("entry");
+        Value* sx = sb.add_param(Type::f64());
+        sb.build_ret(sx);
+    }
+
+    Function* fn = mod.create_function("reentry_evict", Type::f64(), {Type::i64(), Type::ptr()});
+    {
+        Builder b(*fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* cold = b.append_block("cold");
+        BasicBlock* join = b.append_block("join");
+        BasicBlock* loop = b.append_block("loop");
+        BasicBlock* exit_bb = b.append_block("exit");
+
+        b.position_at_end(entry);
+        Value* n = b.add_param(Type::i64());
+        Value* p = b.add_param(Type::ptr());
+        std::vector<Value*> xs;
+        xs.reserve(28);
+        for (int i = 0; i < 28; ++i) {
+            xs.push_back(b.build_load(Type::f64(), p, i * 8));
+        }
+        Value* zero = b.build_iconst_i64(0);
+        Value* c0 = b.build_slt(n, zero);
+        b.build_br_if(c0, cold, join);
+
+        b.position_at_end(cold);
+        b.build_call("sink", Type::f64(), {xs[0]});
+        b.build_br(join);
+
+        b.position_at_end(join);
+        Value* i0 = b.build_iconst_i64(0);
+        Value* acc0 = b.build_fconst_f64(0.0);
+        b.build_br(loop, {i0, acc0});
+
+        b.position_at_end(loop);
+        Value* idx = b.add_param(Type::i64());
+        Value* acc = b.add_param(Type::f64());
+        Value* step = b.build_iconst_i64(1);
+        Value* inext = b.build_add(idx, step);
+        Value* cur = acc;
+        for (size_t i = 0; i < 28; ++i) {
+            cur = b.build_fadd(cur, xs[i]);
+        }
+        Value* cont = b.build_slt(inext, n);
+        b.build_br_if(cont, loop, {inext, cur}, exit_bb, {cur});
+
+        b.position_at_end(exit_bb);
+        Value* res = b.add_param(Type::f64());
+        b.build_ret(res);
+    }
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_module(mod));
+
+    // Verify both AArch64 and x64 linear scan succeed with zero conflicting moves.
+    {
+        aarch64::AArch64ISel isel(Target::aarch64_macos(), CallingConvention::apple_aapcs64());
+        auto lir = isel.lower(*fn);
+        REQUIRE(lir != nullptr);
+        lir->sort_blocks_rpo();
+        LivenessAnalysis liveness(*lir);
+        liveness.run();
+        LinearScanAllocator regalloc(*lir, liveness, CallingConvention::apple_aapcs64());
+        regalloc.allocate();
+        CHECK(lir->frame.num_spill_slots > 0);
+    }
+    {
+        X64ISel isel(Target::x64_linux(), CallingConvention::sysv64());
+        auto lir = isel.lower(*fn);
+        REQUIRE(lir != nullptr);
+        lir->sort_blocks_rpo();
+        LivenessAnalysis liveness(*lir);
+        liveness.run();
+        LinearScanAllocator regalloc(*lir, liveness, CallingConvention::sysv64());
+        regalloc.allocate();
+        CHECK(lir->frame.num_spill_slots > 0);
+    }
+
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(mod));
+    auto compiled = jit.get_function_ptr<double (*)(int64_t, const double*)>("reentry_evict");
+    REQUIRE(compiled != nullptr);
+    double vals[28];
+    double sum1 = 0.0;
+    for (int i = 0; i < 28; ++i) {
+        vals[i] = static_cast<double>(i + 1);
+        sum1 += vals[i];
+    }
+    CHECK_EQ(compiled(3, vals), sum1 * 3.0);
+    CHECK_EQ(compiled(-1, vals), sum1);
+}

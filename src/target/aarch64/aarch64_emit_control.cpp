@@ -19,30 +19,46 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
         bool done = false;
     };
 
+    auto same_loc = [](const LirOperand& a, const LirOperand& b) -> bool {
+        if (a.kind != b.kind) return false;
+        switch (a.kind) {
+            case LirOperandKind::PReg: return a.preg_val == b.preg_val;
+            case LirOperandKind::SpillSlot: return a.spill_slot == b.spill_slot;
+            case LirOperandKind::LocalSlot: return a.local_offset == b.local_offset;
+            case LirOperandKind::Mem: return a.mem_val == b.mem_val && a.size == b.size;
+            default: return false;
+        }
+    };
+
     std::vector<Move> moves;
     for (size_t i = 0; i < n; ++i) {
-        if (inst.defs[i].is_preg() && inst.uses[i].is_preg() &&
-            inst.defs[i].preg_val == inst.uses[i].preg_val) {
-            continue;
+        bool shadowed = false;
+        for (size_t j = i + 1; j < n; ++j) {
+            if (same_loc(inst.defs[i], inst.defs[j])) {
+                shadowed = true;
+                break;
+            }
         }
-        if (inst.defs[i].is_spill_slot() && inst.uses[i].is_spill_slot() &&
-            inst.defs[i].spill_slot == inst.uses[i].spill_slot) {
-            continue;
-        }
+        if (shadowed || same_loc(inst.defs[i], inst.uses[i])) continue;
         moves.push_back({inst.defs[i], inst.uses[i], false});
     }
 
     auto emit_move = [&](const LirOperand& dst, const LirOperand& src) {
-        if (dst.is_preg() && src.is_preg() && dst.preg_val == src.preg_val) return;
-        if (dst.is_spill_slot() && src.is_spill_slot() && dst.spill_slot == src.spill_slot) return;
+        if (same_loc(dst, src)) return;
 
         if (dst.is_preg()) {
             if (dst.preg_val.is_gpr()) {
                 GPR dst_gpr = dst.preg_val.as_aarch64_gpr();
                 if (src.is_preg()) {
-                    GPR src_gpr = src.preg_val.as_aarch64_gpr();
-                    if (dst.size == 4 && src.size == 4) enc_.mov32(dst_gpr, src_gpr);
-                    else enc_.mov(dst_gpr, src_gpr);
+                    if (src.preg_val.is_gpr()) {
+                        GPR src_gpr = src.preg_val.as_aarch64_gpr();
+                        if (dst.size == 4 && src.size == 4) enc_.mov32(dst_gpr, src_gpr);
+                        else enc_.mov(dst_gpr, src_gpr);
+                    } else if (dst.size == 4 && src.size == 4) {
+                        enc_.fmov_to_gpr32(dst_gpr, src.preg_val.as_aarch64_fpr());
+                    } else {
+                        enc_.fmov_to_gpr(dst_gpr, src.preg_val.as_aarch64_fpr());
+                    }
                 } else if (src.is_imm_int()) {
                     if (dst.size == 1) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int & 0xff));
                     else if (dst.size == 2) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int & 0xffff));
@@ -56,7 +72,10 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                 }
             } else {
                 FPR dst_fpr = dst.preg_val.as_aarch64_fpr();
-                if (dst.size == 16 || src.size == 16) {
+                if (src.is_preg() && src.preg_val.is_gpr()) {
+                    if (dst.size == 4 && src.size == 4) enc_.fmov_from_gpr32(dst_fpr, src.preg_val.as_aarch64_gpr());
+                    else enc_.fmov_from_gpr(dst_fpr, src.preg_val.as_aarch64_gpr());
+                } else if (dst.size == 16 || src.size == 16) {
                     if (src.is_preg()) enc_.vec_orr(dst_fpr, src.preg_val.as_aarch64_fpr(), src.preg_val.as_aarch64_fpr());
                     else enc_.ldr_q(dst_fpr, ensure_accessible_mem(to_mem_address(src)));
                 } else if (dst.size == 4 || src.size == 4) {
@@ -140,13 +159,7 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
             bool dst_used = false;
             for (const auto& other : moves) {
                 if (other.done) continue;
-                if (m.dst.is_preg() && other.src.is_preg() &&
-                    m.dst.preg_val == other.src.preg_val) {
-                    dst_used = true;
-                    break;
-                }
-                if (m.dst.is_spill_slot() && other.src.is_spill_slot() &&
-                    m.dst.spill_slot == other.src.spill_slot) {
+                if (same_loc(m.dst, other.src)) {
                     dst_used = true;
                     break;
                 }
@@ -179,41 +192,35 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
             cycle.push_back(curr);
             size_t next_idx = SIZE_MAX;
             for (size_t i = 0; i < moves.size(); ++i) {
-                if (!moves[i].done) {
-                    bool match = false;
-                    if (moves[i].dst.is_preg() && moves[curr].src.is_preg() &&
-                        moves[i].dst.preg_val == moves[curr].src.preg_val) {
-                        match = true;
-                    } else if (moves[i].dst.is_spill_slot() && moves[curr].src.is_spill_slot() &&
-                               moves[i].dst.spill_slot == moves[curr].src.spill_slot) {
-                        match = true;
-                    }
-                    if (match) {
-                        next_idx = i;
-                        break;
-                    }
+                if (!moves[i].done && same_loc(moves[i].dst, moves[curr].src)) {
+                    next_idx = i;
+                    break;
                 }
             }
             if (next_idx == SIZE_MAX || next_idx == start_idx) {
                 break;
             }
-            bool already_in_cycle = false;
-            for (size_t c : cycle) {
-                if (c == next_idx) {
-                    already_in_cycle = true;
-                    break;
-                }
+            auto it = std::find(cycle.begin(), cycle.end(), next_idx);
+            if (it != cycle.end()) {
+                cycle.erase(cycle.begin(), it);
+                break;
             }
-            if (already_in_cycle) break;
             curr = next_idx;
         }
 
         if (!cycle.empty()) {
             size_t idx0 = cycle[0];
             auto& m0 = moves[idx0];
-            bool is_fpr = (m0.dst.is_preg() && m0.dst.preg_val.is_xmm()) ||
-                          (m0.src.is_preg() && m0.src.preg_val.is_xmm()) ||
-                          (m0.dst.size == 16);
+            bool is_fpr = false;
+            for (size_t idx : cycle) {
+                const auto& cm = moves[idx];
+                if ((cm.dst.is_preg() && cm.dst.preg_val.is_xmm()) ||
+                    (cm.src.is_preg() && cm.src.preg_val.is_xmm()) ||
+                    cm.dst.size >= 16 || cm.src.size >= 16) {
+                    is_fpr = true;
+                    break;
+                }
+            }
             // The value parked here has to survive every move still to be
             // emitted, and emit_move itself uses X15/X16/X17 and V31 for a
             // memory-to-memory move (a 16-byte slot copy goes through V31).

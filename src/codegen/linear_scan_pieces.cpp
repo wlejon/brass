@@ -1,6 +1,7 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <algorithm>
 #include <bit>
+#include <stdexcept>
 
 // The scan: each piece, in order of its start, gets a register free for all
 // of it, else one free for a prefix that holds a use (the rest is split off
@@ -292,7 +293,8 @@ void LinearScanAllocator::assign(uint32_t idx, PReg reg) {
 // than one on every edge from where the value waits in its slot.
 uint32_t LinearScanAllocator::register_reentry(const AllocPiece& p, uint32_t limit) const {
     constexpr int kScan = 16;
-    auto here = std::upper_bound(spans_.begin(), spans_.end(), p.start,
+    const uint32_t from = std::max(p.start, scan_pos_);
+    auto here = std::upper_bound(spans_.begin(), spans_.end(), from,
                                  [](uint32_t x, const BlockSpan& s) { return x < s.start; });
     if (here == spans_.begin()) return kNever;
     const auto& list = vreg_pieces_[p.vreg().id];
@@ -303,13 +305,13 @@ uint32_t LinearScanAllocator::register_reentry(const AllocPiece& p, uint32_t lim
         const AllocPiece& q = pieces_[*(it - 1)];
         return pos <= q.to && !q.spilled && q.reg.is_valid();
     };
-    auto span = std::upper_bound(spans_.begin(), spans_.end(), p.start + 1,
+    auto span = std::upper_bound(spans_.begin(), spans_.end(), from + 1,
                                  [](uint32_t x, const BlockSpan& s) { return x < s.start; });
     for (int n = 0; span != spans_.end() && span->start <= limit && n < kScan; ++span, ++n) {
         for (const LirBlock* pred : span->block->predecessors) {
             if (pred->instructions.empty()) continue;
             const uint32_t e = liveness_.block_liveness(pred).end_id;
-            if (e < p.start && in_register_at(e)) return span->start - 1;
+            if (e < from && in_register_at(e)) return span->start - 1;
         }
     }
     return kNever;
@@ -323,6 +325,9 @@ uint32_t LinearScanAllocator::register_reentry(const AllocPiece& p, uint32_t lim
 // back instead: the reload is on the edges from where the value waits in its
 // slot, rather than a store on that path's edge (or at the definition, where
 // the store-once rule hoists it) for a slot the block expected it in.
+// Never split at or before `scan_pos_`: `active_` has already retired every
+// piece ending at or before `scan_pos_`, so rewinding the scan cursor would
+// assign registers on top of live intervals that already expired from `active_`.
 void LinearScanAllocator::spill_and_requeue(uint32_t idx, uint32_t after, std::vector<uint32_t>& unhandled) {
     AllocPiece& p = pieces_[idx];
     const VReg v = p.vreg();
@@ -330,17 +335,18 @@ void LinearScanAllocator::spill_and_requeue(uint32_t idx, uint32_t after, std::v
     p.reg = PReg{};
     slot_of(v);
     if (unsplittable_[v.id]) return;
-    uint32_t lo = std::max(p.start, after) + 1;
+    const uint32_t floor = std::max(p.start, scan_pos_);
+    uint32_t lo = std::max(floor, after) + 1;
     const uint32_t u = next_use(p, lo + 1, true);
     uint32_t hi = u == kNever ? kNever : u - 1;
     const uint32_t r = register_reentry(p, u == kNever ? p.end : u);
-    if (r != kNever && r > p.start) {
-        lo = p.start + 1;
+    if (r != kNever && r > floor) {
+        lo = floor + 1;
         hi = r;
     }
     if (hi == kNever) return;
     const uint32_t q = split_position(lo, hi);
-    if (q == kNever || q <= p.start || q >= p.end) return;
+    if (q == kNever || q <= floor || q >= p.end) return;
     push_unhandled(unhandled, split_piece(idx, q));
 }
 
@@ -817,11 +823,16 @@ void LinearScanAllocator::run_scan() {
         if (x.end != y.end) return x.end > y.end;
         return x.seq > y.seq;
     };
+    scan_pos_ = 0;
     while (!unhandled.empty()) {
         std::pop_heap(unhandled.begin(), unhandled.end(), later);
         const uint32_t idx = unhandled.back();
         unhandled.pop_back();
         const uint32_t pos = pieces_[idx].start;
+        if (pos < scan_pos_) {
+            throw std::logic_error("register allocation: scan cursor moved backwards in " + fn_.name);
+        }
+        scan_pos_ = pos;
         active_.erase(std::remove_if(active_.begin(), active_.end(),
                                      [&](uint32_t a) { return pieces_[a].end <= pos; }),
                       active_.end());

@@ -418,6 +418,19 @@ void LinearScanAllocator::collect_resolution_moves() {
 // still reads goes first; what is left then is cycles of registers, which a
 // ParallelCopy resolves through its scratch register.
 void LinearScanAllocator::emit_moves(std::vector<PendingMove>& moves, std::vector<std::unique_ptr<LirInst>>& out) {
+    for (size_t i = 0; i < moves.size(); ++i) {
+        for (size_t j = i + 1; j < moves.size();) {
+            if (!same_location(moves[i].dst, moves[j].dst)) {
+                ++j;
+                continue;
+            }
+            if (!same_location(moves[i].src, moves[j].src)) {
+                throw std::logic_error("register allocation: conflicting parallel moves to " +
+                                       to_string(moves[i].dst) + " in " + fn_.name);
+            }
+            moves.erase(moves.begin() + static_cast<std::ptrdiff_t>(j));
+        }
+    }
     auto make = [](const PendingMove& m) {
         const bool reg_to_reg = m.dst.is_preg() && m.src.is_preg();
         LirOpcode op = LirOpcode::Mov;

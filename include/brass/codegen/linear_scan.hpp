@@ -164,6 +164,7 @@ private:
     std::vector<double> whole_life_cost_;
     std::vector<uint32_t> active_;   // piece indices holding a register
     uint32_t next_seq_ = 0;
+    uint32_t scan_pos_ = 0;
 
     struct BlockSpan {
         const LirBlock* block = nullptr;
