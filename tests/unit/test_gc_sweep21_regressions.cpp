@@ -177,6 +177,89 @@ TEST_CASE("Sweep21 - an entry scope under a generated caller answers with that c
 }
 #endif
 
+namespace {
+
+GenHeap* g_aligned_heap = nullptr;
+
+extern "C" SWEEP21_NOINLINE int64_t sweep21_collect_from_host(int64_t x) {
+    // Walks from C++ (brass_stack_walk_from_here) while a generated frame
+    // that saved callee-saved GPRs sits below an over-aligned C++ EH frame.
+    if (g_aligned_heap) g_aligned_heap->heap.collect(gc::CollectionKind::Minor);
+    return x + 1;
+}
+
+SWEEP21_NOINLINE int64_t call_from_aligned_eh_frame(I64Fn fn, int64_t arg) {
+    volatile int dtor_sink = 0;
+    struct EhGuard {
+        volatile int* p;
+        ~EhGuard() {
+            if (p) *p = *p + 1;
+        }
+    } guard{&dtor_sink};
+    alignas(64) volatile uint64_t overaligned[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    GeneratedCodeEntryScope entry;
+    const int64_t r = fn(arg);
+    return r + static_cast<int64_t>(overaligned[0] - 1);
+}
+
+const char* kCalleeSavedWalk = R"(module @csw
+func @busy(%n: i64) -> i64 {
+b0:
+  %sz = iconst.i64 48
+  %z = iconst.i64 0
+  %kind = iconst.i32 2
+  %o1 = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  %o2 = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  %o3 = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  %o4 = call.gcref @brass_gc_alloc(%sz, %z, %kind)
+  %k1 = iconst.i64 10
+  %k2 = iconst.i64 20
+  %k3 = iconst.i64 30
+  %k4 = iconst.i64 40
+  store.i64 %o1, 16, %k1
+  store.i64 %o2, 16, %k2
+  store.i64 %o3, 16, %k3
+  store.i64 %o4, 16, %k4
+  %c = call.i64 @host_collect(%n)
+  %g = call.i64 @host_cb(%n)
+  %v1 = load.i64 %o1, 16
+  %v2 = load.i64 %o2, 16
+  %v3 = load.i64 %o3, 16
+  %v4 = load.i64 %o4, 16
+  %s1 = add.i64 %v1, %v2
+  %s2 = add.i64 %v3, %v4
+  %s3 = add.i64 %s1, %s2
+  %s4 = add.i64 %s3, %c
+  %s5 = add.i64 %s4, %g
+  ret %s5
+}
+)";
+
+} // namespace
+
+TEST_CASE("Sweep21 - unwinding past generated callee-saved frames into over-aligned EH host frames") {
+    auto wmod = parse_ok(kWalk);
+    auto bmod = parse_ok(kCalleeSavedWalk);
+    codegen::JitExecutionEngine jit_w;
+    codegen::JitExecutionEngine jit_b;
+    gc::HeapConfig cfg = test::small_heap_config();
+    cfg.walk_stack_on_host_collection = true;
+    GenHeap heap(cfg);
+    g_aligned_heap = &heap;
+    jit_w.register_external_symbol("host_cb", reinterpret_cast<void*>(&sweep21_host_cb));
+    jit_b.register_external_symbol("host_collect", reinterpret_cast<void*>(&sweep21_collect_from_host));
+    jit_b.register_external_symbol("host_cb", reinterpret_cast<void*>(&sweep21_host_cb));
+    REQUIRE(jit_w.compile_and_load(*wmod));
+    REQUIRE(jit_b.compile_and_load(*bmod));
+    g_g = reinterpret_cast<I64Fn>(jit_w.get_symbol_address("g"));
+    auto busy = reinterpret_cast<I64Fn>(jit_b.get_symbol_address("busy"));
+    REQUIRE(g_g != nullptr);
+    REQUIRE(busy != nullptr);
+    // 10 + 20 + 30 + 40 + (20000 + 1) + 42 = 20143
+    CHECK_EQ(call_from_aligned_eh_frame(busy, 20000), 20143);
+    g_aligned_heap = nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // 2. NaN operands of add/sub/mul/div: lhs NaN if the lhs is one, else the
 // rhs NaN, quieted, in every tier and in the constant folder.

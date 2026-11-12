@@ -56,8 +56,8 @@ namespace {
 thread_local size_t t_unwind_steps = 0;
 
 #if defined(_WIN32) && defined(_M_X64)
-// A frame being unwound: its context, of which the walk reads three
-// registers.
+// A frame being unwound: its context, including the non-volatile GPRs
+// Win64 unwind info may name as FrameRegister in outer compiled frames.
 struct Cursor {
     CONTEXT ctx{};
     uintptr_t ip() const noexcept { return static_cast<uintptr_t>(ctx.Rip); }
@@ -68,10 +68,37 @@ struct Cursor {
         ctx.Rsp = sp;
         ctx.Rbp = fp;
     }
-    // One frame up; false at the base of the stack.
-    bool step() noexcept { return detail::win64_unwind_one(ctx); }
+    void save_memo(GeneratedCodeEntryScope::Memo& m) const noexcept {
+        m.rsp = sp();
+        m.rbp = fp();
+        m.ip = ip();
+        m.rbx = ctx.Rbx;
+        m.rsi = ctx.Rsi;
+        m.rdi = ctx.Rdi;
+        m.r12 = ctx.R12;
+        m.r13 = ctx.R13;
+        m.r14 = ctx.R14;
+        m.r15 = ctx.R15;
+    }
+    void load_memo(const GeneratedCodeEntryScope::Memo& m) noexcept {
+        set(m.ip, m.rsp, m.rbp);
+        ctx.Rbx = m.rbx;
+        ctx.Rsi = m.rsi;
+        ctx.Rdi = m.rdi;
+        ctx.R12 = m.r12;
+        ctx.R13 = m.r13;
+        ctx.R14 = m.r14;
+        ctx.R15 = m.r15;
+    }
+    // One frame up; false at the base of the stack or an out-of-bounds frame.
+    bool step(uintptr_t stack_low = 0, uintptr_t stack_high = UINTPTR_MAX) noexcept {
+        return detail::win64_unwind_one(ctx, stack_low, stack_high);
+    }
 };
 bool ip_in_image(uintptr_t ip) noexcept { return detail::win64_ip_in_image(ip); }
+__declspec(noinline) void capture_current_cursor(Cursor& cur) noexcept {
+    RtlCaptureContext(&cur.ctx);
+}
 #elif defined(BRASS_NATIVE_UNWIND)
 struct Cursor {
     NativeUnwindFrame f;
@@ -79,9 +106,17 @@ struct Cursor {
     uintptr_t sp() const noexcept { return f.sp; }
     uintptr_t fp() const noexcept { return f.fp; }
     void set(uintptr_t ip, uintptr_t sp, uintptr_t fp) noexcept { f = {ip, sp, fp}; }
+    void save_memo(GeneratedCodeEntryScope::Memo& m) const noexcept {
+        m.rsp = sp();
+        m.rbp = fp();
+        m.ip = ip();
+    }
+    void load_memo(const GeneratedCodeEntryScope::Memo& m) noexcept {
+        set(m.ip, m.rsp, m.rbp);
+    }
     // One frame up; false at the base of the stack or where no step is
     // possible, which the walk cannot see past either way.
-    bool step() noexcept { return brass_unwind_step(f); }
+    bool step(uintptr_t = 0, uintptr_t = UINTPTR_MAX) noexcept { return brass_unwind_step(f); }
 };
 bool ip_in_image(uintptr_t ip) noexcept { return brass_ip_in_image(ip); }
 #endif
@@ -117,6 +152,7 @@ struct OtherStack {
     uintptr_t low = 0;
     uintptr_t high = UINTPTR_MAX;
     GeneratedCodeEntryScope* entries = nullptr;
+    const void* context = nullptr;
 };
 
 // The walk. `start`, when given, is a compiled frame on the walked stack:
@@ -245,8 +281,12 @@ size_t walk_stack(
         for (;;) {
             const uintptr_t prev_sp = cur.sp();
             ++t_unwind_steps;
-            if (!cur.step()) {  // base of the stack
+            if (!cur.step(stack_low, stack_high)) {  // base of the stack (or invalid frame on Win64)
+#if defined(_WIN32) && defined(_M_X64)
+                if (cur.ip() == 0) result = UnwindResult::Nothing;
+#else
                 result = UnwindResult::Nothing;
+#endif
                 break;
             }
             if (cur.sp() <= prev_sp || cur.sp() < stack_low || cur.sp() > stack_high) break;
@@ -257,7 +297,7 @@ size_t walk_stack(
                 if (on_this_stack(entry) && m.beneath != GeneratedCodeEntryScope::Beneath::Unknown &&
                     m.maps == &stack_maps) {
                     if (m.beneath == GeneratedCodeEntryScope::Beneath::Generated) {
-                        cur.set(m.ip, m.rsp, m.rbp);
+                        cur.load_memo(m);
                         result = UnwindResult::Generated;
                     } else {
                         result = UnwindResult::Nothing;
@@ -280,14 +320,16 @@ size_t walk_stack(
                 m.beneath = result == UnwindResult::Generated ? GeneratedCodeEntryScope::Beneath::Generated
                                                               : GeneratedCodeEntryScope::Beneath::Nothing;
                 m.maps = &stack_maps;
-                m.rsp = cur.sp();
-                m.rbp = cur.fp();
-                m.ip = cur.ip();
+                cur.save_memo(m);
             }
         }
         return result;
     };
 
+#if defined(_WIN32) && defined(_M_X64)
+    Cursor saved_cur;
+    bool have_saved_cur = false;
+#endif
     if (start != nullptr) {
         Cursor cur = *start;
         if (find_map(cur.ip()) == nullptr) {
@@ -295,6 +337,8 @@ size_t walk_stack(
         }
 #if defined(_WIN32) && defined(_M_X64)
         if (cur.sp() >= stop_at || cur.fp() < cur.sp()) return 0;
+        saved_cur = cur;
+        have_saved_cur = true;
 #else
         if (cur.sp() >= stop_at) return 0;
 #endif
@@ -314,15 +358,49 @@ size_t walk_stack(
             if (callee_rbp == 0) {
                 break;  // the walk started in compiled code: no stack position
             }
+            const uintptr_t target_sp = callee_rbp + 16;
+            if (target_sp >= stop_at) break;
             Cursor cur;
-            cur.set(cur_return_ip, callee_rbp + 16, cur_rbp);
-            if (cur.sp() >= stop_at) break;
+#if defined(_WIN32) && defined(_M_X64)
+            // Generated frames save callee-saved GPRs (RBX, RSI, RDI, R12..R15)
+            // in their own frames while the fast path followed only [rbp]. An
+            // outer MSVC frame (e.g. /arch:AVX2 stack alignment + C++ EH) may
+            // use RBX or another non-volatile GPR as UNWIND_INFO.FrameRegister,
+            // so step a full CONTEXT up to target_sp to restore them first.
+            if (!have_saved_cur) {
+                if (other != nullptr && other->context != nullptr) {
+                    saved_cur.ctx = *static_cast<const CONTEXT*>(other->context);
+                    have_saved_cur = true;
+                } else if (other == nullptr && callee_rbp >= stack_low && target_sp <= stack_high) {
+                    capture_current_cursor(saved_cur);
+                    have_saved_cur = true;
+                }
+            }
+            if (have_saved_cur && saved_cur.sp() <= target_sp) {
+                while (saved_cur.sp() < target_sp) {
+                    const uintptr_t prev = saved_cur.sp();
+                    if (!saved_cur.step(stack_low, stack_high) || saved_cur.sp() <= prev) {
+                        have_saved_cur = false;
+                        break;
+                    }
+                }
+            }
+            if (have_saved_cur && saved_cur.sp() == target_sp && saved_cur.ip() == cur_return_ip) {
+                cur = saved_cur;
+            } else {
+                have_saved_cur = false;
+                cur.set(cur_return_ip, target_sp, cur_rbp);
+            }
+#else
+            cur.set(cur_return_ip, target_sp, cur_rbp);
+#endif
             const UnwindResult res = unwind_to_generated(cur);
             if (res != UnwindResult::Generated) break;
             if (cur.sp() >= stop_at) break;
 #if defined(_WIN32) && defined(_M_X64)
             // The generated frame's rbp lies at or above its stack pointer.
             if (cur.fp() < cur.sp()) break;
+            if (have_saved_cur) saved_cur = cur;
 #endif
             cur_rbp = cur.fp();
             cur_return_ip = cur.ip();
@@ -476,7 +554,7 @@ size_t brass_stack_walk_switched(
     brass_root_visitor_fn visitor,
     void* user_data
 ) {
-    const OtherStack other{stack.low, stack.high, stack.entries};
+    const OtherStack other{stack.low, stack.high, stack.entries, stack.context};
 #if defined(_WIN32) && defined(_M_X64)
     if (stack.context == nullptr) return 0;
     Cursor cur;
@@ -504,7 +582,7 @@ size_t brass_stack_walk_bounded_on(
     uintptr_t stop_at,
     const SwitchedStack& stack
 ) {
-    const OtherStack other{stack.low, stack.high, stack.entries};
+    const OtherStack other{stack.low, stack.high, stack.entries, stack.context};
     return walk_stack(top_rbp, top_return_ip, stack_maps, visitor, user_data, stop_at, nullptr, &other);
 }
 

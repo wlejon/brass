@@ -120,6 +120,9 @@ public:
         Beneath beneath = Beneath::Unknown;
         const void* maps = nullptr;  // the stack maps the answer was found with
         uintptr_t rsp = 0, rbp = 0, ip = 0;  // the generated frame found
+#if defined(_WIN32) && defined(_M_X64)
+        uint64_t rbx = 0, rsi = 0, rdi = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
+#endif
     };
     Memo memo;
     GeneratedCodeEntryScope* outer() const noexcept { return prev_; }
