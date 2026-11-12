@@ -12,8 +12,9 @@
 // register-register form, but the constant takes no register, so the values
 // it displaced stay out of spill slots, and no 10-byte movabs or 7-byte pool
 // load makes it. Only uses an x64 instruction can take from memory fold: an
-// ALU operation's source, a compare's right operand, a move into a register
-// (a `movq x, v` into an xmm as the `movsd` that loads the word);
+// ALU operation's source, a compare's right operand, a conditional move's
+// moved value, a move into a register (a `movq x, v` into an xmm as the
+// `movsd` that loads the word);
 // the rest keep the movabs, which the emitter turns into a load from the
 // same word.
 
@@ -35,6 +36,12 @@ bool foldable_use(const LirInst& in, size_t k) {
             break;
         case LirOpcode::Cmp:
             if (in.uses.size() != 2 || k != 1 || !in.defs.empty()) return false;
+            break;
+        case LirOpcode::Cmovcc:
+            // dst = cond ? src : dst: the moved value is the last of two uses.
+            if (in.uses.size() != 2 || k != 1 || in.defs.size() != 1 || !in.defs[0].is_vreg() || in.defs[0].size != 8) {
+                return false;
+            }
             break;
         case LirOpcode::Mov:
         case LirOpcode::Movq_xg:

@@ -430,10 +430,19 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
         case LirOpcode::Setcc:
             enc_.setcc(inst.condition, to_gpr(inst.defs[0]));
             break;
-        case LirOpcode::Cmovcc:
-            if (inst.defs[0].size == 4) enc_.cmovcc32(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
-            else enc_.cmovcc(inst.condition, to_gpr(inst.defs[0]), to_gpr(inst.uses.back()));
+        case LirOpcode::Cmovcc: {
+            GPR dst = to_gpr(inst.defs[0]);
+            const auto& src = inst.uses.back();
+            if (inst.defs[0].size == 4) {
+                if (src.is_preg()) enc_.cmovcc32(inst.condition, dst, to_gpr(src));
+                else enc_.cmovcc32(inst.condition, dst, to_mem_address(src));
+            } else if (src.is_preg()) {
+                enc_.cmovcc(inst.condition, dst, to_gpr(src));
+            } else {
+                enc_.cmovcc(inst.condition, dst, to_mem_address(src));
+            }
             break;
+        }
         default:
             throw_unsupported("x64 emit (alu)", to_string(inst.opcode));
     }

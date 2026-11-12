@@ -3,6 +3,7 @@
 #include <brass/mir/critical_edge.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/gc_refs.hpp>
+#include <brass/mir/loop_analysis.hpp>
 #include <brass/mir/uses.hpp>
 
 #include "ir_clone.hpp"
@@ -149,6 +150,72 @@ BasicBlock* join_that_takes(const BasicBlock* bb, const std::vector<Instruction*
     return nullptr;
 }
 
+// The values `inst` is made of that would have to stay live in its place were
+// it and what feeds only it computed later: its operands, through those
+// defined in its block for it alone, constants left out. False when there are
+// more than `limit`.
+using UserMap = std::unordered_map<const Value*, std::vector<Instruction*>>;
+bool inputs_within(const Instruction& inst, const UserMap& users, size_t limit, std::vector<const Value*>& inputs,
+                   unsigned depth = 0) {
+    for (const Value* v : inst.operands()) {
+        const Instruction* def = v->is_instruction() ? v->defining_instruction() : nullptr;
+        if (def && (def->opcode() == Opcode::iconst_i32 || def->opcode() == Opcode::iconst_i64 ||
+                    def->opcode() == Opcode::fconst_f64)) {
+            continue;
+        }
+        const auto u = users.find(v);
+        if (def && depth < 4 && def->parent() == inst.parent() && sinkable(*def, false) && u != users.end() &&
+            std::all_of(u->second.begin(), u->second.end(), [&](const Instruction* r) { return r == &inst; })) {
+            if (!inputs_within(*def, users, limit, inputs, depth + 1)) return false;
+            continue;
+        }
+        if (std::find(inputs.begin(), inputs.end(), v) != inputs.end()) continue;
+        if (inputs.size() == limit) return false;
+        inputs.push_back(v);
+    }
+    return true;
+}
+
+// More blocks than this walked from a value's block and it stays where it is.
+constexpr size_t kMaxReadRegion = 256;
+
+// Each block's innermost loop.
+using LoopOf = std::unordered_map<const BasicBlock*, const LoopInfo*>;
+
+// The blocks holding `users`, when a copy at the head of each can stand for
+// the value: `bb` dominates every one, none is in a loop `bb` is outside of
+// (it would run there once a turn), and some path out of `bb` returns to it
+// or leaves the function passing none of them, which is the path that stops
+// paying. Else empty.
+std::vector<BasicBlock*> blocks_that_read(const BasicBlock* bb, const std::vector<Instruction*>& users,
+                                          const DominatorTree& dom, const LoopOf& loop_of,
+                                          const std::unordered_set<const BasicBlock*>& resumed) {
+    std::vector<BasicBlock*> readers;
+    for (Instruction* u : users) {
+        BasicBlock* at = u->parent();
+        if (std::find(readers.begin(), readers.end(), at) != readers.end()) continue;
+        if (at == bb || readers.size() == kMaxCopies || resumed.count(at) != 0 || !dom.dominates(bb, at)) return {};
+        if (at->head() && at->head()->opcode() == Opcode::landing_pad) return {};
+        const auto loop = loop_of.find(at);
+        if (loop != loop_of.end() && !loop->second->contains(bb)) return {};
+        readers.push_back(at);
+    }
+    std::unordered_set<const BasicBlock*> seen;
+    std::vector<const BasicBlock*> work{bb};
+    for (size_t next = 0; next < work.size(); ++next) {
+        const auto succs = work[next]->successors();
+        if (succs.empty()) return readers;
+        for (const BasicBlock* s : succs) {
+            if (!s) continue;
+            if (s == bb) return readers;
+            if (std::find(readers.begin(), readers.end(), s) != readers.end() || !seen.insert(s).second) continue;
+            if (work.size() == kMaxReadRegion) return {};
+            work.push_back(s);
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 size_t sink_code(Function& fn) {
@@ -161,8 +228,13 @@ size_t sink_code(Function& fn) {
     }
     forward_single_edge_params(fn, resumed);
     const DominatorTree dom(fn);
+    const LoopAnalysis loops(fn, dom);
+    LoopOf loop_of;
+    for (const LoopInfo* loop : loops.post_order_loops()) {
+        for (const BasicBlock* b : loop->blocks()) loop_of.emplace(b, loop);
+    }
 
-    std::unordered_map<const Value*, std::vector<Instruction*>> users;
+    UserMap users;
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (Instruction* inst : *bb) {
@@ -173,6 +245,10 @@ size_t sink_code(Function& fn) {
     size_t moved = 0;
     // Dominator preorder: what a block receives is weighed again against its
     // own branch. Within a block last to first, so a chain follows its end.
+    // Then once more for the values whose readers the first walk moved out of
+    // the way: a value boxed for two exits is read, until its box has gone to
+    // each exit's edge, in the block the fast path runs through.
+    for (const bool to_readers : {false, true})
     for (const BasicBlock* cbb : dom.reachable_blocks()) {
         BasicBlock* bb = const_cast<BasicBlock*>(cbb);
         Instruction* term = bb->terminator();
@@ -187,7 +263,7 @@ size_t sink_code(Function& fn) {
         for (Instruction* inst = term->prev(); inst;) {
             Instruction* prev = inst->prev();
             const auto it = users.find(inst->result());
-            if (sinkable(*inst, gc_after) && it != users.end() && !it->second.empty()) {
+            if (!to_readers && sinkable(*inst, gc_after) && it != users.end() && !it->second.empty()) {
                 // Each use's edge: the target that dominates it.
                 std::vector<std::pair<BasicBlock*, std::vector<Instruction*>>> groups;
                 bool all = true;
@@ -248,6 +324,38 @@ size_t sink_code(Function& fn) {
                     bb->remove_instruction(inst);
                     join->prepend_instruction(inst);
                     ++moved;
+                }
+            } else if (std::vector<const Value*> inputs;
+                       to_readers && sinkable(*inst, gc_after) && it != users.end() && !it->second.empty() &&
+                       inst->opcode() != Opcode::bitcast_tagged_i64 && inputs_within(*inst, users, 1, inputs)) {
+                {
+                    // Read only in blocks further down that a path through
+                    // `bb` can miss (the exits of a fast path, each past a
+                    // test of its own): a copy in each. Made of one value, so
+                    // that value is live to the exits where this one was.
+                    const std::vector<BasicBlock*> readers = blocks_that_read(bb, it->second, dom, loop_of, resumed);
+                    if (!readers.empty()) {
+                        std::vector<Instruction*> all_users = std::move(it->second);
+                        for (size_t i = 0; i < readers.size(); ++i) {
+                            Instruction* at = inst;
+                            if (i != 0) {
+                                ir::ValueMap values;
+                                at = ir::clone_instruction(fn, *inst, values, {});
+                                for (Value* v : inst->operands()) users[v].push_back(at);
+                            } else {
+                                bb->remove_instruction(inst);
+                            }
+                            readers[i]->prepend_instruction(at);
+                            std::vector<Instruction*> mine;
+                            for (Instruction* u : all_users) {
+                                if (u->parent() != readers[i]) continue;
+                                if (i != 0) replace_uses_in(*u, inst->result(), at->result());
+                                mine.push_back(u);
+                            }
+                            users[at->result()] = std::move(mine);
+                        }
+                        moved += readers.size();
+                    }
                 }
             }
             if (inst->parent() == bb && may_trigger_gc(*inst)) gc_after = true;
