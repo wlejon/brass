@@ -36,6 +36,18 @@ bool get_const_int(const Value* val, int64_t& out_val) {
     return false;
 }
 
+// The bits of a tagged value, read out of it: a tagged value is a GC root
+// with a home in the frame, and each read of its bits is a load from there.
+// A double made of such bits is an untracked copy, and turning the double
+// back into bits (a move between registers) must not be answered with the
+// earlier read: that would keep the read, and through GVN the root, live to
+// the turn-back, across whatever calls lie between, where the double alone
+// was. Front ends rebuild a boxed number from its double for that reason.
+bool reads_tagged_bits(const Value* v) {
+    const Instruction* def = v && v->is_instruction() ? v->defining_instruction() : nullptr;
+    return def && def->opcode() == Opcode::bitcast_i64_tagged;
+}
+
 // Pure and safe to execute speculatively: LICM hoists these out of loops
 // and CSE merges them.
 bool is_pure_instruction(const Instruction* inst) {
@@ -514,7 +526,8 @@ bool fold_constants(Function& fn) {
                     Opcode dop = def ? def->opcode() : Opcode::unreachable;
                     if (op == Opcode::bitcast_f64_i64 && dop == Opcode::bitcast_i64_f64 && def->operand(0)->type() == cur->type()) {
                         replacement = def->operand(0);
-                    } else if (op == Opcode::bitcast_i64_f64 && dop == Opcode::bitcast_f64_i64 && def->operand(0)->type() == cur->type()) {
+                    } else if (op == Opcode::bitcast_i64_f64 && dop == Opcode::bitcast_f64_i64 && def->operand(0)->type() == cur->type() &&
+                               !reads_tagged_bits(def->operand(0))) {
                         replacement = def->operand(0);
                     } else if (op == Opcode::bitcast_f32_i32 && dop == Opcode::bitcast_i32_f32 && def->operand(0)->type() == cur->type()) {
                         replacement = def->operand(0);
