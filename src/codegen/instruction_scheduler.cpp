@@ -58,19 +58,21 @@ static void get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra, RegUs
                 }
             }
         }
-        for (const auto& u : inst.uses) {
-            if (u.is_vreg()) {
-                if (u.vreg_val.is_xmm()) usage.uses_xmm.push_back(u.vreg_val.id);
-                else usage.uses_gpr.push_back(u.vreg_val.id);
-            }
-            if (u.is_mem()) {
-                if (u.mem_val.base_vreg.is_valid()) {
-                    if (u.mem_val.base_vreg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.base_vreg.id);
-                    else usage.uses_gpr.push_back(u.mem_val.base_vreg.id);
+        if (!inst.ignores_uses()) {
+            for (const auto& u : inst.uses) {
+                if (u.is_vreg()) {
+                    if (u.vreg_val.is_xmm()) usage.uses_xmm.push_back(u.vreg_val.id);
+                    else usage.uses_gpr.push_back(u.vreg_val.id);
                 }
-                if (u.mem_val.index_vreg.is_valid()) {
-                    if (u.mem_val.index_vreg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.index_vreg.id);
-                    else usage.uses_gpr.push_back(u.mem_val.index_vreg.id);
+                if (u.is_mem()) {
+                    if (u.mem_val.base_vreg.is_valid()) {
+                        if (u.mem_val.base_vreg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.base_vreg.id);
+                        else usage.uses_gpr.push_back(u.mem_val.base_vreg.id);
+                    }
+                    if (u.mem_val.index_vreg.is_valid()) {
+                        if (u.mem_val.index_vreg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.index_vreg.id);
+                        else usage.uses_gpr.push_back(u.mem_val.index_vreg.id);
+                    }
                 }
             }
         }
@@ -95,19 +97,21 @@ static void get_instruction_reg_usage(const LirInst& inst, bool is_pre_ra, RegUs
             if (inst.clobbered_gprs & (1u << c)) usage.defs_gpr++;
             if (inst.clobbered_xmms & (1u << c)) usage.defs_xmm++;
         }
-        for (const auto& u : inst.uses) {
-            if (u.is_preg() && u.preg_val.is_valid()) {
-                if (u.preg_val.is_xmm()) usage.uses_xmm.push_back(u.preg_val.code);
-                else usage.uses_gpr.push_back(u.preg_val.code);
-            }
-            if (u.is_mem()) {
-                if (u.mem_val.base_preg.is_valid()) {
-                    if (u.mem_val.base_preg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.base_preg.code);
-                    else usage.uses_gpr.push_back(u.mem_val.base_preg.code);
+        if (!inst.ignores_uses()) {
+            for (const auto& u : inst.uses) {
+                if (u.is_preg() && u.preg_val.is_valid()) {
+                    if (u.preg_val.is_xmm()) usage.uses_xmm.push_back(u.preg_val.code);
+                    else usage.uses_gpr.push_back(u.preg_val.code);
                 }
-                if (u.mem_val.index_preg.is_valid()) {
-                    if (u.mem_val.index_preg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.index_preg.code);
-                    else usage.uses_gpr.push_back(u.mem_val.index_preg.code);
+                if (u.is_mem()) {
+                    if (u.mem_val.base_preg.is_valid()) {
+                        if (u.mem_val.base_preg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.base_preg.code);
+                        else usage.uses_gpr.push_back(u.mem_val.base_preg.code);
+                    }
+                    if (u.mem_val.index_preg.is_valid()) {
+                        if (u.mem_val.index_preg.is_xmm()) usage.uses_xmm.push_back(u.mem_val.index_preg.code);
+                        else usage.uses_gpr.push_back(u.mem_val.index_preg.code);
+                    }
                 }
             }
         }

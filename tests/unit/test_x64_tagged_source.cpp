@@ -126,3 +126,51 @@ TEST_CASE("x64 tagged source - the shared register answers through the JIT") {
     CHECK_EQ(f(0, boxed, half_bits), three_bits);
     CHECK_EQ(g(41), 42 + 41);
 }
+
+TEST_CASE("x64 tagged source - zero idiom is not rooted before its definition") {
+    const char* src = R"(module @m
+extern @gc_step() -> void
+extern @sink(tagged, tagged, tagged, tagged, tagged, tagged, tagged, tagged) -> tagged
+func @h(%flag: i64, %a: tagged, %b: tagged, %c: tagged, %d: tagged, %e: tagged, %f: tagged, %g: tagged) -> tagged {
+entry:
+  %z0 = iconst.i64 0
+  %cond = ne.i64 %flag, %z0
+  br_if %cond, slow, body
+slow:
+  call.void @gc_step()
+  br body
+body:
+  %zero = iconst.i64 0
+  %tv = bitcast.tagged.i64 %zero
+  call.void @gc_step()
+  %res = call.tagged @sink(%a, %b, %c, %d, %e, %f, %g, %tv)
+  ret %res
+}
+)";
+    auto mod = parse_module(src);
+    REQUIRE(mod != nullptr);
+    mod->set_pinned_tls_register(true);
+    mod->set_precise_stack_roots(true);
+
+    object::ModuleCompiler compiler(Target::x64_windows(), CallingConvention::win64());
+    object::ObjectFile obj = compiler.compile(*mod);
+
+    const FunctionStackMap* fn_map = obj.stack_maps.find_function_by_name("h");
+    REQUIRE(fn_map != nullptr);
+    // Three call sites: slow's gc_step (7 live params), body's gc_step (7 live
+    // params + %tv = 8 roots), and tail/final sink (0 live after). Before
+    // LirInst::ignores_uses, `xor %zero, %zero` made %zero upward-exposed from
+    // entry and rooted its uninitialized spill slot across slow's gc_step too.
+    REQUIRE_EQ(fn_map->records.size(), 3ULL);
+    size_t seven_root_sites = 0;
+    size_t eight_root_sites = 0;
+    size_t zero_root_sites = 0;
+    for (const auto& rec : fn_map->records) {
+        if (rec.roots.size() == 7) ++seven_root_sites;
+        else if (rec.roots.size() == 8) ++eight_root_sites;
+        else if (rec.roots.empty()) ++zero_root_sites;
+    }
+    CHECK_EQ(seven_root_sites, 1ULL);
+    CHECK_EQ(eight_root_sites, 1ULL);
+    CHECK_EQ(zero_root_sites, 1ULL);
+}

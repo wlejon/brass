@@ -444,21 +444,23 @@ void SchedDAG::build_register_dependencies() {
         uses_vregs.clear();
         uses_pregs.clear();
 
-        for (const auto& u : inst.uses) {
-            if (u.is_vreg() && u.vreg_val.is_valid()) {
-                uses_vregs.push_back(u.vreg_val.id);
-            }
-            if (u.is_preg() && u.preg_val.is_valid()) {
-                uses_pregs.push_back((static_cast<uint32_t>(u.preg_val.reg_class) << 8) | u.preg_val.code);
-            }
-            if (u.is_mem()) {
-                if (u.mem_val.base_vreg.is_valid()) uses_vregs.push_back(u.mem_val.base_vreg.id);
-                if (u.mem_val.index_vreg.is_valid()) uses_vregs.push_back(u.mem_val.index_vreg.id);
-                if (u.mem_val.base_preg.is_valid()) {
-                    uses_pregs.push_back((static_cast<uint32_t>(u.mem_val.base_preg.reg_class) << 8) | u.mem_val.base_preg.code);
+        if (!inst.ignores_uses()) {
+            for (const auto& u : inst.uses) {
+                if (u.is_vreg() && u.vreg_val.is_valid()) {
+                    uses_vregs.push_back(u.vreg_val.id);
                 }
-                if (u.mem_val.index_preg.is_valid()) {
-                    uses_pregs.push_back((static_cast<uint32_t>(u.mem_val.index_preg.reg_class) << 8) | u.mem_val.index_preg.code);
+                if (u.is_preg() && u.preg_val.is_valid()) {
+                    uses_pregs.push_back((static_cast<uint32_t>(u.preg_val.reg_class) << 8) | u.preg_val.code);
+                }
+                if (u.is_mem()) {
+                    if (u.mem_val.base_vreg.is_valid()) uses_vregs.push_back(u.mem_val.base_vreg.id);
+                    if (u.mem_val.index_vreg.is_valid()) uses_vregs.push_back(u.mem_val.index_vreg.id);
+                    if (u.mem_val.base_preg.is_valid()) {
+                        uses_pregs.push_back((static_cast<uint32_t>(u.mem_val.base_preg.reg_class) << 8) | u.mem_val.base_preg.code);
+                    }
+                    if (u.mem_val.index_preg.is_valid()) {
+                        uses_pregs.push_back((static_cast<uint32_t>(u.mem_val.index_preg.reg_class) << 8) | u.mem_val.index_preg.code);
+                    }
                 }
             }
         }
@@ -474,9 +476,11 @@ void SchedDAG::build_register_dependencies() {
                 }
             }
         }
-        for (const auto& c : inst.use_constraints) {
-            if (c.has_fixed_preg && c.fixed_preg.is_valid()) {
-                uses_pregs.push_back((static_cast<uint32_t>(c.fixed_preg.reg_class) << 8) | c.fixed_preg.code);
+        if (!inst.ignores_uses()) {
+            for (const auto& c : inst.use_constraints) {
+                if (c.has_fixed_preg && c.fixed_preg.is_valid()) {
+                    uses_pregs.push_back((static_cast<uint32_t>(c.fixed_preg.reg_class) << 8) | c.fixed_preg.code);
+                }
             }
         }
 

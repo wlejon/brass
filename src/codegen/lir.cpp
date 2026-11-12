@@ -521,6 +521,40 @@ bool LirInst::is_call() const noexcept {
     return opcode == LirOpcode::Call || opcode == LirOpcode::CallIndirect;
 }
 
+bool LirInst::ignores_uses() const noexcept {
+    switch (opcode) {
+        case LirOpcode::Xor:
+        case LirOpcode::Xor32:
+        case LirOpcode::Xorpd:
+        case LirOpcode::Xorps:
+        case LirOpcode::Pxor:
+        case LirOpcode::Vxorps:
+        case LirOpcode::Vxorpd:
+        case LirOpcode::Vpxor:
+        case LirOpcode::Pcmpeqd:
+        case LirOpcode::Vpcmpeqd:
+        case LirOpcode::Vpcmpeqq:
+            break;
+        default:
+            return false;
+    }
+    if (defs.size() != 1 || uses.size() != 2) return false;
+    const LirOperand& d = defs[0];
+    const LirOperand& u0 = uses[0];
+    const LirOperand& u1 = uses[1];
+    if (d.kind != u0.kind || d.kind != u1.kind) return false;
+    switch (d.kind) {
+        case LirOperandKind::VReg:
+            return d.vreg_val.is_valid() && d.vreg_val == u0.vreg_val && d.vreg_val == u1.vreg_val;
+        case LirOperandKind::PReg:
+            return d.preg_val.is_valid() && d.preg_val == u0.preg_val && d.preg_val == u1.preg_val;
+        case LirOperandKind::SpillSlot:
+            return d.spill_slot >= 0 && d.spill_slot == u0.spill_slot && d.spill_slot == u1.spill_slot;
+        default:
+            return false;
+    }
+}
+
 std::string to_string(const LirInst& inst) {
     std::ostringstream ss;
     ss << std::setw(4) << inst.id << ": ";

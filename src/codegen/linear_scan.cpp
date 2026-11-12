@@ -238,7 +238,9 @@ void LinearScanAllocator::build_constraint_index() {
             }
         };
         for (const auto& d : inst.defs) count(d);
-        for (const auto& u : inst.uses) count(u);
+        if (!inst.ignores_uses()) {
+            for (const auto& u : inst.uses) count(u);
+        }
         ScratchPair out;
         if (n_gpr >= 3) out.gpr |= x64::reg_mask(x64::GPR::R15);
         if (n_gpr >= 4) out.gpr |= x64::reg_mask(x64::GPR::R14);
@@ -382,22 +384,11 @@ void LinearScanAllocator::compute_held_pregs(const LirBlock& block, std::vector<
         }
     }
     auto cls = [](const PReg& p) { return p.reg_class == RegClass::GPR ? 0 : 1; };
-    // xor r, r (zeroing RDX before an unsigned divide) names r as a use but
-    // does not read its value.
-    auto is_zeroing_idiom = [](const LirInst& inst) {
-        switch (inst.opcode) {
-            case LirOpcode::Xor: case LirOpcode::Xor32: case LirOpcode::Xorpd:
-            case LirOpcode::Xorps: case LirOpcode::Pxor:
-                break;
-            default:
-                return false;
-        }
-        return inst.uses.size() == 2 && inst.uses[0].is_preg() && inst.uses[1].is_preg() &&
-               inst.uses[0].preg_val == inst.uses[1].preg_val;
-    };
     for (size_t i = 0; i < n; ++i) {
         const LirInst& inst = *block.instructions[i];
-        const bool reads_pregs = !is_zeroing_idiom(inst);
+        // xor r, r (zeroing RDX before an unsigned divide) names r as a use
+        // but does not read its value (LirInst::ignores_uses).
+        const bool reads_pregs = !inst.ignores_uses();
         for (const auto& u : inst.uses) {
             if (!reads_pregs) break;
             if (!u.is_preg() || !u.preg_val.is_valid() || u.preg_val.code >= 32) continue;
@@ -850,6 +841,7 @@ void LinearScanAllocator::record_live_gcrefs() {
             for (const auto& d : inst.defs) {
                 if (d.is_vreg() && is_gcref(d.vreg_val)) live[d.vreg_val.id] = 0;
             }
+            if (inst.ignores_uses()) continue;
             auto mark_use = [&](VReg v) { if (is_gcref(v)) live[v.id] = 1; };
             for (const auto& d : inst.defs) {
                 if (d.is_mem()) {

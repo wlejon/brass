@@ -581,6 +581,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 }
 
                 // If instruction reads from def (e.g. add dst, src), load initial value of def into scratch
+                const bool self_idiom = inst->ignores_uses();
                 bool reads_def = false;
                 for (size_t i = 0; i < inst->uses.size(); ++i) {
                     if (inst->uses[i].is_spill_slot() && inst->uses[i].spill_slot == original_spill_def.spill_slot) {
@@ -589,7 +590,7 @@ void LinearScanAllocator::rewrite_instructions() {
                     }
                 }
 
-                if (reads_def) {
+                if (reads_def && !self_idiom) {
                     LirOpcode load_op = is_xmm_def ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                    : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                     auto load_def = std::make_unique<LirInst>(load_op);

@@ -68,13 +68,15 @@ bool PeepholeOptimizer::operands_equal(const LirOperand& a, const LirOperand& b)
 }
 
 bool PeepholeOptimizer::uses_register(const LirInst& inst, PReg reg) noexcept {
-    for (const auto& u : inst.uses) {
-        if (u.is_preg() && u.preg_val == reg) {
-            return true;
-        }
-        if (u.is_mem()) {
-            if (u.mem_val.base_preg == reg || u.mem_val.index_preg == reg) {
+    if (!inst.ignores_uses()) {
+        for (const auto& u : inst.uses) {
+            if (u.is_preg() && u.preg_val == reg) {
                 return true;
+            }
+            if (u.is_mem()) {
+                if (u.mem_val.base_preg == reg || u.mem_val.index_preg == reg) {
+                    return true;
+                }
             }
         }
     }

@@ -503,6 +503,10 @@ public:
     bool is_terminator() const noexcept;
     bool is_branch() const noexcept;
     bool is_call() const noexcept;
+    // Whether `uses` are named only for the two-address encoding and their
+    // prior value is not read (`xor r, r` zeroing a register, `pcmpeqd x, x`
+    // filling one with ones).
+    bool ignores_uses() const noexcept;
 
     void add_def(LirOperand op, FixedConstraint constraint = FixedConstraint::none()) {
         defs.push_back(std::move(op));

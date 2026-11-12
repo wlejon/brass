@@ -239,17 +239,19 @@ void LinearScanAllocator::reorder_spill_slots() {
                     add_vreg(d.mem_val.index_vreg, at, w);
                 }
             }
-            for (const auto& u : inst->uses) {
-                if (u.is_vreg()) {
-                    add_vreg(u.vreg_val, at, w);
-                    if (inst->opcode == LirOpcode::GuardExit && u.vreg_val.id < constant_refused.size()) {
-                        constant_refused[u.vreg_val.id] = 1;
+            if (!inst->ignores_uses()) {
+                for (const auto& u : inst->uses) {
+                    if (u.is_vreg()) {
+                        add_vreg(u.vreg_val, at, w);
+                        if (inst->opcode == LirOpcode::GuardExit && u.vreg_val.id < constant_refused.size()) {
+                            constant_refused[u.vreg_val.id] = 1;
+                        }
+                    } else if (u.is_spill_slot()) {
+                        add_slot(u.spill_slot, w);
+                    } else if (u.is_mem()) {
+                        add_vreg(u.mem_val.base_vreg, at, w);
+                        add_vreg(u.mem_val.index_vreg, at, w);
                     }
-                } else if (u.is_spill_slot()) {
-                    add_slot(u.spill_slot, w);
-                } else if (u.is_mem()) {
-                    add_vreg(u.mem_val.base_vreg, at, w);
-                    add_vreg(u.mem_val.index_vreg, at, w);
                 }
             }
             if (!constant_vregs_.empty() && !inst->uses.empty() && slot_fold_width(inst->opcode) != 0) {
@@ -499,6 +501,7 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
                     live_remove(d.vreg_val.id);
                 }
             }
+            if (inst.ignores_uses()) continue;
             auto mark_use = [&](VReg v) {
                 if (v.is_valid() && v.id < num_vregs && v.is_gpr()) live_add(v.id);
             };
@@ -663,8 +666,10 @@ void LinearScanAllocator::clear_dead_callee_gprs_at_calls(uint32_t final_callee_
                     note_op_into(d, pm.dst, inst.id);
                 }
             }
-            for (const auto& u : inst.uses) note_op_into(d, u, inst.id);
-            use_scratches_into(d, inst);
+            if (!inst.ignores_uses()) {
+                for (const auto& u : inst.uses) note_op_into(d, u, inst.id);
+                use_scratches_into(d, inst);
+            }
             if (inst.is_call() && !inst.no_gc_point) {
                 seg.push_back(d);
                 call_at[bi].push_back(idx);

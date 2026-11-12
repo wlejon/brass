@@ -284,7 +284,7 @@ void LivenessAnalysis::compute_local_liveness() {
                     }
                 }
             };
-            add_uses_of(*inst);
+            if (!inst->ignores_uses()) add_uses_of(*inst);
             if (const LirInst* exit = guard_exit_taken_by(*inst)) add_uses_of(*exit);
             for (const auto& d : inst->defs) {
                 if (d.is_vreg()) {
@@ -451,21 +451,23 @@ void LivenessAnalysis::build_intervals() {
             }
 
             // Uses extend the live range from bl.start_id to inst_id
-            for (size_t i = 0; i < inst->uses.size(); ++i) {
-                const auto& u = inst->uses[i];
-                FixedConstraint fc = (i < inst->use_constraints.size()) ? inst->use_constraints[i] : FixedConstraint::none();
+            if (!inst->ignores_uses()) {
+                for (size_t i = 0; i < inst->uses.size(); ++i) {
+                    const auto& u = inst->uses[i];
+                    FixedConstraint fc = (i < inst->use_constraints.size()) ? inst->use_constraints[i] : FixedConstraint::none();
 
-                if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < intervals_.size()) {
-                    intervals_[u.vreg_val.id].add_use_pos(inst_id, false, true, fc.fixed_preg);
-                    intervals_[u.vreg_val.id].add_range(live_from,inst_id);
-                } else if (u.is_mem()) {
-                    if (u.mem_val.base_vreg.is_valid() && u.mem_val.base_vreg.id < intervals_.size()) {
-                        intervals_[u.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
-                        intervals_[u.mem_val.base_vreg.id].add_range(live_from,inst_id);
-                    }
-                    if (u.mem_val.index_vreg.is_valid() && u.mem_val.index_vreg.id < intervals_.size()) {
-                        intervals_[u.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
-                        intervals_[u.mem_val.index_vreg.id].add_range(live_from,inst_id);
+                    if (u.is_vreg() && u.vreg_val.is_valid() && u.vreg_val.id < intervals_.size()) {
+                        intervals_[u.vreg_val.id].add_use_pos(inst_id, false, true, fc.fixed_preg);
+                        intervals_[u.vreg_val.id].add_range(live_from,inst_id);
+                    } else if (u.is_mem()) {
+                        if (u.mem_val.base_vreg.is_valid() && u.mem_val.base_vreg.id < intervals_.size()) {
+                            intervals_[u.mem_val.base_vreg.id].add_use_pos(inst_id, false, true);
+                            intervals_[u.mem_val.base_vreg.id].add_range(live_from,inst_id);
+                        }
+                        if (u.mem_val.index_vreg.is_valid() && u.mem_val.index_vreg.id < intervals_.size()) {
+                            intervals_[u.mem_val.index_vreg.id].add_use_pos(inst_id, false, true);
+                            intervals_[u.mem_val.index_vreg.id].add_range(live_from,inst_id);
+                        }
                     }
                 }
             }
