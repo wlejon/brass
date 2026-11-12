@@ -321,7 +321,8 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 if (auto chain = and_chains_.find(inst); chain != and_chains_.end()) {
                     for (const Value* leaf : chain->second) {
                         const Instruction* def_inst = leaf->defining_instruction();
-                        if (def_inst && skipped_insts_.count(def_inst) && is_comparison(def_inst->opcode())) {
+                        if (def_inst && skipped_insts_.count(def_inst) && is_comparison(def_inst->opcode()) &&
+                            comparison_fusible(*def_inst)) {
                             count_compare_folds(def_inst);
                         }
                     }

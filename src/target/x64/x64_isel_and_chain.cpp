@@ -10,6 +10,16 @@
 // into a Jcc to the false target, in a LIR block of its own, and the last
 // leaf branches both ways.
 //
+// An OR is the same with the sides exchanged (a leaf that holds leaves for
+// the true target, the last one branches both ways), and the two nest: the
+// condition is a tree of `and` / `or` nodes over leaves, each node's first
+// operand deciding whether its second is tested at all. A front end's "both
+// strings" test, `(t == S || t == R) && t == u`, is such a tree.
+//
+// A float `eq` / `ne` leaf is two flags (x64_isel_branch.cpp): ucomis and two
+// jumps to one side, where its value form is two setcc, two zero extensions
+// and an `and` / `or` before the chain's test of it.
+//
 // Only the condition is restructured. Every operand of every leaf was
 // computed before the branch, in the block, exactly as before; a leaf is a
 // pure test of values already in hand, so testing them one at a time and
@@ -51,10 +61,19 @@ bool is_boolean(const Value* v, int depth = 0) {
     return false;
 }
 
+// A float `eq` / `ne` of two values: ZF and PF both decide it.
+bool is_parity_compare(const Instruction& cmp) {
+    if (cmp.opcode() != Opcode::eq && cmp.opcode() != Opcode::ne) return false;
+    if (cmp.operand_count() != 2 || !cmp.operand(0) || !cmp.operand(1) || cmp.operand(0) == cmp.operand(1)) return false;
+    const Type t = cmp.operand(0)->type();
+    return t.is_float() && !t.is_vector();
+}
+
 }  // namespace
 
 void X64ISel::find_and_chains(const Function& mir_fn) {
     and_chains_.clear();
+    chain_nodes_.clear();
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
             if (inst->opcode() != Opcode::br_if) continue;
@@ -63,7 +82,8 @@ void X64ISel::find_and_chains(const Function& mir_fn) {
             if (!inst->true_target().args.empty() || !inst->false_target().args.empty()) continue;
             const Value* cond = inst->operand(0);
             const Instruction* root = cond && cond->is_instruction() ? cond->defining_instruction() : nullptr;
-            if (!root || root->opcode() != Opcode::and_ || root->parent() != bb || use_count_[cond] != 1) continue;
+            if (!root || (root->opcode() != Opcode::and_ && root->opcode() != Opcode::or_)) continue;
+            if (root->parent() != bb || use_count_[cond] != 1) continue;
 
             std::vector<const Value*> leaves;
             std::vector<const Instruction*> nodes;
@@ -74,7 +94,8 @@ void X64ISel::find_and_chains(const Function& mir_fn) {
             auto collect = [&](auto&& self, const Value* v) -> void {
                 if (!ok) return;
                 const Instruction* def = v && v->is_instruction() ? v->defining_instruction() : nullptr;
-                if (def && def->opcode() == Opcode::and_ && def->parent() == bb && use_count_[v] == 1 &&
+                if (def && (def->opcode() == Opcode::and_ || def->opcode() == Opcode::or_) && def->parent() == bb &&
+                    use_count_[v] == 1 &&
                     is_boolean(v)) {
                     nodes.push_back(def);
                     self(self, def->operand(0));
@@ -90,13 +111,16 @@ void X64ISel::find_and_chains(const Function& mir_fn) {
             collect(collect, cond);
             if (!ok || leaves.size() < 2) continue;
 
-            for (const Instruction* n : nodes) skipped_insts_.insert(n);
+            for (const Instruction* n : nodes) {
+                skipped_insts_.insert(n);
+                chain_nodes_.insert(n);
+            }
             // A leaf compared nowhere else, in this block, is folded into
             // its Jcc; any other is a value in a register, tested.
             for (const Value* leaf : leaves) {
                 const Instruction* def = leaf->defining_instruction();
                 if (def->parent() == bb && use_count_[leaf] == 1 && is_compare_opcode(def->opcode()) &&
-                    comparison_fusible(*def)) {
+                    (comparison_fusible(*def) || is_parity_compare(*def))) {
                     skipped_insts_.insert(def);
                 }
             }
@@ -105,12 +129,9 @@ void X64ISel::find_and_chains(const Function& mir_fn) {
     }
 }
 
-void X64ISel::lower_and_chain_branch(const Instruction& inst, const std::vector<const Value*>& leaves,
-                                     LirBlock& lir_bb) {
+void X64ISel::lower_and_chain_branch(const Instruction& inst, LirBlock& lir_bb) {
     const auto& t_target = inst.true_target();
     const auto& f_target = inst.false_target();
-    LirBlock* t_lir = lir_fn_->get_block_by_id(t_target.block->id());
-    LirBlock* f_lir = lir_fn_->get_block_by_id(f_target.block->id());
 
     auto leaf_condition = [&](const Value* leaf, LirBlock& bb) -> Condition {
         const Instruction* def = leaf->defining_instruction();
@@ -134,25 +155,56 @@ void X64ISel::lower_and_chain_branch(const Instruction& inst, const std::vector<
         bb.append_inst(std::move(j));
     };
 
-    LirBlock* cur = &lir_bb;
-    for (size_t i = 0; i < leaves.size(); ++i) {
-        const Condition c = leaf_condition(leaves[i], *cur);
-        if (i + 1 < leaves.size()) {
-            LirBlock* next = lir_fn_->create_block("and_chain");
-            if (f_lir) link_blocks(*cur, *f_lir);
-            link_blocks(*cur, *next);
-            jump(*cur, LirOpcode::Jcc, invert(c), f_target.block->id());
-            jump(*cur, LirOpcode::Jmp, Condition::None, next->id);
-            cur = next;
-        } else {
-            if (cur != &lir_bb) {
-                if (t_lir) link_blocks(*cur, *t_lir);
-                if (f_lir) link_blocks(*cur, *f_lir);
-            }
-            jump(*cur, LirOpcode::Jcc, c, t_target.block->id());
-            jump(*cur, LirOpcode::Jmp, Condition::None, f_target.block->id());
+    // `v` decided in `cur`, which then leaves for `on_true` or `on_false`. A
+    // node's first operand goes on to a block of its own for the second
+    // when it holds (an AND) or when it does not (an OR). `falls` is the
+    // target laid out after `cur`, which the unconditional jump takes.
+    auto lower = [&](auto&& self, const Value* v, LirBlock* cur, uint32_t on_true, uint32_t on_false,
+                     uint32_t falls) -> void {
+        const Instruction* def = v->defining_instruction();
+        if (def && chain_nodes_.count(def)) {
+            const bool is_or = def->opcode() == Opcode::or_;
+            LirBlock* second = lir_fn_->create_block(is_or ? "or_chain" : "and_chain");
+            self(self, def->operand(0), cur, is_or ? on_true : second->id, is_or ? second->id : on_false, second->id);
+            self(self, def->operand(1), second, on_true, on_false, falls);
+            return;
         }
-    }
+        for (const uint32_t to : {on_true, on_false}) {
+            if (LirBlock* b = lir_fn_->get_block_by_id(to)) link_blocks(*cur, *b);
+        }
+        if (def && skipped_insts_.count(def) && is_parity_compare(*def)) {
+            uint8_t sz = static_cast<uint8_t>(def->operand(0)->type().size_in_bytes());
+            if (sz == 0) sz = 8;
+            auto ucomi = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Ucomiss : LirOpcode::Ucomisd);
+            ucomi->add_use(LirOperand::vreg(get_vreg(def->operand(0)), sz));
+            ucomi->add_use(LirOperand::vreg(get_vreg(def->operand(1)), sz));
+            ucomi->mir_origin = &inst;
+            cur->append_inst(std::move(ucomi));
+            // Unordered is unequal: `eq` fails on parity, `ne` holds on it.
+            const bool eq = def->opcode() == Opcode::eq;
+            const uint32_t on_parity = eq ? on_false : on_true;
+            const uint32_t on_equal = eq ? on_true : on_false;
+            const uint32_t on_unequal = eq ? on_false : on_true;
+            jump(*cur, LirOpcode::Jcc, Condition::P, on_parity);
+            if (on_equal == falls) {
+                jump(*cur, LirOpcode::Jcc, Condition::NE, on_unequal);
+                jump(*cur, LirOpcode::Jmp, Condition::None, on_equal);
+            } else {
+                jump(*cur, LirOpcode::Jcc, Condition::E, on_equal);
+                jump(*cur, LirOpcode::Jmp, Condition::None, on_unequal);
+            }
+            return;
+        }
+        const Condition c = leaf_condition(v, *cur);
+        if (on_true == falls) {
+            jump(*cur, LirOpcode::Jcc, invert(c), on_false);
+            jump(*cur, LirOpcode::Jmp, Condition::None, on_true);
+        } else {
+            jump(*cur, LirOpcode::Jcc, c, on_true);
+            jump(*cur, LirOpcode::Jmp, Condition::None, on_false);
+        }
+    };
+    lower(lower, inst.operand(0), &lir_bb, t_target.block->id(), f_target.block->id(), f_target.block->id());
 }
 
 }  // namespace brass::x64

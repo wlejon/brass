@@ -60,9 +60,11 @@ private:
     // (analyze_function; match_address).
     std::unordered_set<const Value*> address_only_;
     std::unordered_set<const Instruction*> skipped_insts_;
-    // br_if -> the leaves of its AND condition, tested one branch each
+    // br_if -> the leaves of its `and` / `or` condition, tested one branch each
     // (x64_isel_and_chain.cpp).
     std::unordered_map<const Instruction*, std::vector<const Value*>> and_chains_;
+    // The `and` / `or` nodes of their conditions.
+    std::unordered_set<const Instruction*> chain_nodes_;
     // Comparisons recomputed at each of their users, in whatever block, in
     // place of one materialized 0/1 (x64_isel_cmp.cpp, find_remat_compares).
     // Each is also in skipped_insts_.
@@ -199,8 +201,7 @@ private:
     // lowers: a single-use comparison of the user's block, or a
     // rematerialized one (remat_cmps_), from any block.
     bool fused_into(const Instruction* cmp, const Instruction& user) const;
-    void lower_and_chain_branch(const Instruction& inst, const std::vector<const Value*>& leaves,
-                                codegen::LirBlock& lir_bb);
+    void lower_and_chain_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_overflow_check(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);

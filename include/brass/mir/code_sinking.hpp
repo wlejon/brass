@@ -25,6 +25,13 @@ namespace brass {
 // so moving it past a GC point changes only which of the two is live across
 // it.
 //
+// A comparison read only as the condition of selects goes down with them
+// even when every edge reads it at once: in its select's block it is that
+// select's flags, a block above it is a 0/1 made there (a float `ne`: two
+// setcc, two zero extensions and an `or`) and tested again at the select. A
+// front end's NaN-canonicalising box, `select(ne f, f, K, bits f)`, whose
+// select this pass has just moved to each exit, is the case.
+//
 // A value whose uses all lie in one block further down, a join of several
 // exits (each guard of a run leaving for the same slow copy with the values
 // computed so far), moves to the head of that block when some path from its

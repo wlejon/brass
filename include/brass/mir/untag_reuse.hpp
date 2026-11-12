@@ -27,6 +27,14 @@ namespace brass {
 // it. A loop header, a deoptimization's resume target and a landing pad
 // start with nothing.
 //
+// A front end that loads a word, tests its tag and then roots it writes the
+// test's address as a bare `xor(bits, K)` beside `x = bitcast_tagged_i64
+// bits`. While no GC point has run since that bitcast, x is still that word,
+// so the bare read is a read of x's address and serves the reads through x
+// that follow (and the other way round). Past a GC point the two part: the
+// collector keeps x current and not `bits`, so a bare read there is no read
+// of x, and an arm that must compute the address always reads x.
+//
 // The address stays an i64 no stack map lists, as it was, and is live only
 // where no GC point can run: every path from a definition to a use of it is
 // one this analysis walked without meeting one. Critical edges are split

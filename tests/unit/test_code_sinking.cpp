@@ -221,3 +221,37 @@ TEST_CASE("Code sinking - a value every path reads stays above the join") {
     CHECK_EQ(sink_code(*fn), 0ULL);
     CHECK_EQ(count_in(entry, Opcode::add), 1ULL);
 }
+
+TEST_CASE("Code sinking - a comparison goes with the selects that read it, a value read at once on every edge stays") {
+    // entry: n = (f != f); w = a + a; if (c) goto left else goto right
+    // left: return select(n, a, w)        right: return select(n, w, a)
+    Module mod("sink_compare");
+    Builder b(mod);
+    Function* fn = mod.create_function("sink_compare", Type::i64(), {Type::f64(), Type::i64(), Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* left = b.append_block("left");
+    BasicBlock* right = b.append_block("right");
+    b.position_at_end(entry);
+    Value* f = b.add_block_param(entry, Type::f64());
+    Value* a = b.add_block_param(entry, Type::i64());
+    Value* c = b.add_block_param(entry, Type::i32());
+    Value* n = b.build_ne(f, f);
+    Value* w = b.build_add(a, a);
+    b.build_br_if(c, left, right);
+    b.position_at_end(left);
+    b.build_ret(b.build_select(n, a, w));
+    b.position_at_end(right);
+    b.build_ret(b.build_select(n, w, a));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    CHECK_EQ(sink_code(*fn), 2ULL);
+    REQUIRE(verify_function(*fn));
+    // Each select has its comparison in its own block, where it is flags.
+    CHECK_EQ(count_in(entry, Opcode::ne), 0ULL);
+    CHECK_EQ(count_in(left, Opcode::ne), 1ULL);
+    CHECK_EQ(count_in(right, Opcode::ne), 1ULL);
+    CHECK_EQ(left->head()->opcode(), Opcode::ne);
+    // The sum is one add wherever it stands: it stays.
+    CHECK_EQ(count_in(entry, Opcode::add), 1ULL);
+}

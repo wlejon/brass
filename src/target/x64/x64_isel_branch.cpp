@@ -127,8 +127,8 @@ void X64ISel::lower_parity_branch(const Instruction& inst, const PeeledBranch& p
 }
 
 void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
-    if (auto chain = and_chains_.find(&inst); chain != and_chains_.end()) {
-        lower_and_chain_branch(inst, chain->second, lir_bb);
+    if (and_chains_.count(&inst) != 0) {
+        lower_and_chain_branch(inst, lir_bb);
         return;
     }
     const Value* cond_val = inst.operand(0);

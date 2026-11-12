@@ -221,6 +221,14 @@ size_t sink_code(Function& fn) {
                         pays = pays || std::none_of(us.begin(), us.end(),
                                                     [&](const Instruction* u) { return u->parent() == t; });
                     }
+                    // A comparison read only as selects' conditions goes with
+                    // them: beside its select it is the select's flags, a
+                    // block above it is a byte made there and tested here.
+                    pays = pays || (is_comparison(inst->opcode()) &&
+                                    std::all_of(it->second.begin(), it->second.end(), [&](const Instruction* u) {
+                                        return is_select(u->opcode()) && u->operand(0) == inst->result() &&
+                                               u->operand(1) != inst->result() && u->operand(2) != inst->result();
+                                    }));
                 }
                 if (pays) {
                     // One edge is taken, so one copy runs where one ran.

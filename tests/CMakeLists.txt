@@ -26,6 +26,7 @@ add_executable(brass_unit_tests
     unit/test_lir_isel.cpp
     unit/test_x64_cmp_remat.cpp
     unit/test_x64_and_chain_zero_load.cpp
+    unit/test_x64_or_chain.cpp
     unit/test_x64_branch_peel.cpp
     unit/test_aarch64_cmp_remat.cpp
     unit/test_linear_scan.cpp
