@@ -2,6 +2,7 @@
 #include <brass/gc/code_stack_maps.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/native_unwind.hpp>
+#include <cstring>
 #include <iostream>
 
 #if defined(_WIN32)
@@ -68,36 +69,24 @@ struct Cursor {
         ctx.Rsp = sp;
         ctx.Rbp = fp;
     }
-    void save_memo(GeneratedCodeEntryScope::Memo& m) const noexcept {
-        m.rsp = sp();
-        m.rbp = fp();
-        m.ip = ip();
-        m.rbx = ctx.Rbx;
-        m.rsi = ctx.Rsi;
-        m.rdi = ctx.Rdi;
-        m.r12 = ctx.R12;
-        m.r13 = ctx.R13;
-        m.r14 = ctx.R14;
-        m.r15 = ctx.R15;
-    }
-    void load_memo(const GeneratedCodeEntryScope::Memo& m) noexcept {
-        set(m.ip, m.rsp, m.rbp);
-        ctx.Rbx = m.rbx;
-        ctx.Rsi = m.rsi;
-        ctx.Rdi = m.rdi;
-        ctx.R12 = m.r12;
-        ctx.R13 = m.r13;
-        ctx.R14 = m.r14;
-        ctx.R15 = m.r15;
-    }
     // One frame up; false at the base of the stack or an out-of-bounds frame.
     bool step(uintptr_t stack_low = 0, uintptr_t stack_high = UINTPTR_MAX) noexcept {
         return detail::win64_unwind_one(ctx, stack_low, stack_high);
     }
 };
 bool ip_in_image(uintptr_t ip) noexcept { return detail::win64_ip_in_image(ip); }
-__declspec(noinline) void capture_current_cursor(Cursor& cur) noexcept {
+// Captures a live Win64 CONTEXT and unwinds it (starting from this helper's
+// own still-live frame) up to `target_sp`, so non-volatile GPRs saved by
+// intervening generated frames are restored before unwinding host frames.
+__declspec(noinline) bool capture_cursor_at_sp(Cursor& cur, uintptr_t target_sp,
+                                               uintptr_t stack_low, uintptr_t stack_high) noexcept {
     RtlCaptureContext(&cur.ctx);
+    if (!cur.step(stack_low, stack_high)) return false;
+    while (cur.sp() < target_sp) {
+        const uintptr_t prev = cur.sp();
+        if (!cur.step(stack_low, stack_high) || cur.sp() <= prev) return false;
+    }
+    return cur.sp() == target_sp;
 }
 #elif defined(BRASS_NATIVE_UNWIND)
 struct Cursor {
@@ -106,14 +95,6 @@ struct Cursor {
     uintptr_t sp() const noexcept { return f.sp; }
     uintptr_t fp() const noexcept { return f.fp; }
     void set(uintptr_t ip, uintptr_t sp, uintptr_t fp) noexcept { f = {ip, sp, fp}; }
-    void save_memo(GeneratedCodeEntryScope::Memo& m) const noexcept {
-        m.rsp = sp();
-        m.rbp = fp();
-        m.ip = ip();
-    }
-    void load_memo(const GeneratedCodeEntryScope::Memo& m) noexcept {
-        set(m.ip, m.rsp, m.rbp);
-    }
     // One frame up; false at the base of the stack or where no step is
     // possible, which the walk cannot see past either way.
     bool step(uintptr_t = 0, uintptr_t = UINTPTR_MAX) noexcept { return brass_unwind_step(f); }
@@ -269,7 +250,8 @@ size_t walk_stack(
     // beneath them, or learn the answer this unwind finds.
     enum class UnwindResult { Generated, Nothing, GaveUp };
     GeneratedCodeEntryScope* entry = innermost_entry;
-    auto unwind_to_generated = [&](Cursor& cur) -> UnwindResult {
+    auto unwind_to_generated = [&](Cursor& cur, bool& used_memo) -> UnwindResult {
+        used_memo = false;
         constexpr size_t MAX_PENDING = 16;
         GeneratedCodeEntryScope* pending[MAX_PENDING];
         size_t npending = 0;
@@ -297,7 +279,8 @@ size_t walk_stack(
                 if (on_this_stack(entry) && m.beneath != GeneratedCodeEntryScope::Beneath::Unknown &&
                     m.maps == &stack_maps) {
                     if (m.beneath == GeneratedCodeEntryScope::Beneath::Generated) {
-                        cur.load_memo(m);
+                        cur.set(m.ip, m.rsp, m.rbp);
+                        used_memo = true;
                         result = UnwindResult::Generated;
                     } else {
                         result = UnwindResult::Nothing;
@@ -320,25 +303,27 @@ size_t walk_stack(
                 m.beneath = result == UnwindResult::Generated ? GeneratedCodeEntryScope::Beneath::Generated
                                                               : GeneratedCodeEntryScope::Beneath::Nothing;
                 m.maps = &stack_maps;
-                cur.save_memo(m);
+                m.rsp = cur.sp();
+                m.rbp = cur.fp();
+                m.ip = cur.ip();
             }
         }
         return result;
     };
 
+    Cursor cur;
 #if defined(_WIN32) && defined(_M_X64)
-    Cursor saved_cur;
-    bool have_saved_cur = false;
+    bool have_live_ctx = false;
 #endif
     if (start != nullptr) {
-        Cursor cur = *start;
+        cur = *start;
+        bool used_memo = false;
         if (find_map(cur.ip()) == nullptr) {
-            if (unwind_to_generated(cur) != UnwindResult::Generated) return 0;
+            if (unwind_to_generated(cur, used_memo) != UnwindResult::Generated) return 0;
         }
 #if defined(_WIN32) && defined(_M_X64)
         if (cur.sp() >= stop_at || cur.fp() < cur.sp()) return 0;
-        saved_cur = cur;
-        have_saved_cur = true;
+        have_live_ctx = !used_memo;
 #else
         if (cur.sp() >= stop_at) return 0;
 #endif
@@ -360,47 +345,54 @@ size_t walk_stack(
             }
             const uintptr_t target_sp = callee_rbp + 16;
             if (target_sp >= stop_at) break;
-            Cursor cur;
 #if defined(_WIN32) && defined(_M_X64)
             // Generated frames save callee-saved GPRs (RBX, RSI, RDI, R12..R15)
             // in their own frames while the fast path followed only [rbp]. An
             // outer MSVC frame (e.g. /arch:AVX2 stack alignment + C++ EH) may
             // use RBX or another non-volatile GPR as UNWIND_INFO.FrameRegister,
             // so step a full CONTEXT up to target_sp to restore them first.
-            if (!have_saved_cur) {
-                if (other != nullptr && other->context != nullptr) {
-                    saved_cur.ctx = *static_cast<const CONTEXT*>(other->context);
-                    have_saved_cur = true;
-                } else if (other == nullptr && callee_rbp >= stack_low && target_sp <= stack_high) {
-                    capture_current_cursor(saved_cur);
-                    have_saved_cur = true;
-                }
-            }
-            if (have_saved_cur && saved_cur.sp() <= target_sp) {
-                while (saved_cur.sp() < target_sp) {
-                    const uintptr_t prev = saved_cur.sp();
-                    if (!saved_cur.step(stack_low, stack_high) || saved_cur.sp() <= prev) {
-                        have_saved_cur = false;
+            if (have_live_ctx && cur.sp() <= target_sp) {
+                while (cur.sp() < target_sp) {
+                    const uintptr_t prev = cur.sp();
+                    if (!cur.step(stack_low, stack_high) || cur.sp() <= prev) {
+                        have_live_ctx = false;
                         break;
                     }
                 }
-            }
-            if (have_saved_cur && saved_cur.sp() == target_sp && saved_cur.ip() == cur_return_ip) {
-                cur = saved_cur;
+                if (cur.sp() != target_sp || cur.ip() != cur_return_ip) {
+                    have_live_ctx = false;
+                }
             } else {
-                have_saved_cur = false;
+                have_live_ctx = false;
+            }
+            if (!have_live_ctx) {
+                if (other != nullptr && other->context != nullptr) {
+                    cur.ctx = *static_cast<const CONTEXT*>(other->context);
+                    while (cur.sp() < target_sp) {
+                        const uintptr_t prev = cur.sp();
+                        if (!cur.step(stack_low, stack_high) || cur.sp() <= prev) break;
+                    }
+                    have_live_ctx = (cur.sp() == target_sp && cur.ip() == cur_return_ip);
+                } else if (other == nullptr && callee_rbp >= stack_low && target_sp <= stack_high) {
+                    have_live_ctx = capture_cursor_at_sp(cur, target_sp, stack_low, stack_high) &&
+                                    cur.ip() == cur_return_ip;
+                }
+            }
+            if (!have_live_ctx) {
+                std::memset(&cur.ctx, 0, sizeof(cur.ctx));
                 cur.set(cur_return_ip, target_sp, cur_rbp);
             }
 #else
             cur.set(cur_return_ip, target_sp, cur_rbp);
 #endif
-            const UnwindResult res = unwind_to_generated(cur);
+            bool used_memo = false;
+            const UnwindResult res = unwind_to_generated(cur, used_memo);
             if (res != UnwindResult::Generated) break;
             if (cur.sp() >= stop_at) break;
 #if defined(_WIN32) && defined(_M_X64)
             // The generated frame's rbp lies at or above its stack pointer.
             if (cur.fp() < cur.sp()) break;
-            if (have_saved_cur) saved_cur = cur;
+            if (used_memo) have_live_ctx = false;
 #endif
             cur_rbp = cur.fp();
             cur_return_ip = cur.ip();
