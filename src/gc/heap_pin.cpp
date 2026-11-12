@@ -35,6 +35,7 @@
 #include "heap_internal.hpp"
 
 #include <algorithm>
+#include <cstring>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -94,10 +95,11 @@ BRASS_PIN_NOINLINE void scan_from_here(StackScan& scan) {
 // them: a reference a caller keeps only in a register is seen too.
 BRASS_PIN_NOINLINE void scan_thread_stacks(StackScan& scan) {
 #if defined(_WIN32) && defined(_M_X64)
-    // Only the callee-saved integer registers: whatever else the context
-    // holds (the volatile registers, the vector ones) is the collector's own
-    // scratch, and a stale reference in it would keep its object.
-    uintptr_t registers[8];
+    // Only the callee-saved registers (integer plus XMM6..XMM15 on Win64,
+    // where MSVC may hold 64-bit/128-bit aggregates across calls): whatever
+    // else the context holds is the collector's own scratch, and a stale
+    // reference in it would keep its object.
+    uintptr_t registers[28];
     {
         CONTEXT context;
         RtlCaptureContext(&context);
@@ -109,6 +111,7 @@ BRASS_PIN_NOINLINE void scan_thread_stacks(StackScan& scan) {
         registers[5] = context.R13;
         registers[6] = context.R14;
         registers[7] = context.R15;
+        std::memcpy(&registers[8], &context.Xmm6, 10 * sizeof(M128A));
         SecureZeroMemory(&context, sizeof(context));
     }
     scan_from_here(scan);

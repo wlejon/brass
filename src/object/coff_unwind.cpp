@@ -310,16 +310,23 @@ void CoffUnwindBuilder::build_unwind_info(
             for (size_t i = 0; i < saved_gprs.size(); ++i) {
                 GPR g = saved_gprs[i];
                 int32_t disp_from_rbp = static_cast<int32_t>((i + 1) * 8);
-                int32_t disp_from_rsp = static_cast<int32_t>(frame_sz - disp_from_rbp);
-                disp_from_rbp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + 4))
+                uint32_t disp_from_rsp = static_cast<uint32_t>(frame_sz - static_cast<size_t>(disp_from_rbp));
+                disp_from_rbp <= 128 ? (cur_offset = static_cast<uint8_t>(cur_offset + 4))
                                      : (cur_offset = static_cast<uint8_t>(cur_offset + 7));
 
                 UnwindOpSlot op;
                 op.code_offset = cur_offset;
-                op.unwind_op = coff::UWOP_SAVE_NONVOL;
                 op.op_info = static_cast<uint8_t>(g);
-                op.extra_slot1 = static_cast<uint16_t>(disp_from_rsp / 8);
-                op.num_slots = 2;
+                if (disp_from_rsp / 8 <= 0xFFFF) {
+                    op.unwind_op = coff::UWOP_SAVE_NONVOL;
+                    op.extra_slot1 = static_cast<uint16_t>(disp_from_rsp / 8);
+                    op.num_slots = 2;
+                } else {
+                    op.unwind_op = coff::UWOP_SAVE_NONVOL_FAR;
+                    op.extra_slot1 = static_cast<uint16_t>(disp_from_rsp & 0xFFFF);
+                    op.extra_slot2 = static_cast<uint16_t>((disp_from_rsp >> 16) & 0xFFFF);
+                    op.num_slots = 3;
+                }
                 ops.push_back(op);
             }
 
@@ -329,17 +336,24 @@ void CoffUnwindBuilder::build_unwind_info(
             for (size_t i = 0; i < saved_xmms.size(); ++i) {
                 XMM x = saved_xmms[i];
                 int32_t disp_from_rbp = static_cast<int32_t>(gpr_bytes + (i + 1) * 16);
-                int32_t disp_from_rsp = static_cast<int32_t>(frame_sz - disp_from_rbp);
+                uint32_t disp_from_rsp = static_cast<uint32_t>(frame_sz - static_cast<size_t>(disp_from_rbp));
                 bool is_ext = (static_cast<uint8_t>(x) >= 8);
-                disp_from_rbp <= 127 ? (cur_offset = static_cast<uint8_t>(cur_offset + (is_ext ? 5 : 4)))
+                disp_from_rbp <= 128 ? (cur_offset = static_cast<uint8_t>(cur_offset + (is_ext ? 5 : 4)))
                                      : (cur_offset = static_cast<uint8_t>(cur_offset + (is_ext ? 8 : 7)));
 
                 UnwindOpSlot op;
                 op.code_offset = cur_offset;
-                op.unwind_op = coff::UWOP_SAVE_XMM128;
                 op.op_info = static_cast<uint8_t>(x);
-                op.extra_slot1 = static_cast<uint16_t>(disp_from_rsp / 16);
-                op.num_slots = 2;
+                if (disp_from_rsp / 16 <= 0xFFFF) {
+                    op.unwind_op = coff::UWOP_SAVE_XMM128;
+                    op.extra_slot1 = static_cast<uint16_t>(disp_from_rsp / 16);
+                    op.num_slots = 2;
+                } else {
+                    op.unwind_op = coff::UWOP_SAVE_XMM128_FAR;
+                    op.extra_slot1 = static_cast<uint16_t>(disp_from_rsp & 0xFFFF);
+                    op.extra_slot2 = static_cast<uint16_t>((disp_from_rsp >> 16) & 0xFFFF);
+                    op.num_slots = 3;
+                }
                 ops.push_back(op);
             }
         }
@@ -353,7 +367,7 @@ void CoffUnwindBuilder::build_unwind_info(
         // Emit UNWIND_INFO Header (4 bytes)
         bool has_ehandler = fn.exception_table.has_scopes();
         uint8_t version_flags = static_cast<uint8_t>(0x01 | (has_ehandler ? 0x08 : 0x00)); // Version = 1, UNW_FLAG_EHANDLER
-        uint8_t prolog_sz = static_cast<uint8_t>(fn.prologue_size > 0 ? fn.prologue_size : cur_offset);
+        uint8_t prolog_sz = cur_offset;
         uint8_t cnt_codes = static_cast<uint8_t>(total_slots);
 
         xdata_sec->emit8(version_flags);
