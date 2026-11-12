@@ -119,3 +119,27 @@ TEST_CASE("x64 NaN-canonicalizing store - the JIT stores the select's bits for e
         CHECK_EQ(mem[2], std::bit_cast<uint64_t>(c[0]));
     }
 }
+
+TEST_CASE("x64 NaN-canonicalizing store - a pinned K is loaded into its xmm from the pinned word") {
+    // K kept at the pinned register: `movsd k, [r13 - 16]`, where the movabs
+    // into a GPR and the movq out of it were two instructions.
+    const std::string text = std::string("module @m\n\nattributes pinned_tls_register pinned_constant "
+                                         "0x7ff8000000000000 -16\n") +
+                             (std::string(kStore).substr(std::string("module @m\n").size()));
+    auto mod = parse_module(text);
+    REQUIRE(mod != nullptr);
+    auto lir = lower(*mod, "canon", true);
+    CHECK_EQ(count(*lir, LirOpcode::Vblendvpd), 2u);
+    CHECK_EQ(count(*lir, LirOpcode::Movq_xg), 0u);
+    CHECK_EQ(count(*lir, LirOpcode::Movabs), 0u);
+    size_t loads = 0;
+    for (const auto& b : lir->blocks) {
+        for (const auto& inst : b->instructions) {
+            if (inst->opcode != LirOpcode::Movsd || inst->uses.size() != 1 || !inst->uses[0].is_mem()) continue;
+            const auto& m = inst->uses[0].mem_val;
+            loads += m.base_preg == PReg::gpr(GPR::R13) && m.disp == -16 && inst->defs[0].is_vreg() &&
+                     inst->defs[0].vreg_val.is_xmm();
+        }
+    }
+    CHECK_EQ(loads, 1u);
+}

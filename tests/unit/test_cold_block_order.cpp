@@ -88,6 +88,40 @@ TEST_CASE("Block order - a loop's cold poll is ordered after its latch") {
     CHECK(position(fn, cont) < position(fn, poll));
 }
 
+TEST_CASE("Block order - a miss named cold and the rest of its arm are ordered after the hit") {
+    // site: hit or miss; miss: fill or done; fill -> done; done -> join;
+    // hit -> join. Only the miss is named: its arm up to the join is cold
+    // with it, and the join, which the hit reaches too, is not.
+    LirFunction fn;
+    fn.name = "cold_arm";
+    LirBlock* site = fn.create_block("site");
+    LirBlock* miss = fn.create_block("get_miss_cold");
+    LirBlock* fill = fn.create_block("fill");
+    LirBlock* done = fn.create_block("done");
+    LirBlock* hit = fn.create_block("hit");
+    LirBlock* join = fn.create_block("join");
+    branch(site, hit, miss);
+    branch(miss, fill, done);
+    work(fill);
+    jmp(fill, done);
+    work(done);
+    jmp(done, join);
+    work(hit);
+    jmp(hit, join);
+    join->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+
+    fn.sort_blocks_rpo();
+
+    CHECK(miss->cold);
+    CHECK(fill->cold);
+    CHECK(done->cold);
+    CHECK_FALSE(hit->cold);
+    CHECK_FALSE(join->cold);
+    CHECK(position(fn, hit) < position(fn, join));
+    CHECK(position(fn, join) < position(fn, miss));
+    CHECK(position(fn, join) < position(fn, done));
+}
+
 TEST_CASE("Block layout - an if's body falls through, not the join") {
     // cond: then or join; then -> join. Falling into the join left a taken
     // branch to the body and a jump back from it.

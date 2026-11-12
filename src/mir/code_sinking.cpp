@@ -106,6 +106,49 @@ void forward_single_edge_params(Function& fn, const std::unordered_set<const Bas
     }
 }
 
+// More blocks than this between a value and the join that reads it and it
+// stays where it is.
+constexpr size_t kMaxJoinRegion = 16;
+
+// `users` all lie in one block that some path out of `bb` does not reach,
+// with no GC point and no loop between: that block, else null. The blocks
+// between are the ones that reach it without passing `bb` (which dominates
+// it); an edge out of them or out of `bb` to anywhere else is a path that
+// goes without the value.
+BasicBlock* join_that_takes(const BasicBlock* bb, const std::vector<Instruction*>& users,
+                            const std::unordered_set<const BasicBlock*>& resumed) {
+    BasicBlock* join = users.front()->parent();
+    for (const Instruction* u : users) {
+        if (u->parent() != join) return nullptr;
+    }
+    if (join == bb || resumed.count(join) != 0) return nullptr;
+    if (join->head() && join->head()->opcode() == Opcode::landing_pad) return nullptr;
+    std::vector<const BasicBlock*> between;
+    std::vector<const BasicBlock*> work{join};
+    while (!work.empty()) {
+        const BasicBlock* at = work.back();
+        work.pop_back();
+        for (const BasicBlock* p : at->predecessors()) {
+            if (p == join) return nullptr;
+            if (p == bb || std::find(between.begin(), between.end(), p) != between.end()) continue;
+            if (between.size() == kMaxJoinRegion || resumed.count(p) != 0) return nullptr;
+            for (const Instruction* inst : *p) {
+                if (may_trigger_gc(*inst)) return nullptr;
+            }
+            between.push_back(p);
+            work.push_back(p);
+        }
+    }
+    auto leaves = [&](const BasicBlock* from) {
+        for (const BasicBlock* s : from->successors()) {
+            if (s != join && std::find(between.begin(), between.end(), s) == between.end()) return true;
+        }
+        return false;
+    };
+    if (leaves(bb) || std::any_of(between.begin(), between.end(), leaves)) return join;
+    return nullptr;
+}
+
 } // namespace
 
 size_t sink_code(Function& fn) {
@@ -138,9 +181,9 @@ size_t sink_code(Function& fn) {
         for_each_edge(*term, [&](const BranchTarget& t) {
             if (edge_takes(bb, t.block, resumed)) targets.push_back(t.block);
         });
-        if (targets.empty() || bb->successors().size() < 2) continue;
+        if (bb->successors().size() < 2) continue;
 
-        bool gc_after = false;
+        bool gc_after = may_trigger_gc(*term);
         for (Instruction* inst = term->prev(); inst;) {
             Instruction* prev = inst->prev();
             const auto it = users.find(inst->result());
@@ -193,6 +236,10 @@ size_t sink_code(Function& fn) {
                     groups[0].first->prepend_instruction(inst);
                     users[inst->result()] = std::move(groups[0].second);
                     moved += groups.size();
+                } else if (BasicBlock* join = gc_after ? nullptr : join_that_takes(bb, it->second, resumed)) {
+                    bb->remove_instruction(inst);
+                    join->prepend_instruction(inst);
+                    ++moved;
                 }
             }
             if (inst->parent() == bb && may_trigger_gc(*inst)) gc_after = true;

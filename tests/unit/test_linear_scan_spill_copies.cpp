@@ -534,6 +534,124 @@ size_t aarch64_clears_before_last_call(const char* text) {
 
 } // namespace
 
+namespace {
+
+// %v comes from a call's result on one arm and is handed to a call only on
+// a path the other way does not take.
+const char* kJoinKeepsRegister = R"(module @m
+
+func @twice(%a: i64) -> i64 {
+entry:
+  %r = add.i64 %a, %a
+  ret %r
+}
+
+func @join(%a: i64, %c: i32, %d: i32) -> i64 {
+entry:
+  br_if %c, left, rare_cold
+left:
+  %x = call.i64 @twice(%a)
+  br join(%x)
+rare_cold:
+  %one = iconst.i64 1
+  %y = add.i64 %a, %one
+  br join(%y)
+join(%v: i64):
+  br_if %d, again, done
+again:
+  %w = call.i64 @twice(%v)
+  ret %w
+done:
+  ret %v
+}
+)";
+
+} // namespace
+
+TEST_CASE("Linear Scan - a constant into a spill slot is one store of the immediate") {
+    // Two references live across a call, so in their slots from where they
+    // are made: one by the zero idiom, one by an immediate move.
+    LirFunction fn;
+    fn.name = "slot_constants";
+    fn.calling_conv = CallingConvention::sysv64();
+    LirBlock* entry = fn.create_block_with_id(0, "entry");
+    const VReg zero = fn.allocate_vreg(RegClass::GPR, 8, /*is_gcref=*/true);
+    const VReg five = fn.allocate_vreg(RegClass::GPR, 8, /*is_gcref=*/true);
+    {
+        auto idiom = std::make_unique<LirInst>(LirOpcode::Xor);
+        idiom->add_def(LirOperand::vreg(zero, 8));
+        idiom->add_use(LirOperand::vreg(zero, 8));
+        idiom->add_use(LirOperand::vreg(zero, 8));
+        entry->append_inst(std::move(idiom));
+        auto imm = std::make_unique<LirInst>(LirOpcode::Mov);
+        imm->add_def(LirOperand::vreg(five, 8));
+        imm->add_use(LirOperand::imm(5, 8));
+        entry->append_inst(std::move(imm));
+        auto call = std::make_unique<LirInst>(LirOpcode::Call);
+        call->add_use(LirOperand::symbol("ext"));
+        call->clobbered_gprs = fn.calling_conv.caller_saved_gpr_mask();
+        call->clobbered_xmms = fn.calling_conv.caller_saved_xmm_mask();
+        entry->append_inst(std::move(call));
+        entry->append_inst(std::make_unique<LirInst>(LirOpcode::Safepoint));
+        const VReg sum = fn.allocate_vreg(RegClass::GPR, 8);
+        auto first = std::make_unique<LirInst>(LirOpcode::Mov);
+        first->add_def(LirOperand::vreg(sum, 8));
+        first->add_use(LirOperand::vreg(zero, 8));
+        entry->append_inst(std::move(first));
+        auto add = std::make_unique<LirInst>(LirOpcode::Add);
+        add->add_def(LirOperand::vreg(sum, 8));
+        add->add_use(LirOperand::vreg(sum, 8));
+        add->add_use(LirOperand::vreg(five, 8));
+        entry->append_inst(std::move(add));
+        auto out = std::make_unique<LirInst>(LirOpcode::Mov);
+        out->add_def(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+        out->add_use(LirOperand::vreg(sum, 8));
+        entry->append_inst(std::move(out));
+        entry->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+    }
+    LivenessAnalysis liveness(fn);
+    liveness.run();
+    LinearScanAllocator regalloc(fn, liveness, fn.calling_conv);
+    regalloc.allocate();
+
+    REQUIRE(fn.get_vreg_info(zero).is_spilled);
+    REQUIRE(fn.get_vreg_info(five).is_spilled);
+    std::vector<int64_t> stored;
+    for (const auto& inst : entry->instructions) {
+        if (inst->is_call()) break;
+        // Neither the idiom on a reloaded scratch nor a constant made in a
+        // scratch and stored from it.
+        CHECK(inst->opcode == LirOpcode::Mov);
+        REQUIRE_EQ(inst->defs.size(), size_t(1));
+        REQUIRE_EQ(inst->uses.size(), size_t(1));
+        REQUIRE(inst->uses[0].is_imm_int());
+        if (!inst->defs[0].is_spill_slot()) continue;  // a dead register cleared for the call
+        CHECK_EQ(inst->defs[0].size, 8);
+        stored.push_back(inst->uses[0].imm_int);
+    }
+    CHECK((stored == std::vector<int64_t>{0, 5}));
+}
+
+TEST_CASE("Linear Scan - a join's parameter stays in the register its argument came in") {
+    // The call's result arrives in RAX and is returned from RAX; the call on
+    // the other path wants it in RDI. Asked for RDI first, the parameter was
+    // moved there on the edge and back for the return.
+    Allocated a = allocate(kJoinKeepsRegister, "join");
+    for (const auto& b : a.lir->blocks) {
+        if (b->name != "left" && b->name != "done") continue;
+        for (const auto& inst : b->instructions) {
+            const bool copy = inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::ParallelCopy;
+            if (!copy || inst->is_call()) continue;
+            for (size_t i = 0; i < inst->defs.size() && i < inst->uses.size(); ++i) {
+                if (!inst->defs[i].is_preg() || !inst->uses[i].is_preg()) continue;
+                // The argument into RDI before the call in `left` is the one copy there.
+                if (b->name == "left" && inst->defs[i].preg_val == PReg::gpr(GPR::RDI)) continue;
+                CHECK(inst->defs[i].preg_val == inst->uses[i].preg_val);
+            }
+        }
+    }
+}
+
 TEST_CASE("Linear Scan - a precise-roots module clears no dead register at a call") {
     Allocated precise = allocate(kStaleAtCallPrecise, "stale");
     CHECK(!precise.lir->clear_dead_roots_at_calls);

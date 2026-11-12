@@ -12,6 +12,7 @@
 #include <brass/mir/float_rem_inline.hpp>
 #include <brass/mir/sincos_fuse.hpp>
 #include <brass/mir/code_sinking.hpp>
+#include <brass/mir/untag_reuse.hpp>
 #include <brass/mir/fdiv_pow2.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
@@ -236,6 +237,11 @@ PassStep sincos_fuse() {
 PassStep code_sinking() {
     return function_step("code_sinking", FunctionFilter::All,
                          [](Function& fn) { return sink_code(fn) != 0; });
+}
+
+PassStep untag_reuse() {
+    return function_step("untag_reuse", FunctionFilter::All,
+                         [](Function& fn) { return reuse_untagged_addresses(fn) != 0; });
 }
 
 PassStep fdiv_pow2() {

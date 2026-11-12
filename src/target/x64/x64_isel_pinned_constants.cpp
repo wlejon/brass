@@ -12,7 +12,8 @@
 // register-register form, but the constant takes no register, so the values
 // it displaced stay out of spill slots, and no 10-byte movabs or 7-byte pool
 // load makes it. Only uses an x64 instruction can take from memory fold: an
-// ALU operation's source, a compare's right operand, a move into a register;
+// ALU operation's source, a compare's right operand, a move into a register
+// (a `movq x, v` into an xmm as the `movsd` that loads the word);
 // the rest keep the movabs, which the emitter turns into a load from the
 // same word.
 
@@ -36,6 +37,7 @@ bool foldable_use(const LirInst& in, size_t k) {
             if (in.uses.size() != 2 || k != 1 || !in.defs.empty()) return false;
             break;
         case LirOpcode::Mov:
+        case LirOpcode::Movq_xg:
             if (in.uses.size() != 1 || in.defs.size() != 1 || !in.defs[0].is_vreg() || in.is_patchable) return false;
             break;
         default:
@@ -124,6 +126,8 @@ void fold_pinned_constants(LirFunction& fn) {
                     continue;
                 }
                 u = LirOperand::mem(PReg::gpr(kPinnedTlsGpr), it->second.offset, 8);
+                // The constant's bits into an xmm: the load is a movsd.
+                if (in.opcode == LirOpcode::Movq_xg) in.opcode = LirOpcode::Movsd;
                 if (k < in.use_constraints.size()) in.use_constraints[k] = FixedConstraint::none();
             }
         }

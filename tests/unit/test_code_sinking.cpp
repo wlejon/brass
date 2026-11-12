@@ -150,3 +150,74 @@ TEST_CASE("Code sinking - bits boxed as a tagged value move only when no GC poin
     CHECK_EQ(boxes_left(false), 0ULL);
     CHECK_EQ(boxes_left(true), 1ULL);
 }
+
+TEST_CASE("Code sinking - a value only a join reads moves to the join, unless a GC point lies between") {
+    // entry: s = a + b; if (c) goto hot else goto exit1
+    // hot: if (d) return a else goto exit2        exit1, exit2: goto join        join: return s
+    auto adds_in_join = [](bool call_between) {
+        Module mod("sink_join");
+        Builder b(mod);
+        Function* fn = mod.create_function("sink_join", Type::i64(), {Type::i64(), Type::i64(), Type::i32(), Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hot = b.append_block("hot");
+        BasicBlock* done = b.append_block("done");
+        BasicBlock* exit1 = b.append_block("exit1");
+        BasicBlock* exit2 = b.append_block("exit2");
+        BasicBlock* join = b.append_block("join");
+        b.position_at_end(entry);
+        Value* a = b.add_block_param(entry, Type::i64());
+        Value* bv = b.add_block_param(entry, Type::i64());
+        Value* c = b.add_block_param(entry, Type::i32());
+        Value* d = b.add_block_param(entry, Type::i32());
+        Value* s = b.build_add(a, bv);
+        b.build_br_if(c, hot, exit1);
+        b.position_at_end(hot);
+        b.build_br_if(d, done, exit2);
+        b.position_at_end(done);
+        b.build_ret(a);
+        b.position_at_end(exit1);
+        if (call_between) b.build_call("external_may_collect", Type::void_type(), {});
+        b.build_br(join);
+        b.position_at_end(exit2);
+        b.build_br(join);
+        b.position_at_end(join);
+        b.build_ret(s);
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        sink_code(*fn);
+        REQUIRE(verify_function(*fn));
+        CHECK_EQ(count_in(entry, Opcode::add) + count_in(join, Opcode::add), 1ULL);
+        return count_in(join, Opcode::add);
+    };
+    CHECK_EQ(adds_in_join(false), 1ULL);
+    CHECK_EQ(adds_in_join(true), 0ULL);
+}
+
+TEST_CASE("Code sinking - a value every path reads stays above the join") {
+    // entry: s = a + b; if (c) goto left else goto right; both: goto join; join: return s
+    Module mod("sink_join_all");
+    Builder b(mod);
+    Function* fn = mod.create_function("sink_join_all", Type::i64(), {Type::i64(), Type::i64(), Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* left = b.append_block("left");
+    BasicBlock* right = b.append_block("right");
+    BasicBlock* join = b.append_block("join");
+    b.position_at_end(entry);
+    Value* a = b.add_block_param(entry, Type::i64());
+    Value* bv = b.add_block_param(entry, Type::i64());
+    Value* c = b.add_block_param(entry, Type::i32());
+    Value* s = b.build_add(a, bv);
+    b.build_br_if(c, left, right);
+    b.position_at_end(left);
+    b.build_br(join);
+    b.position_at_end(right);
+    b.build_br(join);
+    b.position_at_end(join);
+    b.build_ret(s);
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    CHECK_EQ(sink_code(*fn), 0ULL);
+    CHECK_EQ(count_in(entry, Opcode::add), 1ULL);
+}

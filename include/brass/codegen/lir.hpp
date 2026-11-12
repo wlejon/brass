@@ -527,10 +527,11 @@ public:
     uint32_t loop_depth = 0;
     x64::Label x64_label;
     bool is_landing_pad = false;
-    // Rarely run (the MIR block's is_cold, or an edge block leading only
-    // into such a block): ordered after the hot blocks of its loop before
-    // register allocation, so the scan's positions after its calls are not
-    // the hot path's, and placed at the end by the block layout.
+    // Rarely run (the MIR block's is_cold, a block its front end named
+    // `cold`, an edge block leading only into such a block, or a block
+    // reached only from such blocks): ordered after the hot blocks of its
+    // loop before register allocation, so the scan's positions after its
+    // calls are not the hot path's, and placed at the end by the block layout.
     bool cold = false;
 
     LirBlock() = default;

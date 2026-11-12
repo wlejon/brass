@@ -25,6 +25,12 @@ namespace brass {
 // so moving it past a GC point changes only which of the two is live across
 // it.
 //
+// A value whose uses all lie in one block further down, a join of several
+// exits (each guard of a run leaving for the same slow copy with the values
+// computed so far), moves to the head of that block when some path from its
+// own block does not reach the join, and no GC point and no loop lie between
+// the two (at most kMaxJoinRegion blocks are looked at).
+//
 // An edge's block must be entered from nowhere else, which it is once
 // critical edges are split; the pass splits them first. Returns how many
 // instructions it placed.

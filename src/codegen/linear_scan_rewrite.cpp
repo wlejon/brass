@@ -61,6 +61,39 @@ static std::optional<LirOpcode> direct_slot_copy(const LirInst& inst, bool def_i
     return kNone;
 }
 
+// The constant `inst` puts in a spill slot, when one `mov m64, imm32` (sign
+// extended) stores it: a GPR immediate move, or the zero idiom `v = xor v, v`
+// on a spilled v. A 32-bit move's value is zero-extended, as its store to the
+// slot is (the whole slot is written at every spill).
+static std::optional<int64_t> slot_constant(const LirInst& inst) {
+    if (inst.defs.size() != 1 || !inst.defs[0].is_spill_slot() || inst.is_patchable || inst.resume_id != 0) {
+        return std::nullopt;
+    }
+    const LirOperand& d = inst.defs[0];
+    int64_t k = 0;
+    switch (inst.opcode) {
+        case LirOpcode::Xor:
+        case LirOpcode::Xor32:
+            if (inst.uses.size() != 2) return std::nullopt;
+            for (const LirOperand& u : inst.uses) {
+                if (!u.is_spill_slot() || u.spill_slot != d.spill_slot) return std::nullopt;
+            }
+            break;
+        case LirOpcode::Mov:
+            if (inst.uses.size() != 1 || !inst.uses[0].is_imm_int() || d.size != 8) return std::nullopt;
+            k = inst.uses[0].imm_int;
+            break;
+        case LirOpcode::Mov32:
+            if (inst.uses.size() != 1 || !inst.uses[0].is_imm_int()) return std::nullopt;
+            k = static_cast<int64_t>(static_cast<uint32_t>(inst.uses[0].imm_int));
+            break;
+        default:
+            return std::nullopt;
+    }
+    if (k < INT32_MIN || k > INT32_MAX) return std::nullopt;
+    return k;
+}
+
 // note_x64_emitter_scratch's AArch64 counterpart: a store of an immediate, or a
 // memory-to-memory move, to an address it builds in X16 (base + index +
 // displacement, or an offset out of range) puts the data through X15, one of
@@ -399,6 +432,20 @@ void LinearScanAllocator::rewrite_instructions() {
                 continue;
             }
 
+            // A constant whose value lives in a spill slot is one store of
+            // an immediate, where the general path made it in a scratch
+            // register and stored that (and, for the zero idiom, reloaded
+            // the slot first as the idiom's operand).
+            if (const auto k = is_aarch64 ? std::nullopt : slot_constant(*inst)) {
+                auto store = std::make_unique<LirInst>(LirOpcode::Mov);
+                store->add_def(LirOperand::slot(inst->defs[0].spill_slot, 8));
+                store->add_use(LirOperand::imm(*k, 8));
+                store->id = inst->id;
+                store->mir_origin = inst->mir_origin;
+                rewritten.push_back(std::move(store));
+                continue;
+            }
+
             // Moves between memory / spill slots:
             if ((inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32 ||
                  inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss ||
@@ -411,12 +458,16 @@ void LinearScanAllocator::rewrite_instructions() {
                 PReg scratch = is_xmm ? (is_aarch64 ? PReg::aarch64_fpr(brass::aarch64::FPR::V29) : PReg::xmm(XMM::XMM14))
                                       : (is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R15));
                 if (!is_xmm) {
-                    // x64: R11 and R10 first; R15 and R14 hold values and are
+                    // x64: R10 and R11 first; R15 and R14 hold values and are
                     // free here only where both addresses take R10 and R11
-                    // (build_constraint_index blocks them there).
+                    // (build_constraint_index blocks them there). R10 before
+                    // R11: it is where a spilled operand's reload goes, so a
+                    // value stored to memory and read again next to the
+                    // store (a boxed field's store, then its number test) is
+                    // reloaded once (reuse_scratch_reloads).
                     PReg candidates[] = {
-                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R11),
-                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R10),
+                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X15) : PReg::gpr(GPR::R10),
+                        is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(GPR::R11),
                         is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(GPR::R15),
                     };
                     scratch = candidates[0];

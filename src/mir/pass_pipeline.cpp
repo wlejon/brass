@@ -44,6 +44,7 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     // Last: every pass that reads a block's computations where the front end
     // put them has run.
     p.add(passes::code_sinking());
+    p.add(passes::untag_reuse());
     return p;
 }
 

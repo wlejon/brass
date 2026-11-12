@@ -22,7 +22,9 @@
 // reference name where its object is now. No pass hoists it, merges it with
 // another, or carries it across a GC point in place of a fresh one: it is
 // absent from every pure-instruction list, so LICM, CSE, GVN and PRE leave
-// it where the frontend put it.
+// it where the frontend put it. Two passes let one read stand for another of
+// the same value where no GC point can run between them on any path: GVN
+// (gvn_gc_free.hpp) and untag_reuse (untag_reuse.hpp).
 namespace brass {
 
 // True for a value whose computation matches the definition above.

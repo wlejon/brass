@@ -697,6 +697,14 @@ void LirFunction::sort_blocks_rpo() {
             preds[it->second].push_back(static_cast<uint32_t>(i));
         }
     }
+    // A block its front end named cold is one (block_layout.cpp reads the
+    // same name): an inline cache's miss, which is not `is_cold` to the
+    // MIR passes.
+    for (uint32_t i = 0; i < n; ++i) {
+        if (blocks[i] && blocks[i].get() != entry && blocks[i]->name.find("cold") != std::string::npos) {
+            blocks[i]->cold = true;
+        }
+    }
     // An edge block (one way in, one way out) into a cold block is cold:
     // instruction selection's block for a branch's arguments, a critical
     // edge's.
@@ -707,6 +715,15 @@ void LirFunction::sort_blocks_rpo() {
             if (blocks[i].get() == entry || !blocks[succs[i][0]]->cold) continue;
             blocks[i]->cold = true;
             changed = true;
+        }
+        // A block reached only from cold blocks is cold: the rest of a cold
+        // arm, up to the join it returns to.
+        for (uint32_t i = 0; i < n; ++i) {
+            if (!blocks[i] || blocks[i]->cold || blocks[i].get() == entry || preds[i].empty()) continue;
+            if (std::all_of(preds[i].begin(), preds[i].end(), [&](uint32_t p) { return blocks[p] && blocks[p]->cold; })) {
+                blocks[i]->cold = true;
+                changed = true;
+            }
         }
     }
     std::vector<uint32_t> roots;

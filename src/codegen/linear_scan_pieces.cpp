@@ -395,6 +395,18 @@ LinearScanAllocator::HintRegs LinearScanAllocator::hint_regs(const AllocPiece& p
         const AllocPiece& q = pieces_[i];
         if (q.to == p.from && &q != &p && !q.spilled) add(q.reg);
     }
+    // The value this one is copied from where it starts (a join's parameter
+    // from the edge's argument, which ends there): no move on that edge.
+    const auto c = coalesce_hints_.find(v.id);
+    if (c != coalesce_hints_.end()) {
+        for (VReg partner : c->second) {
+            if (partner.id >= vreg_pieces_.size()) continue;
+            for (uint32_t i : vreg_pieces_[partner.id]) {
+                const AllocPiece& q = pieces_[i];
+                if (!q.spilled && q.reg.is_valid() && q.end == p.start) add(q.reg);
+            }
+        }
+    }
     const auto& uses = p.base->use_positions;
     auto it = std::lower_bound(uses.begin(), uses.end(), p.from,
         [](const UsePosition& u, uint32_t x) { return u.inst_id < x; });
@@ -402,7 +414,7 @@ LinearScanAllocator::HintRegs LinearScanAllocator::hint_regs(const AllocPiece& p
     if (auto f = fixed_preg_hints_.find(v.id); f != fixed_preg_hints_.end()) {
         for (PReg r : f->second) add(r);
     }
-    if (auto c = coalesce_hints_.find(v.id); c != coalesce_hints_.end()) {
+    if (c != coalesce_hints_.end()) {
         for (VReg partner : c->second) {
             if (partner.id >= vreg_pieces_.size()) continue;
             for (uint32_t i : vreg_pieces_[partner.id]) {
@@ -445,14 +457,19 @@ bool LinearScanAllocator::try_allocate_free(uint32_t idx, std::vector<uint32_t>&
     // A register free for a prefix that holds a use: keep it there.
     PReg best{};
     uint32_t best_q = 0;
+    // A hinted register free past the next use is kept over one free for
+    // longer: it saves a copy here, and costs a split at its conflict where
+    // the other's came later.
+    const uint32_t u = next_use(p, p.start, true);
     for (PReg r : hints) {
         if (max_q[r.code] > best_q) { best = r; best_q = max_q[r.code]; }
     }
-    for (PReg r : pool) {
-        if (max_q[r.code] > best_q) { best = r; best_q = max_q[r.code]; }
+    if (u == kNever || best_q <= u) {
+        for (PReg r : pool) {
+            if (max_q[r.code] > best_q) { best = r; best_q = max_q[r.code]; }
+        }
     }
     if (!best.is_valid() || best_q <= p.start) return false;
-    const uint32_t u = next_use(p, p.start, true);
     if (u == kNever || u >= best_q) return false;
     const uint32_t q = split_position(u + 1, best_q);
     if (q == kNever || q <= p.start || q >= p.end) return false;

@@ -61,6 +61,9 @@ PassStep sincos_fuse();
 // Every function: a pure computation only one outgoing edge needs moves to
 // that edge (code_sinking.hpp).
 PassStep code_sinking();
+// Every function: a reference's untagged address is carried through a join
+// to the read after it (untag_reuse.hpp).
+PassStep untag_reuse();
 // Every function: a float division by a power of two as the multiplication
 // by its reciprocal (fdiv_pow2.hpp).
 PassStep fdiv_pow2();
