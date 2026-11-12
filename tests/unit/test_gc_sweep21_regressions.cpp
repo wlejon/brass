@@ -98,15 +98,19 @@ extern "C" SWEEP21_NOINLINE int64_t sweep21_host_cb(int64_t n) {
     return g_g(n);
 }
 
+extern "C" SWEEP21_NOINLINE int64_t sweep21_enter_leaf(int64_t n, Entry how) {
+    if (how == Entry::EngineInvoke) {
+        return g_jit->invoke("g", {RuntimeValue::from_i64(n)}).as_i64();
+    }
+    GeneratedCodeEntryScope entry;
+    return g_g(n);
+}
+
 extern "C" SWEEP21_NOINLINE int64_t sweep21_host_rec(int depth, int64_t n, Entry how) {
     volatile char pad[64];
     pad[0] = static_cast<char>(depth);
     if (depth <= 0) {
-        if (how == Entry::EngineInvoke) {
-            return g_jit->invoke("g", {RuntimeValue::from_i64(n)}).as_i64();
-        }
-        GeneratedCodeEntryScope entry;
-        return g_g(n);
+        return sweep21_enter_leaf(n, how);
     }
     const int64_t r = sweep21_host_rec(depth - 1, n, how);
     return r + pad[0] - static_cast<char>(depth);
