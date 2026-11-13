@@ -296,6 +296,11 @@ void AArch64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     const Function* stub = callee_module_ && !inst.symbol().empty() ? callee_module_->get_function(inst.symbol())
                            : mir_fn_                                ? mir_fn_->guard_exit_stub(inst)
                                                                     : nullptr;
+    if (stub && stub->is_resume_twin()) {
+        // The direct exit (x64: emit_guard_exit.cpp) has no AArch64 form yet.
+        codegen::throw_unsupported("aarch64 isel (guard)",
+                                   "guard exiting into resume twin '" + std::string(inst.symbol()) + "'");
+    }
     if (stub) {
         std::string why;
         if (!mir_fn_->guard_exit_stub_matches(inst, *stub, why)) {

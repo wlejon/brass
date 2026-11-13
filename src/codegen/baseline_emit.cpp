@@ -88,6 +88,11 @@ void check_x64_baseline_supported(const Function& fn, const Target& target, cons
                 if (stub && !fn.guard_exit_stub_matches(*inst, *stub, why)) {
                     throw_unsupported(kX64BaselineStage, why);
                 }
+                if (stub && stub->is_resume_twin()) {
+                    // A speculated function is optimized code's; the baseline
+                    // JIT runs the function it was speculated from.
+                    throw_unsupported(kX64BaselineStage, "guard exiting into a resume twin");
+                }
                 if (!stub && !fn.get_resume_target(inst->resume_id())) {
                     throw_unsupported(kX64BaselineStage, "guard with no exit stub or resume target");
                 }

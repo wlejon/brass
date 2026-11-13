@@ -188,6 +188,44 @@ const Function* Function::guard_exit_stub(const Instruction& guard) const noexce
 bool Function::guard_exit_stub_matches(const Instruction& guard, const Function& stub, std::string& why) const {
     const auto& state = guard.state_map();
     const auto& params = stub.param_types();
+    if (stub.is_resume_twin()) {
+        const std::string twin = "resume twin '" + std::string(stub.name()) + "'";
+        if (params.size() != 2 || params[0] != Type::i32() || params[1] != Type::ptr()) {
+            why = twin + " must take (i32 resume id, ptr state)";
+            return false;
+        }
+        if (stub.return_type() != return_type_) {
+            why = twin + " returns " + std::string(stub.return_type().name()) + " but '" + std::string(name_) +
+                  "' returns " + std::string(return_type_.name()) + " (the twin's result is the function's)";
+            return false;
+        }
+        for (const Value* v : state) {
+            if (v && v->type().is_vector()) {
+                why = twin + " cannot take a vector state value (a state value is one 8-byte word)";
+                return false;
+            }
+        }
+        if (stub.twin_states().empty()) return true;
+        const std::vector<Type>* want = stub.twin_state_types(guard.resume_id());
+        if (!want) {
+            why = twin + " has no resume point " + std::to_string(guard.resume_id());
+            return false;
+        }
+        if (want->size() != state.size()) {
+            why = twin + " reads " + std::to_string(want->size()) + " state values at resume point " +
+                  std::to_string(guard.resume_id()) + " but the guard has " + std::to_string(state.size());
+            return false;
+        }
+        for (size_t i = 0; i < state.size(); ++i) {
+            if (!state[i] || state[i]->type() != (*want)[i]) {
+                why = twin + " reads state value " + std::to_string(i) + " of resume point " +
+                      std::to_string(guard.resume_id()) + " as " + std::string((*want)[i].name()) +
+                      " but the guard passes " + (state[i] ? std::string(state[i]->type().name()) : "nothing");
+                return false;
+            }
+        }
+        return true;
+    }
     const std::string who = "exit stub '" + std::string(stub.name()) + "'";
     if (params.size() != state.size()) {
         why = who + " takes " + std::to_string(params.size()) + " parameters but the guard has " +

@@ -156,13 +156,35 @@ public:
     }
     // A guard's exit stub: the function of this function's module named by
     // the guard's exit label, or null when the label names none (it is then
-    // only a label). Called as stub(state values...); its result is this
+    // only a label). Called as stub(state values...), or, when it is a
+    // resume twin, as twin(resume id, &state); its result is this
     // function's result. See "Guard exits" in docs/mir_reference.md.
     const Function* guard_exit_stub(const Instruction& guard) const noexcept;
     // Whether `stub` has the exit-stub signature for `guard` of this
     // function: one parameter per state value, of its type, and this
-    // function's return type. When not, `why` says what differs.
+    // function's return type; for a resume twin, (i32, ptr), this function's
+    // return type, and the state types the twin recorded for the guard's
+    // resume id. When not, `why` says what differs.
     bool guard_exit_stub_matches(const Instruction& guard, const Function& stub, std::string& why) const;
+
+    // A resume twin (mir/resume_twin.hpp): `(i32 resume id, ptr state) -> R`,
+    // the generic code of a function with every one of its resume points as
+    // an entry. A guard naming one exits by calling it with the guard's
+    // resume id and the address of its state values, 8 bytes each, and
+    // returning its result (docs/speculation_and_deopt.md, "Guards in AOT
+    // images"). The state types a resume id takes are recorded when the twin
+    // is built, for the verifier to hold each such guard to; a twin with
+    // none recorded (one parsed from text) is not checked.
+    bool is_resume_twin() const noexcept { return resume_twin_; }
+    void set_resume_twin(bool twin = true) noexcept { resume_twin_ = twin; }
+    void set_twin_state_types(uint32_t resume_id, std::vector<Type> types) {
+        twin_states_[resume_id] = std::move(types);
+    }
+    const std::vector<Type>* twin_state_types(uint32_t resume_id) const noexcept {
+        auto it = twin_states_.find(resume_id);
+        return it == twin_states_.end() ? nullptr : &it->second;
+    }
+    const std::unordered_map<uint32_t, std::vector<Type>>& twin_states() const noexcept { return twin_states_; }
 
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
@@ -240,6 +262,8 @@ private:
     bool guard_id_known_ = false;
     bool allow_fp_reassociation_ = false;
     bool requires_barrier_certs_ = false;
+    bool resume_twin_ = false;
+    std::unordered_map<uint32_t, std::vector<Type>> twin_states_;
 
     bool has_coro_frame_layout_ = false;
     uint32_t coro_frame_slot_count_ = 0;

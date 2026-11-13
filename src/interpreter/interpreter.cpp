@@ -1,4 +1,5 @@
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/interpreter/twin_exit.hpp>
 #include <brass/interpreter/narrow_int.hpp>
 #include <brass/interpreter/memory_access.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -667,6 +668,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
 
                         if (module_ && !inst->symbol().empty()) {
                             const Function* stub_fn = module_->get_function(inst->symbol());
+                            if (stub_fn && stub_fn->is_resume_twin()) {
+                                const TwinExitArgs twin(inst->resume_id(), last_deopt_.state_map);
+                                return execute_function(*stub_fn, twin.args);
+                            }
                             if (stub_fn) {
                                 return execute_function(*stub_fn, last_deopt_.state_map);
                             }

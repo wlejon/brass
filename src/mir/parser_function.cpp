@@ -340,9 +340,12 @@ Function* Parser::parse_function_decl(Module& mod) {
 
     // Function attributes.
     bool fp_reassociation = false;
+    bool resume_twin = false;
     while (peek().is(TokenKind::Ident)) {
         if (peek().text == "fp_reassociation") {
             fp_reassociation = true;
+        } else if (peek().text == "resume_twin") {
+            resume_twin = true;
         } else {
             error(peek().location, "Unknown function attribute '" + std::string(peek().text) + "'");
             return nullptr;
@@ -354,6 +357,7 @@ Function* Parser::parse_function_decl(Module& mod) {
 
     Function* fn = mod.create_function(fn_name, ret_type, param_types);
     fn->set_allow_fp_reassociation(fp_reassociation);
+    fn->set_resume_twin(resume_twin);
     for (size_t i = 0; i < param_noalias.size(); ++i) {
         if (param_noalias[i]) fn->set_param_noalias(i);
     }

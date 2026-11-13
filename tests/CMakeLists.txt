@@ -103,6 +103,7 @@ add_executable(brass_unit_tests
     unit/test_elf_so_writer.cpp
     unit/test_aot_shared_library.cpp
     unit/test_aot_imports.cpp
+    unit/test_aot_guard_twin.cpp
     unit/test_artifact_cache.cpp
     unit/test_native_module_cache.cpp
     unit/test_pic_x64.cpp

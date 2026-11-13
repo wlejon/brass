@@ -1,6 +1,8 @@
 // Deopt stress guards for tier 2 (include/brass/mir/deopt_stress.hpp).
 #include <brass/mir/deopt_stress.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/module.hpp>
+#include <brass/mir/runtime_symbols.hpp>
 
 #include <string>
 #include <vector>
@@ -10,8 +12,10 @@ namespace brass {
 namespace {
 
 bool selected(const Instruction& guard, const DeoptStressPlan& plan) {
-    return plan.resume_id < 0 || static_cast<uint64_t>(plan.resume_id) == guard.resume_id();
+    return plan.runtime_poll || plan.resume_id < 0 || static_cast<uint64_t>(plan.resume_id) == guard.resume_id();
 }
+
+constexpr std::string_view kPollSite = "brass_deopt_stress_poll_site";
 
 } // namespace
 
@@ -31,7 +35,7 @@ bool deopt_stress_guard_eligible(const Function& fn, const Instruction& guard, c
 }
 
 bool has_deopt_stress_guards(const Function& fn, const Module* stub_module, const DeoptStressPlan& plan) {
-    if (plan.period == 0 || !plan.evaluations || !plan.forced) return false;
+    if (plan.period == 0 || (!plan.runtime_poll && (!plan.evaluations || !plan.forced))) return false;
     for (const auto* bb : fn.blocks()) {
         if (!bb) continue;
         for (const auto* inst : *bb) {
@@ -58,8 +62,24 @@ size_t insert_deopt_stress_guards(Function& fn, const Module* stub_module, const
     }
 
     Builder b(fn);
+    if (plan.runtime_poll && fn.parent()) {
+        // The poll allocates nothing and reaches no GC point, so the values
+        // live at the guard stay where they are.
+        fn.parent()->add_external_symbol(kPollSite);
+        fn.parent()->add_symbol_role(kPollSite, SymbolRole::NoCollect);
+    }
     for (Instruction* guard : guards) {
         b.position_before(guard);
+        const auto& polled_state = guard->state_map();
+        if (plan.runtime_poll) {
+            Value* keep = b.build_call(kPollSite, Type::i32(),
+                                       {b.build_iconst_i32(static_cast<int32_t>(guard->resume_id()))});
+            Instruction* stress = b.build_guard(keep, guard->symbol(),
+                                                Span<Value* const>(polled_state.data(), polled_state.size()));
+            stress->set_resume_id(guard->resume_id());
+            stress->set_offset(guard->offset());
+            continue;
+        }
         // n = ++evaluations; forced += (n % period == 0);
         // guard (n % period != 0), <the guard's exits and state>
         Value* eval_addr = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(plan.evaluations)));

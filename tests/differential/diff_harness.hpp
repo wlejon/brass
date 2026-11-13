@@ -7,11 +7,18 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/resume_twin.hpp>
+#include <brass/object/object_writer.hpp>
+#include <brass/target/aot_linker.hpp>
+#include <brass/target/dynamic_library.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt_stress.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/vm/fast_interpreter.hpp>
+#include <atomic>
+#include <filesystem>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -178,15 +185,22 @@ inline void assert_diff_3way(
 //
 // Tiers: the reference interpreter (the oracle), the fast interpreter,
 // Tier 1 (the baseline JIT, installed by a program's pipeline), Tier 2
-// installed by a program's pipeline (its deopts finish in Tier 0), and the
-// standalone JIT engine. Every tier gives the oracle's answer; then, under
+// installed by a program's pipeline (its deopts finish in Tier 0), the
+// standalone JIT engine, and an AOT image: the module with each function
+// that has site-form guards speculated against its resume twin
+// (mir/resume_twin.hpp), linked into a shared image and loaded. The image
+// leg runs for a module that has such a guard and whose image needs nothing
+// from the process. A forced exit there continues in the twin, whose own
+// copies of the sites are branches that stress does not touch, so under
+// stress the image is held to the answer only with `exits_equivalent`.
+// Every tier gives the oracle's answer; then, under
 // deopt stress at period 1 (every eligible guard evaluation fails) and at
 // each guard site alone, every tier gives the stressed oracle's answer.
 // With `exits_equivalent` (each guard's exits compute what its fast path
 // does, which is what speculation promises) stress at any period gives the
 // unstressed answer.
 
-enum class DiffTier { Interp, Fast, Baseline, Tier2, Jit };
+enum class DiffTier { Interp, Fast, Baseline, Tier2, Jit, Aot };
 
 inline const char* diff_tier_name(DiffTier t) {
     switch (t) {
@@ -195,6 +209,7 @@ inline const char* diff_tier_name(DiffTier t) {
         case DiffTier::Baseline: return "tier1";
         case DiffTier::Tier2: return "tier2";
         case DiffTier::Jit: return "jit";
+        case DiffTier::Aot: return "aot";
     }
     return "?";
 }
@@ -204,6 +219,9 @@ struct TierDiffOptions {
     bool baseline = true;
     bool tier2 = true;
     bool jit = true;
+    bool aot = true;
+    // The image leg must run (the module is one it takes).
+    bool require_aot = false;
     bool deopt_stress = true;
     bool exits_equivalent = false;
     std::vector<uint64_t> equivalent_periods{1, 2, 3, 5};
@@ -238,6 +256,61 @@ inline bool same_answer(const RuntimeValue& a, const RuntimeValue& b) {
     return a.raw_bits() == b.raw_bits();
 }
 
+// The module as an AOT image, built under whatever deopt stress is set.
+struct AotImage {
+    std::unique_ptr<Module> mod;
+    std::filesystem::path path;
+    std::unique_ptr<target::DynamicLibrary> lib;
+    std::string why;
+
+    ~AotImage() {
+        lib.reset();
+        std::error_code ec;
+        if (!path.empty()) std::filesystem::remove(path, ec);
+    }
+};
+
+inline std::unique_ptr<AotImage> build_aot_image(const Module& mod) {
+    auto img = std::make_unique<AotImage>();
+    img->mod = clone_module(mod);
+    if (!speculate_module_against_twins(*img->mod, &img->why)) return img;
+    object::ModuleCompiler compiler(Target::host());
+    const runtime::DeoptStressConfig stress = runtime::deopt_stress_config();
+    if (stress.active()) {
+        DeoptStressPlan plan;
+        plan.period = stress.period;
+        plan.resume_id = stress.resume_id;
+        plan.evaluations = runtime::deopt_stress_evaluation_counter_address();
+        plan.forced = runtime::deopt_stress_forced_counter_address();
+        compiler.set_deopt_stress(plan);
+    }
+    object::ObjectFile obj;
+    try {
+        obj = compiler.compile(*img->mod);
+    } catch (const std::exception& e) {
+        img->why = e.what();
+        return img;
+    }
+    for (const auto& sym : obj.symbols) {
+        if (sym.section_index == object::SECTION_UNDEF && !sym.name.empty()) {
+            img->why = "the image needs '" + sym.name + "' from the process";
+            return img;
+        }
+    }
+    static std::atomic<uint64_t> serial{0};
+    const Target host = Target::host();
+    const std::string file = "diff_aot_" + std::to_string(serial.fetch_add(1)) +
+                             (host.is_windows() ? ".dll" : (host.is_macos() ? ".dylib" : ".so"));
+    img->path = scratch_dir() / file;
+    target::LinkerOptions lopts;
+    lopts.module_name = file;
+    lopts.export_all_functions = true;
+    if (target::AotLinker::link_to_file(obj, img->path.string(), lopts, &img->why)) {
+        img->lib = target::DynamicLibrary::open(img->path.string(), &img->why);
+    }
+    return img;
+}
+
 // Runs `fn_name` on one tier. Native tiers compile now, under whatever deopt
 // stress is set, in a program of their own.
 inline RuntimeValue run_on_tier(Module& mod, std::string_view fn_name, const std::vector<RuntimeValue>& args,
@@ -255,6 +328,16 @@ inline RuntimeValue run_on_tier(Module& mod, std::string_view fn_name, const std
             codegen::JitExecutionEngine jit(Target::host());
             REQUIRE(jit.compile_and_load(mod));
             return jit.invoke(fn_name, args);
+        }
+        case DiffTier::Aot: {
+            const std::unique_ptr<AotImage> img = build_aot_image(mod);
+            if (!img->lib) std::cerr << "aot image of " << fn_name << ": " << img->why << "\n";
+            REQUIRE(img->lib != nullptr);
+            void* addr = img->lib->get_symbol(std::string(fn_name));
+            const Function* f = mod.get_function(fn_name);
+            REQUIRE(addr != nullptr);
+            REQUIRE(f != nullptr);
+            return runtime::invoke_native_address(addr, f->return_type(), &f->param_types(), args);
         }
         case DiffTier::Baseline:
         case DiffTier::Tier2: break;
@@ -299,12 +382,13 @@ inline RuntimeValue run_on_tier(Module& mod, std::string_view fn_name, const std
 // also have forced at least that many guard failures.
 inline void check_tiers(Module& mod, std::string_view fn_name, const std::vector<RuntimeValue>& args,
                         const TierDiffOptions& opts, const RuntimeValue& expected, std::string_view what,
-                        bool jit_ok, uint64_t min_forced = 0) {
+                        bool jit_ok, bool aot_ok, uint64_t min_forced = 0, bool aot_forces = false) {
     std::vector<DiffTier> tiers{DiffTier::Interp};
     if (opts.fast) tiers.push_back(DiffTier::Fast);
     if (opts.baseline) tiers.push_back(DiffTier::Baseline);
     if (opts.tier2) tiers.push_back(DiffTier::Tier2);
     if (opts.jit && jit_ok) tiers.push_back(DiffTier::Jit);
+    if (opts.aot && aot_ok) tiers.push_back(DiffTier::Aot);
     for (DiffTier t : tiers) {
         runtime::reset_deopt_stress_counters();
         const RuntimeValue got = run_on_tier(mod, fn_name, args, t);
@@ -314,10 +398,14 @@ inline void check_tiers(Module& mod, std::string_view fn_name, const std::vector
                       << ": expected " << to_string(expected) << ", got " << to_string(got) << "\n";
         }
         CHECK(same_answer(expected, got));
-        if (forced < min_forced) {
+        // The image counts a guard only while the call is still in its
+        // speculated code, so a guard the oracle forces may be one the image
+        // evaluates in the twin.
+        const uint64_t need = (t == DiffTier::Aot && !aot_forces) ? 0 : min_forced;
+        if (forced < need) {
             std::cerr << "no forced deopt in " << fn_name << " (" << what << ") on " << diff_tier_name(t) << "\n";
         }
-        CHECK(forced >= min_forced);
+        CHECK(forced >= need);
     }
 }
 
@@ -333,7 +421,19 @@ inline void assert_diff_tiers(Module& mod, std::string_view fn_name, const std::
     {
         runtime::DeoptStressScope off(0);
         plain = run_on_tier(mod, fn_name, args, DiffTier::Interp);
-        check_tiers(mod, fn_name, args, opts, plain, "no stress", true);
+    }
+    // The image leg: a module with a site-form guard, whose image loads.
+    bool aot_ok = false;
+    if (opts.aot && guards.resume_only) {
+        runtime::DeoptStressScope off(0);
+        const std::unique_ptr<AotImage> img = build_aot_image(mod);
+        aot_ok = img->lib != nullptr;
+        if (!aot_ok && opts.require_aot) std::cerr << "no aot image of " << fn_name << ": " << img->why << "\n";
+    }
+    if (opts.require_aot) REQUIRE(aot_ok);
+    {
+        runtime::DeoptStressScope off(0);
+        check_tiers(mod, fn_name, args, opts, plain, "no stress", true, aot_ok);
     }
     if (!opts.deopt_stress || guards.resume_ids.empty()) return;
 
@@ -344,7 +444,8 @@ inline void assert_diff_tiers(Module& mod, std::string_view fn_name, const std::
         runtime::DeoptStressScope scope(cfg);
         const RuntimeValue oracle = run_on_tier(mod, fn_name, args, DiffTier::Interp);
         const bool fired = runtime::deopt_stress_forced() > 0;
-        check_tiers(mod, fn_name, args, opts, oracle, what, jit_ok, fired ? 1 : 0);
+        check_tiers(mod, fn_name, args, opts, oracle, what, jit_ok, aot_ok && opts.exits_equivalent, fired ? 1 : 0,
+                    cfg.resume_id < 0);
         if (opts.exits_equivalent) {
             if (!same_answer(plain, oracle)) {
                 std::cerr << "stressed answer differs in " << fn_name << " (" << what << "): " << to_string(oracle)
@@ -360,7 +461,7 @@ inline void assert_diff_tiers(Module& mod, std::string_view fn_name, const std::
     if (opts.exits_equivalent) {
         for (uint64_t p : opts.equivalent_periods) {
             runtime::DeoptStressScope scope(p);
-            check_tiers(mod, fn_name, args, opts, plain, "stress: period " + std::to_string(p), jit_ok);
+            check_tiers(mod, fn_name, args, opts, plain, "stress: period " + std::to_string(p), jit_ok, aot_ok);
         }
     }
 }

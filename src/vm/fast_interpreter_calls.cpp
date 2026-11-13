@@ -5,6 +5,7 @@
 
 #include "fast_interpreter_impl.hpp"
 #include <brass/runtime/code_installer.hpp>
+#include <brass/interpreter/twin_exit.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <cstring>
 
@@ -699,6 +700,10 @@ RuntimeValue FastInterpreter::resume_from_native(const Function& fn, uint32_t re
             throw InterpreterException("Guard " + std::to_string(resume_id) + " in function " +
                                        std::string(fn.name()) + " has neither an exit stub nor a resume target");
         }
+    }
+    if (stub && stub->is_resume_twin()) {
+        const TwinExitArgs twin(resume_id, state_values);
+        return run(*stub, twin.args);
     }
     if (stub) return run(*stub, state_values);
     return resume(fn, resume_id, state_values);

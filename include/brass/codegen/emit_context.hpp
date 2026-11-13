@@ -156,11 +156,21 @@ private:
     // `mov dst, imm` as a read of the pinned copy when the immediate has no
     // shorter encoding than a movabs and the host keeps it; false otherwise.
     bool mov_pinned_constant(x64::GPR dst, int64_t imm);
-    // Guard exit with no handler or resumer: calls the exit stub as
-    // stub(state values...) from the deopt record at [rsp + slots_disp]. The
-    // stack arguments use the outgoing area the guard exit allocated below
-    // the record; RSP does not move.
+    // Guard exits (emit_guard_exit.cpp). A resume twin's is direct:
+    // twin(resume id, &state slots). Any other builds a deopt record for the
+    // runtime, and with no handler or resumer calls the exit stub as
+    // stub(state values...) from the record at [rsp + slots_disp]; the stack
+    // arguments use the outgoing area the guard exit allocated below the
+    // record, so RSP does not move.
+    void emit_guard_exit(const LirInst& inst);
+    void emit_twin_guard_exit(const LirInst& inst);
     void emit_exit_stub_call(const LirInst& inst, int32_t slots_disp);
+    // Moves RSP down by `bytes` (a multiple of 16) for a guard exit's area,
+    // touching its pages first; returns the code offset just after.
+    size_t open_guard_exit_area(size_t bytes);
+    // Writes the guard's state values to 8-byte slots at [rsp + slots_disp].
+    void store_guard_state(const LirInst& inst, int32_t slots_disp);
+    void emit_guard_exit_epilogue();
     void pad_invoke_return();
 };
 

@@ -106,6 +106,7 @@ public:
         os_ << ") -> " << fn_.return_type().name();
         // Function attributes.
         if (fn_.allow_fp_reassociation()) os_ << " fp_reassociation";
+        if (fn_.is_resume_twin()) os_ << " resume_twin";
         os_ << " {\n";
 
         // Print basic blocks

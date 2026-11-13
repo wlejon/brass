@@ -237,10 +237,6 @@ void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
 }
 
 void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
-    if (mir_fn_ && mir_fn_->return_type().is_vector()) {
-        // A lower tier's result comes back through one 64-bit word.
-        codegen::throw_unsupported("x64 isel (guard)", "guard in a function returning a vector");
-    }
     const Value* cond_val = inst.operand(0);
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
     // Only a comparison the analysis folded into this guard is recomputed.
@@ -359,12 +355,18 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     const Function* stub = callee_module_ && !inst.symbol().empty() ? callee_module_->get_function(inst.symbol())
                            : mir_fn_                                ? mir_fn_->guard_exit_stub(inst)
                                                                     : nullptr;
+    if (mir_fn_ && mir_fn_->return_type().is_vector() && !(stub && stub->is_resume_twin())) {
+        // A lower tier's result comes back through one 64-bit word; a
+        // resume twin's comes back in the function's own return register.
+        codegen::throw_unsupported("x64 isel (guard)", "guard in a function returning a vector");
+    }
     if (stub) {
         std::string why;
         if (!mir_fn_->guard_exit_stub_matches(inst, *stub, why)) {
             codegen::throw_unsupported("x64 isel (guard)", why);
         }
         exit_inst->exit_symbol = std::string(inst.symbol());
+        exit_inst->twin_exit = stub->is_resume_twin();
     }
 
     // Every state value keeps its position (the resume side maps them by

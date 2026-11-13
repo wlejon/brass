@@ -484,6 +484,9 @@ public:
     uint32_t resume_id = 0;
     uint32_t deopt_reason = 0;
     std::string exit_symbol;
+    // GuardExit: exit_symbol is a resume twin, called as
+    // twin(resume_id, &state) with no runtime in between.
+    bool twin_exit = false;
     // GuardExit: one runtime::DeoptValueKind per use, in use order.
     std::vector<uint8_t> deopt_kinds;
     bool is_patchable = false;

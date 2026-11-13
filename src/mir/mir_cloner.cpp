@@ -128,6 +128,8 @@ Function* clone_function(const Function& src, Module& dst_mod) {
 
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst_fn->set_requires_barrier_certs(src.requires_barrier_certs());
+    dst_fn->set_resume_twin(src.is_resume_twin());
+    for (const auto& [id, types] : src.twin_states()) dst_fn->set_twin_state_types(id, types);
     dst_fn->guard_elim_certs() = src.guard_elim_certs();
     if (src.has_coro_frame_layout()) {
         dst_fn->set_coro_frame_layout(src.coro_frame_slot_count(), src.coro_frame_ref_bits());

@@ -1,4 +1,5 @@
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/interpreter/twin_exit.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/gc/fiber.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
@@ -286,6 +287,10 @@ RuntimeValue Interpreter::resume_after_guard(const Function& fn, uint32_t resume
     }
     if (const Function* stub = fn.guard_exit_stub(*guard)) {
         if (fn.parent()) module_ = fn.parent();
+        if (stub->is_resume_twin()) {
+            const TwinExitArgs twin(resume_id, state_values);
+            return execute_function(*stub, twin.args);
+        }
         return execute_function(*stub, state_values);
     }
     if (!fn.get_resume_target(resume_id)) {

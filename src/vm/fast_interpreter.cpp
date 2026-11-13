@@ -6,6 +6,7 @@
 
 #include "fast_interpreter_impl.hpp"
 #include <brass/interpreter/float_arith.hpp>
+#include <brass/interpreter/twin_exit.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
 #include <brass/runtime/deopt_stress.hpp>
@@ -626,6 +627,10 @@ loop_start:
             }
             if (module_ && !g.exit_stub.empty()) {
                 if (const Function* stub_fn = module_->get_function(g.exit_stub)) {
+                    if (stub_fn->is_resume_twin()) {
+                        const TwinExitArgs twin(g.resume_id, last_deopt_.state_map);
+                        return run(*stub_fn, twin.args);
+                    }
                     return run(*stub_fn, last_deopt_.state_map);
                 }
             }

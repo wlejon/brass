@@ -100,6 +100,14 @@ extern "C" uint32_t brass_deopt_stress_poll() {
     return (period != 0 && brass::runtime::tick(period)) ? 0u : 1u;
 }
 
+extern "C" void brass_set_deopt_stress(uint64_t period, int64_t resume_id) {
+    brass::runtime::set_deopt_stress(brass::runtime::DeoptStressConfig{period, resume_id});
+}
+
+extern "C" uint32_t brass_deopt_stress_poll_site(uint32_t resume_id) {
+    return brass::runtime::deopt_stress_should_fail(resume_id) ? 0u : 1u;
+}
+
 namespace brass::runtime {
 
 uint64_t deopt_stress_evaluations() noexcept {

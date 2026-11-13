@@ -1,3 +1,4 @@
+#include <brass/mir/builder.hpp>
 #include <brass/mir/inline_transform.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/uses.hpp>
@@ -23,7 +24,9 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     // function's result and its resume id names that function's Tier-0
     // guard. Copied into the caller it would finish the caller with the
     // callee's exit; instead the copy branches, where it fails, to a call of
-    // the exit stub, whose result is the inlined call's. A guard with no
+    // the exit stub (a resume twin called as twin(resume id, &state), the
+    // state stored to a block of the caller's frame), whose result is the
+    // inlined call's. A guard with no
     // stub (one resuming in a Tier-0 frame) keeps its callee out of line, as
     // does any guard at an invoke site (the stub may raise).
     const bool is_invoke_site = call_inst->opcode() == Opcode::invoke;
@@ -193,6 +196,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
         const Instruction* guard;
         Instruction* branch;
         Instruction* stub_call;
+        bool twin;
     };
     std::vector<GuardExit> guard_exits;
     std::unordered_map<const BasicBlock*, BasicBlock*> final_block_map;
@@ -286,7 +290,7 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
                 to_tail->set_loc(wrap_loc(src_inst->loc()));
                 to_tail->set_branch_target(BranchTarget(split_tail, std::move(tail_args)));
                 exit_bb->append_instruction(to_tail);
-                guard_exits.push_back({src_inst, br, stub_call});
+                guard_exits.push_back({src_inst, br, stub_call, stub->is_resume_twin()});
 
                 dst_bb = cont_bb;
                 continue;
@@ -356,7 +360,19 @@ InlineResult inline_call_site(Function& caller, Instruction* call_inst, const Fu
     }
     for (const GuardExit& ge : guard_exits) {
         ge.branch->add_operand(map_val(ge.guard->operand(0)));
-        for (const Value* sv : ge.guard->state_map()) ge.stub_call->add_operand(map_val(sv));
+        const auto& state = ge.guard->state_map();
+        if (ge.twin) {
+            Builder b(caller);
+            b.position_before(ge.stub_call);
+            Value* words = b.build_alloca(static_cast<uint32_t>(std::max<size_t>(state.size(), 1) * 8), 8);
+            for (size_t i = 0; i < state.size(); ++i) {
+                b.build_store(state[i]->type(), words, static_cast<int32_t>(i * 8), map_val(state[i]));
+            }
+            ge.stub_call->add_operand(b.build_iconst_i32(static_cast<int32_t>(ge.guard->resume_id())));
+            ge.stub_call->add_operand(words);
+            continue;
+        }
+        for (const Value* sv : state) ge.stub_call->add_operand(map_val(sv));
     }
 
     // 6c. Remap ret instructions to br split_tail(...)

@@ -26,6 +26,13 @@ struct DeoptStressPlan {
     // tier-2 and OSR code). Without one only guards with an exit stub are
     // forced.
     bool resume_targets = false;
+    // The code runs in another process than the one compiling it (an AOT
+    // image): there are no counters to bake in, so each stress guard asks
+    // the process it runs in, brass_deopt_stress_poll_site(resume id), an
+    // import of the image. BRASS_DEOPT_STRESS where the image runs then
+    // decides which guards fail and how often; `period` only has to be
+    // nonzero and `resume_id` is not read.
+    bool runtime_poll = false;
 };
 
 // Whether forcing `guard` of `fn` to fail takes one of its exits: it has an

@@ -74,7 +74,13 @@ void check_supported(const Function& fn, const Target& target) {
             check_aarch64_baseline_vector_inst(*inst, target);
             if (op == Opcode::guard) {
                 const Module* mod = fn.parent();
-                const bool has_stub = mod && !inst->symbol().empty() && mod->get_function(inst->symbol());
+                const Function* stub = mod && !inst->symbol().empty() ? mod->get_function(inst->symbol()) : nullptr;
+                const bool has_stub = stub != nullptr;
+                if (stub && stub->is_resume_twin()) {
+                    // A speculated function is optimized code's; the baseline
+                    // JIT runs the function it was speculated from.
+                    throw_unsupported(kA64BaselineStage, "guard exiting into a resume twin");
+                }
                 if (!has_stub && !fn.get_resume_target(inst->resume_id())) {
                     throw_unsupported(kA64BaselineStage, "guard with no exit stub or resume target");
                 }
