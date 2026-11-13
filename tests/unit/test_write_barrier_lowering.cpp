@@ -63,6 +63,30 @@ entry:
 }
 )";
 
+// wbl_slot(tls, obj, val): stores val in the slot at obj + 8 + 8 * 1 of an
+// object whose address is already masked, and barriers the slot. The filter
+// asks the masked object, and the slot's address is the call's alone.
+const char* kSlotModule = R"(module @wbl_slot
+attributes pinned_tls_register young_range 16 24
+
+func @wbl_slot(%tls: i64, %obj: i64, %val: i64) -> i64 {
+entry:
+  pinned_tls_write %tls
+  %mask = iconst.i64 281474976710655
+  %a = and.i64 %obj, %mask
+  %one = iconst.i64 1
+  %three = iconst.i64 3
+  %eight = iconst.i64 8
+  store_indexed.i64 %a, %one, 8, 8, %val
+  %scaled = shl.i64 %one, %three
+  %at = add.i64 %a, %scaled
+  %slot = add.i64 %at, %eight
+  write_barrier %slot, %val
+  %r = add.i64 %val, %one
+  ret %r
+}
+)";
+
 std::unique_ptr<Module> parse_ok(const char* src) {
     DiagnosticReporter diag;
     auto mod = parse_module(src, &diag);
@@ -153,6 +177,54 @@ TEST_CASE("Write barrier filter - tier 2's expansion tests the target and calls 
     Function* fn2 = clone_function(*mod->get_function("wbl_store"), plain);
     CHECK(!needs_write_barrier_expansion(*fn2));
     CHECK_EQ(expand_write_barriers(*fn2), size_t{0});
+}
+
+TEST_CASE("Write barrier filter - a slot of a masked object: the object is tested, the slot's address is the call's") {
+    auto mod = parse_ok(kSlotModule);
+    Module copy("copy");
+    copy.set_pinned_tls_register(true);
+    copy.copy_declarations_from(*mod);
+    Function* fn = clone_function(*mod->get_function("wbl_slot"), copy);
+    CHECK_EQ(expand_write_barriers(*fn), size_t{1});
+    DiagnosticReporter diag;
+    const bool ok = verify_function(*fn, &diag);
+    if (!ok) std::cerr << diag.format_all() << "\n";
+    CHECK(ok);
+    // One mask (the program's own), and the shift and adds beside the call.
+    size_t masks = 0, hot_arith = 0, cold_arith = 0;
+    for (const BasicBlock* bb : fn->blocks()) {
+        for (const Instruction* inst : *bb) {
+            if (inst->opcode() == Opcode::and_) ++masks;
+            if (inst->opcode() == Opcode::shl || inst->opcode() == Opcode::add) {
+                if (bb->is_cold()) ++cold_arith;
+                else ++hot_arith;
+            }
+        }
+    }
+    CHECK_EQ(masks, size_t{1});
+    CHECK_EQ(cold_arith, size_t{3});
+    CHECK_EQ(hot_arith, size_t{1});  // %r
+
+    codegen::JitExecutionEngine jit;
+    jit.register_external_symbol("brass_gc_write_barrier", reinterpret_cast<void*>(&wbl_barrier));
+    REQUIRE(jit.compile_and_load(*mod));
+    Fn3 p = jit.get_function_ptr<Fn3>("wbl_slot");
+    REQUIRE(p != nullptr);
+    reset();
+    const int64_t tls = addr(&t_wb.tls[0]);
+    CHECK_EQ(p(tls, addr(&t_wb.young[0]), 5), int64_t{6});
+    CHECK_EQ(t_wb.young[2], uint64_t{5});
+    CHECK_EQ(t_wb.calls, 0);
+    const int64_t tagged = static_cast<int64_t>(static_cast<uint64_t>(addr(&t_wb.young[1])) | (uint64_t{0xFFF1} << 48));
+    CHECK_EQ(p(tls, tagged, 6), int64_t{7});
+    CHECK_EQ(t_wb.young[3], uint64_t{6});
+    CHECK_EQ(t_wb.calls, 0);
+    CHECK_EQ(p(tls, addr(&t_wb.old[0]), 7), int64_t{8});
+    CHECK_EQ(t_wb.old[2], uint64_t{7});
+    CHECK_EQ(t_wb.calls, 1);
+    CHECK_EQ(t_wb.last_obj, static_cast<uint64_t>(addr(&t_wb.old[2])));
+    CHECK_EQ(t_wb.last_val, uint64_t{7});
+    runtime::FunctionDispatchTable::instance().forget_module(*mod);
 }
 
 TEST_CASE("Write barrier filter - every tier calls the host's barrier for an old target only") {

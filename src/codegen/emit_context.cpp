@@ -140,6 +140,7 @@ CompilationResult EmitContext::compile_once() {
 
     // 4. Emit blocks
     const BranchThreading threading(fn_);
+    threading_ = &threading;
     // A target is the fall-through when only blocks that emit nothing lie
     // between: skipped ones, empty ones, and a jump to the block after.
     auto emits_nothing = [&](size_t i) {
@@ -248,6 +249,7 @@ CompilationResult EmitContext::compile_once() {
         }
     }
 
+    threading_ = nullptr;
     emit_constant_pool();
     for (size_t off : buffer_.rel8_overflows()) {
         auto it = short_patch_ord_.find(off);
@@ -450,10 +452,10 @@ void EmitContext::zero_tagged_locals() {
 void EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Jmp:
-            emit_jump(Condition::None, inst.uses[0].label_id);
+            emit_jump(Condition::None, threading_ ? threading_->target(inst.uses[0].label_id) : inst.uses[0].label_id);
             break;
         case LirOpcode::Jcc:
-            emit_jump(inst.condition, inst.uses[0].label_id);
+            emit_jump(inst.condition, threading_ ? threading_->target(inst.uses[0].label_id) : inst.uses[0].label_id);
             break;
         case LirOpcode::Call: {
             // A 256-bit argument travels in a YMM register; no other value

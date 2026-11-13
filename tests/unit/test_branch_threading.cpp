@@ -3,6 +3,7 @@
 #include <brass/target/x64/x64_isel.hpp>
 #include <brass/codegen/live_range.hpp>
 #include <brass/codegen/linear_scan.hpp>
+#include <brass/codegen/branch_threading.hpp>
 #include <brass/codegen/emit_context.hpp>
 #include <string>
 
@@ -156,4 +157,74 @@ TEST_CASE("Branches - the nested loop computes the same sum through the JIT") {
         }
         CHECK_EQ(fn(a, n), want);
     }
+}
+
+namespace {
+
+void lir_jmp(LirBlock* from, LirBlock* to) {
+    auto j = std::make_unique<LirInst>(LirOpcode::Jmp);
+    j->add_use(LirOperand::label(to->id));
+    from->append_inst(std::move(j));
+    from->successors.push_back(to);
+}
+
+void lir_jcc(LirBlock* from, LirBlock* taken) {
+    auto j = std::make_unique<LirInst>(LirOpcode::Jcc);
+    j->condition = Condition::NE;
+    j->add_use(LirOperand::label(taken->id));
+    from->append_inst(std::move(j));
+    from->successors.push_back(taken);
+}
+
+void lir_copy(LirBlock* b, GPR to, GPR from) {
+    auto c = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+    c->add_def(LirOperand::preg_gpr(to, 8));
+    c->add_use(LirOperand::preg_gpr(from, 8));
+    b->append_inst(std::move(c));
+}
+
+// entry -> head; head: `jcc back` in the middle of the block, a copy for its
+// other edge, `jmp out`. `back` holds the back edge's copies and jumps to
+// head; `out` returns.
+struct Latch {
+    LirFunction fn;
+    LirBlock* head = nullptr;
+    LirBlock* back = nullptr;
+    LirBlock* out = nullptr;
+};
+
+void build_latch(Latch& l, GPR back_to, GPR back_from) {
+    l.fn.name = "latch";
+    LirBlock* entry = l.fn.create_block("entry");
+    l.head = l.fn.create_block("head");
+    l.back = l.fn.create_block("back");
+    l.out = l.fn.create_block("out");
+    lir_jmp(entry, l.head);
+    lir_jcc(l.head, l.back);
+    lir_copy(l.head, GPR::RCX, GPR::RDX);
+    lir_jmp(l.head, l.out);
+    lir_copy(l.back, back_to, back_from);
+    lir_jmp(l.back, l.head);
+    l.out->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+}
+
+} // namespace
+
+TEST_CASE("Branches - an edge block whose copies move nothing is seen through, from a branch inside a block too") {
+    Latch l;
+    build_latch(l, GPR::RAX, GPR::RAX);
+    BranchThreading threading(l.fn);
+    CHECK_EQ(threading.target(l.back->id), l.head->id);
+    CHECK(threading.skipped(position_of(l.fn, l.back)));
+    CHECK(threading.loop_head(position_of(l.fn, l.head)));
+    CHECK_EQ(threading.target(l.out->id), l.out->id);
+    CHECK_FALSE(threading.skipped(position_of(l.fn, l.out)));
+}
+
+TEST_CASE("Branches - an edge block whose copies move a value is kept") {
+    Latch l;
+    build_latch(l, GPR::RAX, GPR::RBX);
+    BranchThreading threading(l.fn);
+    CHECK_EQ(threading.target(l.back->id), l.back->id);
+    CHECK_FALSE(threading.skipped(position_of(l.fn, l.back)));
 }

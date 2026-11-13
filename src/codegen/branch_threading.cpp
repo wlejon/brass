@@ -9,6 +9,37 @@ bool is_label_branch(const LirInst& inst, LirOpcode op) noexcept {
     return inst.opcode == op && !inst.uses.empty() && inst.uses[0].is_label();
 }
 
+// A parallel copy every move of which is from a location to itself, as
+// EmitContext::emit_parallel_copy reads one: it emits nothing.
+bool copies_nothing(const LirInst& inst) noexcept {
+    if (inst.opcode != LirOpcode::ParallelCopy) return false;
+    const size_t n = inst.defs.size();
+    if (n == 0 || n != inst.uses.size()) return true;
+    for (size_t i = 0; i < n; ++i) {
+        const LirOperand& a = inst.defs[i];
+        const LirOperand& b = inst.uses[i];
+        if (a.kind != b.kind) return false;
+        switch (a.kind) {
+            case LirOperandKind::PReg: if (!(a.preg_val == b.preg_val)) return false; break;
+            case LirOperandKind::SpillSlot: if (a.spill_slot != b.spill_slot) return false; break;
+            case LirOperandKind::LocalSlot: if (a.local_offset != b.local_offset) return false; break;
+            default: return false;
+        }
+    }
+    return true;
+}
+
+// A jump and nothing else that emits code: the copies of an edge whose
+// values register allocation left where they were may stand in front of it.
+bool only_jumps(const LirBlock& b) noexcept {
+    const size_t n = b.instructions.size();
+    if (n == 0 || !is_label_branch(*b.instructions[n - 1], LirOpcode::Jmp)) return false;
+    for (size_t k = 0; k + 1 < n; ++k) {
+        if (!copies_nothing(*b.instructions[k])) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 ClosingBranches closing_branches(const LirFunction& fn, size_t index) noexcept {
@@ -48,9 +79,7 @@ BranchThreading::BranchThreading(const LirFunction& fn) {
     std::vector<uint32_t> hop(forward_.size(), UINT32_MAX);
     for (size_t i = 1; i < n; ++i) {
         const LirBlock& b = *fn.blocks[i];
-        if (b.instructions.size() == 1 && is_label_branch(*b.instructions[0], LirOpcode::Jmp)) {
-            hop[b.id] = b.instructions[0]->uses[0].label_id;
-        }
+        if (only_jumps(b)) hop[b.id] = b.instructions.back()->uses[0].label_id;
     }
     for (uint32_t id = 0; id <= max_id; ++id) {
         uint32_t t = id;
@@ -98,7 +127,7 @@ BranchThreading::BranchThreading(const LirFunction& fn) {
             if (inst.unwind_block_id != UINT32_MAX) enter(inst.unwind_block_id);
             for (const auto& u : inst.uses) {
                 if (!u.is_label()) continue;
-                if (inst.is_branch()) branch_to(u.label_id, i);
+                if (inst.is_branch()) branch_to(target(u.label_id), i);
                 else enter(u.label_id);
             }
         }

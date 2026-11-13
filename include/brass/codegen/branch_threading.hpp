@@ -25,9 +25,11 @@ ClosingBranches closing_branches(const LirFunction& fn, size_t index) noexcept;
 // iteration; branching straight to where it goes, the block is entered by
 // nothing and is not emitted.
 //
-// Only closing branches are redirected. Any other reference to a block (a
-// branch inside a block, an unwind target, a resume entry, the entry) keeps
-// the block.
+// Branches are redirected, a block's closing ones and one inside it alike
+// (`jcc head; <the other edge's copies>; jmp slow` is what register
+// allocation makes of a latch whose poll edge needs copies, and its `jcc`
+// is the loop's back edge). Any other reference to a block (an unwind
+// target, a resume entry, the entry) keeps the block.
 class BranchThreading {
 public:
     explicit BranchThreading(const LirFunction& fn);

@@ -782,3 +782,31 @@ TEST_CASE("Linear Scan - eviction split before a hot join never rewinds scan cur
     CHECK_EQ(compiled(3, vals), sum1 * 3.0);
     CHECK_EQ(compiled(-1, vals), sum1);
 }
+
+TEST_CASE("x64 - a 32-bit load widened to 64 bits has a clear upper half, in a register or a slot") {
+    // Twenty i32 loads all live at once (some in slots), each widened: the
+    // widening is a 64-bit copy of what the load left, which must be the
+    // 32 bits and nothing of the word beside them.
+    std::string src = "module @zl\n\nfunc @zl(%p: ptr) -> i64 {\nentry:\n";
+    const int n = 20;
+    for (int i = 0; i < n; ++i) {
+        src += "  %l" + std::to_string(i) + " = load.i32 %p, " + std::to_string(4 * i) + "\n";
+    }
+    src += "  %s0 = iconst.i64 0\n";
+    for (int i = 0; i < n; ++i) {
+        src += "  %z" + std::to_string(i) + " = zext_i64 %l" + std::to_string(i) + "\n";
+        src += "  %s" + std::to_string(i + 1) + " = add.i64 %s" + std::to_string(i) + ", %z" + std::to_string(i) + "\n";
+    }
+    src += "  ret %s" + std::to_string(n) + "\n}\n";
+    auto mod = parse_module(src.c_str());
+    REQUIRE(mod != nullptr);
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<int64_t (*)(const uint32_t*)>("zl");
+    REQUIRE(fn != nullptr);
+    uint32_t words[n + 1];
+    int64_t want = 0;
+    for (int i = 0; i <= n; ++i) words[i] = 0xFFFFFFF0u + static_cast<uint32_t>(i % 16);
+    for (int i = 0; i < n; ++i) want += static_cast<int64_t>(words[i]);
+    CHECK_EQ(fn(words), want);
+}

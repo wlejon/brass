@@ -120,6 +120,8 @@ private:
     std::vector<BranchSite> sites_;        // this emission's branches, by ordinal
     std::vector<uint8_t> block_cold_;      // by block id: LirBlock::cold
     bool emitting_cold_ = false;           // the block being emitted is cold
+    // Where a branch to a block goes while blocks are emitted (emit()).
+    const class BranchThreading* threading_ = nullptr;
     std::vector<uint32_t> relay_to_;       // the plan emitted: ordinal -> hub ordinal, or UINT32_MAX
     std::vector<x64::Label> hub_labels_;   // by ordinal, valid where a branch relays onto it
 

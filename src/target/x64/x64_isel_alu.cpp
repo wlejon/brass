@@ -205,6 +205,18 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
                 lir_inst->add_use(LirOperand::vreg(src, 1));
                 lir_inst->mir_origin = &inst;
                 lir_bb.append_inst(std::move(lir_inst));
+            } else if (const Instruction* def = inst.operand(0)->defining_instruction();
+                       def && (def->opcode() == Opcode::load || def->opcode() == Opcode::load_indexed) &&
+                       inst.operand(0)->type() == Type::i32() && !skipped_insts_.count(def)) {
+                // A 32-bit load into a register already cleared the upper
+                // half (lower_load's Mov32), and a spilled definition stores
+                // all eight bytes (linear_scan_rewrite.cpp), so the extension
+                // is a copy the allocator can coalesce away.
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov);
+                lir_inst->add_def(LirOperand::vreg(dst, 8));
+                lir_inst->add_use(LirOperand::vreg(src, 8));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
             } else {
                 auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
                 lir_inst->add_def(LirOperand::vreg(dst, 4));
