@@ -82,6 +82,24 @@ void AArch64ISel::lower_landing_pad(const Instruction& inst, LirBlock& lir_bb) {
 void AArch64ISel::lower_invoke(const Instruction& inst, LirBlock& lir_bb) {
     lir_fn_->frame.has_calls = true;
 
+    // The landing pad's parameters take their values before the call: the
+    // unwinder enters the pad from inside it, where no copy can run, and
+    // each parameter then waits in the one place the pad reads it from (a
+    // pad's live-ins are never split). A resume twin's pad has parameters:
+    // a value it reads reaches it from each resume entry.
+    if (const auto& unwind = inst.unwind_target(); unwind.block && !unwind.args.empty()) {
+        auto pcopy = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        for (size_t i = 0; i < unwind.args.size(); ++i) {
+            VReg arg_v = get_vreg(unwind.args[i]);
+            VReg param_v = get_vreg(unwind.block->param(i));
+            if (arg_v == param_v) continue;
+            pcopy->add_def(LirOperand::vreg(param_v, param_v.size));
+            pcopy->add_use(LirOperand::vreg(arg_v, param_v.size));
+        }
+        pcopy->mir_origin = &inst;
+        if (!pcopy->defs.empty()) lir_bb.append_inst(std::move(pcopy));
+    }
+
     size_t num_args = inst.operand_count();
     auto call_lir = std::make_unique<LirInst>(LirOpcode::Call);
     call_lir->callee_symbol = std::string(inst.symbol());
