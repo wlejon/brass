@@ -329,6 +329,7 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
         for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
             if (inst && inst->result() && ref_slots.count(inst->result())) {
                 fail(why, "a gcref state value's slot could not be turned back into a value");
+                dst.remove_function(out);
                 return nullptr;
             }
         }
@@ -336,6 +337,7 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
     DiagnosticReporter diag;
     if (!verify_function(*out, &diag)) {
         fail(why, "the resume twin does not verify:\n" + diag.format_all());
+        dst.remove_function(out);
         return nullptr;
     }
     return out;

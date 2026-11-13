@@ -765,6 +765,8 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
         bool fixed = false;
         for (const UsePosition& u : p.base->use_positions) {
             if (u.fixed_reg.is_valid()) fixed = true;
+            // A guard's state reads the value wherever it is.
+            if (!u.is_def && !u.requires_reg) continue;
             w += static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(liveness_.get_loop_depth_at(u.inst_id), 6)));
         }
         if (fixed || w < kPreassignWeight) continue;

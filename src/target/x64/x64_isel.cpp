@@ -279,40 +279,48 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 continue;
             }
 
-            if (inst->opcode() == Opcode::br_if) {
-                // What append_fused_compare folds of a comparison it emits
-                // for this branch: a constant operand, or a load.
-                auto count_compare_folds = [&](const Instruction* def_inst) {
-                    // Counted once for all its users above, and never with a
-                    // load folded in (find_remat_compares).
-                    if (remat_cmps_.count(def_inst)) return;
-                    const Value* lhs = def_inst->operand(0);
-                    const Value* rhs = def_inst->operand(1);
-                    ImmIntInfo rhs_imm = get_imm_int_info(rhs);
-                    ImmIntInfo lhs_imm = get_imm_int_info(lhs);
+            // What append_fused_compare folds of a comparison it emits
+            // for this branch or guard: a constant operand, or a load.
+            auto count_compare_folds = [&](const Instruction* def_inst) {
+                // Counted once for all its users above, and never with a
+                // load folded in (find_remat_compares).
+                if (remat_cmps_.count(def_inst)) return;
+                const Value* lhs = def_inst->operand(0);
+                const Value* rhs = def_inst->operand(1);
+                ImmIntInfo rhs_imm = get_imm_int_info(rhs);
+                ImmIntInfo lhs_imm = get_imm_int_info(lhs);
 
-                    // A comparison with zero, equality or relational, is a
-                    // `test` of the register (append_fused_compare), which
-                    // reads no memory operand: its other side keeps its load
-                    // and its register. (An and-chain's bounds check of a
-                    // constant index 0, `ult 0, length`, is this shape.)
-                    const bool tests_zero =
-                        (rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0);
-                    if (rhs_imm.is_imm && rhs_imm.fits_i32) {
-                        folded_uses[rhs]++;
-                        if (!tests_zero && fuses_compare_imm_load(lhs, inst)) {
-                            skipped_insts_.insert(lhs->defining_instruction());
-                        }
-                    } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
-                        folded_uses[lhs]++;
-                        if (!tests_zero && fuses_compare_imm_load(rhs, inst)) {
-                            skipped_insts_.insert(rhs->defining_instruction());
-                        }
-                    } else if (!lhs->type().is_float() && rhs && rhs->is_instruction() &&
-                               can_fuse_load(rhs->defining_instruction(), inst)) {
+                // A comparison with zero, equality or relational, is a
+                // `test` of the register (append_fused_compare), which
+                // reads no memory operand: its other side keeps its load
+                // and its register. (An and-chain's bounds check of a
+                // constant index 0, `ult 0, length`, is this shape.)
+                const bool tests_zero =
+                    (rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0);
+                if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+                    folded_uses[rhs]++;
+                    if (!tests_zero && fuses_compare_imm_load(lhs, inst)) {
+                        skipped_insts_.insert(lhs->defining_instruction());
+                    }
+                } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
+                    folded_uses[lhs]++;
+                    if (!tests_zero && fuses_compare_imm_load(rhs, inst)) {
                         skipped_insts_.insert(rhs->defining_instruction());
                     }
-                };
+                } else if (!lhs->type().is_float() && rhs && rhs->is_instruction() &&
+                           can_fuse_load(rhs->defining_instruction(), inst)) {
+                    skipped_insts_.insert(rhs->defining_instruction());
+                }
+            };
+            if (inst->opcode() == Opcode::guard) {
+                const Value* cond = inst->operand(0);
+                const Instruction* def_inst = cond && cond->is_instruction() ? cond->defining_instruction() : nullptr;
+                if (fused_into(def_inst, *inst)) {
+                    count_compare_folds(def_inst);
+                    continue;
+                }
+            }
+            if (inst->opcode() == Opcode::br_if) {
                 if (auto peeled = peeled_branches_.find(inst); peeled != peeled_branches_.end()) {
                     count_peeled_folds(peeled->second, folded_uses);
                     if (!peeled->second.parity) count_compare_folds(peeled->second.cmp);

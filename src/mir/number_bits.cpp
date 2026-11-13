@@ -92,6 +92,14 @@ bool Facts::holds(const Value* v, const Value* ordered, unsigned depth) {
             }
             return holds(d->operand(0), ordered, depth + 1) || holds(d->operand(1), ordered, depth + 1);
         }
+        case Opcode::bitcast_i64_tagged: {
+            // A number's bits read back from the tagged value they were made
+            // into: no collection moves a number.
+            const Value* t = d->operand(0);
+            const Instruction* made = t && t->is_instruction() ? t->defining_instruction() : nullptr;
+            if (!made || made->opcode() != Opcode::bitcast_tagged_i64) return false;
+            return holds(made->operand(0), ordered, depth + 1);
+        }
         case Opcode::lshr: {
             uint64_t s = 0;
             return const_bits(d->operand(1), s) && (s & 63) != 0;

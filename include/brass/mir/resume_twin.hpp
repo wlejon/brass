@@ -58,7 +58,7 @@ struct ResumeTwinOptions {
 // twin gets an entry for each resume point of `fn` that a guard without an
 // exit stub names. Null (with `why`) when `fn` has none, is a coroutine
 // body, has a guard state the twin cannot carry (a vector), or the result
-// does not verify.
+// does not verify; `dst` is then as it was.
 Function* build_resume_twin(const Function& fn, Module& dst, std::string_view name,
                             const ResumeTwinOptions& options = {}, std::string* why = nullptr);
 

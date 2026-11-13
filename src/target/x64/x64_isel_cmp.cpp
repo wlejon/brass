@@ -83,8 +83,8 @@ void X64ISel::append_fused_float_compare(const Instruction& cmp, LirBlock& lir_b
 // test, cmovne where one cmovb would do). Flags never live across blocks, so
 // the comparison is worth more as two cmp instructions than as one register.
 //
-// A comparison qualifies when EVERY use of it is the condition of a br_if or
-// select, or a leaf of an and-chain (x64_isel_and_chain.cpp). Each such user
+// A comparison qualifies when EVERY use of it is the condition of a br_if,
+// select or guard, or a leaf of an and-chain (x64_isel_and_chain.cpp). Each such user
 // then emits the comparison itself, exactly as a single-use same-block one
 // already is emitted at its user. It reads the same two SSA operands, which
 // dominate every user because the comparison does, so it computes the same
@@ -105,7 +105,7 @@ void X64ISel::find_remat_compares(const Function& mir_fn) {
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
             const Opcode op = inst->opcode();
-            if (op != Opcode::br_if && op != Opcode::select) continue;
+            if (op != Opcode::br_if && op != Opcode::select && op != Opcode::guard) continue;
             if (op == Opcode::br_if && and_chains_.count(inst)) continue;
             const Value* cond = inst->operand(0);
             if (cond && cond->is_instruction()) ++consumer_uses[cond];

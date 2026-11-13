@@ -162,16 +162,18 @@ public:
             size_t facts;
             size_t loads;
             size_t exprs;
+            size_t known;
         };
         std::vector<Marks> marks;
         walk_dominator_tree(
             dom_, fn_.entry_block(),
             [&](const BasicBlock* bb) {
-                marks.push_back({facts_.size(), dom_loads_.size(), dom_exprs_.size()});
+                marks.push_back({facts_.size(), dom_loads_.size(), dom_exprs_.size(), known_.size()});
                 visit(const_cast<BasicBlock*>(bb));
             },
             [&](const BasicBlock*) {
                 facts_.resize(marks.back().facts);
+                known_.resize(marks.back().known);
                 truncate_loads(marks.back().loads);
                 truncate_exprs(marks.back().exprs);
                 marks.pop_back();
@@ -343,10 +345,22 @@ public:
 
 private:
 
-    void collect_edge_facts(const Value* cond, bool on_true, const BasicBlock* bb) {
+    // A condition a dominating edge or guard decided: `value` is `holds`
+    // there, `tested` being the operand of that branch or guard.
+    struct Known {
+        const Value* value;
+        const Value* tested;
+        bool holds;
+    };
+
+    void collect_edge_facts(const Value* cond, bool on_true, const BasicBlock* bb, const Value* tested = nullptr) {
         if (!cond || !cond->is_instruction()) return;
         const Instruction* def = cond->defining_instruction();
         if (!def) return;
+        // The condition itself, whatever it is: a value read again where this
+        // edge or guard dominates (a guard on `and(a, b)` after one on each).
+        if (!tested) tested = cond;
+        known_.push_back(Known{cond, tested, on_true});
         if (const Instruction* cmp = as_int_comparison(cond)) {
             Opcode op = on_true ? cmp->opcode() : invert_comparison_opcode(cmp->opcode());
             const Value* lhs = canonicalize(cmp->operand(0), bb);
@@ -355,11 +369,11 @@ private:
             return;
         }
         if (def->opcode() == Opcode::and_ && on_true && is_bool_expr(cond)) {
-            collect_edge_facts(def->operand(0), true, bb);
-            collect_edge_facts(def->operand(1), true, bb);
+            collect_edge_facts(def->operand(0), true, bb, tested);
+            collect_edge_facts(def->operand(1), true, bb, tested);
         } else if (def->opcode() == Opcode::or_ && !on_true) {
-            collect_edge_facts(def->operand(0), false, bb);
-            collect_edge_facts(def->operand(1), false, bb);
+            collect_edge_facts(def->operand(0), false, bb, tested);
+            collect_edge_facts(def->operand(1), false, bb, tested);
         }
     }
 
@@ -566,10 +580,29 @@ private:
                 const Value* c1 = cur->operand_count() >= 2 ? canonicalize(cur->operand(1), bb) : nullptr;
                 push_expr({cur->opcode(), cur->type(), c0, c1, cur->imm_i64(), cur->result()});
             } else if (cur->opcode() == Opcode::guard) {
+                // A guard on a condition a dominating one already tested
+                // tests nothing (it goes with the constant guards below).
+                if (const Known* k = known_value(cur->operand(0)); k && k->holds) {
+                    Builder b(mod_);
+                    b.set_function(&fn_);
+                    b.position_before(cur);
+                    Value* folded = b.build_iconst_i32(1);
+                    GuardElimCert cert;
+                    cert.reason = GuardElimCert::Reason::DominatedSameCond;
+                    const Instruction* def = cur->operand(0)->defining_instruction();
+                    cert.check_op = def ? def->opcode() : Opcode::eq;
+                    cert.witness_inst_or_val_id = k->tested->id();
+                    pending_certs_[folded] = cert;
+                    cur->set_operand(0, folded);
+                    if (opts_.stats) opts_.stats->checks_implied++;
+                    changed_ = true;
+                    continue;
+                }
                 collect_edge_facts(cur->operand(0), true, bb);
                 continue;
             }
 
+            if (fold_known_bool(cur)) continue;
             if (facts_.empty()) continue;
             const Instruction* cmp = as_int_comparison(cur->result());
             if (!cmp) continue;
@@ -593,6 +626,52 @@ private:
         }
     }
 
+    // What a dominating edge or guard says of `v`, a condition it tested.
+    const Known* known_value(const Value* v) const {
+        for (auto it = known_.rbegin(); it != known_.rend(); ++it) {
+            if (it->value == v) return &*it;
+        }
+        return nullptr;
+    }
+
+    // `and` / `or` of conditions the dominating edges and guards decided:
+    // a region guard on `and(a, b)` behind a guard on `a` and one on `b`
+    // tests nothing, and with its operands read twice neither comparison
+    // fused into its own guard.
+    bool fold_known_bool(Instruction* cur) {
+        if (known_.empty() || cur->operand_count() != 2 || !cur->produces_value()) return false;
+        const Opcode op = cur->opcode();
+        if ((op != Opcode::and_ && op != Opcode::or_) || cur->type() != Type::i32() || !is_bool_expr(cur->result())) return false;
+        const Known* ka = known_value(cur->operand(0));
+        const Known* kb = known_value(cur->operand(1));
+        const bool a_true = ka && ka->holds, a_false = ka && !ka->holds;
+        const bool b_true = kb && kb->holds, b_false = kb && !kb->holds;
+        std::optional<bool> out;
+        if (op == Opcode::and_) {
+            if (a_true && b_true) out = true;
+            else if (a_false || b_false) out = false;
+        } else {
+            if (a_true || b_true) out = true;
+            else if (a_false && b_false) out = false;
+        }
+        if (!out) return false;
+        Builder bld(mod_);
+        bld.set_function(&fn_);
+        bld.position_before(cur);
+        Value* folded = bld.build_iconst_i32(*out ? 1 : 0);
+        if (*out) {
+            GuardElimCert cert;
+            cert.reason = GuardElimCert::Reason::DominatedSameCond;
+            cert.check_op = op;
+            cert.witness_inst_or_val_id = (a_true ? ka : kb)->tested->id();
+            pending_certs_[folded] = cert;
+        }
+        replace_all_uses(fn_, cur->result(), folded);
+        if (opts_.stats) opts_.stats->checks_implied++;
+        changed_ = true;
+        return true;
+    }
+
     Function& fn_;
     Module& mod_;
     const DominatorTree& dom_;
@@ -602,6 +681,7 @@ private:
     const RangeAnalysisOptions& opts_;
     std::unordered_map<const Value*, GuardElimCert>& pending_certs_;
     std::vector<Fact> facts_;
+    std::vector<Known> known_;
     std::vector<const Instruction*> dom_loads_;
     std::vector<DomExpr> dom_exprs_;
     bool changed_ = false;

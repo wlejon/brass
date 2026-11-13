@@ -8,38 +8,6 @@ namespace brass::x64 {
 
 using namespace brass::codegen;
 
-static constexpr std::pair<Condition, Condition> get_comparison_conditions(Opcode op) noexcept {
-    switch (op) {
-        case Opcode::eq:  return {Condition::E, Condition::E};
-        case Opcode::ne:  return {Condition::NE, Condition::NE};
-        case Opcode::slt: return {Condition::L, Condition::B};
-        case Opcode::ult: return {Condition::B, Condition::B};
-        case Opcode::sle: return {Condition::LE, Condition::BE};
-        case Opcode::ule: return {Condition::BE, Condition::BE};
-        case Opcode::sgt: return {Condition::G, Condition::A};
-        case Opcode::ugt: return {Condition::A, Condition::A};
-        case Opcode::sge: return {Condition::GE, Condition::AE};
-        case Opcode::uge: return {Condition::AE, Condition::AE};
-        default: return {Condition::E, Condition::E};
-    }
-}
-
-static constexpr Condition swap_relational_condition(Condition cond) noexcept {
-    switch (cond) {
-        case Condition::E:   return Condition::E;
-        case Condition::NE:  return Condition::NE;
-        case Condition::L:   return Condition::G;
-        case Condition::LE:  return Condition::GE;
-        case Condition::G:   return Condition::L;
-        case Condition::GE:  return Condition::LE;
-        case Condition::B:   return Condition::A;
-        case Condition::BE:  return Condition::AE;
-        case Condition::A:   return Condition::B;
-        case Condition::AE:  return Condition::BE;
-        default: return cond;
-    }
-}
-
 void X64ISel::finish_call(LirInst& call, Type ret_t) const {
     call.clobbered_gprs = cc_.caller_saved_gpr_mask();
     call.clobbered_xmms = cc_.caller_saved_xmm_mask();
@@ -239,94 +207,13 @@ void X64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
 void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     const Value* cond_val = inst.operand(0);
     const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
-    // Only a comparison the analysis folded into this guard is recomputed.
-    bool is_fused_cmp = cmp_inst && cmp_inst->parent() == inst.parent() && is_comparison(cmp_inst->opcode()) &&
-                        skipped_insts_.count(cmp_inst);
-
+    // A comparison the analysis folded into this guard is emitted here, with
+    // what it folds (a constant, a load), as a branch's is; the guard leaves
+    // when it does not hold (a float one also when its operands are
+    // unordered).
     Condition deopt_cond = Condition::E;
-
-    if (is_fused_cmp) {
-        Opcode cmp_op = cmp_inst->opcode();
-        const Condition gpr_c = get_comparison_conditions(cmp_op).first;
-        const Value* lhs = cmp_inst->operand(0);
-        const Value* rhs = cmp_inst->operand(1);
-
-        if (lhs->type().is_float()) {
-            // Unordered operands make the comparison false: deoptimize.
-            Condition holds = Condition::None;
-            append_fused_float_compare(*cmp_inst, lir_bb, holds);
-            deopt_cond = invert(holds);
-        } else {
-            uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
-            if (sz == 0) sz = 8;
-            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
-            LirOpcode test_lir_op = (sz == 4) ? LirOpcode::Test32 : LirOpcode::Test;
-
-            ImmIntInfo rhs_imm = get_imm_int_info(rhs);
-            ImmIntInfo lhs_imm = get_imm_int_info(lhs);
-
-            if ((cmp_op == Opcode::eq || cmp_op == Opcode::ne) && ((rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0))) {
-                const Value* non_zero = (rhs_imm.is_imm && rhs_imm.val == 0) ? lhs : rhs;
-                if (non_zero->is_instruction() && skipped_insts_.count(non_zero->defining_instruction()) && non_zero->defining_instruction()->opcode() == Opcode::and_) {
-                    const Instruction* and_inst = non_zero->defining_instruction();
-                    const Value* a = and_inst->operand(0);
-                    const Value* b = and_inst->operand(1);
-                    ImmIntInfo imm_b = get_imm_int_info(b);
-                    ImmIntInfo imm_a = get_imm_int_info(a);
-
-                    auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                    if (imm_b.is_imm && imm_b.fits_i32) {
-                        test_lir->add_use(LirOperand::vreg(get_vreg(a), sz));
-                        test_lir->add_use(LirOperand::imm(imm_b.val, sz));
-                    } else if (imm_a.is_imm && imm_a.fits_i32) {
-                        test_lir->add_use(LirOperand::vreg(get_vreg(b), sz));
-                        test_lir->add_use(LirOperand::imm(imm_a.val, sz));
-                    } else {
-                        test_lir->add_use(LirOperand::vreg(get_vreg(a), sz));
-                        test_lir->add_use(LirOperand::vreg(get_vreg(b), sz));
-                    }
-                    lir_bb.append_inst(std::move(test_lir));
-                    deopt_cond = (cmp_op == Opcode::eq) ? Condition::NE : Condition::E;
-                } else {
-                    auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                    VReg reg = get_vreg(non_zero);
-                    test_lir->add_use(LirOperand::vreg(reg, sz));
-                    test_lir->add_use(LirOperand::vreg(reg, sz));
-                    lir_bb.append_inst(std::move(test_lir));
-                    deopt_cond = invert((rhs_imm.is_imm && rhs_imm.val == 0) ? gpr_c : swap_relational_condition(gpr_c));
-                }
-            } else if (rhs_imm.is_imm && rhs_imm.val == 0) {
-                auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                test_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                test_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                lir_bb.append_inst(std::move(test_lir));
-                deopt_cond = invert(gpr_c);
-            } else if (lhs_imm.is_imm && lhs_imm.val == 0) {
-                auto test_lir = std::make_unique<LirInst>(test_lir_op);
-                test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                lir_bb.append_inst(std::move(test_lir));
-                deopt_cond = invert(swap_relational_condition(gpr_c));
-            } else if (rhs_imm.is_imm && rhs_imm.fits_i32) {
-                deopt_cond = invert(gpr_c);
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                cmp_lir->add_use(LirOperand::imm(rhs_imm.val, sz));
-                lir_bb.append_inst(std::move(cmp_lir));
-            } else if (lhs_imm.is_imm && lhs_imm.fits_i32) {
-                deopt_cond = invert(swap_relational_condition(gpr_c));
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                cmp_lir->add_use(LirOperand::imm(lhs_imm.val, sz));
-                lir_bb.append_inst(std::move(cmp_lir));
-            } else {
-                deopt_cond = invert(gpr_c);
-                auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(lhs), sz));
-                cmp_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
-                lir_bb.append_inst(std::move(cmp_lir));
-            }
-        }
+    if (fused_into(cmp_inst, inst)) {
+        deopt_cond = invert(append_fused_compare(*cmp_inst, inst, lir_bb));
     } else {
         VReg cond = get_vreg(cond_val);
         uint8_t sz = cond.size;
@@ -334,7 +221,6 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
         test_inst->add_use(LirOperand::vreg(cond, sz));
         test_inst->add_use(LirOperand::vreg(cond, sz));
         lir_bb.append_inst(std::move(test_inst));
-        deopt_cond = Condition::E;
     }
 
     auto* deopt_block = lir_fn_->create_block("guard_deopt");

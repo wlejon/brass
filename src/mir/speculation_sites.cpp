@@ -98,7 +98,8 @@ size_t SpecFeedback::size() const {
 
 void SpecSiteEmitter::begin_function(bool can_deopt, std::string_view name) {
     fn_name_ = name;
-    can_deopt_ = can_deopt && feedback_ != nullptr;
+    can_deopt_ = can_deopt && (feedback_ != nullptr || image_sites_);
+    next_image_site_ = 0;
     pending_.clear();
 }
 
@@ -176,6 +177,44 @@ void SpecSiteEmitter::emit_branch(Builder& b, Value* hit, BasicBlock* fast, Basi
     }
 }
 
+namespace {
+// Whether `v` is 0 or 1.
+bool is_boolean(const Value* v, int depth = 0) {
+    const Instruction* def = v && v->is_instruction() && depth <= 8 ? v->defining_instruction() : nullptr;
+    if (!def) return false;
+    if (is_comparison(def->opcode())) return true;
+    if (def->opcode() != Opcode::and_ && def->opcode() != Opcode::or_) return false;
+    return is_boolean(def->operand(0), depth + 1) && is_boolean(def->operand(1), depth + 1);
+}
+
+}  // namespace
+
+void SpecSiteEmitter::emit_image_site(Builder& b, Value* hit, BasicBlock* fast, BasicBlock* slow,
+                                      Span<Value* const> fast_args) {
+    // `and(x, y)` is a site on `x` and then one on `y`, both resuming at
+    // `slow`: armed, each comparison folds into its own guard's jump (a
+    // guard's exit is entered by one jump, where a branch on such an `and`
+    // is a chain of them, isel's and-chains), and a later test of `x` alone
+    // is known to pass.
+    const Instruction* def = hit && hit->is_instruction() ? hit->defining_instruction() : nullptr;
+    if (def && def->opcode() == Opcode::and_ && is_boolean(hit)) {
+        BasicBlock* first = b.current_block();
+        BasicBlock* second = b.append_block("site_and_" + std::to_string(next_image_site_));
+        b.position_at_end(first);
+        emit_image_site(b, def->operand(0), second, slow, Span<Value* const>());
+        b.position_at_end(second);
+        emit_image_site(b, def->operand(1), fast, slow, fast_args);
+        b.position_at_end(first);
+        return;
+    }
+    Instruction* guard = b.build_guard(b.build_iconst_i32(1), "brass.spec");
+    const uint32_t site = next_image_site_++;
+    guard->set_resume_id(site);
+    b.current_block()->parent()->add_resume_point(site, slow);
+    pending_.push_back({guard, slow});
+    b.build_br_if(hit, fast, fast_args, slow, Span<Value* const>());
+}
+
 void SpecSiteEmitter::finish_function(Function& fn) {
     if (pending_.empty()) return;
     std::vector<const BasicBlock*> targets;
@@ -216,6 +255,56 @@ void mark_cold(Module& mod, BasicBlock& bb) {
 }
 
 } // namespace
+
+namespace {
+
+// The site-form guards of `fn`: a guard on the constant 1 that resumes in
+// fn's table, directly in front of its site's br_if.
+std::vector<Instruction*> image_site_guards(Function& fn) {
+    std::vector<Instruction*> guards;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        Instruction* last = bb->tail();
+        Instruction* guard = last ? last->prev() : nullptr;
+        if (!guard || guard->opcode() != Opcode::guard || last->opcode() != Opcode::br_if) continue;
+        if (fn.guard_exit_stub(*guard) || !fn.get_resume_target(guard->resume_id())) continue;
+        const Instruction* def = guard->operand(0) ? guard->operand(0)->defining_instruction() : nullptr;
+        if (!def || def->opcode() != Opcode::iconst_i32 || def->imm_i32() != 1) continue;
+        guards.push_back(guard);
+    }
+    return guards;
+}
+
+void prune_pinned_branches(Function& fn) {
+    CfgSimplifyOptions prune;
+    prune.enable_block_merge = false;
+    prune.enable_param_elimination = false;
+    prune.enable_trampoline_elimination = false;
+    prune.max_iterations = 2;
+    cfg_simplify_function(fn, prune);
+}
+
+} // namespace
+
+uint32_t arm_image_sites(Function& fn) {
+    const std::vector<Instruction*> guards = image_site_guards(fn);
+    for (Instruction* guard : guards) {
+        Instruction* br = guard->next();
+        Value* placeholder = guard->operand(0);
+        guard->set_operand(0, br->operand(0));
+        br->set_operand(0, placeholder);
+        fn.remove_resume_point(guard->resume_id());
+    }
+    if (!guards.empty()) prune_pinned_branches(fn);
+    return static_cast<uint32_t>(guards.size());
+}
+
+void drop_image_sites(Function& fn) {
+    for (Instruction* guard : image_site_guards(fn)) {
+        fn.remove_resume_point(guard->resume_id());
+        guard->parent()->remove_instruction(guard);
+    }
+}
 
 void arm_speculation_sites(Module& mod, const SpecFeedback& feedback, const ArmSpeculationOptions& options) {
     const size_t sites = feedback.size();
@@ -260,17 +349,10 @@ void arm_speculation_sites(Module& mod, const SpecFeedback& feedback, const ArmS
             }
         }
         for (uint32_t site : seen) fn->remove_resume_point(site);
-        if (armed != 0) {
-            // A pinned branch leaves its slow side unreachable. Dropped here,
-            // before the tier-2 passes, so inlining, GVN and GVN-PRE never
-            // walk it.
-            CfgSimplifyOptions prune;
-            prune.enable_block_merge = false;
-            prune.enable_param_elimination = false;
-            prune.enable_trampoline_elimination = false;
-            prune.max_iterations = 2;
-            cfg_simplify_function(*fn, prune);
-        }
+        // A pinned branch leaves its slow side unreachable. Dropped here,
+        // before the tier-2 passes, so inlining, GVN and GVN-PRE never walk
+        // it.
+        if (armed != 0) prune_pinned_branches(*fn);
         if (options.after_function) options.after_function(*fn);
         if (options.trace && !seen.empty()) {
             std::fprintf(stderr, "spec: %.*s armed %u of %zu\n", static_cast<int>(fn->name().size()),

@@ -25,6 +25,7 @@
 // Kinds are the front end's: a small number naming what a site tests, which
 // its policy reads with the site's count to decide whether to arm it.
 
+#include <brass/core/span.hpp>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -118,9 +119,17 @@ public:
     void set_feedback(SpecFeedback* feedback) { feedback_ = feedback; }
     SpecFeedback* feedback() const noexcept { return feedback_; }
     [[nodiscard]] bool has_feedback() const noexcept { return feedback_ != nullptr; }
+    // A lowering for an image, whose guards will exit into resume twins
+    // (resume_twin.hpp): there is no feedback and nothing is counted, a
+    // function's sites are numbered from 0, and the front end emits a site
+    // (emit_image_site) only where it means the guard to be armed.
+    void set_image_sites(bool on) noexcept { image_sites_ = on; }
+    [[nodiscard]] bool image_sites() const noexcept { return image_sites_; }
+    // Whether the function being lowered takes guards.
+    [[nodiscard]] bool can_deopt() const noexcept { return can_deopt_; }
 
-    // Starts a function `name`; `can_deopt` false (or no feedback) lowers
-    // every site as its branch, with its count.
+    // Starts a function `name`; `can_deopt` false (or neither feedback nor
+    // image sites) lowers every site as its branch, with its count.
     void begin_function(bool can_deopt, std::string_view name = {});
     // A body built again must be the body its code was compiled from: its
     // sites are the ones its first build added, ids and counters alike, not
@@ -145,6 +154,14 @@ public:
     // calls anyway to increment.
     void emit_branch(Builder& b, Value* hit, BasicBlock* fast, BasicBlock* slow, uint8_t kind,
                      std::string_view tag = {}, Value** counter_out = nullptr);
+    // An image's site (set_image_sites, in a function that can deopt): the
+    // guard and `br_if %hit, fast(fast_args), slow`, nothing counted. The
+    // builder stays in the block it was in, which the site ends; `slow`
+    // takes no parameters, and several sites may share it (the tests of one
+    // operation that all leave to its generic code). A hit that is an `and`
+    // of conditions is one site per condition, each in a block of its own.
+    void emit_image_site(Builder& b, Value* hit, BasicBlock* fast, BasicBlock* slow,
+                         Span<Value* const> fast_args = {});
     // Gives each guard of the function its state: the values live into its
     // resume block. Run once the function's CFG is final.
     void finish_function(Function& fn);
@@ -158,6 +175,8 @@ private:
     uint32_t take_site(uint8_t kind, std::string_view tag);
 
     SpecFeedback* feedback_ = nullptr;
+    bool image_sites_ = false;
+    uint32_t next_image_site_ = 0;
     bool can_deopt_ = false;
     bool replaying_ = false;
     bool replay_ok_ = true;
@@ -190,5 +209,15 @@ struct ArmSpeculationOptions {
 // guard of `mod`'s functions that the feedback says to, drops the others,
 // and prunes the slow paths the armed sites leave unreachable.
 void arm_speculation_sites(Module& mod, const SpecFeedback& feedback, const ArmSpeculationOptions& options = {});
+
+// An image's function (SpecSiteEmitter::set_image_sites), once its resume
+// twin is built from it: arms every site guard, which pins each site's branch
+// to its fast side, and drops the resume points; speculate_against_twin then
+// points the guards at the twin. Returns the number armed.
+uint32_t arm_image_sites(Function& fn);
+// The same function without its speculation: every site guard and resume
+// point removed, the branches kept. For a function no twin could be built
+// for.
+void drop_image_sites(Function& fn);
 
 } // namespace brass

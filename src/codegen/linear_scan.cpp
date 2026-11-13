@@ -563,8 +563,16 @@ void LinearScanAllocator::allocate() {
     for (VReg v : mem_index_vregs_) {
         if (v.id < num_vregs) is_mem_index_[v.id] = 1;
     }
+    // A GC reference live across a GC point has one location for its whole
+    // life, the slot the stack map names (run_scan). One that crosses none is
+    // in no stack map and is split like any other value: a guard's state
+    // keeps the boxed operands of a function's fast paths live to its last
+    // guard, and held whole each kept the register its one read was given.
     for (size_t id = 0; id < num_vregs; ++id) {
-        if (fn_.vreg_table[id].vreg.is_gcref) unsplittable_[id] = 1;
+        const VReg v = fn_.vreg_table[id].vreg;
+        if (!v.is_gcref) continue;
+        const LiveInterval* iv = liveness_.get_interval(v);
+        if (iv == nullptr || iv->spans_call) unsplittable_[id] = 1;
     }
     mark_folded_uses();
     whole_life_cost_.assign(num_vregs, 0.0);
