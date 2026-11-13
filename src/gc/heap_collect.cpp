@@ -509,11 +509,7 @@ void full_reclaim(GcState& g, PhaseClock& clock) {
     clock.lap(kPhaseSweep);
 }
 
-void visit_roots(HeapState& s, Tracer& t) {
-    // Gathered before any root is visited: append_active_coro_roots reads
-    // each registered frame's is_done, and once a frame has been evacuated
-    // its old copy holds the forwarding address there instead.
-    std::vector<uintptr_t*> slots;
+void append_frame_roots(const HeapState& s, std::vector<uintptr_t*>& slots) {
     // The recorded runs of native frames cover the stack from the innermost
     // one that starts at a generated frame to the base; the walk from the
     // collection's own frame stops there rather than visit those frames
@@ -528,6 +524,14 @@ void visit_roots(HeapState& s, Tracer& t) {
     // The thread's other stacks (gc::Fiber): each suspended fiber, and each
     // stack waiting on a fiber it resumed, from where it switched away.
     brass_append_switched_stack_roots(slots);
+}
+
+void visit_roots(HeapState& s, Tracer& t) {
+    // Gathered before any root is visited: append_active_coro_roots reads
+    // each registered frame's is_done, and once a frame has been evacuated
+    // its old copy holds the forwarding address there instead.
+    std::vector<uintptr_t*> slots;
+    append_frame_roots(s, slots);
     // The registry's slots hold raw frame addresses, references on any heap.
     std::vector<uintptr_t*> frame_slots;
     if (s.coro_frames) runtime::append_active_coro_roots(*s.coro_frames, frame_slots);

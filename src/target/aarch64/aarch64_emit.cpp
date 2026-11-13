@@ -259,6 +259,11 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
     result.stack_map.function_name = fn_.name;
     result.stack_map.code_size = static_cast<uint32_t>(result.code_buffer.size());
     result.stack_map.records = std::move(stack_map_records_);
+    // The spill slots run up from just above the save area, and the locals
+    // (the allocas) lie above them (AArch64FrameLayout).
+    result.stack_map.slot_area_lo = static_cast<int32_t>(AArch64FrameLayout::spill_slot_address(0, frame_).offset);
+    result.stack_map.slot_area_hi = static_cast<int32_t>(
+        AArch64FrameLayout::local_frame_address(static_cast<int32_t>(frame_.local_frame_bytes), frame_).offset);
     result.entry_offset = 0;
     result.debug_table.set_function_name(std::string(fn_.name));
     result.debug_table.set_code_size(static_cast<uint32_t>(result.code_buffer.size()));

@@ -106,6 +106,23 @@ bool ip_in_image(uintptr_t ip) noexcept { return brass_ip_in_image(ip); }
 
 size_t brass_stack_walk_unwind_steps() noexcept { return t_unwind_steps; }
 
+namespace {
+thread_local StackFrameObserverScope* t_frame_observer = nullptr;
+} // namespace
+
+struct StackFrameObserverAccess {
+    static void observe(uintptr_t fp, const FunctionStackMap& map, const StackMapRecord& record) {
+        if (StackFrameObserverScope* o = t_frame_observer) o->fn_(fp, map, record, o->ctx_);
+    }
+};
+
+StackFrameObserverScope::StackFrameObserverScope(brass_frame_observer_fn fn, void* ctx) noexcept
+    : fn_(fn), ctx_(ctx), prev_(t_frame_observer) {
+    t_frame_observer = this;
+}
+
+StackFrameObserverScope::~StackFrameObserverScope() { t_frame_observer = prev_; }
+
 size_t brass_stack_walk(
     uintptr_t top_rbp,
     uintptr_t top_return_ip,
@@ -481,6 +498,7 @@ size_t walk_stack(
         if (fn_map != nullptr) {
             const StackMapRecord* rec = fn_map->find_record_by_ip(cur_return_ip);
             if (rec != nullptr) {
+                StackFrameObserverAccess::observe(cur_rbp, *fn_map, *rec);
                 for (const auto& root_loc : rec->roots) {
                     intptr_t slot_addr_int = static_cast<intptr_t>(cur_rbp) + root_loc.offset_from_rbp;
                     void** root_slot = reinterpret_cast<void**>(slot_addr_int);

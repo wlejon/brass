@@ -99,6 +99,28 @@ size_t brass_stack_walk_bounded_on(
     const SwitchedStack& stack
 );
 
+// While one lives, every walk on this thread also reports each generated
+// frame whose roots it visits: the frame pointer, the frame's map, and the
+// record at its return address (its current safepoint). Called before the
+// frame's roots are visited. The collector's stack scan learns this way
+// which frames the root walks of a collection describe exactly (heap_pin.cpp).
+// Scopes nest; the innermost observes.
+using brass_frame_observer_fn = void (*)(uintptr_t fp, const FunctionStackMap& map,
+                                         const StackMapRecord& record, void* ctx);
+class StackFrameObserverScope {
+public:
+    StackFrameObserverScope(brass_frame_observer_fn fn, void* ctx) noexcept;
+    ~StackFrameObserverScope();
+    StackFrameObserverScope(const StackFrameObserverScope&) = delete;
+    StackFrameObserverScope& operator=(const StackFrameObserverScope&) = delete;
+
+private:
+    brass_frame_observer_fn fn_;
+    void* ctx_;
+    StackFrameObserverScope* prev_;
+    friend struct StackFrameObserverAccess;
+};
+
 // C++ std::function overload for convenience
 size_t brass_stack_walk(
     uintptr_t top_rbp,

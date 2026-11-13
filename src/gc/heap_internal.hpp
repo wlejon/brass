@@ -812,6 +812,12 @@ uintptr_t live_address(const GcState& g, uintptr_t a) noexcept;
 // Visits every root of the heap with `tracer`, the objects the stacks name
 // (HeapState::stack_objects) among them.
 void visit_roots(HeapState& s, Tracer& tracer);
+// The root slots of the generated frames on the thread's stacks, as
+// visit_roots visits them: from the frame the collection was asked at (or,
+// with walk_stack_on_host_collection, its own), each recorded run of native
+// frames, and each switched-out stack. gather_stack_objects walks the same
+// frames to learn which words of them the maps describe.
+void append_frame_roots(const HeapState& s, std::vector<uintptr_t*>& slots);
 // The to-space's fragments for evacuation `g` (begun), and the residents'
 // range in_from reads (HeapState::gc_to_resident_span).
 void setup_to_space(GcState& g);
@@ -833,7 +839,11 @@ uintptr_t young_object_containing(HeapState& s, uintptr_t a) noexcept;
 // HeapState::stack_objects from every stack of the calling thread (each word
 // that, untagged or under a reference tag, names a young object's payload): the
 // running stack from here, the callee-saved registers included, and each
-// switched-out fiber's from where it switched away. A collection that marks
+// switched-out fiber's from where it switched away, except the words of a
+// generated frame's slot area (FunctionStackMap::slot_area_lo/hi: its spill
+// slots and locals) and its listed frame-slot roots, in every frame append_frame_roots walks: those
+// the maps describe exactly, so a word there no root names is dead, and a
+// root is visited and updated by visit_roots. A collection that marks
 // the old generation gathers the old objects named too (WithOld), which
 // visit_roots then marks; a minor needs only the young.
 enum class StackObjects { YoungOnly, WithOld };

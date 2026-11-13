@@ -258,6 +258,8 @@ std::vector<uint8_t> encode_stack_maps(const ModuleStackMap& stack_maps) {
         }
         write_u64(out, static_cast<uint64_t>(fn.code_offset));
         write_u32(out, fn.code_size);
+        write_i32(out, fn.slot_area_lo);
+        write_i32(out, fn.slot_area_hi);
         write_u32(out, static_cast<uint32_t>(fn.records.size()));
 
         for (const auto& rec : fn.records) {
@@ -289,7 +291,7 @@ bool decode_stack_maps_into(std::span<const uint8_t> data, ModuleStackMap& out, 
     }
 
     uint32_t version = 0;
-    if (!reader.read_u32(version) || version != STACK_MAP_VERSION) {
+    if (!reader.read_u32(version) || version < 1 || version > STACK_MAP_VERSION) {
         return false;
     }
 
@@ -309,6 +311,10 @@ bool decode_stack_maps_into(std::span<const uint8_t> data, ModuleStackMap& out, 
         fn_map.code_offset = static_cast<uint32_t>(code_offset);
 
         if (!reader.read_u32(fn_map.code_size)) return false;
+        if (version >= 2) {
+            if (!reader.read_i32(fn_map.slot_area_lo) || !reader.read_i32(fn_map.slot_area_hi)) return false;
+            if (fn_map.slot_area_hi < fn_map.slot_area_lo) return false;
+        }
 
         if (text_base_address > 0) {
             fn_map.function_address = text_base_address + fn_map.code_offset;
@@ -364,7 +370,7 @@ bool peek_stack_maps(std::span<const uint8_t> data, uint32_t& function_count, ui
     BinaryReader reader(data);
     uint32_t magic = 0, version = 0;
     if (!reader.read_u32(magic) || magic != STACK_MAP_MAGIC) return false;
-    if (!reader.read_u32(version) || version != STACK_MAP_VERSION) return false;
+    if (!reader.read_u32(version) || version < 1 || version > STACK_MAP_VERSION) return false;
     if (!reader.read_u32(function_count)) return false;
     if (function_count == 0) return true;
     // The first function: its name, code offset and size, then its count.
@@ -372,6 +378,7 @@ bool peek_stack_maps(std::span<const uint8_t> data, uint32_t& function_count, ui
     uint64_t code_offset = 0;
     if (!reader.read_u32(name_len) || !reader.skip(name_len)) return false;
     if (!reader.read_u64(code_offset) || !reader.read_u32(code_size)) return false;
+    if (version >= 2 && !reader.skip(8)) return false;
     return reader.read_u32(first_record_count);
 }
 

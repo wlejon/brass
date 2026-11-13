@@ -7,12 +7,16 @@
 // fragments), an object no fragment fits is allocated old with its card
 // dirty, survivor spaces copy around the residents an earlier pin left there,
 // and a resident no longer named is copied like any other survivor. A
-// suspended fiber's stack pins too.
+// suspended fiber's stack pins too. In a generated frame the maps describe,
+// a dead word of the slot area pins nothing, while the frame's save area and
+// a native frame's words still do.
 
 #include "test_framework.hpp"
 
+#include <brass/gc/code_stack_maps.hpp>
 #include <brass/gc/fiber.hpp>
 #include <brass/gc/heap.hpp>
+#include <brass/gc/stack_map.hpp>
 
 #include <cstdio>
 #include <cstring>
@@ -441,4 +445,156 @@ TEST_CASE("gc::Heap pinning - an object only a heap root names still moves") {
     brass::test::collect_scrubbed(h, CollectionKind::Minor);
     CHECK(brass::test::from_own_frame([&] { return intact(static_cast<uintptr_t>(*root.slot), 4, 16); }));
     CHECK(root.hidden() != before);
+}
+
+namespace {
+
+// Code addresses for the frames built by hand below: only their maps are
+// ever read, never the bytes.
+alignas(16) const unsigned char kDescribedCode[64] = {};
+alignas(16) const unsigned char kUndescribedCode[64] = {};
+
+// The map of a generated function at `code` with one safepoint, at offset 16,
+// whose only root is the frame slot fp - 32. With `slot_area`, its spill
+// slots and locals are [fp - 64, fp - 16), as the optimizing emitter
+// describes them;
+// fp - 16 and fp - 8 lie outside, where a frame keeps the callee-saved
+// registers it saves for its caller.
+std::shared_ptr<const void> register_frame_map(const unsigned char* code, bool slot_area) {
+    brass::FunctionStackMap m;
+    m.function_name = slot_area ? "pin_described_frame" : "pin_undescribed_frame";
+    m.function_address = reinterpret_cast<uintptr_t>(code);
+    m.code_size = 64;
+    if (slot_area) {
+        m.slot_area_lo = -64;
+        m.slot_area_hi = -16;
+    }
+    brass::StackMapRecord rec;
+    rec.instruction_offset = 16;
+    rec.frame_size = 64;
+    rec.roots.push_back(brass::StackMapRootLocation::frame_slot(-32));
+    m.records.push_back(rec);
+    m.sort_records();
+    return brass::register_code_stack_map(m);
+}
+
+struct FrameObjects {
+    uint64_t dead;    // in a slot-area word the record does not list
+    uint64_t saved;   // in the save area
+    uint64_t native;  // in a C++ local
+    uint64_t root;    // in the listed root slot (the only reference to it)
+};
+
+// Where the built frame's words escape to, so the compiler keeps every store
+// to them ahead of the collection, which reads them.
+uint64_t* volatile g_frame_escape = nullptr;
+uint64_t* volatile g_native_escape = nullptr;
+
+// One minor collection asked at the safepoint of a generated frame built in
+// this function's stack: fp's record ends the frame chain, and the frame's
+// words hold the objects as `hidden` says (hidden addresses, unhidden only
+// in frames of their own). Returns what the root slot holds afterwards,
+// hidden.
+BRASS_TEST_NOINLINE uint64_t collect_at_built_frame(Heap& h, const unsigned char* code, const FrameObjects& hidden) {
+    alignas(16) uint64_t words[16] = {};
+    uint64_t native[1] = {};
+    g_frame_escape = words;
+    g_native_escape = native;
+    uint64_t* const fp = &words[12];
+    brass::test::set_hidden(fp - 3, hidden.dead);
+    brass::test::set_hidden(fp - 1, hidden.saved);
+    brass::test::set_hidden(fp - 4, hidden.root);
+    brass::test::set_hidden(native, hidden.native);
+    brass::test::scrub_stack();
+    h.collect_at(CollectionKind::Minor, reinterpret_cast<uintptr_t>(fp), reinterpret_cast<uintptr_t>(code) + 16);
+    const uint64_t root_after = brass::test::hide_address(fp[-4]);
+    g_frame_escape = nullptr;
+    g_native_escape = nullptr;
+    std::memset(words, 0, sizeof(words));
+    native[0] = 0;
+    return root_after;
+}
+
+BRASS_TEST_NOINLINE void set_leaf(Heap& h, uint64_t* slot, size_t words, uintptr_t salt) {
+    *slot = make_leaf(h, words, salt);
+}
+
+BRASS_TEST_NOINLINE bool hidden_intact(uint64_t hidden, size_t words, uintptr_t salt) {
+    return intact(static_cast<uintptr_t>(brass::test::unhide_address(hidden)), words, salt);
+}
+
+} // namespace
+
+TEST_CASE("gc::Heap pinning - a generated frame's dead slot pins nothing; its save area and native words still pin") {
+    for (const bool described : {true, false}) {
+        HeapConfig c = pin_config();
+        Heap h(c);
+        HeapScope bind(h);
+        const unsigned char* code = described ? kDescribedCode : kUndescribedCode;
+        const std::shared_ptr<const void> token = register_frame_map(code, described);
+        brass::test::HeapRoot dead(h), saved(h), native(h), root(h);
+        set_leaf(h, dead.slot, 4, 21);
+        set_leaf(h, saved.slot, 5, 22);
+        set_leaf(h, native.slot, 6, 23);
+        set_leaf(h, root.slot, 7, 24);
+        const FrameObjects before{dead.hidden(), saved.hidden(), native.hidden(), root.hidden()};
+        // The frame slot is the only reference to its object from here on.
+        *root.slot = 0;
+        const uint64_t root_after = collect_at_built_frame(h, code, before);
+        // The listed root is visited and updated; in a frame whose map
+        // describes no slot area it pins as well.
+        if (described) {
+            CHECK(root_after != before.root);
+        } else {
+            CHECK_EQ(root_after, before.root);
+        }
+        CHECK(hidden_intact(root_after, 7, 24));
+        // The save area and the C++ local keep their objects in place.
+        CHECK_EQ(saved.hidden(), before.saved);
+        CHECK_EQ(native.hidden(), before.native);
+        // A dead slot-area word pins only where the map describes no slot
+        // area; elsewhere its object moves like any survivor.
+        if (described) {
+            CHECK(dead.hidden() != before.dead);
+        } else {
+            CHECK_EQ(dead.hidden(), before.dead);
+        }
+        CHECK(hidden_intact(dead.hidden(), 4, 21));
+        CHECK(hidden_intact(saved.hidden(), 5, 22));
+        CHECK(hidden_intact(native.hidden(), 6, 23));
+    }
+}
+
+TEST_CASE("Stack maps - the slot area round-trips, and a version 1 map decodes with none") {
+    brass::ModuleStackMap maps;
+    brass::FunctionStackMap m;
+    m.function_name = "f";
+    m.code_size = 32;
+    m.slot_area_lo = -48;
+    m.slot_area_hi = -16;
+    brass::StackMapRecord rec;
+    rec.instruction_offset = 8;
+    rec.roots.push_back(brass::StackMapRootLocation::frame_slot(-24));
+    m.records.push_back(rec);
+    maps.add_function(m);
+    const std::vector<uint8_t> encoded = brass::encode_stack_maps(maps);
+    const brass::ModuleStackMap back = brass::decode_stack_maps(encoded);
+    REQUIRE_EQ(back.size(), size_t{1});
+    CHECK_EQ(back.functions()[0].slot_area_lo, -48);
+    CHECK_EQ(back.functions()[0].slot_area_hi, -16);
+    uint32_t functions = 0, records = 0;
+    CHECK(brass::peek_stack_maps(encoded, functions, records));
+    CHECK_EQ(records, uint32_t{1});
+    // Version 1: no slot area after the code size.
+    std::vector<uint8_t> v1(encoded.begin(), encoded.end());
+    v1[4] = 1;
+    const size_t area_at = 12 + 4 + 1 + 8 + 4;  // header, name length, "f", code offset, code size
+    v1.erase(v1.begin() + static_cast<std::ptrdiff_t>(area_at), v1.begin() + static_cast<std::ptrdiff_t>(area_at + 8));
+    const brass::ModuleStackMap old = brass::decode_stack_maps(v1);
+    REQUIRE_EQ(old.size(), size_t{1});
+    CHECK_EQ(old.functions()[0].slot_area_lo, 0);
+    CHECK_EQ(old.functions()[0].slot_area_hi, 0);
+    CHECK_EQ(old.functions()[0].records.size(), size_t{1});
+    CHECK(brass::peek_stack_maps(v1, functions, records));
+    CHECK_EQ(records, uint32_t{1});
 }

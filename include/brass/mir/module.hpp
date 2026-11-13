@@ -117,10 +117,12 @@ public:
     // (LinearScanAllocator::clear_dead_callee_gprs_at_calls). The stack maps
     // name only what is live at a call, so a dead location is never read as
     // a root through them; the zeroing is for the collector's conservative
-    // stack scan (gc::Heap pins what any stack word names, heap_pin.cpp),
-    // where a dead word that still names an object keeps it alive, and
-    // pinned, for that collection. A host that takes that retention to save
-    // the stores at every call sets this. Off by default.
+    // stack scan (gc::Heap pins what a stack word names, heap_pin.cpp). That
+    // scan passes over a frame's spill slots and locals, which its map
+    // describes, so a dead slot keeps nothing; a dead callee-saved register, read where a callee
+    // saved it or as the collector captures it, still keeps what it names
+    // alive, and pinned, for that collection. A host that takes that
+    // retention to save the stores at every call sets this. Off by default.
     bool precise_stack_roots() const noexcept { return precise_stack_roots_; }
     void set_precise_stack_roots(bool precise) noexcept { precise_stack_roots_ = precise; }
 

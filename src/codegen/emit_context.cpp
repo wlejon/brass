@@ -260,6 +260,10 @@ CompilationResult EmitContext::compile_once() {
     result.stack_map.function_name = fn_.name;
     result.stack_map.code_size = static_cast<uint32_t>(result.code_buffer.size());
     result.stack_map.records = std::move(stack_map_records_);
+    // The spill slots run down from just under the save area, and the
+    // locals (the allocas) lie under them (X64FrameLayout).
+    result.stack_map.slot_area_lo = X64FrameLayout::local_frame_address(0, frame_).disp;
+    result.stack_map.slot_area_hi = X64FrameLayout::spill_slot_address(0, frame_).disp + 8;
     result.entry_offset = 0;
     result.debug_table.set_function_name(std::string(fn_.name));
     result.debug_table.set_code_size(static_cast<uint32_t>(result.code_buffer.size()));

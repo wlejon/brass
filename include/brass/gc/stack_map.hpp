@@ -89,6 +89,19 @@ struct FunctionStackMap {
     uint32_t code_offset = 0;       // Offset in .text section
     uint32_t code_size = 0;         // Function size in bytes
     std::vector<StackMapRecord> records;
+    // The frame's stack slots, its spill slots and its locals (the allocas),
+    // as fp-relative offsets [slot_area_lo, slot_area_hi): every word there
+    // that a reference live across a GC point is kept in is one of the
+    // record's roots at that point (a spill slot, or a word of an
+    // `alloca.tagged`; a plain alloca holds none across one), so a word
+    // there that the record does not list is dead, and the collector's stack
+    // scan does not pin what it names (gc_contract.md 2.5), nor what a
+    // frame-slot root names, which the walk updates. Only the optimizing
+    // emitters, whose maps are exact, set it; an empty range (the default,
+    // the baseline tier, a map encoded before version 2) leaves the whole
+    // frame, its roots included, to the conservative scan.
+    int32_t slot_area_lo = 0;
+    int32_t slot_area_hi = 0;
     // Set by sort_records: lookups then binary-search the records.
     bool records_sorted = false;
 
@@ -133,11 +146,12 @@ private:
 
 // Binary serialization format
 // Magic: 0x4D435342 ("BSCM")
-// Version: 1
+// Version: 2 (each function carries its slot area after its code size;
+// version 1, without it, still decodes, with an empty area)
 // Each root is 8 bytes: int32 rbp offset, then the location kind, register
 // class, register code and value kind (StackMapValueKind) as bytes.
 constexpr uint32_t STACK_MAP_MAGIC = 0x4D435342;
-constexpr uint32_t STACK_MAP_VERSION = 1;
+constexpr uint32_t STACK_MAP_VERSION = 2;
 
 std::vector<uint8_t> encode_stack_maps(const ModuleStackMap& stack_maps);
 ModuleStackMap decode_stack_maps(std::span<const uint8_t> data, uintptr_t text_base_address = 0);

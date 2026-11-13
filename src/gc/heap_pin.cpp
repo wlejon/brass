@@ -5,7 +5,7 @@
 // them in. No stack map describes those frames, so a collection could not
 // update such a reference when it moved the object, and the reference would
 // name the dead copy afterwards. So every collection that moves young objects
-// first reads every word of the thread's stacks, from its own frame (the
+// first reads the words of the thread's stacks, from its own frame (the
 // callee-saved registers spilled where the scan sees them) to each stack's
 // base, and of each switched-out fiber's stack from where it switched away.
 // A word that, untagged or under one of the heap's reference tags, falls in
@@ -24,15 +24,40 @@
 // reference in a local keeps whatever it names alive, old or young. A minor
 // collection decides nothing old, so it passes over them.
 //
-// The scan is conservative: a word that merely looks like such a reference
-// (a number, a stale slot of a dead frame) keeps its object for that
-// collection too. It never makes anything unsound, only something live a
+// Generated frames are the exception, where their maps vouch for them. The
+// scan first walks the generated frames exactly as visit_roots will
+// (append_frame_roots, observed through StackFrameObserverScope), and in each
+// one whose map the optimizing emitter wrote (it describes a slot area:
+// FunctionStackMap::slot_area_lo/hi, the spill slots and the locals) it
+// passes over that area and every frame-slot root the record at the frame's
+// return address lists. A reference live across the frame's GC point is kept
+// in one of those roots (a spill slot, or a word of an `alloca.tagged`;
+// gc_contract.md 1.1), which visit_roots visits and updates, so any other
+// word of the slot area is dead: a stale spill left by a value whose last
+// use has passed, or a plain alloca's word (a resume twin's guard state,
+// which the twin reads before its first GC point). Pinning from it kept a
+// long-lived object young for as long as the frame lived, and every old
+// object naming it on a dirty card. The rest of such a frame stays
+// conservative: its callee-saved register save area (a caller's register,
+// possibly a C++ caller's raw pointer), its outgoing argument and guard exit
+// areas under the locals (what a helper or the deoptimizer reads), and
+// whatever lies between frames. So do every frame no walk visits with a
+// record (C++ frames, the interpreters', a frame at a return address without
+// a record), and the whole of every frame whose map describes no slot area
+// (the baseline tier's, a map encoded before version 2), whose roots then
+// pin as well.
+//
+// The scan is otherwise conservative: a word that merely looks like such a
+// reference (a number, a stale slot of a dead frame) keeps its object for
+// that collection too. It never makes anything unsound, only something live a
 // little longer. The collector keeps its own words out of what it reads: it
 // clears the stack below the collection's frame before the scan, and of the
 // registers it reads only the callee-saved integer ones, where a caller's
 // references can be; the rest are the collector's scratch.
 
 #include "heap_internal.hpp"
+
+#include <brass/gc/stack_walker.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -61,21 +86,73 @@ namespace {
 // wrong, not a stack, and is not read.
 constexpr uintptr_t kMaxStackSpan = uintptr_t{1} << 30;
 
+using Range = std::pair<uintptr_t, uintptr_t>;  // [first, second)
+
 struct StackScan {
     const Heap* heap;
     std::vector<uintptr_t>* candidates;
     bool old;  // old addresses too (StackObjects::WithOld)
+    // The words the generated frames' maps describe, sorted and disjoint.
+    const std::vector<Range>* described;
 };
 
-// Every word of [lo, hi) that names an address in the young generation (and,
-// when the scan asks for them, the old), untagged or under a reference tag.
+uintptr_t at(uintptr_t fp, int32_t offset) noexcept {
+    return static_cast<uintptr_t>(static_cast<intptr_t>(fp) + offset);
+}
+
+// A frame the root walks visit, when its map is an optimizing emitter's (it
+// has a slot area): the slot area, and the frame-slot roots of the record at
+// its safepoint (a callee-saved register's root is the register's, and
+// stays to the scan). Any other map's frame stays to the scan whole, its
+// roots too: a baseline frame's, or one encoded before the slot area was.
+void note_frame(uintptr_t fp, const FunctionStackMap& map, const StackMapRecord& record, void* ctx) {
+    if (map.slot_area_lo >= map.slot_area_hi) return;
+    auto& described = *static_cast<std::vector<Range>*>(ctx);
+    described.emplace_back(at(fp, map.slot_area_lo), at(fp, map.slot_area_hi));
+    for (const StackMapRootLocation& root : record.roots) {
+        if (root.kind != StackMapRootKind::FrameSlot) continue;
+        const uintptr_t slot = at(fp, root.offset_from_rbp);
+        described.emplace_back(slot, slot + sizeof(uint64_t));
+    }
+}
+
+void describe_generated_frames(const HeapState& s, std::vector<Range>& described) {
+    {
+        StackFrameObserverScope observe(&note_frame, &described);
+        std::vector<uintptr_t*> slots;
+        append_frame_roots(s, slots);
+    }
+    std::sort(described.begin(), described.end());
+    size_t n = 0;
+    for (const Range& r : described) {
+        if (n > 0 && r.first <= described[n - 1].second) {
+            described[n - 1].second = std::max(described[n - 1].second, r.second);
+        } else {
+            described[n++] = r;
+        }
+    }
+    described.resize(n);
+}
+
+// Every word of [lo, hi) outside the described ranges that names an address
+// in the young generation (and, when the scan asks for them, the old),
+// untagged or under a reference tag.
 void scan_words(void* context, uintptr_t lo, uintptr_t hi) {
     auto& scan = *static_cast<StackScan*>(context);
     lo = (lo + sizeof(uint64_t) - 1) & ~(uintptr_t{sizeof(uint64_t)} - 1);
     if (hi <= lo || hi - lo > kMaxStackSpan) return;
     const Heap& heap = *scan.heap;
     const bool old = scan.old;
+    const std::vector<Range>& described = *scan.described;
+    auto skip = std::upper_bound(described.begin(), described.end(), lo,
+                                 [](uintptr_t a, const Range& r) { return a < r.second; });
     for (uintptr_t p = lo; p + sizeof(uint64_t) <= hi; p += sizeof(uint64_t)) {
+        while (skip != described.end() && skip->second <= p) ++skip;
+        if (skip != described.end() && p >= skip->first) {
+            // To the range's last word; the loop steps past it.
+            p = ((skip->second + sizeof(uint64_t) - 1) & ~(uintptr_t{sizeof(uint64_t)} - 1)) - sizeof(uint64_t);
+            continue;
+        }
         const uint64_t word = *reinterpret_cast<const uint64_t*>(p);
         if ((word >> kTagShift) != 0 && !heap.is_reference_tag(word)) continue;
         const auto a = static_cast<uintptr_t>(word & kAddressMask);
@@ -184,7 +261,9 @@ void gather_stack_objects(HeapState& s, StackObjects which) {
     s.stack_objects.clear();
     std::vector<uintptr_t> candidates;
     candidates.reserve(256);
-    StackScan scan{&s.heap, &candidates, which == StackObjects::WithOld};
+    std::vector<Range> described;
+    describe_generated_frames(s, described);
+    StackScan scan{&s.heap, &candidates, which == StackObjects::WithOld, &described};
     clear_scan_frames();
     scan_thread_stacks(scan);
     std::sort(candidates.begin(), candidates.end());
