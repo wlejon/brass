@@ -25,6 +25,9 @@ void Function::remove_block(BasicBlock* bb) {
     if (it != blocks_.end()) {
         blocks_.erase(it);
     }
+    // A certificate says where a guard was eliminated; with that block gone it
+    // says nothing, and the verifier refuses one that names no block.
+    std::erase_if(guard_elim_certs_, [&](const GuardElimCert& c) { return c.block_id == bb->id(); });
 }
 
 namespace {
