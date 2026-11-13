@@ -413,6 +413,8 @@ void EmitContext::emit_control_instruction(const LirInst& inst) {
                     0,
                     callee
                 );
+            } else if (!inst.entry_cell.empty()) {
+                enc_.call_through(inst.entry_cell);
             } else {
                 enc_.call(callee);
             }

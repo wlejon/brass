@@ -14,9 +14,13 @@
 namespace brass {
 
 Function* clone_function(const Function& src, Module& dst_mod) {
+    return clone_function(src, dst_mod, src.name());
+}
+
+Function* clone_function(const Function& src, Module& dst_mod, std::string_view name) {
     Module::BodyRead read(src);
     std::vector<Type> params = src.param_types();
-    Function* dst_fn = dst_mod.create_function(src.name(), src.return_type(), params);
+    Function* dst_fn = dst_mod.create_function(name, src.return_type(), params);
 
     uint32_t max_block_id = 0;
     uint32_t max_val_id = 0;

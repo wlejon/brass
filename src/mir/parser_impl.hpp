@@ -94,6 +94,9 @@ private:
     // parser_function.cpp
     Type parse_type();
     std::string_view parse_symbol_name();
+    // ` via @cell` behind a call's or an invoke's callee: its entry cell
+    // (Instruction::extra_symbol), empty when there is none.
+    std::string_view parse_entry_cell();
     bool parse_module_decl(Module& mod);
     bool parse_extern_decl(Module& mod);
     bool parse_module_attributes(Module& mod);

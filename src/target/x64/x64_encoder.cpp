@@ -573,6 +573,14 @@ void X64Encoder::call(const std::string& symbol) {
     buffer_.add_relocation(patch_off, RelocationKind::PCRel32, symbol, -4);
 }
 
+void X64Encoder::call_through(const std::string& cell) {
+    buffer_.emit8(0xFF);
+    emit_modrm(0, 2, 5); // RIP-relative
+    size_t patch_off = buffer_.size();
+    buffer_.emit32(0x00000000);
+    buffer_.add_relocation(patch_off, RelocationKind::PCRel32, cell, -4);
+}
+
 void X64Encoder::call(GPR target) {
     emit_rex(false, false, false, is_extended(target));
     buffer_.emit8(0xFF);

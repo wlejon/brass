@@ -101,6 +101,12 @@ std::string_view Parser::parse_symbol_name() {
     return sym;
 }
 
+std::string_view Parser::parse_entry_cell() {
+    if (!(is_identifier_or_keyword(peek().kind) && peek().text == "via")) return "";
+    advance();
+    return parse_symbol_name();
+}
+
 bool Parser::parse_module_decl(Module& mod) {
     advance(); // consume 'module'
     std::string_view mod_name = parse_symbol_name();

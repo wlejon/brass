@@ -101,6 +101,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 
 ### Function Calls, Addresses & Safepoints
 - `call.<type> @fn_symbol(<args...>)` -> `<type>`
+- `call.<type> @fn_symbol via @cell(<args...>)` -> `<type>` (and `invoke ... via @cell`: the call goes through the word `@cell` of the image, `call [rip + cell]` on x64, which holds `@fn_symbol`'s address or that of another entry computing the same thing. Passes read the callee; AArch64 and the interpreters call it directly)
 - `call_indirect.<type> <callee_ptr:ptr>(<args...>)` -> `<type>`
 - `patchable_call.<type> @patch_sym, @default_target(<args...>)` -> `<type>`
 - `func_addr @fn_symbol` -> `ptr`

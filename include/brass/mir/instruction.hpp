@@ -166,6 +166,12 @@ public:
     std::string_view symbol() const noexcept { return symbol_; }
     void set_symbol(std::string_view sym) noexcept { symbol_ = sym; }
 
+    // A patchable_call's default target. On a `call` or `invoke`: the call's
+    // entry cell, a word of the image that holds the address called (x64:
+    // `call [rip + cell]`). Whatever the cell holds computes what the named
+    // callee computes, which is all the passes read; a front end stores
+    // another entry of the callee there (a resume twin's generic entry,
+    // docs/speculation_and_deopt.md 7.3.7).
     std::string_view extra_symbol() const noexcept { return extra_symbol_; }
     void set_extra_symbol(std::string_view sym) noexcept { extra_symbol_ = sym; }
 

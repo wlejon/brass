@@ -492,6 +492,10 @@ public:
     bool is_patchable = false;
     std::string patch_symbol;
     std::string callee_symbol;
+    // Call: the word the call goes through (`call [rip + entry_cell]`), from
+    // the MIR call's entry cell; callee_symbol still names what is called
+    // for everything that asks about the callee.
+    std::string entry_cell;
     std::vector<VReg> live_gcrefs;
     bool is_invoke = false;
     // A call whose callee never reaches a GC point (SymbolRole::Pure or

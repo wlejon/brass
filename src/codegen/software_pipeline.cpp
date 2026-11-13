@@ -150,6 +150,7 @@ static std::unique_ptr<LirInst> clone_instruction(
     dst->is_patchable = src.is_patchable;
     dst->patch_symbol = src.patch_symbol;
     dst->callee_symbol = src.callee_symbol;
+    dst->entry_cell = src.entry_cell;
     dst->def_constraints = src.def_constraints;
     dst->use_constraints = src.use_constraints;
 

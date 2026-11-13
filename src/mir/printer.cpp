@@ -365,7 +365,9 @@ public:
                 } else {
                     os_ << "call ";
                 }
-                os_ << sym_ref(inst.symbol()) << "(";
+                os_ << sym_ref(inst.symbol());
+                if (!inst.extra_symbol().empty()) os_ << " via " << sym_ref(inst.extra_symbol());
+                os_ << "(";
                 for (size_t i = 0; i < inst.operand_count(); ++i) {
                     if (i > 0) os_ << ", ";
                     os_ << value_name(inst.operand(i));
@@ -463,7 +465,9 @@ public:
                 } else {
                     os_ << "invoke ";
                 }
-                os_ << sym_ref(inst.symbol()) << "(";
+                os_ << sym_ref(inst.symbol());
+                if (!inst.extra_symbol().empty()) os_ << " via " << sym_ref(inst.extra_symbol());
+                os_ << "(";
                 for (size_t i = 0; i < inst.operand_count(); ++i) {
                     if (i > 0) os_ << ", ";
                     os_ << value_name(inst.operand(i));

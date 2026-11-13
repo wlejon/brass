@@ -620,6 +620,100 @@ TEST_CASE("AOT guards - failures are counted in the twin and a caller pins to th
     CHECK_EQ(m, 20);
 }
 
+// The remedy without a caller's help: a call names the function and the
+// word it goes through (`call @sum via @sum_entry`). The twin's entries count
+// in the image's own data and, at the limit, store the generic entry into
+// that word; the calls then reach the generic code, and the speculated
+// function's code holds nothing of it.
+TEST_CASE("AOT guards - a call through an entry cell is routed to the generic entry by the twin") {
+    auto mod = parse_checked(std::string(kSumSite) + R"(
+func @twice(%0: ptr, %1: i64, %2: ptr) -> i64 {
+bb0:
+  %a = call.i64 @sum via @sum_entry(%0, %1, %2)
+  %b = call.i64 @sum via @sum_entry(%0, %1, %2)
+  %r = add.i64 %a, %b
+  ret %r
+}
+func @sum_entry_addr() -> ptr {
+bb0:
+  %a = func_addr @sum_entry
+  ret %a
+}
+)");
+    REQUIRE(mod != nullptr);
+    Function* sum = mod->get_function("sum");
+    REQUIRE(sum != nullptr);
+    ResumeTwinOptions options;
+    options.entry_id = 1000;
+    // sum_entry: the entry word, then the count of exits.
+    options.on_exit = [](Builder& b, uint32_t) {
+        Value* cell = b.build_func_addr("sum_entry");
+        Value* n = b.build_add(b.build_load(Type::i64(), cell, 8), b.build_iconst_i64(1));
+        b.build_store(Type::i64(), cell, 8, n);
+        Value* pinned = b.build_sge(n, b.build_iconst_i64(3));
+        b.build_store(Type::ptr(), cell, 0,
+                      b.build_select(pinned, b.build_func_addr("sum_generic"), b.build_func_addr("sum")));
+    };
+    std::string why;
+    const Function* twin = build_resume_twin(*sum, *mod, "sum_twin", options, &why);
+    if (!twin) std::cerr << why << "\n";
+    REQUIRE(twin != nullptr);
+    REQUIRE(build_twin_entry(*sum, *twin, 1000, "sum_generic", &why) != nullptr);
+    REQUIRE(speculate_against_twin(*sum, *twin, &why));
+    REQUIRE(verify_module(*mod));
+
+    // The text form carries the cell.
+    std::ostringstream os;
+    print_module(*mod, os);
+    CHECK(os.str().find("call.i64 @sum via @sum_entry(") != std::string::npos);
+    auto again = parse_checked(os.str());
+    REQUIRE(again != nullptr);
+    CHECK_EQ(again->get_function("twice")->entry_block()->head()->extra_symbol(), "sum_entry");
+
+    LoadedImage img = link_and_load(*mod, "ag_cell", nullptr, {}, [](object::ObjectFile& obj) {
+        object::Section& data = obj.get_or_create_section(
+            ".data", object::SectionKind::Data,
+            object::SectionFlags::Read | object::SectionFlags::Write | object::SectionFlags::Alloc, 8);
+        data.align_to(8);
+        const size_t at = data.data.size();
+        data.relocations.push_back({at, object::RelocKind::Abs64, "sum", 0});
+        data.emit64(0);
+        data.emit64(0);
+        obj.add_symbol({"sum_entry", obj.get_section_index(".data"), at, 16, object::SymbolBinding::Global,
+                        object::SymbolType::Object});
+    });
+    REQUIRE(img.lib != nullptr);
+    CHECK(img.undefined.empty());
+    auto twice = img.lib->get_function<SumFn>("twice");
+    auto cell_addr = img.lib->get_function<int64_t* (*)()>("sum_entry_addr");
+    REQUIRE(twice != nullptr);
+    REQUIRE(cell_addr != nullptr);
+    int64_t* cell = cell_addr();
+    const int64_t speculated = cell[0];
+
+    std::vector<int64_t> clean{1, 2, 3, 4, 5, 6, 7, 8};
+    std::vector<int64_t> dirty{1, 2, -3, 4, -5, 6, 7, 8};
+    int64_t m = 0;
+    // Passing calls count nothing and leave the word alone.
+    CHECK_EQ(twice(clean.data(), 8, &m), 72);
+    CHECK_EQ(cell[1], 0);
+    CHECK_EQ(cell[0], speculated);
+    // Two exits: still the speculated function.
+    CHECK_EQ(twice(dirty.data(), 8, &m), 40);
+    CHECK_EQ(cell[1], 2);
+    CHECK_EQ(cell[0], speculated);
+    // The third exit stores the generic entry; the calls after it count no
+    // exit, whatever the array.
+    CHECK_EQ(twice(dirty.data(), 8, &m), 40);
+    CHECK_EQ(cell[1], 3);
+    CHECK(cell[0] != speculated);
+    CHECK_EQ(twice(dirty.data(), 8, &m), 40);
+    CHECK_EQ(twice(clean.data(), 8, &m), 72);
+    CHECK_EQ(cell[1], 3);
+    // Every negative element was added by generic code: 2 a call of sum.
+    CHECK_EQ(m, 12);
+}
+
 // What the verifier holds a twin exit to.
 TEST_CASE("AOT guards - the verifier checks a guard against its twin") {
     auto mod = parse_checked(kSumSite);

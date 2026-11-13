@@ -116,6 +116,9 @@ bool optimize_module_loops(Module& mod, const LoopOptOptions& options = {});
 
 // Helper to clone a function into a target module
 Function* clone_function(const Function& src, Module& dst_mod);
+// The same under another name, which may be a second function of src's own
+// module (a call of src by name in the copy still names src).
+Function* clone_function(const Function& src, Module& dst_mod, std::string_view name);
 
 // Helper to clone an entire module
 std::unique_ptr<Module> clone_module(const Module& src);

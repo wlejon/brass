@@ -154,6 +154,7 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
     } else {
         std::string callee_name = std::string(inst.symbol());
         call_lir->callee_symbol = callee_name;
+        call_lir->entry_cell = std::string(inst.extra_symbol());
         call_lir->add_use(LirOperand::symbol(callee_name));
     }
 

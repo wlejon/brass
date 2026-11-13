@@ -422,6 +422,8 @@ namespace brass::mir_parser {
             case Opcode::call: {
                 std::string_view callee = parse_symbol_name();
                 if (has_error_) return false;
+                const std::string_view entry_cell = parse_entry_cell();
+                if (has_error_) return false;
                 if (!expect(TokenKind::LParen, "'('")) return false;
 
                 std::vector<Value*> args;
@@ -438,6 +440,7 @@ namespace brass::mir_parser {
 
                 Type call_ret_type = has_assignment ? (type_suffix.is_void() ? Type::i32() : type_suffix) : Type::void_type();
                 res_val = b.build_call(callee, call_ret_type, args);
+                if (!entry_cell.empty()) b.current_block()->tail()->set_extra_symbol(fn->parent()->string_pool().intern(entry_cell));
                 break;
             }
 
@@ -704,6 +707,8 @@ namespace brass::mir_parser {
             case Opcode::invoke: {
                 std::string_view callee = parse_symbol_name();
                 if (has_error_) return false;
+                const std::string_view entry_cell = parse_entry_cell();
+                if (has_error_) return false;
                 if (!expect(TokenKind::LParen, "'('")) return false;
 
                 std::vector<Value*> args;
@@ -730,6 +735,7 @@ namespace brass::mir_parser {
                 res_inst = b.build_invoke(callee, invoke_ret_type, args,
                                           normal_t.block, normal_t.args,
                                           unwind_t.block, unwind_t.args);
+                if (res_inst && !entry_cell.empty()) res_inst->set_extra_symbol(fn->parent()->string_pool().intern(entry_cell));
                 if (res_inst && res_inst->result()) {
                     res_val = res_inst->result();
                 }

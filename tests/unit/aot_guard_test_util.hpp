@@ -3,6 +3,7 @@
 #pragma once
 
 #include "test_framework.hpp"
+#include <functional>
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/verifier.hpp>
@@ -60,7 +61,8 @@ struct LoadedImage {
 
 inline LoadedImage link_and_load(const Module& mod, const std::string& stem,
                                  const DeoptStressPlan* stress = nullptr,
-                                 const std::vector<target::ImportLibrary>& imports = {}) {
+                                 const std::vector<target::ImportLibrary>& imports = {},
+                                 const std::function<void(object::ObjectFile&)>& add_data = {}) {
     LoadedImage img;
     const Target host = Target::host();
     object::ModuleCompiler compiler(host);
@@ -72,6 +74,7 @@ inline LoadedImage link_and_load(const Module& mod, const std::string& stem,
         std::cerr << "link_and_load(" << stem << "): " << img.error << "\n";
         return img;
     }
+    if (add_data) add_data(img.obj);
     for (const auto& sym : img.obj.symbols) {
         if (sym.section_index == object::SECTION_UNDEF && !sym.name.empty()) img.undefined.push_back(sym.name);
     }

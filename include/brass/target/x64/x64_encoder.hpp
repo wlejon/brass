@@ -724,6 +724,8 @@ public:
     void call(int32_t rel32_disp);
     void call(Label label);
     void call(const std::string& symbol);
+    // call [rip + cell]: the address in the word `cell` names.
+    void call_through(const std::string& cell);
     void call(GPR target);
     void call(const MemAddress& target);
 
