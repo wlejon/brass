@@ -5,6 +5,7 @@
 // and the process-wide registry of object layouts that says how an object's
 // references are found. docs/gc_contract.md is the full contract.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -138,9 +139,21 @@ LayoutId register_layout(const LayoutDescriptor& descriptor);
 // thereafter: what brass_gc_alloc(size, mask, tag) allocates with.
 LayoutId mask_layout(uint64_t mask, uint32_t type_tag);
 
+namespace detail {
+// The registry's chunks of descriptors (layout.cpp), each never moved or
+// freed once published: what layout_descriptor reads, with no call.
+inline constexpr size_t kLayoutChunkBits = 8;
+inline constexpr size_t kLayoutChunkSize = size_t{1} << kLayoutChunkBits;
+inline constexpr size_t kLayoutChunks = (size_t{65535} + kLayoutChunkSize) / kLayoutChunkSize;
+extern std::atomic<LayoutDescriptor*> layout_chunks[kLayoutChunks];
+} // namespace detail
+
 // The layout `id` names. `id` must have been returned by register_layout or
-// mask_layout (or be kLeafLayout).
-const LayoutDescriptor& layout_descriptor(LayoutId id) noexcept;
+// mask_layout (or be kLeafLayout, once a heap exists).
+[[nodiscard]] inline const LayoutDescriptor& layout_descriptor(LayoutId id) noexcept {
+    const LayoutDescriptor* chunk = detail::layout_chunks[id >> detail::kLayoutChunkBits].load(std::memory_order_acquire);
+    return chunk[id & (detail::kLayoutChunkSize - 1)];
+}
 
 // How many layouts are registered (ids are 0 .. count-1).
 size_t layout_count() noexcept;

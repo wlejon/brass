@@ -80,6 +80,9 @@ void apply_environment(HeapConfig& config) {
 
 Heap::Heap(const HeapConfig& config) : s_(std::make_unique<HeapState>(*this)) {
     HeapState& s = *s_;
+    // The layout registry exists (its leaf layout is published) before any
+    // object does: layout_descriptor reads its chunks with no check.
+    (void)layout_count();
     s.config = config;
     apply_environment(s.config);
     s.config.tenure_age = static_cast<uint8_t>(std::clamp<unsigned>(s.config.tenure_age, 1u, 7u));

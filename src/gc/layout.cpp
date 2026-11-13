@@ -13,12 +13,14 @@
 
 namespace brass::gc {
 
+// Constant-initialized (all null): a chunk is published by the registry.
+std::atomic<LayoutDescriptor*> detail::layout_chunks[detail::kLayoutChunks];
+
 namespace {
 
-constexpr size_t kChunkBits = 8;
-constexpr size_t kChunkSize = size_t{1} << kChunkBits;
+constexpr size_t kChunkBits = detail::kLayoutChunkBits;
+constexpr size_t kChunkSize = detail::kLayoutChunkSize;
 constexpr size_t kMaxLayouts = 65535;
-constexpr size_t kChunks = (kMaxLayouts + kChunkSize) / kChunkSize;
 
 struct MaskKey {
     uint64_t mask;
@@ -35,7 +37,6 @@ struct MaskKeyHash {
 };
 
 struct Registry {
-    std::array<std::atomic<LayoutDescriptor*>, kChunks> chunks{};
     std::atomic<size_t> count{0};
     std::mutex mutex;
     std::unordered_map<MaskKey, LayoutId, MaskKeyHash> masks;
@@ -54,10 +55,10 @@ struct Registry {
         if (id >= kMaxLayouts) {
             throw std::length_error("brass::gc: the layout registry is full (65535 layouts)");
         }
-        LayoutDescriptor* chunk = chunks[id >> kChunkBits].load(std::memory_order_relaxed);
+        LayoutDescriptor* chunk = detail::layout_chunks[id >> kChunkBits].load(std::memory_order_relaxed);
         if (!chunk) {
             chunk = new LayoutDescriptor[kChunkSize];
-            chunks[id >> kChunkBits].store(chunk, std::memory_order_release);
+            detail::layout_chunks[id >> kChunkBits].store(chunk, std::memory_order_release);
         }
         chunk[id & (kChunkSize - 1)] = d;
         count.store(id + 1, std::memory_order_release);
@@ -138,11 +139,6 @@ LayoutId mask_layout_slow(uint64_t mask, uint32_t type_tag, MaskCacheEntry& cach
 }
 
 } // namespace
-
-const LayoutDescriptor& layout_descriptor(LayoutId id) noexcept {
-    const LayoutDescriptor* chunk = registry().chunks[id >> kChunkBits].load(std::memory_order_acquire);
-    return chunk[id & (kChunkSize - 1)];
-}
 
 size_t layout_count() noexcept {
     return registry().count.load(std::memory_order_acquire);

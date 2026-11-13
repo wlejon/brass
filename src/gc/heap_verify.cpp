@@ -171,6 +171,28 @@ void Heap::remember_interior(uintptr_t address, uint64_t value) noexcept {
         if (head != UINT32_MAX) s.remember_slot(s.large_object_at(head), reinterpret_cast<const void*>(address));
         return;
     }
+    // A mature object's slot: the object is the nearest start at or below
+    // the slot, and most are small enough that it lies in the same word of
+    // the block's start bits. (In a block the lazy sweep has yet to reach,
+    // the nearest start below a live object's slot is still that object's:
+    // objects never overlap.)
+    if (s.in_mature(address)) {
+        const uint32_t index = s.block_index(address);
+        if (index < s.blocks.size() && s.blocks[index]->in_use) {
+            const detail::BlockMeta& meta = *s.blocks[index];
+            const uintptr_t lo = s.block_base(index);
+            const size_t granule = (address - lo) / kGranuleBytes;
+            const uint64_t below = meta.starts[granule >> 6] & (~uint64_t{0} >> (63 - (granule & 63)));
+            if (below != 0) {
+                const size_t start = (granule & ~size_t{63}) + detail::clz_index64(below);
+                const uintptr_t object = lo + start * kGranuleBytes;
+                if (address - object < header_of(object)->size) {
+                    dirty_card(object);
+                    return;
+                }
+            }
+        }
+    }
     const uintptr_t object = find_object(address);
     if (object != 0) dirty_card(object);
 }

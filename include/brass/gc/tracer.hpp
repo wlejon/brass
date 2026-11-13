@@ -22,6 +22,15 @@ namespace brass::gc {
 
 class Heap;
 
+namespace detail {
+// tracer_run.cpp. Whether the CPU has AVX2 (false until that file's
+// initializers have run), and how many of the `groups` groups of four slots
+// at `slots`, counted from the first, hold no word whose address lies in
+// [lo, lo + span): the count stops at the first group that holds one.
+extern const bool run_filter_avx2;
+size_t run_groups_outside_avx2(const uint64_t* slots, size_t groups, uintptr_t lo, uintptr_t span) noexcept;
+} // namespace detail
+
 class Tracer {
 public:
     enum class Purpose : uint8_t { Minor, Full, Verify };
@@ -33,6 +42,36 @@ public:
         if (address - range_lo_ < range_span_) visit_slow_(*this, slot, word);
     }
     void visit_ref(uintptr_t* slot) noexcept { visit(reinterpret_cast<uint64_t*>(slot)); }
+
+    // visit() of each of `count` consecutive slots: an object's run of
+    // words, an array's elements. Most slots of a run name nothing in the
+    // range (a number, a constant, an old object in a minor collection), so
+    // where the CPU has AVX2 the run is tested four slots to a compare
+    // (tracer_run.cpp) and only a group holding a reference into the range
+    // is visited slot by slot; elsewhere the range stays in registers
+    // across the run.
+    void visit_run(uint64_t* slots, size_t count) noexcept {
+        const uintptr_t lo = range_lo_;
+        const uintptr_t span = range_span_;
+        if (count >= 16 && detail::run_filter_avx2) {
+            do {
+                const size_t clear = detail::run_groups_outside_avx2(slots, count / 4, lo, span);
+                slots += clear * 4;
+                count -= clear * 4;
+                if (count < 4) break;
+                for (int i = 0; i < 4; ++i) {
+                    const uint64_t word = slots[i];
+                    if (static_cast<uintptr_t>(word & kAddressMask) - lo < span) visit_slow_(*this, slots + i, word);
+                }
+                slots += 4;
+                count -= 4;
+            } while (count >= 4);
+        }
+        for (uint64_t* const end = slots + count; slots != end; ++slots) {
+            const uint64_t word = *slots;
+            if (static_cast<uintptr_t>(word & kAddressMask) - lo < span) [[unlikely]] visit_slow_(*this, slots, word);
+        }
+    }
 
     // A strong reference that may point inside its object rather than at its
     // start (a derived reference, or a slot a conservative source cannot

@@ -68,12 +68,12 @@ uintptr_t to_space_allocate(GcState& g, size_t total) {
     return at;
 }
 
+// Copies fresh young object `object` (not forwarded, not pinned) out of the
+// evacuated space and leaves its forwarding address. The copy is not on the
+// grey stack: the caller scans it at once or pushes it.
 uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     HeapState& s = g.s;
     ObjectHeader* h = header_of(object);
-    // Pinned by this evacuation (pin_stack_objects): it stays, and was made
-    // grey when it was pinned.
-    if (h->gc_bits & kGcPinned) return object;
     const size_t total = kHeaderBytes + h->size;
     const unsigned age = std::min<unsigned>(h->age() + 1u, 7u);
     const bool young_enough = age < g.tenure_age;
@@ -90,17 +90,17 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     uint8_t bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask | kGcResident));
     if (!promoted) bits = static_cast<uint8_t>(bits | (age << kGcAgeShift));
     nh->gc_bits = bits;
-    // Promoted into the large-object space where a pending sweep has yet to
-    // walk: marked, so the walk keeps it (HeapState::note_large_allocated).
-    if (promoted) s.note_large_allocated(dest);
     const uintptr_t moved = dest + kHeaderBytes;
-    // Promoted during a marking cycle: marked as it is copied, and grey, not
-    // black. This collection's scan of it shades its old referents, but
-    // through a Minor tracer, and a host's trace function may visit more
-    // for a full collection's (a prototype held through an off-heap shape):
-    // the marker scans it again as a full collection would.
-    if (promoted && g.shade) shade(s, moved);
     if (promoted) {
+        // Promoted into the large-object space where a pending sweep has yet
+        // to walk: marked, so the walk keeps it (HeapState::note_large_allocated).
+        s.note_large_allocated(dest);
+        // Promoted during a marking cycle: marked as it is copied, and grey,
+        // not black. This collection's scan of it shades its old referents,
+        // but through a Minor tracer, and a host's trace function may visit
+        // more for a full collection's (a prototype held through an off-heap
+        // shape): the marker scans it again as a full collection would.
+        if (g.shade) shade(s, moved);
         g.promoted_bytes += total;
         ++g.promoted_objects;
         s.old_allocated_since_full += total;
@@ -113,7 +113,6 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     h->gc_bits = static_cast<uint8_t>(h->gc_bits | kGcForwarded);
     *reinterpret_cast<uintptr_t*>(object) = moved;
     ++s.relocation_epoch;
-    g.gray.push_back(moved);
     return moved;
 }
 
@@ -124,30 +123,38 @@ void minor_visit(Tracer& t, uint64_t* slot, uint64_t word) {
     uintptr_t now = a;
     if (g.in_from(a)) {
         const ObjectHeader* h = header_of(a);
-        const bool fresh = !h->forwarded() && !(h->gc_bits & kGcPinned);
-        now = h->forwarded() ? *reinterpret_cast<const uintptr_t*>(a) : evacuate_young(g, a);
-        *slot = (word & ~kAddressMask) | now;
-        // A copy made just now is scanned at once, before the next slot of
-        // the object that named it, instead of waiting on the grey stack:
-        // what an object names is copied right after it, depth first, so an
-        // object and the parts it was made with (an array's elements, a slot
-        // block, small objects in its fields) stay together, in the order a
-        // program walks them. Each object taken from the grey stack may copy
-        // kCopyBudget bytes so (its copies and theirs); past that, or deeper
-        // than kCopyDepth, copies wait on the grey stack as before. Roots and
-        // cards have no budget. The bound keeps the work a parallel copy
-        // cannot share (a scan in progress) about one object's parts.
-        const size_t total = kHeaderBytes + header_of(now)->size;
-        if (fresh && total <= g.copy_budget && g.copy_depth < kCopyDepth) {
-            const uintptr_t owner = t.owner();
-            const bool owner_old = t.owner_old();
-            g.copy_budget -= total;
-            g.gray.pop_back();
-            ++g.copy_depth;
-            scan_object(t, now, g.heap.is_old(now));
-            --g.copy_depth;
-            t.set_owner(owner, owner_old);
+        if (h->forwarded()) {
+            now = *reinterpret_cast<const uintptr_t*>(a);
+            *slot = (word & ~kAddressMask) | now;
+        } else if ((h->gc_bits & kGcPinned) == 0) {
+            now = evacuate_young(g, a);
+            *slot = (word & ~kAddressMask) | now;
+            // A copy made just now is scanned at once, before the next slot
+            // of the object that named it, instead of waiting on the grey
+            // stack: what an object names is copied right after it, depth
+            // first, so an object and the parts it was made with (an array's
+            // elements, a slot block, small objects in its fields) stay
+            // together, in the order a program walks them. Each object taken
+            // from the grey stack may copy kCopyBudget bytes so (its copies
+            // and theirs); past that, or deeper than kCopyDepth, copies wait
+            // on the grey stack. Roots and cards have no budget. The bound
+            // keeps the work a parallel copy cannot share (a scan in
+            // progress) about one object's parts.
+            const size_t total = kHeaderBytes + header_of(now)->size;
+            if (total <= g.copy_budget && g.copy_depth < kCopyDepth) {
+                const uintptr_t owner = t.owner();
+                const bool owner_old = t.owner_old();
+                g.copy_budget -= total;
+                ++g.copy_depth;
+                scan_object(t, now, g.heap.is_old(now));
+                --g.copy_depth;
+                t.set_owner(owner, owner_old);
+            } else {
+                g.gray.push_back(now);
+            }
         }
+        // Pinned by this evacuation (pin_stack_objects): it stays, and was
+        // made grey when it was pinned.
     } else if (g.shade && !g.heap.is_young(a)) {
         // While a cycle is open the range is the heap, and an old object an
         // old one names is shaded: a dirty card's slot (an unbarriered store
@@ -551,31 +558,20 @@ void scan_object(Tracer& t, uintptr_t object, bool old) {
     t.set_owner(object, old);
     const ObjectHeader* h = header_of(object);
     const LayoutDescriptor& d = layout_descriptor(h->layout);
+    // A host's objects first: the one kind a program's heap is made of.
+    if (d.kind == LayoutKind::Custom) [[likely]] return d.trace(object, h->size, t);
+    if (d.kind == LayoutKind::Leaf) return;
     auto* words = reinterpret_cast<uint64_t*>(object);
     const size_t count = h->size / kGranuleBytes;
-    switch (d.kind) {
-    case LayoutKind::Leaf:
-        return;
-    case LayoutKind::Words:
-        for (size_t i = 0; i < count; ++i) t.visit(words + i);
-        return;
-    case LayoutKind::Mask: {
-        const size_t low = std::min<size_t>(count, 63);
-        uint64_t bits = d.mask & ((uint64_t{1} << low) - 1);
-        while (bits) {
-            const unsigned i = ctz64(bits);
-            bits &= bits - 1;
-            t.visit(words + i);
-        }
-        if ((d.mask >> 63) & 1) {
-            for (size_t i = 63; i < count; ++i) t.visit(words + i);
-        }
-        return;
+    if (d.kind == LayoutKind::Words) return t.visit_run(words, count);
+    const size_t low = std::min<size_t>(count, 63);
+    uint64_t bits = d.mask & ((uint64_t{1} << low) - 1);
+    while (bits) {
+        const unsigned i = ctz64(bits);
+        bits &= bits - 1;
+        t.visit(words + i);
     }
-    case LayoutKind::Custom:
-        d.trace(object, h->size, t);
-        return;
-    }
+    if ((d.mask >> 63) & 1) t.visit_run(words + 63, count > 63 ? count - 63 : 0);
 }
 
 uintptr_t live_address(const GcState& g, uintptr_t a) noexcept {
