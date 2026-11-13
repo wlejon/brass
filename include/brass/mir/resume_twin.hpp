@@ -28,11 +28,14 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/module.hpp>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace brass {
+
+class Builder;
 
 struct ResumeTwinOptions {
     // Also makes the function's entry an entry of the twin, under this
@@ -40,6 +43,15 @@ struct ResumeTwinOptions {
     // function's arguments. build_twin_entry then gives the unspeculated
     // function without a second copy of its code.
     std::optional<uint32_t> entry_id;
+    // Emits code into each entry a failed guard reaches (not entry_id's),
+    // once the entry has read its state: where a front end counts the
+    // failure, in memory it can address, and acts when the count says the
+    // speculation keeps failing (pointing its callers at build_twin_entry's
+    // function, say). Nothing of it is in the speculated function, so the
+    // count costs the fast path nothing. The builder is positioned in the
+    // entry; the code may call anything and must leave the builder in a
+    // block it has not terminated.
+    std::function<void(Builder&, uint32_t resume_id)> on_exit;
 };
 
 // Adds the resume twin of `fn` to `dst` as `name`. `fn` is in site form: the

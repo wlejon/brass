@@ -113,12 +113,13 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 
 #### Guard exits
 
-When a guard's condition is 0, the guard exits with its state values `[v0, ..., vN-1]`. A guard can exit in two ways:
+When a guard's condition is 0, the guard exits with its state values `[v0, ..., vN-1]`. A guard can exit in three ways:
 
 - **Exit stub.** The guard's `@label` names a function of the same module. That function is called as `stub(v0, ..., vN-1)`, and its result becomes the guarded function's result. The verifier requires the stub to have exactly N parameters, where parameter i has the type of vi, and to return the guarded function's return type. A label that names no function (for example `@exit_stub`) is only a label, and the guard then has no exit stub.
+- **Resume twin.** The guard's `@label` names a function of the same module with the attribute `resume_twin` (written after the return type: `func @t(%0: i32, %1: ptr) -> i64 resume_twin {`). It is called as `twin(resume id, state)`, where `state` points at the state values, value i in the 8 bytes at `8 * i` (a narrower value in the low bytes), and its result becomes the guarded function's result. The verifier requires the twin to be `(i32, ptr)` and to return the guarded function's return type, rejects a vector state value, and, for a twin built by `build_resume_twin`, requires the state to have the types the twin reads at that resume id. See "Guards in AOT images" in `speculation_and_deopt.md`.
 - **Resume target.** The function's `resume_table` maps the guard's resume id to a block. Execution continues in that block, in the same function, and block parameter i takes vi. The verifier requires the block to have at most N parameters, with matching types, and every value live into the block (read from it onward without being defined first) to be one of the guard's state values: a lower tier resuming there after a tier-2 deopt gets the state values and nothing else, and restores each under its own name.
 
-A guard with an exit stub always takes the stub, even when it also has a resume target. A guard with neither can only exit through a deopt handler. The tiers behave as follows:
+A guard with an exit stub or a resume twin always takes it, even when it also has a resume target. A twin exit is the same in every tier that has it: the interpreters and x64 tier 2 call the twin directly, with no deopt handler, resumer or runtime call first; the baseline JITs and AArch64 tier 2 reject the guard. A guard with neither can only exit through a deopt handler. The tiers behave as follows:
 
 | Tier | Exit stub | Resume target only | Neither |
 |---|---|---|---|
@@ -127,7 +128,7 @@ A guard with an exit stub always takes the stub, even when it also has a resume 
 | Tier 2, with a pipeline resumer or deopt handler (tier-up and OSR code) | the lower tier finishes the call and takes the same exits as the interpreter, in the same order | the same | the resumer or handler handles it; with neither, a fatal error |
 | Tier 2, standalone (no resumer and no handler) | native call `stub(v...)`; the stub's return registers are the function's | fatal error: nothing can resume the frame | fatal error |
 
-Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word. Arguments past the registers go on the stack as for any call, on AArch64 as on x64.
+Tier 2 rejects a guard in a function that returns a vector, because a lower tier returns its result as one 64-bit word; a guard that names a resume twin is exempt, since the twin returns in the function's own register. Arguments past the registers go on the stack as for any call, on AArch64 as on x64.
 
 ### Terminators
 - `br <target_block>(<args...>)`

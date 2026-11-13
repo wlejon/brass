@@ -56,6 +56,7 @@ This document guides frontend language compilers (such as `bronze`, the JS AOT c
 6. **Speculation, Guards & Deoptimization**:
    - Lower speculative checks into `b.build_guard(cond, "generic_twin_exit", live_state_values)`.
    - Implement interior resume targets in generic twin functions with `twin->add_resume_point(resume_id, target_block)`.
+   - For an AOT image, build each speculating function's resume twin from its site form (`build_resume_twin`) and point the speculated copy's guards at it (`speculate_against_twin`): a failed guard then calls the twin directly, with no runtime (`speculation_and_deopt.md`, section 7).
 7. **Generational GC Write Barriers**:
    - When writing a managed pointer into an object field, emit `b.build_write_barrier(object_ref, value_ref)` to mark the generational card table.
 

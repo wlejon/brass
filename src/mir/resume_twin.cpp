@@ -209,6 +209,7 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
                 b.build_store(t, slots.at(e.state[i]), 0, v);
             }
         }
+        if (options.on_exit && !(options.entry_id && *options.entry_id == id)) options.on_exit(b, id);
         b.build_br(blocks.at(e.target), Span<Value* const>(args.data(), args.size()));
         out->set_twin_state_types(id, std::move(types));
     }

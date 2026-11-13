@@ -3,11 +3,13 @@
 // "Guards in AOT images").
 
 #include "test_framework.hpp"
+#include <sstream>
 #include "aot_guard_test_util.hpp"
 #include "diff_harness.hpp"
 #include <brass/gc/code_stack_maps.hpp>
 #include <brass/gc/heap.hpp>
 #include <brass/interpreter/interpreter.hpp>
+#include <brass/mir/builder.hpp>
 #include <brass/mir/inliner.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/printer.hpp>
@@ -492,6 +494,187 @@ TEST_CASE("AOT guards - an inlined callee's guard finishes the callee in its twi
     CHECK_EQ(fn(dirty.data(), 8, &m), 8);
     // Each negative element left the inlined body and came back.
     CHECK_EQ(m, 3);
+}
+
+// A tagged state value, and the address of a tagged frame block: the block
+// stays the speculated frame's (which is still on the stack under the twin),
+// and its words are that frame's roots at the exit's call.
+TEST_CASE("AOT guards - a tagged alloca in the state stays rooted in the speculated frame") {
+    const char* text = R"(module @aot_tb
+func @tb(%0: tagged, %1: ptr, %2: i64, %3: i64) -> i64 {
+bb0:
+  %buf = alloca.tagged 16, 8
+  store.i64 %buf, 8, %3
+  %z = iconst.i64 0
+  %ok = eq.i64 %2, %z
+  guard %ok, @deopt, [%0, %buf, %1], id 1
+  %r = iconst.i64 -1
+  ret %r
+
+bb_slow(%q: tagged):
+  %j = call_indirect.i64 %1()
+  %mask = iconst.i64 281474976710655
+  %ua = bitcast.i64.tagged %q
+  %pa = and.i64 %ua, %mask
+  %va = load.i64 %pa, 0
+  %ub = load.i64 %buf, 8
+  %pb = and.i64 %ub, %mask
+  %vb = load.i64 %pb, 0
+  %s = add.i64 %va, %vb
+  ret %s
+
+resume_table {
+  entry 1 -> bb_slow
+}
+}
+)";
+    auto mod = parse_checked(text);
+    REQUIRE(mod != nullptr);
+    std::string why;
+    const bool ok = speculate_module_against_twins(*mod, &why);
+    if (!ok) std::cerr << why << "\n";
+    REQUIRE(ok);
+    LoadedImage img = link_and_load(*mod, "ag_tb");
+    REQUIRE(img.lib != nullptr);
+    auto tb = img.lib->get_function<int64_t (*)(uint64_t, void*, int64_t, uint64_t)>("tb");
+    REQUIRE(tb != nullptr);
+
+    constexpr uint16_t kRefTag = 0xFFF1;
+    constexpr uint64_t kTag = uint64_t{kRefTag} << 48;
+    gc::HeapConfig config;
+    config.read_environment = false;
+    config.poison = true;
+    config.reference_tags = {kRefTag};
+    gc::Heap heap(config);
+    g_twin_heap = &heap;
+    g_twin_collections = 0;
+    const auto maps = register_image_maps(img);
+    auto fresh = [&](int64_t field) {
+        const uintptr_t o = heap.allocate_masked(16, 0, 1);
+        *reinterpret_cast<int64_t*>(o) = field;
+        return static_cast<uint64_t>(o) | kTag;
+    };
+    void* collect = reinterpret_cast<void*>(&twin_collect_now);
+    CHECK_EQ(tb(fresh(40), collect, 0, fresh(2)), -1);
+    CHECK_EQ(tb(fresh(40), collect, 1, fresh(2)), 42);
+    CHECK_EQ(g_twin_collections, 1);
+    g_twin_heap = nullptr;
+}
+
+namespace {
+int64_t g_sum_exits = 0;
+}
+
+// Counting failures costs the speculated code nothing: the count is in the
+// twin's entries (ResumeTwinOptions::on_exit). A caller that sees it pass
+// its limit calls the twin's own entry from then on, which runs the same
+// code with no speculation and no count.
+TEST_CASE("AOT guards - failures are counted in the twin and a caller pins to the generic entry") {
+    auto mod = parse_checked(kSumSite);
+    REQUIRE(mod != nullptr);
+    Function* sum = mod->get_function("sum");
+    REQUIRE(sum != nullptr);
+    ResumeTwinOptions options;
+    options.entry_id = 1000;
+    options.on_exit = [](Builder& b, uint32_t) {
+        Value* addr = b.build_iconst_i64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(&g_sum_exits)));
+        b.build_store(Type::i64(), addr, 0, b.build_add(b.build_load(Type::i64(), addr, 0), b.build_iconst_i64(1)));
+    };
+    std::string why;
+    const Function* twin = build_resume_twin(*sum, *mod, "sum_twin", options, &why);
+    if (!twin) std::cerr << why << "\n";
+    REQUIRE(twin != nullptr);
+    REQUIRE(build_twin_entry(*sum, *twin, 1000, "sum_generic", &why) != nullptr);
+    REQUIRE(speculate_against_twin(*sum, *twin, &why));
+    DiagnosticReporter diag;
+    const bool verified = verify_module(*mod, &diag);
+    if (!verified) std::cerr << diag.format_all() << "\n";
+    REQUIRE(verified);
+
+    LoadedImage img = link_and_load(*mod, "ag_pin");
+    REQUIRE(img.lib != nullptr);
+    CHECK(img.undefined.empty());
+    auto fast = img.lib->get_function<SumFn>("sum");
+    auto generic = img.lib->get_function<SumFn>("sum_generic");
+    REQUIRE(fast != nullptr);
+    REQUIRE(generic != nullptr);
+
+    std::vector<int64_t> clean{1, 2, 3, 4, 5, 6, 7, 8};
+    std::vector<int64_t> dirty{1, 2, -3, 4, -5, 6, 7, 8};
+    g_sum_exits = 0;
+    int64_t m = 0;
+    SumFn entry = fast;
+    int calls_speculated = 0;
+    for (int call = 0; call < 10; ++call) {
+        calls_speculated += entry == fast;
+        CHECK_EQ(entry(dirty.data(), 8, &m), 20);
+        CHECK_EQ(entry(clean.data(), 8, &m), 36);
+        if (g_sum_exits >= 3) entry = generic;
+    }
+    // One exit a call of the speculated code on the dirty array (the twin
+    // runs the rest of that loop), three calls until the limit.
+    CHECK_EQ(g_sum_exits, 3);
+    CHECK_EQ(calls_speculated, 3);
+    // Both negative elements took the generic path in every call.
+    CHECK_EQ(m, 20);
+}
+
+// What the verifier holds a twin exit to.
+TEST_CASE("AOT guards - the verifier checks a guard against its twin") {
+    auto mod = parse_checked(kSumSite);
+    REQUIRE(mod != nullptr);
+    Function* sum = mod->get_function("sum");
+    std::string why;
+    Function* twin = build_resume_twin(*sum, *mod, "sum_twin", {}, &why);
+    REQUIRE(twin != nullptr);
+    REQUIRE(speculate_against_twin(*sum, *twin, &why));
+    REQUIRE(verify_module(*mod));
+
+    // The text form carries the attribute.
+    std::ostringstream os;
+    print_module(*mod, os);
+    CHECK(os.str().find("-> i64 resume_twin {") != std::string::npos);
+    auto again = parse_checked(os.str());
+    REQUIRE(again != nullptr);
+    CHECK(again->get_function("sum_twin")->is_resume_twin());
+
+    Instruction* guard = nullptr;
+    for (BasicBlock* bb : sum->blocks()) {
+        for (Instruction* inst : *bb) {
+            if (inst->opcode() == Opcode::guard) guard = inst;
+        }
+    }
+    REQUIRE(guard != nullptr);
+    // A state value dropped: the twin would read past what the guard wrote.
+    Value* last = guard->state_map().back();
+    guard->state_map().pop_back();
+    CHECK(!verify_module(*mod));
+    guard->state_map().push_back(last);
+    CHECK(verify_module(*mod));
+    // An id the twin has no entry for.
+    guard->set_resume_id(4);
+    CHECK(!verify_module(*mod));
+    guard->set_resume_id(3);
+    // A twin of another shape.
+    twin->set_return_type(Type::i32());
+    CHECK(!verify_module(*mod));
+}
+
+// A function with nothing to resume has no twin, and a coroutine body is
+// refused by name.
+TEST_CASE("AOT guards - functions without a twin") {
+    auto mod = parse_checked(R"(module @aot_none
+func @plain(%0: i64) -> i64 {
+bb0:
+  ret %0
+}
+)");
+    REQUIRE(mod != nullptr);
+    std::string why;
+    CHECK(build_resume_twin(*mod->get_function("plain"), *mod, "plain_twin", {}, &why) == nullptr);
+    CHECK(why.find("no guard") != std::string::npos);
+    CHECK(speculate_module_against_twins(*mod, &why));
+    CHECK(mod->get_function(resume_twin_name("plain")) == nullptr);
 }
 
 #if defined(BRASS_TEST_SHARED_LIB)
