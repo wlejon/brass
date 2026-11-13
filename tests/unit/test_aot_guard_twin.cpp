@@ -14,6 +14,7 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/printer.hpp>
 #include <brass/mir/resume_twin.hpp>
+#include <brass/mir/speculation_sites.hpp>
 
 using namespace brass;
 using namespace brass::test_aot_guard;
@@ -675,6 +676,76 @@ bb0:
     CHECK(why.find("no guard") != std::string::npos);
     CHECK(speculate_module_against_twins(*mod, &why));
     CHECK(mod->get_function(resume_twin_name("plain")) == nullptr);
+}
+
+// The front end's flow with brass's site emitter: the site form is built
+// once, run in the interpreter to collect counts, the twin is built from it,
+// and then the same function is armed from the counts and pointed at the
+// twin.
+TEST_CASE("AOT guards - a site emitted by SpecSiteEmitter, armed from its counts") {
+    SpecFeedback feedback([](uint8_t, uint32_t misses, bool) { return misses == 0; });
+    Module mod("aot_site");
+    Function* fn = mod.create_function("addsmall", Type::i64(), {Type::i64(), Type::i64()});
+    {
+        Builder b(mod);
+        b.set_function(fn);
+        SpecSiteEmitter sites;
+        sites.set_feedback(&feedback);
+        sites.begin_function(true, "addsmall");
+        BasicBlock* entry = b.append_block("entry");
+        Value* x = b.add_block_param(entry, Type::i64());
+        Value* y = b.add_block_param(entry, Type::i64());
+        BasicBlock* fast = b.append_block("fast");
+        BasicBlock* slow = b.append_block("slow");
+        BasicBlock* join = b.append_block("join");
+        Value* r = b.add_block_param(join, Type::i64());
+        b.position_at_end(entry);
+        Value* hit = b.build_slt(x, b.build_iconst_i64(100));
+        sites.emit_branch(b, hit, fast, slow, 0);
+        // The generic code: the same sum, plus a mark that it ran.
+        Value* generic = b.build_add(b.build_add(y, x), b.build_iconst_i64(1000000));
+        b.build_br(join, {generic});
+        b.position_at_end(fast);
+        b.build_br(join, {b.build_add(x, y)});
+        b.position_at_end(join);
+        b.build_ret(r);
+        fn->rebuild_cfg_predecessors();
+        sites.finish_function(*fn);
+    }
+    DiagnosticReporter diag;
+    const bool verified = verify_module(mod, &diag);
+    if (!verified) std::cerr << diag.format_all() << "\n";
+    REQUIRE(verified);
+    {
+        Interpreter in;
+        CHECK_EQ(in.run(mod, "addsmall", {RuntimeValue::from_i64(5), RuntimeValue::from_i64(7)}).as_i64(), 12);
+    }
+    REQUIRE_EQ(feedback.size(), size_t{1});
+    CHECK(feedback.should_speculate(0));
+
+    std::string why;
+    const Function* twin = build_resume_twin(*fn, mod, "addsmall_twin", {}, &why);
+    if (!twin) std::cerr << why << "\n";
+    REQUIRE(twin != nullptr);
+    arm_speculation_sites(mod, feedback);
+    const bool pointed = speculate_against_twin(*fn, *twin, &why);
+    if (!pointed) std::cerr << why << "\n";
+    REQUIRE(pointed);
+    REQUIRE(verify_module(mod));
+    CHECK(fn->get_block_by_name("slow") == nullptr);
+    CHECK(fn->resume_points().empty());
+
+    LoadedImage img = link_and_load(mod, "ag_site");
+    REQUIRE(img.lib != nullptr);
+    CHECK(img.undefined.empty());
+    auto f = img.lib->get_function<int64_t (*)(int64_t, int64_t)>("addsmall");
+    REQUIRE(f != nullptr);
+    CHECK_EQ(f(5, 7), 12);
+    CHECK_EQ(feedback.site(0).misses, 0u);
+    // The armed guard fails: the twin's slow block runs and counts itself.
+    CHECK_EQ(f(500, 7), 1000507);
+    CHECK_EQ(feedback.site(0).misses, 1u);
+    CHECK_EQ(f(99, 1), 100);
 }
 
 #if defined(BRASS_TEST_SHARED_LIB)

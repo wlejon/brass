@@ -384,11 +384,17 @@ bool speculate_against_twin(Function& fn, const Function& twin, std::string* why
     if (!mod || twin.parent() != mod || !twin.is_resume_twin()) {
         return fail(why, "'" + std::string(twin.name()) + "' is not a resume twin of the function's module");
     }
+    // The guards the twin answers for: those still resuming in fn's table,
+    // and those of a copy whose table is gone already (arm_speculation_sites
+    // drops it) but whose resume id the twin has an entry for.
     std::vector<Instruction*> guards;
     for (BasicBlock* bb : fn.blocks()) {
         if (!bb) continue;
         for (Instruction* inst : *bb) {
-            if (inst && resumes_in_table(fn, *inst)) guards.push_back(inst);
+            if (!inst || inst->opcode() != Opcode::guard || fn.guard_exit_stub(*inst)) continue;
+            if (fn.get_resume_target(inst->resume_id()) || twin.twin_state_types(inst->resume_id())) {
+                guards.push_back(inst);
+            }
         }
     }
     const std::string_view twin_name = mod->string_pool().intern(twin.name());

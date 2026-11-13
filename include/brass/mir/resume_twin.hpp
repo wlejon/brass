@@ -70,11 +70,13 @@ Function* build_twin_entry(const Function& fn, const Function& twin, uint32_t en
                            std::string* why = nullptr);
 
 // Makes `fn`, a function of the twin's module that is a copy of the function
-// the twin was built from (with its guards armed or dropped as the front end
-// chose), exit into `twin`: every guard that resumes in fn's resume table
-// names the twin instead, the resume table is dropped, and the blocks only
-// it kept reachable are removed. False (with `why`) when a guard's state
-// does not match what the twin reads at its resume id.
+// the twin was built from, exit into `twin`: every guard without an exit
+// stub that resumes in fn's resume table, or whose resume id the twin has an
+// entry for, names the twin instead; the resume table is dropped, and the
+// blocks only it kept reachable are removed. The front end arms or drops
+// the copy's guards before or after (arm_speculation_sites, which drops the
+// copy's resume table itself, may run first). False (with `why`) when a
+// guard's state does not match what the twin reads at its resume id.
 bool speculate_against_twin(Function& fn, const Function& twin, std::string* why = nullptr);
 
 // The two steps for a whole module, in place: every function with a
