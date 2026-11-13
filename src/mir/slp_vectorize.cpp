@@ -147,7 +147,8 @@ Value* vectorize_lanes(
     BasicBlock& current_bb,
     std::unordered_set<Instruction*>& visited,
     std::unordered_set<Instruction*>& out_vectorized_defs,
-    bool allow_fallback = true
+    bool allow_fallback = true,
+    bool allow_root_fallback = true
 ) {
     if (values.empty()) return nullptr;
 
@@ -288,7 +289,7 @@ Value* vectorize_lanes(
     }
 
     // 5. Fallback: pack via vbroadcast + vinsert_lane
-    if (!allow_fallback) {
+    if (!allow_fallback || !allow_root_fallback) {
         return nullptr;
     }
 
@@ -364,7 +365,12 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
 
         std::unordered_set<Instruction*> visited;
         std::unordered_set<Instruction*> vectorized_defs;
-        Value* vec_val = vectorize_lanes(sb.stored_values, sb.vec_type, b, bb, visited, vectorized_defs);
+        // Stored lanes that only a gather would pack stay scalar stores: the
+        // broadcast and inserts cost what the stores they replace did, and
+        // the vector store comes on top (x86: unpcklpd and movups for two
+        // movsd, which also take an immediate or a register as they stand).
+        Value* vec_val = vectorize_lanes(sb.stored_values, sb.vec_type, b, bb, visited, vectorized_defs,
+                                         /*allow_fallback=*/true, /*allow_root_fallback=*/false);
         if (!vec_val) continue;
 
         // Emit vector store right before the last store in bundle

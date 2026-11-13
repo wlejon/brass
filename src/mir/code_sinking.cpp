@@ -191,10 +191,15 @@ std::vector<BasicBlock*> blocks_that_read(const BasicBlock* bb, const std::vecto
                                           const DominatorTree& dom, const LoopOf& loop_of,
                                           const std::unordered_set<const BasicBlock*>& resumed) {
     std::vector<BasicBlock*> readers;
+    // A copy in a cold block is code size off the path that runs, so only
+    // the hot readers count against kMaxCopies (an index boxed for five
+    // slow-path calls goes to all five).
+    size_t hot_readers = 0;
     for (Instruction* u : users) {
         BasicBlock* at = u->parent();
         if (std::find(readers.begin(), readers.end(), at) != readers.end()) continue;
-        if (at == bb || readers.size() == kMaxCopies || resumed.count(at) != 0 || !dom.dominates(bb, at)) return {};
+        if (at == bb || resumed.count(at) != 0 || !dom.dominates(bb, at)) return {};
+        if (!at->is_cold() && hot_readers++ == kMaxCopies) return {};
         if (at->head() && at->head()->opcode() == Opcode::landing_pad) return {};
         const auto loop = loop_of.find(at);
         if (loop != loop_of.end() && !loop->second->contains(bb)) return {};
@@ -208,6 +213,10 @@ std::vector<BasicBlock*> blocks_that_read(const BasicBlock* bb, const std::vecto
         for (const BasicBlock* s : succs) {
             if (!s) continue;
             if (s == bb) return readers;
+            // From a hot block the path that stops paying is looked for among
+            // hot blocks: a path found there is one, and a large function's
+            // cold slow paths would use up the region before the loop closes.
+            if (s->is_cold() && !bb->is_cold()) continue;
             if (std::find(readers.begin(), readers.end(), s) != readers.end() || !seen.insert(s).second) continue;
             if (work.size() == kMaxReadRegion) return {};
             work.push_back(s);
