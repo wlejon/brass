@@ -4,7 +4,11 @@
 #include <iostream>
 #include <stdexcept>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <string>
 
 namespace brass::codegen {
 
@@ -254,6 +258,25 @@ CompilationResult EmitContext::compile_once() {
     for (size_t off : buffer_.rel8_overflows()) {
         auto it = short_patch_ord_.find(off);
         if (it != short_patch_ord_.end()) overflow_ords_.push_back(it->second);
+    }
+    // BRASS_BLOCK_MAP=<file>: one line per emitted block, `function <tab>
+    // offset <tab> c|h <tab> block`, appended. With a profiler's samples by
+    // offset in the function's symbol, where the time of a function is by
+    // the names its front end gave its blocks.
+    if (static const char* const map_path = std::getenv("BRASS_BLOCK_MAP"); map_path && map_path[0] != '\0') {
+        static std::mutex map_mutex;
+        std::string lines;
+        for (const auto& block : fn_.blocks) {
+            const auto it = result.block_offsets.find(block->id);
+            if (it == result.block_offsets.end()) continue;
+            lines += std::string(fn_.name) + '\t' + std::to_string(it->second) + '\t' + (block->cold ? 'c' : 'h') +
+                     '\t' + block->name + '\n';
+        }
+        const std::lock_guard<std::mutex> lock(map_mutex);
+        if (std::FILE* f = std::fopen(map_path, "a")) {
+            std::fwrite(lines.data(), 1, lines.size(), f);
+            std::fclose(f);
+        }
     }
     result.code_buffer = std::move(buffer_);
     result.safepoints = std::move(safepoints_);
