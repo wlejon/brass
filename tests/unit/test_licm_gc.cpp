@@ -207,3 +207,37 @@ done(%r: i64):
     gvn_function(*polled->get_function("f"));
     CHECK_EQ(count_in(*polled->get_function("f"), Opcode::bitcast_i64_tagged), size_t{2});
 }
+
+TEST_CASE("LICM - an i64 induction cycle is not GC-sensitive past a GC point") {
+    auto mod = parse_ok(R"(module @m
+extern @gc_point
+
+func @f(%n: i64, %k: i64) -> i64 {
+entry:
+  %z = iconst.i64 0
+  %one = iconst.i64 1
+  br outer_head(%z, %z)
+outer_head(%i: i64, %acc: i64):
+  %more_i = slt.i64 %i, %n
+  br_if %more_i, inner_head(%z, %acc), done(%acc)
+inner_head(%j: i64, %inner_acc: i64):
+  %more_j = slt.i64 %j, %n
+  br_if %more_j, inner_body, outer_latch(%inner_acc)
+inner_body:
+  %inv = mul.i64 %i, %k
+  call @gc_point()
+  %sum = add.i64 %inner_acc, %inv
+  %j2 = add.i64 %j, %one
+  br inner_head(%j2, %sum)
+outer_latch(%next_acc: i64):
+  %i2 = add.i64 %i, %one
+  br outer_head(%i2, %next_acc)
+done(%r: i64):
+  ret %r
+}
+)");
+    Function* fn = mod->get_function("f");
+    CHECK(hoist_loop_invariants(*fn));
+    verify_ok(*fn);
+    CHECK_EQ(count_in(*fn, Opcode::mul, "inner_body"), size_t{0});
+}

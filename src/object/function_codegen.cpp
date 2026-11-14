@@ -51,8 +51,8 @@ void mark_no_gc_calls(codegen::LirFunction& lir, const Module& mod) {
 }
 
 const std::string& block_map_path() {
-    static const std::string path = env_value("BRASS_BLOCK_MAP");
-    return path;
+    static const std::string* const path = new std::string(env_value("BRASS_BLOCK_MAP"));
+    return *path;
 }
 
 // Diagnostic: BRASS_BLOCK_MAP=<file> gets each emitted function's blocks as

@@ -10,10 +10,22 @@
 
 #include <algorithm>
 #include <functional>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace brass {
+
+namespace {
+
+bool eligible_sensitive_value(const Value* v) noexcept {
+    // Only a word can hold an address. A narrower value made of a tagged
+    // value's bits (a tag test, an int32 payload, a Number) reads nothing a
+    // move changes: a collection keeps tags and identity.
+    return v && !v->type().is_tagged() && (v->type().is_i64() || v->type().is_pointer());
+}
+
+} // namespace
 
 bool is_rematerializable(const Instruction& inst) {
     if (!inst.produces_value()) return false;
@@ -22,58 +34,161 @@ bool is_rematerializable(const Instruction& inst) {
            is_pure_instruction(&inst);
 }
 
-int GcSensitive::state(const Value* v) {
-    // Only a word can hold an address. A narrower value made of a tagged
-    // value's bits (a tag test, an int32 payload, a Number) reads nothing a
-    // move changes: a collection keeps tags and identity.
-    if (!v || v->type().is_tagged() || !(v->type().is_i64() || v->type().is_pointer())) return 0;
-    if (const auto it = memo_.find(v); it != memo_.end()) return it->second;
-    if (v->is_block_param()) {
-        const int r = param_sensitive(v) ? 2 : 0;
-        memo_[v] = r;
-        return r;
-    }
-    const Instruction* d = v->is_instruction() ? v->defining_instruction() : nullptr;
-    if (!d || !is_rematerializable(*d)) return memo_[v] = 0;
-    if (d->opcode() == Opcode::bitcast_i64_tagged) return memo_[v] = 1;
-    // A chain of pure instructions can be long: past this depth the value
-    // counts as sensitive and not clonable, which moves nothing.
-    if (depth_ > 1000) return 2;
-    ++depth_;
-    int r = 0;
-    for (const Value* op : d->operands()) r = std::max(r, state(op));
-    --depth_;
-    return memo_[v] = r;
-}
+int GcSensitive::state(const Value* root) {
+    auto try_resolve_immediate = [&](const Value* v, int& out) -> bool {
+        if (!eligible_sensitive_value(v)) {
+            out = 0;
+            return true;
+        }
+        if (const int* m = memo_.find(v)) {
+            out = *m;
+            return true;
+        }
+        if (v->is_instruction()) {
+            const Instruction* d = v->defining_instruction();
+            if (!d || !is_rematerializable(*d)) {
+                memo_[v] = 0;
+                out = 0;
+                return true;
+            }
+            if (d->opcode() == Opcode::bitcast_i64_tagged) {
+                memo_[v] = 1;
+                out = 1;
+                return true;
+            }
+            return false;
+        }
+        if (v->is_block_param()) {
+            if (!v->defining_block()) {
+                memo_[v] = 0;
+                out = 0;
+                return true;
+            }
+            return false;
+        }
+        memo_[v] = 0;
+        out = 0;
+        return true;
+    };
 
-bool GcSensitive::param_sensitive(const Value* param) {
-    std::vector<const Value*> work{param};
-    std::unordered_set<const Value*> seen;
-    while (!work.empty()) {
-        const Value* p = work.back();
-        work.pop_back();
-        if (!seen.insert(p).second) continue;
-        const BasicBlock* bb = p->defining_block();
-        if (!bb) continue;
-        const uint32_t idx = p->param_index();
-        for (BasicBlock* pred : bb->predecessors()) {
-            Instruction* term = pred ? pred->terminator() : nullptr;
-            if (!term) continue;
-            bool found = false;
-            for_each_edge(*term, [&](BranchTarget& t) {
-                if (t.block != bb || idx >= t.args.size() || !t.args[idx]) return;
-                const Value* a = t.args[idx];
-                if (a->type().is_tagged()) return;
-                if (a->is_block_param()) {
-                    work.push_back(a);
-                } else if (const auto it = memo_.find(a); it != memo_.end() ? it->second != 0 : state(a) != 0) {
-                    found = true;
+    int immediate = 0;
+    if (try_resolve_immediate(root, immediate)) return immediate;
+
+    struct SccNode {
+        const Value* v = nullptr;
+        uint32_t index = 0;
+        uint32_t lowlink = 0;
+        uint32_t next_dep = 0;
+        bool on_stack = false;
+        bool self_loop = false;
+        int ext_max = 0;
+        std::vector<const Value*> deps;
+    };
+
+    std::vector<SccNode> nodes;
+    DenseIdMap<Value, uint32_t> node_of;
+    std::vector<uint32_t> scc_stack;
+    std::vector<uint32_t> dfs_stack;
+
+    auto push_node = [&](const Value* v) {
+        const uint32_t id = static_cast<uint32_t>(nodes.size());
+        nodes.push_back({});
+        nodes[id].v = v;
+        nodes[id].index = id;
+        nodes[id].lowlink = id;
+        nodes[id].on_stack = true;
+        node_of.insert(v, id);
+        scc_stack.push_back(id);
+        dfs_stack.push_back(id);
+
+        auto add_dep = [&](const Value* dep) {
+            int val = 0;
+            if (try_resolve_immediate(dep, val)) {
+                nodes[id].ext_max = std::max(nodes[id].ext_max, val);
+            } else {
+                nodes[id].deps.push_back(dep);
+            }
+        };
+
+        if (v->is_instruction()) {
+            if (const Instruction* d = v->defining_instruction()) {
+                for (const Value* op : d->operands()) add_dep(op);
+            }
+        } else if (v->is_block_param()) {
+            if (const BasicBlock* bb = v->defining_block()) {
+                const uint32_t idx = v->param_index();
+                for (BasicBlock* pred : bb->predecessors()) {
+                    Instruction* term = pred ? pred->terminator() : nullptr;
+                    if (!term) continue;
+                    for_each_edge(*term, [&](BranchTarget& t) {
+                        if (t.block == bb && idx < t.args.size() && t.args[idx]) add_dep(t.args[idx]);
+                    });
                 }
-            });
-            if (found) return true;
+            }
+        }
+    };
+
+    push_node(root);
+    while (!dfs_stack.empty()) {
+        const uint32_t u_id = dfs_stack.back();
+        if (nodes[u_id].next_dep < nodes[u_id].deps.size()) {
+            const Value* w = nodes[u_id].deps[nodes[u_id].next_dep++];
+            if (const int* resolved = memo_.find(w)) {
+                nodes[u_id].ext_max = std::max(nodes[u_id].ext_max, *resolved);
+                continue;
+            }
+            if (const uint32_t* existing = node_of.find(w)) {
+                const uint32_t w_id = *existing;
+                if (w_id == u_id) nodes[u_id].self_loop = true;
+                if (nodes[w_id].on_stack) {
+                    nodes[u_id].lowlink = std::min(nodes[u_id].lowlink, nodes[w_id].index);
+                }
+                continue;
+            }
+            push_node(w);
+            continue;
+        }
+
+        dfs_stack.pop_back();
+        if (!dfs_stack.empty()) {
+            const uint32_t parent_id = dfs_stack.back();
+            nodes[parent_id].lowlink = std::min(nodes[parent_id].lowlink, nodes[u_id].lowlink);
+        }
+
+        if (nodes[u_id].lowlink == nodes[u_id].index) {
+            size_t scc_begin = scc_stack.size();
+            while (scc_begin > 0) {
+                --scc_begin;
+                if (scc_stack[scc_begin] == u_id) break;
+            }
+            for (size_t k = scc_begin; k < scc_stack.size(); ++k) {
+                nodes[scc_stack[k]].on_stack = false;
+            }
+            int scc_ext_max = 0;
+            for (size_t k = scc_begin; k < scc_stack.size(); ++k) {
+                const SccNode& m = nodes[scc_stack[k]];
+                scc_ext_max = std::max(scc_ext_max, m.ext_max);
+                for (const Value* dep : m.deps) {
+                    if (const int* resolved = memo_.find(dep)) {
+                        scc_ext_max = std::max(scc_ext_max, *resolved);
+                    }
+                }
+            }
+            const bool is_cycle = (scc_stack.size() - scc_begin > 1) || nodes[u_id].self_loop;
+            const int result = (scc_ext_max == 0)
+                                   ? 0
+                                   : ((is_cycle || nodes[u_id].v->is_block_param()) ? 2 : scc_ext_max);
+            for (size_t k = scc_begin; k < scc_stack.size(); ++k) {
+                memo_[nodes[scc_stack[k]].v] = result;
+            }
+            scc_stack.resize(scc_begin);
+            if (!dfs_stack.empty()) {
+                nodes[dfs_stack.back()].ext_max = std::max(nodes[dfs_stack.back()].ext_max, result);
+            }
         }
     }
-    return false;
+
+    return memo_.value_or(root, 0);
 }
 
 namespace {
@@ -219,7 +334,7 @@ size_t rematerialize_after(Function& fn, const std::vector<Instruction*>& vars, 
     }
 
     // Renaming over the dominator tree.
-    GcSensitive sensitive;
+    GcSensitive sensitive(fn);
     std::vector<std::vector<Value*>> stack(nv);
     std::vector<std::vector<size_t>> pushed;  // vars pushed per open block
     size_t copies = 0;

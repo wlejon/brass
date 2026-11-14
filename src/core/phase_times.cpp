@@ -55,8 +55,8 @@ PhaseTable& table() {
 thread_local std::string_view current_subject;
 
 const std::string& subject_filter() {
-    static const std::string f = env_value("BRASS_PASS_TIMES_FUNCTION");
-    return f;
+    static const std::string* const f = new std::string(env_value("BRASS_PASS_TIMES_FUNCTION"));
+    return *f;
 }
 
 } // namespace

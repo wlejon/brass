@@ -339,7 +339,7 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         DecomposedIndex dec;
     };
     std::vector<CandidateAccess> candidates;
-    GcSensitive gc_sensitive;
+    GcSensitive gc_sensitive(fn);
     std::unordered_set<const Instruction*> reducible_access_insts;
     std::unordered_set<const Instruction*> reducible_expr_insts;
     for (BasicBlock* bb : loop.blocks()) {

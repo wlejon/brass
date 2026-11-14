@@ -307,6 +307,11 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                     0,
                     callee
                 );
+            } else if (!inst.entry_cell.empty()) {
+                enc_.load_symbol_address(GPR::X16, inst.entry_cell);
+                enc_.ldr(GPR::X16, ptr(GPR::X16, 0));
+                call_start = buffer_.size();
+                enc_.blr(GPR::X16);
             } else {
                 enc_.bl(callee);
             }

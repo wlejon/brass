@@ -103,6 +103,7 @@ void AArch64ISel::lower_invoke(const Instruction& inst, LirBlock& lir_bb) {
     size_t num_args = inst.operand_count();
     auto call_lir = std::make_unique<LirInst>(LirOpcode::Call);
     call_lir->callee_symbol = std::string(inst.symbol());
+    call_lir->entry_cell = std::string(inst.extra_symbol());
     call_lir->is_invoke = true;
     if (inst.unwind_target().block) {
         call_lir->unwind_block_id = inst.unwind_target().block->id();

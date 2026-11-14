@@ -53,8 +53,8 @@ constexpr size_t kWalkBudget = 4096;
 
 class Licm {
 public:
-    Licm(Function& fn, LoopInfo& loop, const DominatorTree& dom, BasicBlock* preheader)
-        : fn_(fn), loop_(loop), dom_(dom), preheader_(preheader) {}
+    Licm(Function& fn, LoopInfo& loop, const DominatorTree& dom, BasicBlock* preheader, GcSensitive& sensitive)
+        : fn_(fn), loop_(loop), dom_(dom), preheader_(preheader), sensitive_(sensitive) {}
 
     bool run();
 
@@ -79,7 +79,7 @@ private:
     const DominatorTree& dom_;
     BasicBlock* preheader_;
     std::optional<AliasAnalysis> aa_;
-    GcSensitive sensitive_;
+    GcSensitive& sensitive_;
 
     bool scanned_ = false;
     std::vector<Instruction*> writers_;
@@ -212,7 +212,7 @@ bool Licm::tested_before(const Instruction* load) {
 }
 
 bool Licm::address_chain(const Value* v) {
-    if (!v || invariant(v) || !v->is_instruction()) return false;
+    if (!v || !v->is_instruction() || !sensitive_.clonable(v) || invariant(v)) return false;
     if (const auto it = chain_.find(v); it != chain_.end()) return it->second;
     chain_[v] = false;  // a cycle is impossible outside block parameters
     const Instruction* d = v->defining_instruction();
@@ -347,11 +347,11 @@ bool Licm::run() {
     return any;
 }
 
-bool licm_loop(Function& fn, LoopInfo& loop, const DominatorTree& dom) {
+bool licm_loop(Function& fn, LoopInfo& loop, const DominatorTree& dom, GcSensitive& sensitive) {
     BasicBlock* preheader = loop.preheader();
     if (!preheader) preheader = LoopAnalysis::ensure_preheader(fn, loop);
     if (!preheader) return false;
-    return Licm(fn, loop, dom, preheader).run();
+    return Licm(fn, loop, dom, preheader, sensitive).run();
 }
 
 } // namespace
@@ -361,9 +361,10 @@ bool hoist_loop_invariants(Function& fn) {
     fn.rebuild_cfg_predecessors();
     DominatorTree dom(fn);
     LoopAnalysis loops(fn, dom);
+    GcSensitive sensitive(fn);
     bool changed = false;
     for (LoopInfo* loop : loops.post_order_loops()) {
-        if (loop) changed |= licm_loop(fn, *loop, dom);
+        if (loop) changed |= licm_loop(fn, *loop, dom, sensitive);
     }
     if (changed) fn.rebuild_cfg_predecessors();
     return changed;

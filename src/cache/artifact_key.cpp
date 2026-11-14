@@ -72,8 +72,8 @@ std::string measure_binary_identity() {
 } // namespace
 
 const std::string& brass_binary_identity() {
-    static const std::string identity = measure_binary_identity();
-    return identity;
+    static const std::string* const identity = new std::string(measure_binary_identity());
+    return *identity;
 }
 
 KeyBuilder::KeyBuilder(std::string_view domain) : id_(kIdSeed), check_(kCheckSeed) {

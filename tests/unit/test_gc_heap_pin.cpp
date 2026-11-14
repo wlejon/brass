@@ -525,7 +525,7 @@ BRASS_TEST_NOINLINE bool hidden_intact(uint64_t hidden, size_t words, uintptr_t 
 
 } // namespace
 
-TEST_CASE("gc::Heap pinning - a generated frame's dead slot pins nothing; its save area and native words still pin") {
+TEST_CASE("gc::Heap pinning - a generated frame's dead slot pins nothing, its save area and native words still pin") {
     for (const bool described : {true, false}) {
         HeapConfig c = pin_config();
         Heap h(c);

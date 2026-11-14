@@ -512,8 +512,8 @@ const BlockLiveness& LivenessAnalysis::block_liveness(const LirBlock* b) const {
     if (it != block_liveness_.end()) {
         return it->second;
     }
-    static BlockLiveness empty;
-    return empty;
+    static const BlockLiveness* const empty = new BlockLiveness();
+    return *empty;
 }
 
 uint32_t LivenessAnalysis::get_loop_depth_at(uint32_t inst_id) const {

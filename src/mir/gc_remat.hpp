@@ -1,8 +1,8 @@
 #pragma once
 
+#include <brass/mir/dense_id_map.hpp>
 #include <brass/mir/function.hpp>
 #include <cstddef>
-#include <unordered_map>
 #include <vector>
 
 // Values a moving collection makes stale (GcSensitive: what LICM may hoist,
@@ -30,16 +30,17 @@ bool is_rematerializable(const Instruction& inst);
 // again from them.
 class GcSensitive {
 public:
+    GcSensitive() = default;
+    explicit GcSensitive(const Function& fn) : memo_(fn.current_next_value_id()) {}
+
     bool operator()(const Value* v) { return state(v) != 0; }
     bool clonable(const Value* v) { return state(v) == 1; }
 
 private:
     // 0 none, 1 clonable, 2 sensitive through a block parameter.
     int state(const Value* v);
-    bool param_sensitive(const Value* param);
 
-    std::unordered_map<const Value*, int> memo_;
-    int depth_ = 0;
+    DenseIdMap<Value, int> memo_;
 };
 
 // After `after` (no terminator), the vars of these indices computed again,

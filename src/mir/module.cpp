@@ -27,12 +27,12 @@ namespace {
 
 // The live modules with a body provider, for release_idle_bodies.
 std::mutex& provider_modules_mutex() {
-    static std::mutex m;
-    return m;
+    static auto* m = new std::mutex();
+    return *m;
 }
 std::vector<Module*>& provider_modules() {
-    static std::vector<Module*> mods;
-    return mods;
+    static auto* mods = new std::vector<Module*>();
+    return *mods;
 }
 
 void forget_provider_module(Module* mod) {

@@ -97,6 +97,9 @@ private:
     // Zeroes the `alloca.tagged` buffers (after the prologue).
     void zero_tagged_locals();
     void emit_guard_exit(const codegen::LirInst& inst);
+    void emit_twin_guard_exit(const codegen::LirInst& inst);
+    void store_guard_state(const codegen::LirInst& inst, size_t slots_off);
+    void open_guard_exit_area(size_t bytes);
     void move_sp_for_guard_exit(bool allocate, size_t bytes);
 };
 

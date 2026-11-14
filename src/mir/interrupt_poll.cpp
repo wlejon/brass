@@ -114,7 +114,7 @@ bool polled(const Function& fn) {
 void recompute_after_handlers(Function& fn, const std::vector<std::pair<BasicBlock*, BasicBlock*>>& handlers) {
     fn.rebuild_cfg_predecessors();
     const DominatorTree dom(fn);
-    GcSensitive sensitive;
+    GcSensitive sensitive(fn);
     std::vector<Instruction*> vars;
     std::unordered_map<const Value*, size_t> var_of;
     std::vector<RematPoint> points;
