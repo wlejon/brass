@@ -596,3 +596,99 @@ TEST_CASE("Loop Vectorizer - storing the running accumulator is not vectorized")
     CHECK_EQ(r.as_i32(), 55);
     for (int k = 0; k < 10; ++k) CHECK_EQ(out[k], k * (k + 1) / 2);
 }
+
+TEST_CASE("SLP - stored loads of another block stay scalar loads") {
+    // entry loads four floats; `then` stores them; `merge`, which `then`
+    // does not dominate, reads two of them. A vector load in `then` standing
+    // for the loads would leave `merge` reading a lane extracted in `then`.
+    Module mod("slp_loads_other_block");
+    Function* fn = mod.create_function("copy_if", Type::f32(), {Type::ptr(), Type::ptr(), Type::i32()});
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* pin = b.add_block_param(entry, Type::ptr());
+    Value* pout = b.add_block_param(entry, Type::ptr());
+    Value* flag = b.add_block_param(entry, Type::i32());
+    BasicBlock* then_bb = b.create_block("then");
+    BasicBlock* merge_bb = b.create_block("merge");
+
+    Value* l0 = b.build_load(Type::f32(), pin, 0);
+    Value* l1 = b.build_load(Type::f32(), pin, 4);
+    Value* l2 = b.build_load(Type::f32(), pin, 8);
+    Value* l3 = b.build_load(Type::f32(), pin, 12);
+    b.build_br_if(flag, then_bb, merge_bb);
+
+    fn->append_block(then_bb);
+    b.position_at_end(then_bb);
+    b.build_store(Type::f32(), pout, 0, l0);
+    b.build_store(Type::f32(), pout, 4, l1);
+    b.build_store(Type::f32(), pout, 8, l2);
+    b.build_store(Type::f32(), pout, 12, l3);
+    b.build_br(merge_bb);
+
+    fn->append_block(merge_bb);
+    b.position_at_end(merge_bb);
+    b.build_ret(b.build_add(l0, l3));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_module(mod));
+
+    slp_vectorize_function(*fn, SlpOptions());
+    fn->rebuild_cfg_predecessors();
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(mod, &diag));
+
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(mod));
+    alignas(16) float in_buf[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    for (int32_t taken = 0; taken < 2; ++taken) {
+        alignas(16) float out_buf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        RuntimeValue r = jit.invoke("copy_if", {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(in_buf)),
+                                                RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(out_buf)),
+                                                RuntimeValue::from_i32(taken)});
+        CHECK_EQ(r.as_f32(), 5.0f);
+        for (int k = 0; k < 4; ++k) CHECK_EQ(out_buf[k], taken ? in_buf[k] : 0.0f);
+    }
+}
+
+TEST_CASE("SLP - a write between stored loads and their stores keeps the loads scalar") {
+    // The four loads read `in` before in[0] is overwritten; a vector load
+    // where the stores stand would read it after.
+    Module mod("slp_loads_then_write");
+    Function* fn = mod.create_function("copy_then_poke", Type::void_type(), {Type::ptr(), Type::ptr()});
+    Builder b(mod);
+    b.set_function(fn);
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* pin = b.add_block_param(entry, Type::ptr());
+    Value* pout = b.add_block_param(entry, Type::ptr());
+    Value* l0 = b.build_load(Type::f32(), pin, 0);
+    Value* l1 = b.build_load(Type::f32(), pin, 4);
+    Value* l2 = b.build_load(Type::f32(), pin, 8);
+    Value* l3 = b.build_load(Type::f32(), pin, 12);
+    b.build_store(Type::f32(), pin, 0, b.build_fconst_f32(99.0f));
+    b.build_store(Type::f32(), pout, 0, l0);
+    b.build_store(Type::f32(), pout, 4, l1);
+    b.build_store(Type::f32(), pout, 8, l2);
+    b.build_store(Type::f32(), pout, 12, l3);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_module(mod));
+
+    slp_vectorize_function(*fn, SlpOptions());
+    fn->rebuild_cfg_predecessors();
+    DiagnosticReporter diag;
+    REQUIRE(verify_module(mod, &diag));
+
+    codegen::JitExecutionEngine jit(Target::host());
+    REQUIRE(jit.compile_and_load(mod));
+    alignas(16) float in_buf[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    alignas(16) float out_buf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    jit.invoke("copy_then_poke", {RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(in_buf)),
+                                  RuntimeValue::from_ptr(reinterpret_cast<uintptr_t>(out_buf))});
+    CHECK_EQ(in_buf[0], 99.0f);
+    CHECK_EQ(out_buf[0], 1.0f);
+    CHECK_EQ(out_buf[1], 2.0f);
+    CHECK_EQ(out_buf[2], 3.0f);
+    CHECK_EQ(out_buf[3], 4.0f);
+}

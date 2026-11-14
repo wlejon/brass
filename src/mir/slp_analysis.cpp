@@ -32,6 +32,15 @@ bool get_slp_type_info(
     return false;
 }
 
+// Two different stack slots: an access through one is never one through the
+// other.
+static bool distinct_allocas(const Value* a, const Value* b) {
+    if (!a || !b || a == b || !a->is_instruction() || !b->is_instruction()) return false;
+    const Instruction* da = a->defining_instruction();
+    const Instruction* db = b->defining_instruction();
+    return da && db && da->opcode() == Opcode::alloca_ && db->opcode() == Opcode::alloca_;
+}
+
 static bool may_alias_or_barrier(
     const Instruction* inst,
     const Value* base,
@@ -54,7 +63,7 @@ static bool may_alias_or_barrier(
                 if (off < range_end && (off + size) > range_start) {
                     return true;
                 }
-            } else {
+            } else if (!distinct_allocas(inst->operand(0), base)) {
                 // Different or unknown base store might alias
                 return true;
             }
@@ -70,12 +79,49 @@ static bool may_alias_or_barrier(
                 if (off < range_end && (off + size) > range_start) {
                     return true;
                 }
-            } else {
+            } else if (!distinct_allocas(inst->operand(0), base)) {
                 return true;
             }
         } else if (op == Opcode::load_indexed) {
             return true;
         }
+    }
+    return false;
+}
+
+bool slp_loads_readable_at(
+    const std::vector<Instruction*>& loads,
+    const BasicBlock& bb,
+    const Instruction* at,
+    const std::unordered_set<const Instruction*>& replaced_stores
+) {
+    if (loads.empty() || !at || at->parent() != &bb) return false;
+    std::unordered_set<const Instruction*> members;
+    const Value* base = loads.front()->operand(0);
+    int32_t range_start = loads.front()->offset();
+    int32_t range_end = range_start;
+    for (const Instruction* l : loads) {
+        if (!l || l->parent() != &bb) return false;
+        members.insert(l);
+        range_start = std::min(range_start, l->offset());
+        range_end = std::max(range_end, l->offset() + static_cast<int32_t>(l->memory_type().size_in_bytes()));
+    }
+    // From the first of the loads in the block to `at`: every load is passed,
+    // and nothing between may write what they read.
+    size_t seen = 0;
+    bool started = false;
+    for (const Instruction* inst = bb.head(); inst != nullptr; inst = inst->next()) {
+        if (inst == at) return seen == members.size();
+        if (members.count(inst)) {
+            started = true;
+            ++seen;
+            continue;
+        }
+        if (!started) continue;
+        // A store the vector store replaces writes after the vector load, as
+        // it wrote after the scalar loads once the last of them is passed.
+        if (seen == members.size() && replaced_stores.count(inst)) continue;
+        if (may_alias_or_barrier(inst, base, range_start, range_end, /*check_writes=*/true)) return false;
     }
     return false;
 }

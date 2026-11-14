@@ -54,6 +54,19 @@ std::vector<SlpLoadBundle> find_slp_load_bundles(
     const SlpOptions& options
 );
 
+// Whether one vector load placed before `at` reads what `loads` (of one
+// base) read: each is in `bb` before `at`, and nothing from the first of
+// them to `at` may write the bytes they read. `replaced_stores` are the
+// scalar stores a vector store after the load is to replace: one standing
+// after the last load writes after the vector load too; one between the
+// loads may be what a later lane reads.
+bool slp_loads_readable_at(
+    const std::vector<Instruction*>& loads,
+    const BasicBlock& bb,
+    const Instruction* at,
+    const std::unordered_set<const Instruction*>& replaced_stores
+);
+
 std::vector<SlpArithBundle> find_slp_arith_bundles(
     BasicBlock& bb,
     const SlpOptions& options,

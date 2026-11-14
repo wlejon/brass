@@ -145,6 +145,8 @@ Value* vectorize_lanes(
     Type vec_type,
     Builder& b,
     BasicBlock& current_bb,
+    Instruction* at,   // where the builder stands, in current_bb
+    const std::unordered_set<const Instruction*>& replaced_stores,   // the scalar stores the result replaces
     std::unordered_set<Instruction*>& visited,
     std::unordered_set<Instruction*>& out_vectorized_defs,
     bool allow_fallback = true,
@@ -164,16 +166,18 @@ Value* vectorize_lanes(
     }
 
     // 3. Contiguous loads?
+    // One vector load where the builder stands, if it reads there what the
+    // scalar loads read where they are.
     Value* base = nullptr;
     int32_t base_offset = 0;
     Type elem_type;
     if (are_contiguous_loads(values, base, base_offset, elem_type)) {
-        for (Value* v : values) {
-            if (v && v->is_instruction()) {
-                out_vectorized_defs.insert(v->defining_instruction());
-            }
+        std::vector<Instruction*> loads;
+        for (Value* v : values) loads.push_back(v->defining_instruction());
+        if (slp_loads_readable_at(loads, current_bb, at, replaced_stores)) {
+            for (Instruction* l : loads) out_vectorized_defs.insert(l);
+            return b.build_vload(vec_type, base, base_offset);
         }
-        return b.build_vload(vec_type, base, base_offset);
     }
 
     // 4. Recursive Isomorphic Tree?
@@ -230,8 +234,8 @@ Value* vectorize_lanes(
                     rhs_ops[i] = defs[i]->operand(1);
                 }
 
-                Value* vec_lhs = vectorize_lanes(lhs_ops, vec_type, b, current_bb, visited, out_vectorized_defs, allow_fallback);
-                Value* vec_rhs = vectorize_lanes(rhs_ops, vec_type, b, current_bb, visited, out_vectorized_defs, allow_fallback);
+                Value* vec_lhs = vectorize_lanes(lhs_ops, vec_type, b, current_bb, at, replaced_stores, visited, out_vectorized_defs, allow_fallback);
+                Value* vec_rhs = vectorize_lanes(rhs_ops, vec_type, b, current_bb, at, replaced_stores, visited, out_vectorized_defs, allow_fallback);
 
                 Value* res = nullptr;
                 if (vec_lhs && vec_rhs) {
@@ -257,7 +261,7 @@ Value* vectorize_lanes(
                 for (size_t i = 0; i < defs.size(); ++i) {
                     arg_ops[i] = defs[i]->operand(0);
                 }
-                Value* vec_arg = vectorize_lanes(arg_ops, vec_type, b, current_bb, visited, out_vectorized_defs, allow_fallback);
+                Value* vec_arg = vectorize_lanes(arg_ops, vec_type, b, current_bb, at, replaced_stores, visited, out_vectorized_defs, allow_fallback);
                 Value* res = nullptr;
                 if (vec_arg) {
                     res = (op0 == Opcode::neg) ? b.build_vneg(vec_arg) : b.build_vnot(vec_arg);
@@ -271,8 +275,8 @@ Value* vectorize_lanes(
                 std::vector<Value*> sel_lhs;
                 std::vector<Value*> sel_rhs;
                 if (check_isomorphic_select_min_max(defs, is_min, sel_lhs, sel_rhs)) {
-                    Value* vec_lhs = vectorize_lanes(sel_lhs, vec_type, b, current_bb, visited, out_vectorized_defs, allow_fallback);
-                    Value* vec_rhs = vectorize_lanes(sel_rhs, vec_type, b, current_bb, visited, out_vectorized_defs, allow_fallback);
+                    Value* vec_lhs = vectorize_lanes(sel_lhs, vec_type, b, current_bb, at, replaced_stores, visited, out_vectorized_defs, allow_fallback);
+                    Value* vec_rhs = vectorize_lanes(sel_rhs, vec_type, b, current_bb, at, replaced_stores, visited, out_vectorized_defs, allow_fallback);
                     Value* res = nullptr;
                     if (vec_lhs && vec_rhs) {
                         res = is_min ? b.build_vmin(vec_lhs, vec_rhs) : b.build_vmax(vec_lhs, vec_rhs);
@@ -369,7 +373,8 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         // broadcast and inserts cost what the stores they replace did, and
         // the vector store comes on top (x86: unpcklpd and movups for two
         // movsd, which also take an immediate or a register as they stand).
-        Value* vec_val = vectorize_lanes(sb.stored_values, sb.vec_type, b, bb, visited, vectorized_defs,
+        const std::unordered_set<const Instruction*> replaced(sb.stores.begin(), sb.stores.end());
+        Value* vec_val = vectorize_lanes(sb.stored_values, sb.vec_type, b, bb, last_store, replaced, visited, vectorized_defs,
                                          /*allow_fallback=*/true, /*allow_root_fallback=*/false);
         if (!vec_val) continue;
 
@@ -468,7 +473,7 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
 
         std::unordered_set<Instruction*> visited;
         std::unordered_set<Instruction*> vectorized_defs;
-        Value* vec_res = vectorize_lanes(inst_results, ab.vec_type, b, bb, visited, vectorized_defs, /*allow_fallback=*/false);
+        Value* vec_res = vectorize_lanes(inst_results, ab.vec_type, b, bb, last_inst, {}, visited, vectorized_defs, /*allow_fallback=*/false);
         if (!vec_res) continue;
 
         std::unordered_set<Instruction*> dead_arith(ab.insts.begin(), ab.insts.end());
