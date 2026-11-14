@@ -7,6 +7,7 @@
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/mir/uses.hpp>
 #include <brass/core/scratch_alloc.hpp>
+#include "gc_remat.hpp"
 #include "int_fold.hpp"
 #include "number_bits.hpp"
 #include <cmath>
@@ -48,6 +49,8 @@ bool reads_tagged_bits(const Value* v) {
     return def && def->opcode() == Opcode::bitcast_i64_tagged;
 }
 
+} // namespace
+
 // Pure and safe to execute speculatively: LICM hoists these out of loops
 // and CSE merges them.
 bool is_pure_instruction(const Instruction* inst) {
@@ -85,6 +88,8 @@ bool is_pure_instruction(const Instruction* inst) {
         default: return false;
     }
 }
+
+namespace {
 
 // Replace-all-uses deferred to one sweep. MIR keeps no use lists, so an
 // eager replace_all_uses walks the whole function for every fold, which made
@@ -191,136 +196,6 @@ std::optional<ExprKey> expr_key(const Instruction* inst) {
     if (inst->operand_count() >= 3) key.op2 = inst->operand(2);
     if (is_commutative(key.op, key.type) &&std::less<const Value*>()(key.op1, key.op0)) std::swap(key.op0, key.op1);
     return key;
-}
-
-bool licm_loop(Function& fn, LoopInfo& loop, const DominatorTree& dom) {
-    BasicBlock* preheader = loop.preheader();
-    if (!preheader) preheader = LoopAnalysis::ensure_preheader(fn, loop);
-    if (!preheader) return false;
-    Instruction* ph_term = preheader->terminator();
-    if (!ph_term) return false;
-
-    std::optional<AliasAnalysis> aa;
-    auto is_op_invariant = [&](Value* op) -> bool {
-        if (!op) return true;
-        if (op->is_block_param()) {
-            return !loop.contains(op->defining_block());
-        }
-        if (op->is_instruction()) {
-            Instruction* def_inst = op->defining_instruction();
-            if (def_inst && loop.contains(def_inst->parent()) && def_inst->parent() != preheader) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    bool any_hoisted = false;
-    bool hoisted_in_round = true;
-    while (hoisted_in_round) {
-        hoisted_in_round = false;
-        for (BasicBlock* bb : loop.blocks()) {
-            if (!bb || bb == preheader) continue;
-            Instruction* cur = bb->head();
-            while (cur) {
-                Instruction* next = cur->next();
-                if (is_pure_instruction(cur) && cur->produces_value()) {
-                    bool all_operands_invariant = true;
-                    for (Value* op : cur->operands()) {
-                        if (!is_op_invariant(op)) {
-                            all_operands_invariant = false;
-                            break;
-                        }
-                    }
-                    if (all_operands_invariant) {
-                        bb->remove_instruction(cur);
-                        preheader->insert_before(cur, ph_term);
-                        hoisted_in_round = true;
-                        any_hoisted = true;
-                    }
-                } else if (cur->opcode() == Opcode::load && cur->produces_value() &&
-                           !is_derived_gcref(cur->result()) && is_op_invariant(cur->operand(0))) {
-                    Value* base = cur->operand(0);
-                    bool dominates_latches = (bb == loop.header()) || !loop.latches().empty();
-                    if (bb != loop.header()) {
-                        for (BasicBlock* latch : loop.latches()) {
-                            if (!latch || !dom.dominates(bb, latch)) {
-                                dominates_latches = false;
-                                break;
-                            }
-                        }
-                    }
-                    bool null_guarded = false;
-                    auto check_null_cmp = [&](BasicBlock* check_bb, Instruction* stop_at) {
-                        if (!check_bb) return;
-                        for (Instruction* inst : *check_bb) {
-                            if (inst == stop_at) break;
-                            if (!inst) continue;
-                            if ((inst->opcode() == Opcode::eq || inst->opcode() == Opcode::ne) &&
-                                (inst->operand(0) == base || inst->operand(1) == base)) {
-                                null_guarded = true;
-                                break;
-                            }
-                        }
-                    };
-                    if (bb != loop.header()) check_null_cmp(loop.header(), nullptr);
-                    check_null_cmp(bb, cur);
-
-                    if (dominates_latches && !null_guarded) {
-                        if (!aa.has_value()) aa.emplace(fn);
-                        bool clobbered = false;
-                        for (BasicBlock* lbb : loop.blocks()) {
-                            if (!lbb || lbb == preheader) continue;
-                            for (const Instruction* w : *lbb) {
-                                if (w && aa->can_clobber(w, cur)) {
-                                    clobbered = true;
-                                    break;
-                                }
-                            }
-                            if (clobbered) break;
-                        }
-                        if (!clobbered) {
-                            auto find_existing = [&](BasicBlock* search_bb, Instruction* from_inst) -> Value* {
-                                for (Instruction* p = from_inst; p != nullptr; p = p->prev()) {
-                                    if (p->opcode() == Opcode::load &&
-                                        p->operand(0) == base &&
-                                        p->offset() == cur->offset() &&
-                                        p->memory_type() == cur->memory_type() &&
-                                        p->type() == cur->type()) {
-                                        return p->result();
-                                    }
-                                    if (aa->can_clobber(p, cur)) return nullptr;
-                                }
-                                return nullptr;
-                            };
-                            Value* existing = find_existing(preheader, ph_term->prev());
-                            if (!existing && preheader->predecessors().size() == 1) {
-                                BasicBlock* ppred = preheader->predecessors()[0];
-                                bool ph_clobbers = false;
-                                for (Instruction* p = ph_term->prev(); p != nullptr; p = p->prev()) {
-                                    if (aa->can_clobber(p, cur)) { ph_clobbers = true; break; }
-                                }
-                                if (!ph_clobbers && ppred && ppred->terminator()) {
-                                    existing = find_existing(ppred, ppred->terminator()->prev());
-                                }
-                            }
-                            if (existing) {
-                                replace_all_uses(fn, cur->result(), existing);
-                                bb->remove_instruction(cur);
-                            } else {
-                                bb->remove_instruction(cur);
-                                preheader->insert_before(cur, ph_term);
-                            }
-                            hoisted_in_round = true;
-                            any_hoisted = true;
-                        }
-                    }
-                }
-                cur = next;
-            }
-        }
-    }
-    return any_hoisted;
 }
 
 } // namespace
@@ -933,19 +808,6 @@ bool scalar_cleanup(Function& fn) {
     bool changed = fold_constants(fn);
     changed |= dominator_cse(fn);
     changed |= eliminate_dead_code(fn);
-    return changed;
-}
-
-bool hoist_loop_invariants(Function& fn) {
-    if (!fn.entry_block()) return false;
-    fn.rebuild_cfg_predecessors();
-    DominatorTree dom(fn);
-    LoopAnalysis loops(fn, dom);
-    bool changed = false;
-    for (LoopInfo* loop : loops.post_order_loops()) {
-        if (loop) changed |= licm_loop(fn, *loop, dom);
-    }
-    if (changed) fn.rebuild_cfg_predecessors();
     return changed;
 }
 

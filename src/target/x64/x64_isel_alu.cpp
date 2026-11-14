@@ -795,6 +795,20 @@ void X64ISel::lower_binary_alu(
         return;
     }
 
+    if (inst.opcode() == Opcode::add && !imm0.is_imm && !imm1.is_imm) {
+        const Instruction* sh = scaled_lea_shift(inst);
+        if (sh && skipped_insts_.count(sh)) {
+            const Value* other = (op0_val == sh->result()) ? op1_val : op0_val;
+            const int64_t k = get_imm_int_info(sh->operand(1)).val;
+            const Scale sc = (k == 1) ? Scale::Two : ((k == 2) ? Scale::Four : Scale::Eight);
+            auto lea_inst = std::make_unique<LirInst>(LirOpcode::Lea);
+            lea_inst->add_def(LirOperand::vreg(dst, sz));
+            lea_inst->add_use(LirOperand::mem(get_vreg(other), get_vreg(sh->operand(0)), sc, 0, sz));
+            lea_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lea_inst));
+            return;
+        }
+    }
     if (inst.opcode() == Opcode::add) {
         const Value* reg_val = (imm1.is_imm && imm1.fits_i32) ? op0_val : ((imm0.is_imm && imm0.fits_i32) ? op1_val : nullptr);
         ImmIntInfo imm_info = (imm1.is_imm && imm1.fits_i32) ? imm1 : imm0;
@@ -1003,6 +1017,21 @@ void X64ISel::lower_binary_alu(
     } else {
         emit_mov_alu(src0, LirOperand::vreg(src1, sz));
     }
+}
+
+const Instruction* X64ISel::scaled_lea_shift(const Instruction& add) {
+    if (add.opcode() != Opcode::add || add.operand_count() != 2 || add.type().is_float() || add.type().is_vector()) {
+        return nullptr;
+    }
+    for (const Value* op : add.operands()) {
+        if (!op || !op->is_instruction()) continue;
+        const Instruction* def = op->defining_instruction();
+        if (!def || def->opcode() != Opcode::shl || def->parent() != add.parent()) continue;
+        if (add.operand(0) == add.operand(1) || use_count_[op] != 1) continue;
+        const ImmIntInfo k = get_imm_int_info(def->operand(1));
+        if (k.is_imm && k.val >= 1 && k.val <= 3 && !get_imm_int_info(def->operand(0)).is_imm) return def;
+    }
+    return nullptr;
 }
 
 } // namespace brass::x64

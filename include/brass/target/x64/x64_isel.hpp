@@ -119,6 +119,9 @@ private:
     // Whether analyze_function may fold this comparison into its single
     // branch / select / guard user.
     static bool comparison_fusible(const Instruction& cmp) noexcept;
+    // The shift a two-register add `a + (b << k)` (k 1 to 3) takes as a
+    // lea's scaled index: single use, in the add's block. Null if none.
+    const Instruction* scaled_lea_shift(const Instruction& add);
     // i8 / i16 operands (x64_isel_narrow.cpp): a comparison of narrow
     // values, and the sign / zero extension of the narrow operands an
     // instruction reads through, swapped into val_to_vreg_ while it is

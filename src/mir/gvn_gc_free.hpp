@@ -14,6 +14,12 @@ namespace brass {
 // any path. A frontend re-derives the bits after every call it emits (the
 // contract), so within a stretch with no GC point the first read stands for
 // the rest: what follows it, `and` / loads / compares, merges as usual.
+//
+// In a function with interrupt polls (interrupt_poll.hpp) the back edges
+// count as GC points: a poll goes on each after the optimizer, and its
+// handler may collect. So no
+// stretch that enters a loop header, other than the one `from` is in,
+// is GC-free: a path through a header can go round its loop first.
 class GcFreePaths {
 public:
     explicit GcFreePaths(const Function& fn);
@@ -28,6 +34,7 @@ private:
         uint32_t first_gc = UINT32_MAX;  // index of the first GC point, or none
         uint32_t last_gc = 0;            // index of the last one (valid when has_gc)
         bool has_gc = false;
+        bool header = false;             // a back edge's target
     };
 
     bool blocks_between_gc_free(const BasicBlock* a, const BasicBlock* b);

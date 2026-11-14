@@ -3,6 +3,7 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/loop_analysis.hpp>
 #include <brass/mir/uses.hpp>
+#include "gc_remat.hpp"
 #include "ir_clone.hpp"
 #include <algorithm>
 #include <functional>
@@ -338,6 +339,7 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
         DecomposedIndex dec;
     };
     std::vector<CandidateAccess> candidates;
+    GcSensitive gc_sensitive;
     std::unordered_set<const Instruction*> reducible_access_insts;
     std::unordered_set<const Instruction*> reducible_expr_insts;
     for (BasicBlock* bb : loop.blocks()) {
@@ -348,6 +350,10 @@ bool ivsr_loop(Function& fn, LoopInfo& loop) {
             Value* index = inst->operand(1);
             if (!base || !index || !loop.is_loop_invariant(base)) continue;
             if (!base->type().is_pointer() && base->type() != Type::i64()) continue;
+            // An address made of a tagged value's bits is computed again
+            // where its object may have moved (gc_remat.hpp); a pointer
+            // variable stepped from it would be carried past that.
+            if (gc_sensitive(base)) continue;
             DecomposedIndex dec;
             if (!decompose_index(index, dec)) continue;
             candidates.push_back({inst, dec});

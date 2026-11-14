@@ -198,6 +198,13 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                             }
                         }
                     }
+                } else if (!reg_val && !imm0.is_imm && !imm1.is_imm) {
+                    // `a + (b << k)`, k 1 to 3: one lea [a + b * 2^k].
+                    if (const Instruction* sh = scaled_lea_shift(*inst)) {
+                        skipped_insts_.insert(sh);
+                        lea_fusions.emplace_back(inst, sh);
+                        skip_operand_if_dead(sh->operand(1));
+                    }
                 }
             }
         }
@@ -379,6 +386,11 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 continue;
             }
 
+            // A lea `a + (b << k)` (step 2) reads both from registers.
+            if (inst->opcode() == Opcode::add) {
+                const Instruction* sh = scaled_lea_shift(*inst);
+                if (sh && skipped_insts_.count(sh)) continue;
+            }
             bool is_alu = false;
             switch (inst->opcode()) {
                 case Opcode::add: case Opcode::sub: case Opcode::mul:

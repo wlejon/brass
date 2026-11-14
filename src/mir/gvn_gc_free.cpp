@@ -3,6 +3,7 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/instruction.hpp>
+#include <brass/mir/interrupt_poll.hpp>
 
 namespace brass {
 
@@ -23,6 +24,36 @@ GcFreePaths::GcFreePaths(const Function& fn) {
         }
         info_[bb] = bi;
     }
+    // The targets of a depth-first walk's back edges, which
+    // interrupt_poll.cpp polls when the module asks for polls.
+    if (!needs_interrupt_polls(fn)) return;
+    std::unordered_map<const BasicBlock*, uint8_t> state;  // 1 on the stack, 2 done
+    std::vector<std::pair<const BasicBlock*, size_t>> stack;
+    auto walk = [&](const BasicBlock* root) {
+        if (!root || state.count(root)) return;
+        state[root] = 1;
+        stack.push_back({root, 0});
+        while (!stack.empty()) {
+            auto& [bb, next] = stack.back();
+            const SuccessorList succs = bb->successors();
+            if (next == succs.size()) {
+                state[bb] = 2;
+                stack.pop_back();
+                continue;
+            }
+            const BasicBlock* succ = succs[next++];
+            if (!succ) continue;
+            const auto it = state.find(succ);
+            if (it == state.end()) {
+                state[succ] = 1;
+                stack.push_back({succ, 0});
+            } else if (it->second == 1) {
+                info_[succ].header = true;
+            }
+        }
+    };
+    walk(fn.entry_block());
+    for (const BasicBlock* bb : fn.blocks()) walk(bb);
 }
 
 bool GcFreePaths::between(const Instruction* from, const Instruction* to) {
@@ -45,7 +76,7 @@ bool GcFreePaths::between(const Instruction* from, const Instruction* to) {
         return true;
     }
     if (ai.has_gc && ai.last_gc > ia->second) return false;
-    if (bi.has_gc && bi.first_gc < ib->second) return false;
+    if (bi.header || (bi.has_gc && bi.first_gc < ib->second)) return false;
     return blocks_between_gc_free(a, b);
 }
 
@@ -87,7 +118,7 @@ bool GcFreePaths::blocks_between_gc_free(const BasicBlock* a, const BasicBlock* 
     while (!work.empty() && ok) {
         const BasicBlock* c = work.back();
         work.pop_back();
-        if (fwd[block_number_[c]] && info_[c].has_gc) ok = false;
+        if (fwd[block_number_[c]] && (info_[c].has_gc || info_[c].header)) ok = false;
         for (const BasicBlock* p : c->predecessors()) {
             if (!p || p == a || back[block_number_[p]]) continue;
             back[block_number_[p]] = 1;
