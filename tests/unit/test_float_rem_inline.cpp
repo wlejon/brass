@@ -109,6 +109,37 @@ TEST_CASE("Float rem inline - integer operands take the integer path, fmod's bit
     CHECK_EQ(host_calls, 5);
 }
 
+TEST_CASE("Float rem inline - a guard certificate whose witness follows the call moves to the tail block") {
+    Module mod("frem_cert");
+    mod.add_symbol_role("host_fmod", SymbolRole::FloatRem);
+    Builder b(mod);
+    Function* f = mod.create_function("f", Type::f64(), {Type::f64(), Type::f64()});
+    b.set_function(f);
+    BasicBlock* e = b.append_block("entry");
+    Value* x = b.add_block_param(e, Type::f64());
+    Value* y = b.add_block_param(e, Type::f64());
+    Value* r = b.build_call("host_fmod", Type::f64(), {x, y});
+    Value* cond = b.build_eq(b.build_bitcast_i64_f64(r), b.build_bitcast_i64_f64(r));
+    b.build_guard(cond, "deopt");
+    b.build_ret(r);
+    f->rebuild_cfg_predecessors();
+
+    // A second guard on `cond` was eliminated after the first, in the entry.
+    GuardElimCert cert;
+    cert.eliminated_resume_id = 5;
+    cert.block_id = e->id();
+    cert.reason = GuardElimCert::Reason::DominatedSameCond;
+    cert.witness_inst_or_val_id = cond->id();
+    f->add_guard_elim_cert(cert);
+
+    DiagnosticReporter before;
+    CHECK(verify_function(*f, &before));
+    CHECK_EQ(inline_float_rem(*f), 1u);
+    DiagnosticReporter after;
+    CHECK(verify_function(*f, &after));
+    CHECK(f->guard_elim_certs().front().block_id != e->id());
+}
+
 TEST_CASE("Float rem inline - a constant divisor the integer path never takes keeps the call") {
     for (double d : {0.0, -0.0, -1.0, 2.5}) {
         Module mod("frem_const");

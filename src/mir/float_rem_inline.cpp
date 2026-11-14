@@ -103,6 +103,14 @@ size_t inline_float_rem(Function& fn) {
             bb->remove_instruction(moved);
             cont->append_instruction(moved);
         }
+        // A certificate names the block its eliminated guard stood in, and
+        // not where in it. Its witness may be among the instructions just
+        // moved, which the head no longer holds; the tail is dominated by
+        // everything that dominated the head, so the certificate is checked
+        // there.
+        for (GuardElimCert& cert : fn.guard_elim_certs()) {
+            if (cert.block_id == bb->id()) cert.block_id = cont->id();
+        }
         Value* result = b.add_block_param(cont, Type::f64());
         replace_all_uses(fn, call->result(), result);
         bb->remove_instruction(call);

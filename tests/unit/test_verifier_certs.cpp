@@ -275,6 +275,45 @@ TEST_CASE("Verifier Certs - Rejects Unsound GuardElimCerts (#68)") {
     }
 }
 
+TEST_CASE("Verifier Certs - DominatedSameCond witness folded to constant 0") {
+    // with_guard: a dominating guard on constant 0 always leaves, so the
+    // certificate holds. Without it, only a branch dominates, which says
+    // nothing about a constant, and the certificate is rejected.
+    for (bool with_guard : {true, false}) {
+        Module mod("zero_witness");
+        Builder b(mod);
+        Function* fn = mod.create_function("zero_witness", Type::i32(), {Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* left = b.append_block("left");
+        BasicBlock* right = b.append_block("right");
+        Value* x = b.add_block_param(entry, Type::i32());
+
+        b.position_at_end(entry);
+        Value* zero = b.build_iconst_i32(0);
+        if (with_guard) b.build_guard(zero, "deopt");
+        Value* c = b.build_slt(x, b.build_iconst_i32(0));
+        b.build_br_if(c, left, {}, right, {});
+
+        b.position_at_end(left);
+        b.build_ret(x);
+        b.position_at_end(right);
+        b.build_ret(x);
+        fn->rebuild_cfg_predecessors();
+
+        GuardElimCert cert;
+        cert.eliminated_resume_id = 7;
+        cert.block_id = right->id();
+        cert.reason = GuardElimCert::Reason::DominatedSameCond;
+        cert.witness_inst_or_val_id = zero->id();
+        fn->add_guard_elim_cert(cert);
+
+        DiagnosticReporter diag;
+        CHECK(verify_function(*fn, &diag) == with_guard);
+        CHECK(diag.has_errors() == !with_guard);
+    }
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

@@ -265,22 +265,27 @@ void verify_guard_elim_certificates(
                     report_error(cert_prefix + "DominatedSameCond requires a non-zero witness value id.");
                     break;
                 }
+                // A witness later folded to constant 0 is a dominating guard
+                // that always leaves: nothing after it runs in this function,
+                // so the guard eliminated under it asked nothing. That holds
+                // only of a guard on the witness itself; a branch establishes
+                // nothing about a constant.
                 int64_t c_imm = -1;
-                if (cert_const_int(w_val, c_imm) && c_imm == 0) {
-                    report_error(cert_prefix + "DominatedSameCond witness is constant 0.");
-                    break;
-                }
+                const bool always_leaves = cert_const_int(w_val, c_imm) && c_imm == 0;
                 // Verify that some dominating block has a guard or conditional branch establishing a fact
                 bool has_dom_guard_or_branch = false;
                 for (const BasicBlock* dbb : fn.blocks()) {
                     if (!dbb || !dom.dominates(dbb, bb)) continue;
                     for (const Instruction* inst : *dbb) {
                         if (!inst) continue;
-                        if (inst->opcode() == Opcode::guard && inst->operand(0) == w_val) {
+                        int64_t g_imm = -1;
+                        if (inst->opcode() == Opcode::guard &&
+                            (inst->operand(0) == w_val ||
+                             (always_leaves && cert_const_int(inst->operand(0), g_imm) && g_imm == 0))) {
                             has_dom_guard_or_branch = true;
                             break;
                         }
-                        if (inst->opcode() == Opcode::br_if && dbb != bb) {
+                        if (inst->opcode() == Opcode::br_if && dbb != bb && !always_leaves) {
                             has_dom_guard_or_branch = true;
                             break;
                         }
