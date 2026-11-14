@@ -304,30 +304,92 @@ Value* vectorize_lanes(
     return packed;
 }
 
+// The instructions of a function that read each value, kept as the pass
+// rewrites: every question the pass has about a value's readers, and every
+// replacement of one, walks that value's readers and not the function. (A
+// function of one block and 100,000 instructions forms thousands of bundles;
+// a walk of the function for each lane of each took most of its compile.)
+// A list may name an instruction that has since been removed or no longer
+// reads the value, so each is checked as it is visited.
+class Users {
+public:
+    explicit Users(Function& fn) {
+        for (BasicBlock* bb : fn.blocks()) {
+            if (!bb) continue;
+            for (Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) add(inst);
+        }
+    }
+
+    // `inst` reads its values from now on (built, or put back in its block).
+    void add(Instruction* inst) {
+        for_each_use(*inst, [&](const Value* v) {
+            std::vector<Instruction*>& list = readers_[v];
+            if (list.empty() || list.back() != inst) list.push_back(inst);
+        });
+    }
+
+    // The instructions built before `at` since `mark` was the one before it.
+    void add_built(Instruction* mark, Instruction* at) {
+        for (Instruction* inst = at->prev(); inst != nullptr && inst != mark; inst = inst->prev()) add(inst);
+    }
+
+    // True when `f(inst)` is for some instruction in a block that reads `v`.
+    template <typename F>
+    bool any(const Value* v, F&& f) const {
+        const auto it = readers_.find(v);
+        if (it == readers_.end()) return false;
+        for (Instruction* inst : it->second) {
+            if (inst->parent() && uses_value(*inst, v) && f(inst)) return true;
+        }
+        return false;
+    }
+
+    // `new_val` for `old_val` in every slot of each reader `where` accepts.
+    // Every slot: a guard's deopt state map reads a value as surely as an
+    // operand does.
+    template <typename F>
+    void replace(const Value* old_val, Value* new_val, F&& where) {
+        const auto it = readers_.find(old_val);
+        if (it == readers_.end()) return;
+        const std::vector<Instruction*> readers = it->second;   // add() below may move the map
+        for (Instruction* inst : readers) {
+            if (!inst->parent() || !where(inst)) continue;
+            if (replace_uses_in(*inst, old_val, new_val) != 0) add(inst);
+        }
+    }
+
+private:
+    std::unordered_map<const Value*, std::vector<Instruction*>> readers_;
+};
+
+// True when `a` stands before `b` in the block both are in. Walks out from
+// `a` both ways at once, so it costs their distance and not the block.
+static bool stands_before(const Instruction* a, const Instruction* b) {
+    const Instruction* fwd = a->next();
+    const Instruction* back = a->prev();
+    for (;;) {
+        if (fwd == b) return true;
+        if (back == b) return false;
+        if (!fwd) return false;
+        if (!back) return true;
+        fwd = fwd->next();
+        back = back->prev();
+    }
+}
+
 static void replace_scalar_uses(
-    Function& fn,
+    Users& users,
     Value* old_val,
     Value* new_val,
     const std::unordered_set<Instruction*>& dead_insts
 ) {
     Instruction* def_inst = new_val ? new_val->defining_instruction() : nullptr;
     BasicBlock* def_bb = def_inst ? def_inst->parent() : nullptr;
-
-    for (BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        bool reached_def = (bb != def_bb || def_inst == nullptr);
-        for (Instruction* inst = bb->head(); inst != nullptr; inst = inst->next()) {
-            if (inst == def_inst) {
-                reached_def = true;
-                continue;
-            }
-            if (dead_insts.count(inst)) continue;
-            if (!reached_def) continue;
-            // Every slot: a guard's deopt state map reads the scalar as
-            // surely as an operand does, and the scalar is about to go.
-            replace_uses_in(*inst, old_val, new_val);
-        }
-    }
+    // A reader above the new value's definition in its block keeps the scalar.
+    users.replace(old_val, new_val, [&](Instruction* inst) {
+        if (inst == def_inst || dead_insts.count(inst)) return false;
+        return !(def_inst && inst->parent() == def_bb && stands_before(inst, def_inst));
+    });
 }
 
 // True when a result of `insts` (other than as an operand of another of
@@ -348,11 +410,8 @@ static bool used_before(const BasicBlock& bb, const std::vector<Instruction*>& i
     return false;
 }
 
-} // namespace
-
-bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
+bool vectorize_block(BasicBlock& bb, const SlpOptions& options, Users& users) {
     Function* fn = bb.parent();
-    if (!fn || !fn->parent()) return false;
     Module* mod = fn->parent();
 
     bool any_changed = false;
@@ -366,6 +425,7 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
     for (const auto& sb : store_bundles) {
         Instruction* last_store = sb.stores.back();
         b.position_before(last_store);
+        Instruction* mark = last_store->prev();
 
         std::unordered_set<Instruction*> visited;
         std::unordered_set<Instruction*> vectorized_defs;
@@ -376,27 +436,23 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         const std::unordered_set<const Instruction*> replaced(sb.stores.begin(), sb.stores.end());
         Value* vec_val = vectorize_lanes(sb.stored_values, sb.vec_type, b, bb, last_store, replaced, visited, vectorized_defs,
                                          /*allow_fallback=*/true, /*allow_root_fallback=*/false);
-        if (!vec_val) continue;
+        if (!vec_val) {
+            users.add_built(mark, last_store);   // what a lane that failed left built
+            continue;
+        }
 
         // Emit vector store right before the last store in bundle
         b.build_vstore(sb.vec_type, sb.base, sb.base_offset, vec_val);
+        users.add_built(mark, last_store);
 
         // For any vectorized def that has uses outside the vectorized tree, extract lane
         std::unordered_set<Instruction*> all_dead_stores(sb.stores.begin(), sb.stores.end());
         for (Instruction* def : vectorized_defs) {
             if (def && def->produces_value()) {
                 Value* res = def->result();
-                bool has_external_use = false;
-                for (BasicBlock* blk : fn->blocks()) {
-                    for (Instruction* inst = blk->head(); inst != nullptr; inst = inst->next()) {
-                        if (vectorized_defs.count(inst) || all_dead_stores.count(inst)) continue;
-                        if (uses_value(*inst, res)) {
-                            has_external_use = true;
-                            break;
-                        }
-                    }
-                    if (has_external_use) break;
-                }
+                const bool has_external_use = users.any(res, [&](Instruction* inst) {
+                    return !vectorized_defs.count(inst) && !all_dead_stores.count(inst);
+                });
 
                 if (has_external_use) {
                     // Find lane index for res
@@ -404,7 +460,8 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
                         if (sb.stored_values[lane] == res) {
                             b.position_before(last_store);
                             Value* extracted = b.build_vextract_lane(vec_val, lane);
-                            replace_scalar_uses(*fn, res, extracted, all_dead_stores);
+                            users.add(extracted->defining_instruction());
+                            replace_scalar_uses(users, res, extracted, all_dead_stores);
                             break;
                         }
                     }
@@ -438,12 +495,14 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         b.position_before(first_load);
 
         Value* vload = b.build_vload(lb.vec_type, lb.base, lb.base_offset);
+        users.add(vload->defining_instruction());
         std::unordered_set<Instruction*> dead_loads(lb.loads.begin(), lb.loads.end());
 
         FormedLoadBundle formed{vload, {}, lb.loads};
         for (uint32_t lane = 0; lane < lb.width; ++lane) {
             Value* extracted = b.build_vextract_lane(vload, lane);
-            replace_scalar_uses(*fn, lb.loaded_values[lane], extracted, dead_loads);
+            users.add(extracted->defining_instruction());
+            replace_scalar_uses(users, lb.loaded_values[lane], extracted, dead_loads);
             formed.extracts.push_back(extracted);
         }
 
@@ -470,16 +529,19 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         Instruction* last_inst = ab.insts.back();
         if (used_before(bb, ab.insts, last_inst)) continue;
         b.position_before(last_inst);
+        Instruction* mark = last_inst->prev();
 
         std::unordered_set<Instruction*> visited;
         std::unordered_set<Instruction*> vectorized_defs;
         Value* vec_res = vectorize_lanes(inst_results, ab.vec_type, b, bb, last_inst, {}, visited, vectorized_defs, /*allow_fallback=*/false);
+        users.add_built(mark, last_inst);
         if (!vec_res) continue;
 
         std::unordered_set<Instruction*> dead_arith(ab.insts.begin(), ab.insts.end());
         for (uint32_t lane = 0; lane < ab.width; ++lane) {
             Value* extracted = b.build_vextract_lane(vec_res, lane);
-            replace_scalar_uses(*fn, ab.insts[lane]->result(), extracted, dead_arith);
+            users.add(extracted->defining_instruction());
+            replace_scalar_uses(users, ab.insts[lane]->result(), extracted, dead_arith);
         }
 
         for (Instruction* inst : ab.insts) {
@@ -502,25 +564,19 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
         Instruction* vdef = fl.vload->defining_instruction();
         if (!vdef || vdef->parent() != &bb) continue;
         std::unordered_set<const Value*> extract_set(fl.extracts.begin(), fl.extracts.end());
-        bool vector_use = false;
-        for (BasicBlock* blk : fn->blocks()) {
-            for (Instruction* inst = blk->head(); inst != nullptr && !vector_use; inst = inst->next()) {
-                if (inst == vdef) continue;
-                if (inst->produces_value() && extract_set.count(inst->result()) != 0 &&
-                    inst->opcode() == Opcode::vextract_lane && inst->parent() == &bb) {
-                    continue;
-                }
-                vector_use = uses_value(*inst, fl.vload);
-            }
-            if (vector_use) break;
-        }
+        const bool vector_use = users.any(fl.vload, [&](Instruction* inst) {
+            if (inst == vdef) return false;
+            return !(inst->produces_value() && extract_set.count(inst->result()) != 0 &&
+                     inst->opcode() == Opcode::vextract_lane && inst->parent() == &bb);
+        });
         if (vector_use) continue;
         for (size_t lane = 0; lane < fl.loads.size(); ++lane) {
             Instruction* load = fl.loads[lane];
             bb.insert_before(load, vdef);
+            users.add(load);
             Instruction* ext = fl.extracts[lane]->defining_instruction();
             if (ext && ext->parent() == &bb) {
-                replace_all_uses(*fn, fl.extracts[lane], load->result());
+                users.replace(fl.extracts[lane], load->result(), [](Instruction*) { return true; });
                 bb.remove_instruction(ext);
             }
         }
@@ -530,15 +586,26 @@ bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
     return any_changed;
 }
 
+} // namespace
+
+bool slp_vectorize_block(BasicBlock& bb, const SlpOptions& options) {
+    Function* fn = bb.parent();
+    if (!fn || !fn->parent()) return false;
+    Users users(*fn);
+    return vectorize_block(bb, options, users);
+}
+
 bool slp_vectorize_block(BasicBlock& bb) {
     return slp_vectorize_block(bb, SlpOptions());
 }
 
 bool slp_vectorize_function(Function& fn, const SlpOptions& options) {
+    if (!fn.parent()) return false;
     bool changed = false;
+    Users users(fn);
     for (BasicBlock* bb : fn.blocks()) {
         if (bb) {
-            changed |= slp_vectorize_block(*bb, options);
+            changed |= vectorize_block(*bb, options, users);
         }
     }
     return changed;

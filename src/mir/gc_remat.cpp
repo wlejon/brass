@@ -86,7 +86,11 @@ int GcSensitive::state(const Value* root) {
     };
 
     std::vector<SccNode> nodes;
-    DenseIdMap<Value, uint32_t> node_of;
+    // A hash map: the values one question walks are few, and a vector sized
+    // by the function's value ids is filled again for every question (a
+    // function of 100,000 values asked about each of them spent a fifth of
+    // its compile there).
+    std::unordered_map<const Value*, uint32_t> node_of;
     std::vector<uint32_t> scc_stack;
     std::vector<uint32_t> dfs_stack;
 
@@ -97,7 +101,7 @@ int GcSensitive::state(const Value* root) {
         nodes[id].index = id;
         nodes[id].lowlink = id;
         nodes[id].on_stack = true;
-        node_of.insert(v, id);
+        node_of.emplace(v, id);
         scc_stack.push_back(id);
         dfs_stack.push_back(id);
 
@@ -137,8 +141,8 @@ int GcSensitive::state(const Value* root) {
                 nodes[u_id].ext_max = std::max(nodes[u_id].ext_max, *resolved);
                 continue;
             }
-            if (const uint32_t* existing = node_of.find(w)) {
-                const uint32_t w_id = *existing;
+            if (const auto existing = node_of.find(w); existing != node_of.end()) {
+                const uint32_t w_id = existing->second;
                 if (w_id == u_id) nodes[u_id].self_loop = true;
                 if (nodes[w_id].on_stack) {
                     nodes[u_id].lowlink = std::min(nodes[u_id].lowlink, nodes[w_id].index);
