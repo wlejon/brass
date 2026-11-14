@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 using namespace brass;
 
@@ -155,6 +156,166 @@ done(%r: i64):
     // The tag test is no address: it moves, with a copy of what it reads.
     CHECK_EQ(count_in(*fn, Opcode::ult, "body"), size_t{0});
     CHECK_EQ(count_in(*fn, Opcode::bitcast_i64_tagged), size_t{2});
+}
+
+// A loop over the view `%buf`, read out of the object `%o` before the loop,
+// whose exit test compares the counter with `bound`.
+std::string view_loop(const std::string& bound) {
+    return R"(module @m
+func @f(%o: tagged) -> i64 {
+entry:
+  %ob = bitcast.i64.tagged %o
+  %bufbits = load.i64 %ob, 24
+  %buf = bitcast.tagged.i64 %bufbits
+  %n = load.i64 %ob, 16
+  %z = iconst.i64 0
+  br head(%z, %z)
+head(%i: i64, %acc: i64):
+  %vb = bitcast.i64.tagged %buf
+  %more = ne.i64 %i, )" + bound + R"(
+  br_if %more, body, done(%acc)
+body:
+  %bits = bitcast.i64.tagged %buf
+  %len = load.i32 %bits, 8
+  %l64 = zext.i64 %len
+  %acc2 = add.i64 %acc, %l64
+  %one = iconst.i64 1
+  %i2 = add.i64 %i, %one
+  br head(%i2, %acc2)
+done(%r: i64):
+  ret %r
+}
+)";
+}
+
+TEST_CASE("LICM - a test of a number read from the object a view came out of is no test of the view") {
+    // `for (i = 0; i !== this.n; ++i) this.buffer[...]`: the bound and the
+    // view were both read from `this`, and the bound says nothing about what
+    // the view is.
+    auto mod = parse_ok(view_loop("%n"));
+    Function* fn = mod->get_function("f");
+    CHECK(hoist_loop_invariants(*fn));
+    verify_ok(*fn);
+    CHECK_EQ(count_in(*fn, Opcode::load, "body"), size_t{0});
+}
+
+TEST_CASE("LICM - a test of the view's own bits keeps a load through it") {
+    auto mod = parse_ok(view_loop("%vb"));
+    Function* fn = mod->get_function("f");
+    hoist_loop_invariants(*fn);
+    verify_ok(*fn);
+    CHECK_EQ(count_in(*fn, Opcode::load, "body"), size_t{1});
+}
+
+// A loop whose header tests its counter, then what kind of object `%t` is,
+// both by guards, and reads the object's length behind the second. `first`
+// goes at the top of the header.
+std::string guarded_loop(const std::string& first) {
+    return R"(module @m
+func @out(%0: tagged, %1: i64) -> i64 {
+bb0:
+  ret %1
+}
+func @f(%t: tagged, %n: i64, %p: ptr) -> i64 {
+entry:
+  %z = iconst.i64 0
+  br head(%z, %z)
+head(%i: i64, %acc: i64):
+)" + first + R"(  %more = ne.i64 %i, %n
+  guard %more, @out, [%t, %acc]
+  %bits = bitcast.i64.tagged %t
+  %hdr = load.i32 %bits, 0
+  %want = iconst.i32 7
+  %is = eq.i32 %hdr, %want
+  guard %is, @out, [%t, %acc]
+  %len = load.i32 %bits, 8
+  %l64 = zext.i64 %len
+  %acc2 = add.i64 %acc, %l64
+  %one = iconst.i64 1
+  %i2 = add.i64 %i, %one
+  %go = slt.i64 %i2, %n
+  br_if %go, head(%i2, %acc2), done(%acc2)
+done(%r: i64):
+  ret %r
+}
+)";
+}
+
+TEST_CASE("LICM - a header guard of a value the loop does not compute is tested once, ahead of the loop") {
+    auto mod = parse_ok(guarded_loop(""));
+    Function* fn = mod->get_function("f");
+    CHECK(hoist_loop_invariants(*fn));
+    verify_ok(*fn);
+    // The kind test left the loop; the counter's test above it was copied
+    // for the first iteration, with the state that iteration leaves with.
+    CHECK_EQ(count_in(*fn, Opcode::guard, "head"), size_t{1});
+    CHECK_EQ(count_in(*fn, Opcode::guard, "entry"), size_t{2});
+    const BasicBlock* entry = fn->entry_block();
+    const Instruction* copy = nullptr;
+    for (const Instruction* inst : *entry) {
+        if (inst->opcode() == Opcode::guard && !copy) copy = inst;
+    }
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy->state_map().size() == size_t{2});
+    const Instruction* acc0 = copy->state_map()[1]->defining_instruction();
+    CHECK(acc0 != nullptr && acc0->opcode() == Opcode::iconst_i64);
+    // With no test of the object left in the loop, the length follows.
+    CHECK_EQ(count_in(*fn, Opcode::load, "head"), size_t{0});
+}
+
+TEST_CASE("LICM - a header guard below a write stays in the loop") {
+    // What the write stored would be stored once more were the header's top
+    // run ahead of the loop.
+    auto mod = parse_ok(guarded_loop("  store.i64 %p, 0, %acc\n"));
+    Function* fn = mod->get_function("f");
+    hoist_loop_invariants(*fn);
+    verify_ok(*fn);
+    CHECK_EQ(count_in(*fn, Opcode::guard, "head"), size_t{2});
+    CHECK_EQ(count_in(*fn, Opcode::guard, "entry"), size_t{0});
+}
+
+TEST_CASE("Constant folding - a counter passes the whole-number test of an index") {
+    // `i` counts 0, 1, 2, ...: converted to an i64 and back it is itself. A
+    // counter by two, or one that starts at a fraction, is not folded.
+    const auto loop = [](const char* init, const char* step) {
+        return std::string(R"(module @m
+func @f(%n: f64) -> i32 {
+entry:
+  %z = fconst.f64 )") + init + R"(
+  %a = iconst.i32 0
+  br head(%z, %a)
+head(%i: f64, %acc: i32):
+  %more = ne.f64 %i, %n
+  br_if %more, body, done(%acc)
+body:
+  %w = fptosi.i64 %i
+  %back = sitofp.f64.i64 %w
+  %same = eq.f64 %back, %i
+  %acc2 = add.i32 %acc, %same
+  %one = fconst.f64 )" + step + R"(
+  %i2 = add.f64 %i, %one
+  br head(%i2, %acc2)
+done(%r: i32):
+  ret %r
+}
+)";
+    };
+    {
+        auto mod = parse_ok(loop("0.0", "1.0"));
+        Function* fn = mod->get_function("f");
+        CHECK(fold_constants(*fn));
+        eliminate_dead_code(*fn);
+        verify_ok(*fn);
+        CHECK_EQ(count_in(*fn, Opcode::fptosi_i64), size_t{0});
+    }
+    for (const auto& [init, step] : {std::pair{"0.0", "2.0"}, std::pair{"0.5", "1.0"}, std::pair{"-1.0", "1.0"}}) {
+        auto mod = parse_ok(loop(init, step));
+        Function* fn = mod->get_function("f");
+        fold_constants(*fn);
+        eliminate_dead_code(*fn);
+        verify_ok(*fn);
+        CHECK_EQ(count_in(*fn, Opcode::fptosi_i64), size_t{1});
+    }
 }
 
 TEST_CASE("Interrupt poll - a hoisted address is computed again after the handler") {

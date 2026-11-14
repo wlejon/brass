@@ -200,6 +200,56 @@ std::optional<ExprKey> expr_key(const Instruction* inst) {
 
 } // namespace
 
+namespace {
+
+// Whether `x` counts up by one from a whole number: an f64 block parameter
+// that every edge hands a whole constant in [0, 2^53] or `x + 1`. Such a
+// value is always a whole number in [0, 2^53]: below 2^53 the sum is exact,
+// and 2^53 + 1 rounds back to 2^53. (`for (let i = 0; i !== n; ++i)`, whose
+// bound says nothing about how far it goes.)
+bool counts_up_by_one(const Value* x) {
+    if (!x || !x->is_block_param() || x->type() != Type::f64()) return false;
+    const BasicBlock* bb = x->defining_block();
+    if (!bb) return false;
+    const uint32_t idx = x->param_index();
+    bool ok = true, any = false;
+    for (BasicBlock* p : bb->predecessors()) {
+        Instruction* term = p ? p->terminator() : nullptr;
+        if (!term) return false;
+        for_each_edge(*term, [&](BranchTarget& t) {
+            if (t.block != bb) return;
+            any = true;
+            const Value* arg = idx < t.args.size() ? t.args[idx] : nullptr;
+            const Instruction* def = arg && arg->is_instruction() ? arg->defining_instruction() : nullptr;
+            if (!def) {
+                ok = false;
+            } else if (def->opcode() == Opcode::fconst_f64) {
+                const double c = def->imm_f64();
+                ok = ok && c >= 0.0 && c <= 9007199254740992.0 && std::floor(c) == c;
+            } else if (def->opcode() == Opcode::add && def->type() == Type::f64() && def->operand_count() == 2) {
+                const Value* other = def->operand(0) == x ? def->operand(1) : def->operand(1) == x ? def->operand(0) : nullptr;
+                const Instruction* one = other && other->is_instruction() ? other->defining_instruction() : nullptr;
+                ok = ok && one && one->opcode() == Opcode::fconst_f64 && one->imm_f64() == 1.0;
+            } else {
+                ok = false;
+            }
+        });
+    }
+    return ok && any;
+}
+
+// `a` is `x` converted to an i64 and back, of an `x` that conversion is exact for.
+bool exact_round_trip(const Value* a, const Value* x) {
+    const Instruction* back = a && a->is_instruction() ? a->defining_instruction() : nullptr;
+    if (!back || back->opcode() != Opcode::sitofp_f64_i64 || back->operand_count() != 1) return false;
+    const Value* whole = back->operand(0);
+    const Instruction* to = whole && whole->is_instruction() ? whole->defining_instruction() : nullptr;
+    return to && to->opcode() == Opcode::fptosi_i64 && to->operand_count() == 1 && to->operand(0) == x &&
+           counts_up_by_one(x);
+}
+
+}  // namespace
+
 bool fold_constants(Function& fn) {
     if (!fn.parent()) return false;
     bool changed = false;
@@ -255,7 +305,12 @@ bool fold_constants(Function& fn) {
                     return (res_type == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(v)) : b.build_iconst_i64(v);
                 };
 
-                if (has_c0 && has_c1) {
+                if (op == Opcode::eq && res_type == Type::i32() && op0 && op1 && op0->type() == Type::f64() &&
+                    (exact_round_trip(op0, op1) || exact_round_trip(op1, op0))) {
+                    // The test an index makes of itself (is it a whole
+                    // number an i64 holds) is true of a counter.
+                    replacement = build_int(1);
+                } else if (has_c0 && has_c1) {
                     if (int_result && width != 0) {
                         if (auto folded = int_fold::binary(op, width, c0, c1)) replacement = build_int(*folded);
                     }
@@ -510,6 +565,7 @@ bool fold_constants(Function& fn) {
                 }
             }
             if (replacement) {
+                fn.retarget_guard_elim_witness(cur->result(), replacement);
                 pending.replace_and_remove(bb, cur, replacement);
                 changed = true;
             }

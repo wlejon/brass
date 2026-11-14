@@ -196,6 +196,11 @@ public:
     std::vector<GuardElimCert>& guard_elim_certs() noexcept { return guard_elim_certs_; }
     void add_guard_elim_cert(GuardElimCert cert) { guard_elim_certs_.push_back(cert); }
     void clear_guard_elim_certs() noexcept { guard_elim_certs_.clear(); }
+    // A value a pass is about to remove in favour of `to`: a certificate
+    // whose witness it was names `to` instead, or, where `to` is a constant
+    // (no witness of anything), keeps its claim without one, as
+    // reconcile_guard_elim_certs leaves a certificate whose witness is gone.
+    void retarget_guard_elim_witness(const Value* from, const Value* to);
 
     // A lowered coroutine body's frame shape, recorded by coroutine lowering
     // (compute_coro_frame_layout): the slot count and which slots hold

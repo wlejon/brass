@@ -18,11 +18,36 @@
 // the load moves only when no test that can run before it in an iteration
 // (a guard, br_if or switch on a path from the header, or before it in its
 // block) depends on a tagged value its address is made of. The loop's exit
-// test counts like any other.
+// test counts like any other. The values an address is made of are the
+// tagged values whose bits it holds (and what a block parameter among them
+// was handed) and no further: an object read out of
+// another (`this.buffer`) is not the object it was read from, so a test of a
+// Number read from `this` (a loop's bound, `i !== this.valueSize`) stands in
+// front of no load through the buffer. A test depends on everything it was
+// computed from, loads included: a shape compare is a test of the object the
+// shape word was loaded from.
 //
 // A value made of a tagged value's bits that is not one itself (a tag test,
 // a kind compare) moves with copies of the instructions it is made of,
 // whatever GC points the loop has: a collection changes no tag or kind.
+//
+// THE HEADER'S GUARDS. A guard is a test and an exit, so it does not move
+// like a value, and while it stands in the loop every load through the
+// object it tests stands behind it (above). But the instructions at the top
+// of the header, down to the first that writes or calls, run on every entry
+// of the loop before anything of the loop has happened, so running them once
+// more at the end of the preheader, on the values the first iteration has
+// (each header parameter the value the preheader hands it), changes nothing:
+// a guard that fails there leaves with the state it would leave with a
+// moment later. That is what is done, a guard at a time and in their order,
+// as soon as one of them tests a value the loop does not compute: the guards
+// above it are copied with what they read, and it is copied and taken out of
+// the loop, where the copy now answers for every iteration. A load among
+// them that only the tests above it kept in the loop (nothing writes what it
+// reads) moves the same way, below their copies: a view's kind and data
+// pointer, behind the bounds test of its first element. A typed array's
+// header and kind tests leave an element loop that way, with the loads
+// behind them.
 //
 // Nothing moves that a write or GC point of the loop clobbers, even on a
 // cold path: computing it again after each such point (a version per path,
@@ -65,14 +90,26 @@ private:
     bool clobbered(const Instruction* inst, bool is_load);
     // The tagged values `v` is computed from (through instructions and
     // block parameters, wherever defined); false when the walk is too long.
-    bool roots_of(const Value* v, std::vector<const Value*>& roots) const;
+    // `past_roots`: whether the walk goes on through what a root was itself
+    // computed from (a test's does, an address's does not).
+    bool roots_of(const Value* v, std::vector<const Value*>& roots, bool past_roots) const;
     bool tested_before(const Instruction* load);
     // An in-loop address computed from invariant tagged values by pure
     // instructions (no load, nothing hoisted, on the way), and its copy in
     // the preheader.
     bool address_chain(const Value* v);
     Value* copy_chain(Value* v);
-    bool try_hoist(BasicBlock* bb, Instruction* cur);
+    // `behind_tests`: the tests an iteration makes before `cur` have been
+    // made ahead of it in the preheader (the header's guards, below).
+    bool hoistable(BasicBlock* bb, Instruction* cur, bool behind_tests);
+    bool try_hoist(BasicBlock* bb, Instruction* cur, bool behind_tests = false);
+    // The header's guards (the file comment): `v` as the first iteration
+    // has it, computed in the preheader, and one guard or load taken out per
+    // call.
+    bool reads_only(const Instruction* inst) const;
+    bool first_computable(const Value* v);
+    Value* first_value(Value* v);
+    bool peel_header_guard();
 
     Function& fn_;
     LoopInfo& loop_;
@@ -90,6 +127,10 @@ private:
     std::unordered_map<const BasicBlock*, std::unordered_set<const BasicBlock*>> before_;
 
     std::unordered_map<const Value*, bool> chain_;
+    BranchTarget* entry_edge_ = nullptr;
+    std::unordered_map<const Value*, bool> first_ok_;
+    std::unordered_map<const Value*, Value*> first_;
+    std::unordered_set<const Instruction*> peeled_;
     std::unordered_map<const Value*, Value*> copies_;
 };
 
@@ -131,7 +172,7 @@ bool Licm::clobbered(const Instruction* inst, bool is_load) {
     return sensitive_(inst->result()) && !gc_points_.empty();
 }
 
-bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots) const {
+bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots, bool past_roots) const {
     std::vector<const Value*> work{v};
     std::unordered_set<const Value*> seen;
     while (!work.empty()) {
@@ -155,7 +196,34 @@ bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots) const {
         if (!cur->is_instruction()) continue;
         const Instruction* def = cur->defining_instruction();
         if (!def) continue;
-        if (def->opcode() == Opcode::bitcast_i64_tagged) roots.push_back(def->operand(0));
+        if (def->opcode() == Opcode::bitcast_i64_tagged) {
+            roots.push_back(def->operand(0));
+            if (!past_roots) {
+                // The same object under its other names: what a block
+                // parameter was handed.
+                std::vector<const Value*> names{def->operand(0)};
+                while (!names.empty()) {
+                    const Value* name = names.back();
+                    names.pop_back();
+                    if (!name || !name->is_block_param() || !seen.insert(name).second) continue;
+                    if (seen.size() > kWalkBudget) return false;
+                    const BasicBlock* bb = name->defining_block();
+                    if (!bb) continue;
+                    const uint32_t idx = name->param_index();
+                    for (BasicBlock* p : bb->predecessors()) {
+                        Instruction* term = p ? p->terminator() : nullptr;
+                        if (!term) continue;
+                        for_each_edge(*term, [&](BranchTarget& t) {
+                            if (t.block == bb && idx < t.args.size()) {
+                                roots.push_back(t.args[idx]);
+                                names.push_back(t.args[idx]);
+                            }
+                        });
+                    }
+                }
+                continue;
+            }
+        }
         for (const Value* op : def->operands()) work.push_back(op);
     }
     return true;
@@ -164,7 +232,7 @@ bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots) const {
 bool Licm::tested_before(const Instruction* load) {
     std::vector<const Value*> mine;
     for (const Value* op : load->operands()) {
-        if (!roots_of(op, mine)) return true;
+        if (!roots_of(op, mine, /*past_roots=*/false)) return true;
     }
     if (mine.empty()) return false;
     std::sort(mine.begin(), mine.end());
@@ -173,7 +241,7 @@ bool Licm::tested_before(const Instruction* load) {
         if (it == test_roots_.end()) {
             std::vector<const Value*> roots;
             bool ok = true;
-            for (const Value* op : test->operands()) ok = ok && roots_of(op, roots);
+            for (const Value* op : test->operands()) ok = ok && roots_of(op, roots, /*past_roots=*/true);
             if (!ok) test_overflow_.insert(test);
             it = test_roots_.emplace(test, std::move(roots)).first;
         }
@@ -236,8 +304,7 @@ Value* Licm::copy_chain(Value* v) {
     return copy->result();
 }
 
-bool Licm::try_hoist(BasicBlock* bb, Instruction* cur) {
-    Instruction* ph_term = preheader_->terminator();
+bool Licm::hoistable(BasicBlock* bb, Instruction* cur, bool behind_tests) {
     const bool is_load = cur->opcode() == Opcode::load;
     const bool is_untag = cur->opcode() == Opcode::bitcast_i64_tagged;
     if (!cur->produces_value() || !(is_load || is_untag || is_pure_instruction(cur))) return false;
@@ -283,10 +350,16 @@ bool Licm::try_hoist(BasicBlock* bb, Instruction* cur) {
     const bool tagged_address = is_load && sensitive_(cur->operand(0));
     if (is_load || gc_sensitive) {
         scan();
-        if (tagged_address && tested_before(cur)) return false;
+        if (tagged_address && !behind_tests && tested_before(cur)) return false;
         if (clobbered(cur, is_load)) return false;
     }
+    return true;
+}
 
+bool Licm::try_hoist(BasicBlock* bb, Instruction* cur, bool behind_tests) {
+    if (!hoistable(bb, cur, behind_tests)) return false;
+    Instruction* ph_term = preheader_->terminator();
+    const bool is_load = cur->opcode() == Opcode::load;
     if (is_load) {
         // The same load in the preheader, or above it when nothing between
         // writes what it reads, answers for it.
@@ -314,6 +387,7 @@ bool Licm::try_hoist(BasicBlock* bb, Instruction* cur) {
             if (!ph_clobbers && ppred && ppred->terminator()) existing = find_existing(ppred->terminator()->prev());
         }
         if (existing) {
+            fn_.retarget_guard_elim_witness(cur->result(), existing);
             replace_all_uses(fn_, cur->result(), existing);
             bb->remove_instruction(cur);
             return true;
@@ -330,6 +404,120 @@ bool Licm::try_hoist(BasicBlock* bb, Instruction* cur) {
     return true;
 }
 
+bool Licm::reads_only(const Instruction* inst) const {
+    if (!inst || !inst->produces_value() || inst->is_call()) return false;
+    switch (inst->opcode()) {
+        case Opcode::load:
+        case Opcode::load_indexed:
+        case Opcode::bitcast_i64_tagged:
+            return true;
+        // An address made of a tagged value's bits: is_pure_instruction
+        // refuses it for where a merged copy might be kept, not for what
+        // computing it does.
+        case Opcode::add:
+        case Opcode::sub:
+        case Opcode::and_:
+        case Opcode::or_:
+        case Opcode::xor_:
+        case Opcode::shl:
+        case Opcode::lshr:
+        case Opcode::select:
+            return true;
+        default:
+            return is_pure_instruction(inst);
+    }
+}
+
+bool Licm::first_computable(const Value* v) {
+    if (!v) return false;
+    if (invariant(v)) return true;
+    if (const auto it = first_ok_.find(v); it != first_ok_.end()) return it->second;
+    first_ok_[v] = false;
+    bool ok = false;
+    if (v->is_block_param()) {
+        ok = v->defining_block() == loop_.header() && v->param_index() < entry_edge_->args.size() &&
+             entry_edge_->args[v->param_index()] != nullptr;
+    } else if (const Instruction* d = v->is_instruction() ? v->defining_instruction() : nullptr) {
+        ok = d->parent() == loop_.header() && reads_only(d);
+        for (const Value* op : d->operands()) ok = ok && first_computable(op);
+    }
+    return first_ok_[v] = ok;
+}
+
+Value* Licm::first_value(Value* v) {
+    if (invariant(v)) return v;
+    if (const auto it = first_.find(v); it != first_.end()) return it->second;
+    if (v->is_block_param()) return first_[v] = entry_edge_->args[v->param_index()];
+    const Instruction* d = v->defining_instruction();
+    std::vector<Value*> ops;
+    for (Value* op : d->operands()) ops.push_back(first_value(op));
+    ir::ValueMap map;
+    Instruction* copy = ir::clone_shell(fn_, *d, map);
+    for (Value* op : ops) copy->add_operand(op);
+    preheader_->insert_before(copy, preheader_->terminator());
+    return first_[v] = copy->result();
+}
+
+bool Licm::peel_header_guard() {
+    BasicBlock* header = loop_.header();
+    Instruction* ph_term = preheader_->terminator();
+    if (!header || !ph_term) return false;
+    entry_edge_ = nullptr;
+    size_t edges = 0;
+    for_each_edge(*ph_term, [&](BranchTarget& t) {
+        if (t.block == header) {
+            entry_edge_ = &t;
+            ++edges;
+        }
+    });
+    if (edges != 1) return false;
+    // A guard a pass folded to a constant tests nothing and stays where its
+    // certificate says it stood.
+    auto constant = [](const Instruction* g) {
+        const Instruction* d = g->operand(0)->is_instruction() ? g->operand(0)->defining_instruction() : nullptr;
+        return d && (d->opcode() == Opcode::iconst_i32 || d->opcode() == Opcode::iconst_i64);
+    };
+    // The first guard of a value the loop does not compute, or the first
+    // load only the tests above it keep in the loop, and whether every guard
+    // down to it can be made of first-iteration values.
+    Instruction* target = nullptr;
+    for (Instruction* i = header->head(); i && !target; i = i->next()) {
+        if (i->opcode() != Opcode::guard) {
+            if (!reads_only(i)) return false;
+            if (i->opcode() == Opcode::load && hoistable(header, i, /*behind_tests=*/true)) target = i;
+            continue;
+        }
+        if (constant(i)) continue;
+        if (!first_computable(i->operand(0))) return false;
+        for (const Value* sv : i->state_map()) {
+            if (!first_computable(sv)) return false;
+        }
+        if (invariant(i->operand(0))) target = i;
+    }
+    if (!target) return false;
+    for (Instruction* i = header->head();; i = i->next()) {
+        if (i->opcode() == Opcode::guard && !constant(i) && peeled_.insert(i).second) {
+            Value* cond = first_value(i->operand(0));
+            std::vector<Value*> state;
+            for (Value* sv : i->state_map()) state.push_back(first_value(sv));
+            ir::ValueMap map;
+            Instruction* copy = ir::clone_shell(fn_, *i, map);
+            copy->add_operand(cond);
+            for (Value* sv : state) copy->add_state_value(sv);
+            preheader_->insert_before(copy, preheader_->terminator());
+        }
+        if (i == target) break;
+    }
+    // The load goes below the copies of the guards it stood below.
+    if (target->opcode() == Opcode::load) return try_hoist(header, target, /*behind_tests=*/true);
+    tests_.erase(std::remove(tests_.begin(), tests_.end(), target), tests_.end());
+    test_roots_.erase(target);
+    test_overflow_.erase(target);
+    peeled_.erase(target);
+    header->remove_instruction(target);
+    return true;
+}
+
 bool Licm::run() {
     if (!preheader_->terminator()) return false;
     bool any = false;
@@ -343,6 +531,7 @@ bool Licm::run() {
                 cur = next;
             }
         }
+        if (!round && peel_header_guard()) round = any = true;
     }
     return any;
 }

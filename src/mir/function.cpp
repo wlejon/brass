@@ -30,6 +30,25 @@ void Function::remove_block(BasicBlock* bb) {
     std::erase_if(guard_elim_certs_, [&](const GuardElimCert& c) { return c.block_id == bb->id(); });
 }
 
+void Function::retarget_guard_elim_witness(const Value* from, const Value* to) {
+    if (!from || guard_elim_certs_.empty()) return;
+    const Instruction* def = to && to->is_instruction() ? to->defining_instruction() : nullptr;
+    const bool constant = def && (def->opcode() == Opcode::iconst_i32 || def->opcode() == Opcode::iconst_i64 ||
+                                  def->opcode() == Opcode::fconst_f64);
+    for (GuardElimCert& c : guard_elim_certs_) {
+        if (c.witness_inst_or_val_id != from->id()) continue;
+        if (to && !constant) {
+            c.witness_inst_or_val_id = to->id();
+            continue;
+        }
+        c.witness_inst_or_val_id = 0;
+        if (c.reason == GuardElimCert::Reason::DominatedSameCond ||
+            c.reason == GuardElimCert::Reason::NonNegativeMask) {
+            c.reason = GuardElimCert::Reason::ImpliedRelational;
+        }
+    }
+}
+
 namespace {
 // A body arena's first chunk when the body's size is not known yet, and the
 // largest chunk it grows to.
