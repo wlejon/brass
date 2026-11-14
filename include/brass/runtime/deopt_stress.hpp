@@ -34,6 +34,8 @@
 // must give the interpreter's answer; for a program whose exits honour
 // that contract, every period gives the answer with stress off.
 
+#include <brass/brass_export.h>
+
 #include <atomic>
 #include <cstdint>
 
@@ -107,8 +109,9 @@ uint32_t brass_deopt_stress_poll();
 // An AOT image's poll (DeoptStressPlan::runtime_poll): the same for a guard
 // with `resume_id`, under the configuration of the process the image runs
 // in. 1 when stress is off or does not select the guard.
-uint32_t brass_deopt_stress_poll_site(uint32_t resume_id);
+// Exported from the shared library, which an image imports it from.
+BRASS_API uint32_t brass_deopt_stress_poll_site(uint32_t resume_id);
 // set_deopt_stress for a host that reaches the runtime through its C
 // symbols: `period` 0 turns stress off, `resume_id` -1 selects every guard.
-void brass_set_deopt_stress(uint64_t period, int64_t resume_id);
+BRASS_API void brass_set_deopt_stress(uint64_t period, int64_t resume_id);
 }

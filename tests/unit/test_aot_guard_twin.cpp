@@ -16,6 +16,11 @@
 #include <brass/mir/resume_twin.hpp>
 #include <brass/mir/speculation_sites.hpp>
 
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+extern "C" uintptr_t brass_get_rbp();
+#endif
+
 using namespace brass;
 using namespace brass::test_aot_guard;
 
@@ -277,9 +282,16 @@ int g_twin_collections = 0;
 // Called by generated code: a young collection that walks the generated
 // frames above this one through their stack maps.
 int64_t twin_collect_now() {
+#if defined(_MSC_VER) && !defined(__clang__)
+    // MSVC keeps no frame pointer here: the generated caller's rbp is still
+    // in the register, its return address in this function's slot.
+    const uintptr_t caller_ip = reinterpret_cast<uintptr_t>(*reinterpret_cast<void**>(_AddressOfReturnAddress()));
+    const uintptr_t caller_fp = brass_get_rbp();
+#else
     void* frame = __builtin_frame_address(0);
     const uintptr_t caller_fp = *reinterpret_cast<uintptr_t*>(frame);
     const uintptr_t caller_ip = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(frame) + 8);
+#endif
     g_twin_heap->collect_at(gc::CollectionKind::Minor, caller_fp, caller_ip);
     ++g_twin_collections;
     return 0;
