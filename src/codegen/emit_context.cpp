@@ -398,9 +398,23 @@ void EmitContext::record_gc_point(const LirInst& inst, size_t return_offset, Saf
     stack_map_records_.push_back(std::move(map_rec));
 }
 
+// Two words a store through XMM15, the emitter's scratch (emit_sse.cpp), once
+// a function has enough of them to pay for clearing the register: a body of
+// calls keeps an argument buffer for each, and one store a word was twenty
+// instructions at the top of every call of pixi's updateTransformAndChildren.
 void EmitContext::zero_tagged_locals() {
+    uint32_t words = 0;
+    for (const auto& [start, bytes] : frame_.tagged_locals) words += bytes / 8;
+    const bool paired = words >= 4;
+    if (paired) enc_.xorps(XMM::XMM15, XMM::XMM15);
     for (const auto& [start, bytes] : frame_.tagged_locals) {
-        for (uint32_t off = 0; off + 8 <= bytes; off += 8) {
+        uint32_t off = 0;
+        if (paired) {
+            for (; off + 16 <= bytes; off += 16) {
+                enc_.movups(X64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_), XMM::XMM15);
+            }
+        }
+        for (; off + 8 <= bytes; off += 8) {
             enc_.mov(X64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_), int32_t{0});
         }
     }
