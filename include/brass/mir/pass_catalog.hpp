@@ -39,6 +39,10 @@ PassStep sroa(std::string name = "sroa", FunctionFilter filter = FunctionFilter:
 PassStep gvn(FunctionFilter filter = FunctionFilter::NonWrapper);
 PassStep gvn_pre(GvnPreStats* stats = nullptr, FunctionFilter filter = FunctionFilter::NonWrapper);
 PassStep sccp(bool guard_elim = true, FunctionFilter filter = FunctionFilter::NonWrapper);
+// GVN again once the first round's folds have reshaped the blocks: a test
+// below a branch that asked the same thing, a check a removed join was
+// hiding. Where it finds something, SCCP and the CFG cleanup follow.
+PassStep gvn_follow_up(bool guard_elim = true, FunctionFilter filter = FunctionFilter::NonWrapper);
 PassStep cfg_simplify(std::string name = "cfg_simplify", FunctionFilter filter = FunctionFilter::NonWrapper);
 // Gated by options.profile_data (hot loops only) when a profile is given;
 // `cfg_follow_up` runs CFG simplification on each function it changed.
@@ -64,6 +68,7 @@ PassStep code_sinking();
 // Every function: a reference's untagged address is carried through a join
 // to the read after it (untag_reuse.hpp).
 PassStep untag_reuse();
+PassStep fp_load();
 // Every function: a float division by a power of two as the multiplication
 // by its reciprocal (fdiv_pow2.hpp).
 PassStep fdiv_pow2();

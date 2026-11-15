@@ -10,6 +10,8 @@
 // %r9; mov -0x68(%rbp),%r10; mov 0x96848(%r10),%rsi`. A later reload of the
 // same slot into the same register, with the same width, is the value the
 // register already holds when neither was written since; it is dropped.
+// A spill of the scratch counts as a reload does: a spilled value is defined
+// in a scratch and stored, and read back for the instruction after.
 //
 // The soundness of that rests on knowing every write to the scratch
 // registers, including the ones no LIR operand names. Those were audited
@@ -229,6 +231,19 @@ bool PeepholeOptimizer::reuse_scratch_reloads_block(LirBlock& block, std::array<
             reload->slot = inst.uses[0].spill_slot;
             reload->opcode = inst.opcode;
             reload->size = inst.defs[0].size;
+        }
+        // A full-width plain spill of a tracked scratch: the register holds
+        // what the slot now does, so the reload that follows a spilled
+        // value's definition (`mov %r10, slot; mov slot, %r10`) is dropped.
+        if ((inst.opcode == LirOpcode::Mov || inst.opcode == LirOpcode::Movsd) && inst.defs.size() == 1 &&
+            inst.uses.size() == 1 && inst.defs[0].is_spill_slot() && inst.uses[0].is_preg() &&
+            inst.defs[0].size == 8 && inst.uses[0].size == 8 && !inst.is_patchable) {
+            for (Held& h : held) {
+                if (!h.reg.is_valid() || h.reg != inst.uses[0].preg_val) continue;
+                h.slot = inst.defs[0].spill_slot;
+                h.opcode = inst.opcode;
+                h.size = 8;
+            }
         }
     }
     if (changed) {

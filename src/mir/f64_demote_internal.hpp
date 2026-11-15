@@ -19,7 +19,20 @@ bool is_unprofitable_loop(const LoopInfo* loop, const Function& fn);
 // count when ceil(limit) > max, so it may stand only where the entry check
 // proves it does not (version_on_entry_params); restore() puts the original
 // back.
+//
+// A loop left by `iv != limit` gets the same limit under `iv < limit` (`cmp`
+// is then the header's branch and `original` the test it read), which counts
+// the same trips only for a whole limit not below the first value; and an
+// invariant the loop adds to a counter to make an index (`swaps`) is read as
+// the integer it converts to, which is the same number only when it is one.
+// `fits` tests those too, and no entry check can, so such a loop is `local`:
+// its copy alone stands for the test failing.
 struct ClampedLimit {
+    struct Swap {
+        Instruction* user = nullptr;
+        size_t idx = 0;
+        Value* original = nullptr;
+    };
     Instruction* cmp = nullptr;
     size_t idx = 0;
     Value* original = nullptr;
@@ -27,8 +40,13 @@ struct ClampedLimit {
     double max = 0.0;
     BasicBlock* preheader = nullptr;
     BasicBlock* header = nullptr;
-    Value* fits = nullptr;  // ceil(limit) <= max, in the preheader
-    void restore() const { cmp->set_operand(idx, original); }
+    Value* fits = nullptr;  // ceil(limit) <= max and what a local loop adds, in the preheader
+    bool local = false;
+    std::vector<Swap> swaps;
+    void restore() const {
+        cmp->set_operand(idx, original);
+        for (const Swap& s : swaps) s.user->set_operand(s.idx, s.original);
+    }
 };
 
 // For a clamp the entry cannot test: the preheader branches on `fits` to the

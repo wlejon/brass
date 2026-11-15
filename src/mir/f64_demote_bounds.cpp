@@ -3,6 +3,7 @@
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/runtime_symbols.hpp>
+#include <brass/mir/uses.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -577,6 +578,86 @@ private:
     std::unordered_map<const Value*, int> grow_count_;
 };
 
+// Whether every reader of `sum` takes it for an index: converts it to an
+// integer, or asks whether that conversion kept its value.
+bool read_as_index(const Function& fn, const Value* sum) {
+    bool converted = false;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (!inst) continue;
+            bool reads = false;
+            for_each_use(*inst, [&](const Value* v) { reads = reads || v == sum; });
+            if (!reads) continue;
+            const Opcode op = inst->opcode();
+            if (op == Opcode::fptosi_i32 || op == Opcode::fptosi_i64) {
+                converted = true;
+                continue;
+            }
+            if ((op != Opcode::eq && op != Opcode::ne) || inst->operand_count() != 2) return false;
+            const Value* other = inst->operand(0) == sum ? inst->operand(1) : inst->operand(0);
+            const Instruction* back = other && other->is_instruction() ? other->defining_instruction() : nullptr;
+            if (!back || (back->opcode() != Opcode::sitofp_f64_i32 && back->opcode() != Opcode::sitofp_f64_i64)) return false;
+            const Value* from = back->operand(0);
+            const Instruction* conv = from && from->is_instruction() ? from->defining_instruction() : nullptr;
+            if (!conv || (conv->opcode() != Opcode::fptosi_i32 && conv->opcode() != Opcode::fptosi_i64) ||
+                conv->operand(0) != sum) {
+                return false;
+            }
+        }
+    }
+    return converted;
+}
+
+// `buffer[offset + i]`: the loop adds an invariant it cannot show whole to a
+// value of its own and reads the sum only as an index. The preheader tests
+// that the invariant is an int32 (the conversion and back gives its bits
+// again, so it is not -0, not NaN and not out of range, whatever the
+// conversion makes of those) and the loop reads the converted integer in its place, which the demotion takes for
+// exact; `site` carries each replaced operand for the copy that runs when the
+// test fails, and the test in `fits`.
+void assume_whole_index_terms(Function& fn, const DominatorTree& dom, const LoopInfo& loop, ClampedLimit& site) {
+    Instruction* ph_term = site.preheader->terminator();
+    Builder b(*fn.parent());
+    b.set_function(&fn);
+    b.position_before(ph_term);
+    std::unordered_map<Value*, Value*> whole;
+    auto assumable = [&](const Value* v) {
+        if (!v || v->type() != Type::f64() || !loop.is_loop_invariant(v)) return false;
+        if (v->is_block_param()) {
+            // An entry parameter is the entry check's to test.
+            return v->defining_block() != fn.entry_block() && dom.dominates(v->defining_block(), site.preheader);
+        }
+        if (!v->is_instruction()) return false;
+        const Instruction* def = v->defining_instruction();
+        const Opcode op = def->opcode();
+        if (op == Opcode::fconst_f64 || op == Opcode::sitofp_f64_i32 || op == Opcode::sitofp_f64_i64) return false;
+        return def->parent() && dom.dominates(def->parent(), site.preheader);
+    };
+    for (BasicBlock* bb : loop.blocks()) {
+        if (!bb) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || inst->type() != Type::f64() || inst->operand_count() != 2) continue;
+            if (inst->opcode() != Opcode::add && inst->opcode() != Opcode::sub) continue;
+            for (size_t side = 0; side < 2; ++side) {
+                Value* v = inst->operand(side);
+                if (!assumable(v) || loop.is_loop_invariant(inst->operand(1 - side))) continue;
+                if (!read_as_index(fn, inst->result())) continue;
+                Value*& as_int = whole[v];
+                if (!as_int) {
+                    as_int = b.build_sitofp_f64_i32(b.build_fptosi_i32(v));
+                    Value* same = b.build_eq(b.build_bitcast_i64_f64(v), b.build_bitcast_i64_f64(as_int));
+                    site.fits = b.build_and(site.fits, same);
+                    site.local = true;
+                }
+                site.swaps.push_back({inst, side, v});
+                inst->set_operand(side, as_int);
+                break;
+            }
+        }
+    }
+}
+
 } // namespace
 
 bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis,
@@ -644,6 +725,7 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
         }
         if (!hdr_cmp || hdr_cmp->operand_count() != 2) continue;
 
+        const size_t first_clamp = clamped ? clamped->size() : 0;
         for (size_t i = 0; i < header->param_count(); ++i) {
             Value* p = header->param(i);
             if (!p || p->type() != Type::f64()) continue;
@@ -698,7 +780,11 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
             const bool is_p_lt_lim = (lim_idx == 1)
                 ? (stay_true ? hdr_cmp->opcode() == Opcode::slt : hdr_cmp->opcode() == Opcode::sge)
                 : (stay_true ? hdr_cmp->opcode() == Opcode::sgt : hdr_cmp->opcode() == Opcode::sle);
-            if (!is_p_lt_lim) continue;
+            // `p != limit` stays as long as `p < limit` does when the limit
+            // is a whole number the counter starts at or below; the
+            // preheader tests that below.
+            const bool is_p_ne_lim = hdr_cmp->opcode() == (stay_true ? Opcode::ne : Opcode::eq);
+            if (!is_p_lt_lim && !(is_p_ne_lim && clamped)) continue;
 
             Value* limit_v = hdr_cmp->operand(lim_idx);
             if (!limit_v || limit_v->type() != Type::f64()) continue;
@@ -728,7 +814,8 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
             if (limit_v->is_instruction()) {
                 const Instruction* ldef = limit_v->defining_instruction();
                 const Opcode lop = ldef->opcode();
-                if (lop == Opcode::fconst_f64 || lop == Opcode::sitofp_f64_i32 || lop == Opcode::sitofp_f64_i64) {
+                if (is_p_lt_lim &&
+                    (lop == Opcode::fconst_f64 || lop == Opcode::sitofp_f64_i32 || lop == Opcode::sitofp_f64_i64)) {
                     canonical_ivs.insert(p);
                     continue;
                 }
@@ -748,23 +835,47 @@ bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const Loop
                 continue;
             }
 
-            Value* ceil_lim = ph_b.build_ceil_f64(limit_v);
-            Value* init_f_v = (init_const >= 0.0) ? ph_b.build_fconst_f64(init_const) : init_v;
-            Value* max_i32_f = ph_b.build_fconst_f64(max_bound_f);
-            Value* gt_init = ph_b.build_sgt(ceil_lim, init_f_v);
-            Value* le_max = ph_b.build_sle(ceil_lim, max_i32_f);
-            Value* clamped_f = ph_b.build_select(le_max, ceil_lim, max_i32_f);
-            Value* safe_f = ph_b.build_select(gt_init, clamped_f, init_f_v);
-            Value* lim_i32 = ph_b.build_fptosi_i32(safe_f);
-            Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
-            if (clamped) {
-                clamped->push_back(ClampedLimit{hdr_cmp, lim_idx, hdr_cmp->operand(lim_idx), limit_v, max_bound_f,
-                                                ph, header, le_max});
+            if (is_p_ne_lim) {
+                // The limit as an int32 and back is the limit only when it is
+                // a whole number an int32 holds (not NaN, not out of range,
+                // whatever the conversion makes of those); then the bounds of
+                // the counter are integer tests.
+                Value* lim_i32 = ph_b.build_fptosi_i32(limit_v);
+                Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
+                Value* whole = ph_b.build_eq(exact_lim, limit_v);
+                Value* from_init = init_const >= 0.0
+                    ? ph_b.build_sge(lim_i32, ph_b.build_iconst_i32(static_cast<int32_t>(init_const)))
+                    : ph_b.build_sge(limit_v, init_v);
+                Value* to_max = ph_b.build_sle(lim_i32, ph_b.build_iconst_i32(static_cast<int32_t>(max_bound_f)));
+                Value* fits = ph_b.build_and(whole, ph_b.build_and(from_init, to_max));
+                Builder hdr_b(*fn.parent());
+                hdr_b.set_function(&fn);
+                hdr_b.position_before(hdr_term);
+                Value* below = stay_true ? hdr_b.build_slt(p, exact_lim) : hdr_b.build_sge(p, exact_lim);
+                ClampedLimit c{hdr_term, 0, hdr_term->operand(0), limit_v, max_bound_f, ph, header, fits};
+                c.local = true;
+                clamped->push_back(std::move(c));
+                hdr_term->set_operand(0, below);
+            } else {
+                Value* ceil_lim = ph_b.build_ceil_f64(limit_v);
+                Value* init_f_v = (init_const >= 0.0) ? ph_b.build_fconst_f64(init_const) : init_v;
+                Value* max_i32_f = ph_b.build_fconst_f64(max_bound_f);
+                Value* gt_init = ph_b.build_sgt(ceil_lim, init_f_v);
+                Value* le_max = ph_b.build_sle(ceil_lim, max_i32_f);
+                Value* clamped_f = ph_b.build_select(le_max, ceil_lim, max_i32_f);
+                Value* safe_f = ph_b.build_select(gt_init, clamped_f, init_f_v);
+                Value* lim_i32 = ph_b.build_fptosi_i32(safe_f);
+                Value* exact_lim = ph_b.build_sitofp_f64_i32(lim_i32);
+                if (clamped) {
+                    clamped->push_back(ClampedLimit{hdr_cmp, lim_idx, hdr_cmp->operand(lim_idx), limit_v, max_bound_f,
+                                                    ph, header, le_max});
+                }
+                hdr_cmp->set_operand(lim_idx, exact_lim);
             }
-            hdr_cmp->set_operand(lim_idx, exact_lim);
             canonical_ivs.insert(p);
             canonicalized_bounds = true;
         }
+        if (clamped && clamped->size() > first_clamp) assume_whole_index_terms(fn, dom, *loop, (*clamped)[first_clamp]);
     }
     return canonicalized_bounds;
 }

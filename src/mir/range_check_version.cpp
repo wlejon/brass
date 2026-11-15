@@ -239,6 +239,16 @@ Value* within(Builder& b, Value* v, int64_t bound) {
     return b.build_ule(b.build_add(v, b.build_iconst_i64(bound)), b.build_iconst_i64(2 * bound));
 }
 
+// An int32 widened, or a constant no larger: a value `within` need not test.
+bool is_int32(const Value* v) {
+    int64_t k = 0;
+    if (const_i64(v, k)) return k >= INT32_MIN && k <= INT32_MAX;
+    if (!v || !v->is_instruction()) return false;
+    const Instruction* d = v->defining_instruction();
+    return (d->opcode() == Opcode::sext_i64 || d->opcode() == Opcode::zext_i64) && d->operand(0) &&
+           d->operand(0)->type() == Type::i32();
+}
+
 Value* affine_at(Builder& b, const Affine& a, Value* x) {
     Value* sum = b.build_iconst_i64(a.c);
     for (const auto& [t, coef] : a.terms) {
@@ -345,21 +355,42 @@ bool version_loop(Function& fn, LoopInfo& loop) {
     Value* init = at_preheader(b, cl.init);
     Value* lim = at_preheader(b, cl.last);
     Value* hi = cl.inclusive ? lim : b.build_sub(lim, b.build_iconst_i64(1));
-    Value* ok = b.build_and(within(b, init, kIvBound), within(b, lim, kIvBound));
+    Value* ok = nullptr;
+    auto require = [&](Value* cond) { ok = ok ? b.build_and(ok, cond) : cond; };
+    auto bound = [&](Value* v, int64_t by) {
+        if (!is_int32(v)) require(within(b, v, by));
+    };
+    bound(init, kIvBound);
+    bound(lim, kIvBound);
+    // An index that only grows with iv is lowest at the first iteration and
+    // highest at the last, so with a first iteration not after the last one
+    // each end needs one side tested; any other index is tested whole at
+    // both. `ult` tests both sides at once, which is what a length's check
+    // is: a length is not negative.
+    bool ordered_ends = false;
     std::unordered_set<const Value*> bounded;
     for (const Check& c : checks) {
         for (const auto& t : c.idx.terms) {
-            if (bounded.insert(t.first).second) ok = b.build_and(ok, within(b, at_preheader(b, t.first), kTermBound));
+            if (bounded.insert(t.first).second) bound(at_preheader(b, t.first), kTermBound);
         }
-        if (c.idx.iv_scale && bounded.insert(c.idx.iv_scale).second) {
-            ok = b.build_and(ok, within(b, at_preheader(b, c.idx.iv_scale), kIvBound));
-        }
+        if (c.idx.iv_scale && bounded.insert(c.idx.iv_scale).second) bound(at_preheader(b, c.idx.iv_scale), kIvBound);
         Value* len = at_preheader(b, c.len);
+        if (c.idx.iv_coef > 0 && !c.idx.iv_scale) {
+            if (!ordered_ends) require(b.build_sle(init, hi));
+            ordered_ends = true;
+            int64_t first = 0;
+            if (!(c.idx.terms.empty() && const_i64(init, first) && c.idx.iv_coef * first + c.idx.c >= 0)) {
+                require(b.build_sge(affine_at(b, c.idx, init), b.build_iconst_i64(0)));
+            }
+            require(b.build_ult(affine_at(b, c.idx, hi), len));
+            continue;
+        }
         for (Value* x : {init, hi}) {
             Value* e = affine_at(b, c.idx, x);
-            ok = b.build_and(ok, b.build_and(b.build_sge(e, b.build_iconst_i64(0)), b.build_ult(e, len)));
+            require(b.build_and(b.build_sge(e, b.build_iconst_i64(0)), b.build_ult(e, len)));
         }
     }
+    if (!ok) return false;
 
     // The copy, its checks taken as passed.
     std::vector<BasicBlock*> ordered;

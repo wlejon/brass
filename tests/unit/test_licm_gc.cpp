@@ -402,3 +402,35 @@ done(%r: i64):
     verify_ok(*fn);
     CHECK_EQ(count_in(*fn, Opcode::mul, "inner_body"), size_t{0});
 }
+
+TEST_CASE("LICM - what an inner loop put in front of itself is still inside the loop around it") {
+    // The inner loop is entered from a block with two ways out, so it gets
+    // a new block in front of it for its constant; that block runs once per
+    // outer trip, and what reads the constant after the inner loop must not
+    // go above the outer loop without it.
+    auto mod = parse_ok(R"(module @m
+
+func @f(%n: i64, %k: i64) -> i64 {
+entry:
+  %z = iconst.i64 0
+  br outer_head(%z)
+outer_head(%i: i64):
+  %more_i = slt.i64 %i, %n
+  br_if %more_i, inner_head(%i), done
+inner_head(%j: i64):
+  %seven = iconst.i64 7
+  %j2 = add.i64 %j, %seven
+  %more_j = slt.i64 %j2, %k
+  br_if %more_j, inner_head(%j2), tail
+tail:
+  %step = add.i64 %k, %seven
+  %i2 = add.i64 %i, %step
+  br outer_head(%i2)
+done:
+  ret %i
+}
+)");
+    Function* fn = mod->get_function("f");
+    CHECK(hoist_loop_invariants(*fn));
+    verify_ok(*fn);
+}

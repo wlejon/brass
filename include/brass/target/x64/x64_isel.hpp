@@ -81,6 +81,12 @@ private:
         std::vector<const Instruction*> peeled;
     };
     std::unordered_map<const Instruction*, PeeledBranch> peeled_branches_;
+    // Guards whose condition is a float `eq` of their own block read by
+    // nothing else: the guard leaves on the parity flag (unordered) and on
+    // the zero flag, two jumps to its exit after one ucomis, where the 0/1
+    // of the comparison costs two setcc, two movzx, an and and a test. The
+    // comparison is in skipped_insts_.
+    std::unordered_set<const Instruction*> parity_guards_;
 
     struct ImmIntInfo {
         bool is_imm = false;
@@ -191,6 +197,8 @@ private:
     // comparison it can branch on directly; false leaves it to the ordinary
     // fused or tested condition.
     bool find_peeled_branch(const Instruction& br);
+    // Records `guard` in parity_guards_ when its condition is such an `eq`.
+    bool find_parity_guard(const Instruction& guard);
     // The constants the peeled `and` / `eq` / `ne` instructions of `pb` read,
     // none of which is emitted.
     void count_peeled_folds(const PeeledBranch& pb, std::unordered_map<const Value*, uint32_t>& folded_uses) const;
@@ -245,6 +253,7 @@ private:
         codegen::VReg vreg;
     };
     std::unordered_map<int64_t, XmmConstant> xmm_constants_;
+    codegen::VReg xmm_constant(codegen::LirBlock& lir_bb, int64_t bits);
     void find_nan_canon_stores(const Function& mir_fn, std::unordered_map<const Value*, uint32_t>& folded_uses);
     // True when `inst` is such a store, emitted to `mem_op`.
     bool lower_nan_canon_store(const Instruction& inst, const codegen::LirOperand& mem_op, codegen::LirBlock& lir_bb);

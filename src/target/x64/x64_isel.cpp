@@ -139,9 +139,11 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     };
 
     peeled_branches_.clear();
+    parity_guards_.clear();
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
             if (inst->opcode() == Opcode::br_if && find_peeled_branch(*inst)) continue;
+            if (inst->opcode() == Opcode::guard && find_parity_guard(*inst)) continue;
             if (inst->opcode() == Opcode::br_if || inst->opcode() == Opcode::guard || inst->opcode() == Opcode::select) {
                 const Value* cond = inst->operand(0);
                 if (cond && cond->is_instruction()) {
@@ -319,6 +321,7 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                     skipped_insts_.insert(rhs->defining_instruction());
                 }
             };
+            if (inst->opcode() == Opcode::guard && parity_guards_.count(inst) != 0) continue;
             if (inst->opcode() == Opcode::guard) {
                 const Value* cond = inst->operand(0);
                 const Instruction* def_inst = cond && cond->is_instruction() ? cond->defining_instruction() : nullptr;

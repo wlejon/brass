@@ -1,6 +1,7 @@
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/alias_analysis.hpp>
+#include <brass/mir/builder.hpp>
 #include <brass/mir/memory_ssa.hpp>
 #include "gvn_table.hpp"
 #include "gvn_gc_free.hpp"
@@ -232,6 +233,17 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
         GcFreePaths gc_free(fn);
         std::vector<std::pair<const Value*, Instruction*>> tagged_reads;
         std::vector<size_t> tagged_scopes;
+        // What the branch into a block says of its condition, for the blocks
+        // that branch dominates: a block whose one predecessor ends in
+        // `br_if c` to two different blocks is entered with c known, so a use
+        // of c below it reads the constant, and SCCP folds the guard that can
+        // only fail or the test that was already asked.
+        std::vector<std::pair<const Value*, int32_t>> branch_facts;
+        std::vector<size_t> fact_scopes;
+        // A block a lower tier resumes at is entered from outside too, with
+        // whatever the guard's state holds: its branch says nothing there.
+        std::unordered_set<const BasicBlock*> resumed_at;
+        for (const auto& [id, target] : fn.resume_points()) resumed_at.insert(target);
 
         auto resolve = [&](Value* v) -> Value* {
             if (!v) return nullptr;
@@ -251,6 +263,17 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
         auto visit_block = [&](const BasicBlock* bb) -> void {
             table.enter_scope();
             tagged_scopes.push_back(tagged_reads.size());
+            fact_scopes.push_back(branch_facts.size());
+            if (bb->predecessors().size() == 1 && bb->predecessors()[0] && !resumed_at.count(bb)) {
+                const Instruction* term = bb->predecessors()[0]->terminator();
+                if (term && term->opcode() == Opcode::br_if && term->operand(0) &&
+                    term->operand(0)->type().is_i32() && term->operand(0)->is_instruction() &&
+                    term->operand(0)->defining_instruction()->opcode() != Opcode::iconst_i32 &&
+                    term->true_target().block != term->false_target().block) {
+                    if (term->true_target().block == bb) branch_facts.emplace_back(term->operand(0), 1);
+                    if (term->false_target().block == bb) branch_facts.emplace_back(term->operand(0), 0);
+                }
+            }
 
             Instruction* cur = const_cast<BasicBlock*>(bb)->head();
             while (cur) {
@@ -264,12 +287,46 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
                     if (r != op_val) {
                         cur->set_operand(i, r);
                     }
+                    for (auto it = branch_facts.rbegin(); it != branch_facts.rend(); ++it) {
+                        if (it->first != r) continue;
+                        Builder b(*fn.parent());
+                        b.position_before(cur);
+                        cur->set_operand(i, b.build_iconst_i32(it->second));
+                        iter_changed = true;
+                        break;
+                    }
+                }
+
+                // Past a guard its condition held: what follows in this
+                // block and below it reads the constant, as past a branch.
+                // Not past a guard a lower tier resumes from inside this
+                // function: the branch behind it is that tier's way to the
+                // resume block, which no edge would reach once it folded.
+                if (op == Opcode::guard && !fn.get_resume_target(cur->resume_id()) &&
+                    cur->operand_count() >= 1 && cur->operand(0) &&
+                    cur->operand(0)->type().is_i32() && cur->operand(0)->is_instruction() &&
+                    cur->operand(0)->defining_instruction()->opcode() != Opcode::iconst_i32) {
+                    branch_facts.emplace_back(cur->operand(0), 1);
+                    cur = next;
+                    continue;
                 }
 
                 // 0. A re-read of a tagged value's bits with no GC point since
                 // the read in scope: the same bits.
                 if (options.enable_cse && op == Opcode::bitcast_i64_tagged && cur->operand_count() == 1) {
                     const Value* src = cur->operand(0);
+                    // The bits a tagged value was made from, read back with
+                    // no GC point since it was made: those bits.
+                    if (Instruction* made = src->is_instruction() ? src->defining_instruction() : nullptr;
+                        made && made->opcode() == Opcode::bitcast_tagged_i64 && made->operand_count() == 1 &&
+                        gc_free.between(made, cur)) {
+                        subst_map[cur->result()] = resolve(made->operand(0));
+                        to_remove.push_back(cur);
+                        if (options.stats) options.stats->expressions_eliminated++;
+                        iter_changed = true;
+                        cur = next;
+                        continue;
+                    }
                     Instruction* leader = nullptr;
                     for (auto it = tagged_reads.rbegin(); it != tagged_reads.rend(); ++it) {
                         if (it->first == src) {
@@ -371,10 +428,19 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
             table.exit_scope();
             tagged_reads.resize(tagged_scopes.back());
             tagged_scopes.pop_back();
+            branch_facts.resize(fact_scopes.back());
+            fact_scopes.pop_back();
         });
 
         for (Instruction* inst : to_remove) {
             if (inst && inst->parent()) {
+                // A guard-elimination certificate that named the duplicate
+                // names the value that stands for it from here on.
+                if (inst->result()) {
+                    if (const auto it = subst_map.find(inst->result()); it != subst_map.end()) {
+                        fn.retarget_guard_elim_witness(inst->result(), resolve(it->second));
+                    }
+                }
                 inst->parent()->remove_instruction(inst);
             }
         }

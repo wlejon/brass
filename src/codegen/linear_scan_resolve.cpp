@@ -100,13 +100,18 @@ void LinearScanAllocator::mark_unsplittable_live_ins() {
     guard_exit_at_.clear();
     const auto& exits = liveness_.guard_exits();
     std::vector<uint32_t> shared_exits;
+    std::unordered_map<uint32_t, const LirBlock*> exit_from;
     for (const auto& block : fn_.blocks) {
         for (const auto& inst : block->instructions) {
             if (inst->is_invoke && inst->unwind_block_id != UINT32_MAX) landing_pads_.push_back(inst->unwind_block_id);
             if (inst->opcode != LirOpcode::Jcc) continue;
             for (const auto& u : inst->uses) {
                 if (!u.is_label() || !exits.count(u.label_id)) continue;
-                if (!guard_exit_at_.emplace(u.label_id, inst->id).second) shared_exits.push_back(u.label_id);
+                if (guard_exit_at_.emplace(u.label_id, inst->id).second) {
+                    exit_from.emplace(u.label_id, block.get());
+                } else if (exit_from.at(u.label_id) != block.get()) {
+                    shared_exits.push_back(u.label_id);
+                }
             }
         }
     }
@@ -120,8 +125,10 @@ void LinearScanAllocator::mark_unsplittable_live_ins() {
     auto mark_all = [&](const auto& vs) {
         for (VReg v : vs) mark(v);
     };
-    // A guard exit entered by more than one Jcc reads its state where each
-    // of them is: one place for all of them.
+    // A guard exit entered by Jccs of more than one block reads its state
+    // where each of them is: one place for all of them. The Jccs of one
+    // block (a float equality guard's `jp exit; jne exit`) read it where the
+    // first one is, and nothing moves between them (no_split_windows_).
     for (uint32_t id : shared_exits) {
         guard_exit_at_.erase(id);
         const LirInst* exit = exits.at(id);

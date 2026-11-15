@@ -216,7 +216,7 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     std::vector<ClampedLimit> clamped;
     bool versioned_loops = false;
     for (const ClampedLimit& c : all_clamped) {
-        if (limit_computable_at_entry(fn, c.limit)) {
+        if (!c.local && limit_computable_at_entry(fn, c.limit)) {
             clamped.push_back(c);
         } else if (version_loop_on_clamp(fn, c, all_clamped)) {
             versioned_loops = true;

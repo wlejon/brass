@@ -208,6 +208,19 @@ std::vector<LoopInfo*> LoopAnalysis::post_order_loops() const {
     return result;
 }
 
+namespace {
+
+// A block put in front of a loop's header runs once per trip of every loop
+// around that loop, so it is one of their blocks: a pass that asks an outer
+// loop whether a value is made inside it must hear yes for what was put here.
+void join_enclosing_loops(LoopInfo& loop, BasicBlock* preheader) {
+    for (LoopInfo* outer = loop.parent(); outer; outer = outer->parent()) {
+        if (!outer->contains(preheader)) outer->add_block(preheader);
+    }
+}
+
+} // namespace
+
 BasicBlock* LoopAnalysis::ensure_preheader(Function& fn, LoopInfo& loop) {
     BasicBlock* header = loop.header();
     if (!header) return nullptr;
@@ -274,6 +287,7 @@ BasicBlock* LoopAnalysis::ensure_preheader(Function& fn, LoopInfo& loop) {
             preheader->append_instruction(br_inst);
             fn.rebuild_cfg_predecessors();
             loop.set_preheader(preheader);
+            join_enclosing_loops(loop, preheader);
             return preheader;
         }
     }
@@ -327,6 +341,7 @@ BasicBlock* LoopAnalysis::ensure_preheader(Function& fn, LoopInfo& loop) {
 
     fn.rebuild_cfg_predecessors();
     loop.set_preheader(preheader);
+    join_enclosing_loops(loop, preheader);
 
     return preheader;
 }

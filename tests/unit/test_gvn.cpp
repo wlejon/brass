@@ -463,3 +463,111 @@ TEST_CASE("GVN - float divisions merge, an integer division by a variable does n
                                               RuntimeValue::from_i64(9), RuntimeValue::from_i64(2)});
     CHECK_EQ(v.as_f64(), 0.75 * 0.75 + 8.0);
 }
+
+TEST_CASE("GVN - a block a branch leads to reads the branch's condition as the constant") {
+    Module mod("test_branch_facts");
+    Builder b(mod);
+    Function* fn = mod.create_function("facts", Type::i64(), {Type::i64(), Type::i64()});
+    b.set_function(fn);
+    BasicBlock* b0 = b.append_block("b0");
+    BasicBlock* yes = b.append_block("yes");
+    BasicBlock* no = b.append_block("no");
+    BasicBlock* below = b.append_block("below");
+
+    b.position_at_end(b0);
+    Value* x = b.add_block_param(b0, Type::i64());
+    Value* y = b.add_block_param(b0, Type::i64());
+    Value* c = b.build_eq(x, y);
+    b.build_br_if(c, yes, no);
+
+    b.position_at_end(yes);
+    Instruction* sel_yes = b.build_select(c, x, y)->defining_instruction();
+    b.build_ret(sel_yes->result());
+
+    b.position_at_end(no);
+    b.build_br(below);
+
+    // Dominated by `no`, so the condition is still known there.
+    b.position_at_end(below);
+    Instruction* sel_no = b.build_select(c, x, y)->defining_instruction();
+    b.build_ret(sel_no->result());
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    CHECK(gvn_function(*fn));
+    REQUIRE(verify_function(*fn));
+
+    const Instruction* k1 = sel_yes->operand(0)->defining_instruction();
+    const Instruction* k0 = sel_no->operand(0)->defining_instruction();
+    REQUIRE(k1->opcode() == Opcode::iconst_i32);
+    REQUIRE(k0->opcode() == Opcode::iconst_i32);
+    CHECK_EQ(k1->imm_i64(), 1LL);
+    CHECK_EQ(k0->imm_i64(), 0LL);
+}
+
+TEST_CASE("GVN - a block with a second way in learns nothing from a branch") {
+    Module mod("test_branch_facts_join");
+    Builder b(mod);
+    Function* fn = mod.create_function("join", Type::i64(), {Type::i64(), Type::i64()});
+    b.set_function(fn);
+    BasicBlock* b0 = b.append_block("b0");
+    BasicBlock* side = b.append_block("side");
+    BasicBlock* join = b.append_block("join");
+
+    b.position_at_end(b0);
+    Value* x = b.add_block_param(b0, Type::i64());
+    Value* y = b.add_block_param(b0, Type::i64());
+    Value* c = b.build_eq(x, y);
+    b.build_br_if(c, join, side);
+
+    b.position_at_end(side);
+    b.build_br(join);
+
+    b.position_at_end(join);
+    Instruction* sel = b.build_select(c, x, y)->defining_instruction();
+    b.build_ret(sel->result());
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    gvn_function(*fn);
+    REQUIRE(verify_function(*fn));
+    CHECK(sel->operand(0) == c);
+}
+
+TEST_CASE("GVN - a guard's condition is the constant past the guard") {
+    Module mod("test_guard_facts");
+    Builder b(mod);
+    Function* exit_fn = mod.create_function("leave", Type::i64(), {});
+    b.set_function(exit_fn);
+    b.position_at_end(b.append_block("b0"));
+    b.build_ret(b.build_iconst_i64(0));
+
+    Function* fn = mod.create_function("guarded", Type::i64(), {Type::i64(), Type::i64()});
+    b.set_function(fn);
+    BasicBlock* b0 = b.append_block("b0");
+    BasicBlock* b1 = b.append_block("b1");
+    b.position_at_end(b0);
+    Value* x = b.add_block_param(b0, Type::i64());
+    Value* y = b.add_block_param(b0, Type::i64());
+    Value* c = b.build_eq(x, y);
+    Instruction* before = b.build_select(c, x, y)->defining_instruction();
+    b.build_guard(c, "leave");
+    Instruction* second = b.build_guard(c, "leave");
+    b.build_br(b1);
+    b.position_at_end(b1);
+    Instruction* third = b.build_guard(c, "leave");
+    b.build_ret(b.build_add(before->result(), x));
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    CHECK(gvn_function(*fn));
+    REQUIRE(verify_function(*fn));
+
+    // Before the guard the condition is still asked.
+    CHECK(before->operand(0) == c);
+    for (const Instruction* g : {second, third}) {
+        const Instruction* k = g->operand(0)->defining_instruction();
+        REQUIRE(k->opcode() == Opcode::iconst_i32);
+        CHECK_EQ(k->imm_i64(), 1LL);
+    }
+}

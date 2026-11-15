@@ -194,6 +194,59 @@ exit:
     }
 }
 
+// A value the header computes and only code after the loop reads (GVN merges
+// an after-loop computation with the header's equal one): the unrolled loop
+// runs other headers, so the loop is left as it is.
+TEST_CASE("Loop Unrolling - a header value read after the loop keeps the loop whole") {
+    const char* text = R"(
+module @unroll_header_value
+
+func @f(%n: i64, %x: i64) -> i64 {
+entry:
+  %zero = iconst.i64 0
+  %one = iconst.i64 1
+  br hdr(%zero)
+
+hdr(%i: i64):
+  %d = add.i64 %i, %x
+  %c = slt.i64 %i, %n
+  br_if %c, body, exit
+
+body:
+  %in = add.i64 %i, %one
+  br hdr(%in)
+
+exit:
+  %r = xor.i64 %d, %n
+  ret %r
+}
+)";
+    DiagnosticReporter diag;
+    auto mod = parse_module(text, &diag);
+    REQUIRE(mod != nullptr);
+    Function* fn = mod->get_function("f");
+    REQUIRE(fn != nullptr);
+
+    const std::vector<int64_t> inputs = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14};
+    std::vector<int64_t> expected;
+    {
+        Interpreter interp;
+        for (int64_t n : inputs) {
+            expected.push_back(interp.run(*fn, {RuntimeValue::from_i64(n), RuntimeValue::from_i64(100)}).as_i64());
+        }
+    }
+
+    DominatorTree dom(*fn);
+    loop_unroll_pass(*fn, dom, LoopUnrollOptions{});
+    DiagnosticReporter vdiag;
+    REQUIRE(verify_module(*mod, &vdiag));
+
+    Interpreter interp;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        CHECK_EQ(interp.run(*fn, {RuntimeValue::from_i64(inputs[i]), RuntimeValue::from_i64(100)}).as_i64(), expected[i]);
+    }
+}
+
 TEST_CASE("Loop Unrolling - Reduction Accumulator with Remainder Loops (i64 & f64)") {
     // 1. Integer reduction unrolling (default ON)
     {

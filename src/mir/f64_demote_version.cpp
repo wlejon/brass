@@ -155,6 +155,12 @@ bool version_loop_on_clamp(Function& fn, const ClampedLimit& site, const std::ve
         auto vit = values.find(c.original);
         it->second->set_operand(c.idx, vit != values.end() ? vit->second : c.original);
     }
+    for (const ClampedLimit& c : all) {
+        for (const ClampedLimit::Swap& sw : c.swaps) {
+            auto it = copies.find(sw.user);
+            if (it != copies.end()) it->second->set_operand(sw.idx, sw.original);  // an invariant: defined above the copy
+        }
+    }
 
     const std::vector<Value*> args = ph_term->branch_target().args;
     Builder b(*fn.parent());

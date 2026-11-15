@@ -3,6 +3,7 @@
 // "Guards in AOT images").
 
 #include "test_framework.hpp"
+#include <limits>
 #include <sstream>
 #include "aot_guard_test_util.hpp"
 #include "diff_harness.hpp"
@@ -899,3 +900,38 @@ TEST_CASE("AOT guards - an image's stress guards poll the runtime it runs agains
     set_stress(0, -1);
 }
 #endif
+
+// A guard on a float `eq` leaves on the parity flag as well as the zero flag
+// (x64: one ucomis and two jumps to the exit): unordered operands are not
+// equal, and -0 equals 0.
+TEST_CASE("AOT guards - a float equality guard leaves when unordered or unequal") {
+    const char* text = R"(module @aot_guard_float_eq
+func @agf_twin(%0: i32, %1: ptr) -> i64 resume_twin {
+bb0:
+  %2 = load.i64 %1, 0
+  %3 = sext.i64 %0
+  %4 = mul.i64 %2, %3
+  ret %4
+}
+func @agf_f(%0: f64, %1: f64, %2: i64) -> i64 {
+bb0:
+  %3 = eq.f64 %0, %1
+  guard %3, @agf_twin, [%2], id 3
+  %4 = iconst.i64 1
+  %5 = add.i64 %2, %4
+  ret %5
+}
+)";
+    auto mod = parse_checked(text);
+    REQUIRE(mod != nullptr);
+    LoadedImage img = link_and_load(*mod, "ag_float_eq");
+    REQUIRE(img.lib != nullptr);
+    auto f = img.lib->get_function<int64_t (*)(double, double, int64_t)>("agf_f");
+    REQUIRE(f != nullptr);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    const double vals[] = {0.0, -0.0, nan, 1.5, -1.5, inf, -inf, 5e-324};
+    for (double x : vals) {
+        for (double y : vals) CHECK_EQ(f(x, y, 10), x == y ? 11 : 30);
+    }
+}

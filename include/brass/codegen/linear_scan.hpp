@@ -116,6 +116,9 @@ private:
         uint32_t clob = 0;
         uint32_t pin = 0;
         uint32_t call = 0;
+        // Every register at a GC point (a call that may collect, a
+        // safepoint): none holds a GC reference across one.
+        uint32_t gc = 0;
     };
     std::vector<uint32_t> constrained_ids_[2];
     std::vector<ConstraintWord> constraint_words_[2];

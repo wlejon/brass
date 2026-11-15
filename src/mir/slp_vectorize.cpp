@@ -9,6 +9,13 @@ namespace brass {
 
 namespace {
 
+// A scalar the vector code stands for goes, and a guard-elimination
+// certificate that named it as its witness has none from here on.
+void remove_scalar(BasicBlock& bb, Instruction* inst) {
+    if (inst->result() && bb.parent()) bb.parent()->retarget_guard_elim_witness(inst->result(), nullptr);
+    bb.remove_instruction(inst);
+}
+
 static bool is_extract_lane_sequence(const std::vector<Value*>& values, Value*& out_source_vec) {
     if (values.empty()) return false;
     Value* v0 = values[0];
@@ -471,7 +478,7 @@ bool vectorize_block(BasicBlock& bb, const SlpOptions& options, Users& users) {
 
         // Remove the scalar stores
         for (Instruction* s : sb.stores) {
-            bb.remove_instruction(s);
+            remove_scalar(bb, s);
         }
 
         any_changed = true;
@@ -507,7 +514,7 @@ bool vectorize_block(BasicBlock& bb, const SlpOptions& options, Users& users) {
         }
 
         for (Instruction* l : lb.loads) {
-            bb.remove_instruction(l);
+            remove_scalar(bb, l);
         }
         formed_loads.push_back(std::move(formed));
 
@@ -545,7 +552,7 @@ bool vectorize_block(BasicBlock& bb, const SlpOptions& options, Users& users) {
         }
 
         for (Instruction* inst : ab.insts) {
-            bb.remove_instruction(inst);
+            remove_scalar(bb, inst);
         }
 
         any_changed = true;
@@ -577,10 +584,10 @@ bool vectorize_block(BasicBlock& bb, const SlpOptions& options, Users& users) {
             Instruction* ext = fl.extracts[lane]->defining_instruction();
             if (ext && ext->parent() == &bb) {
                 users.replace(fl.extracts[lane], load->result(), [](Instruction*) { return true; });
-                bb.remove_instruction(ext);
+                remove_scalar(bb, ext);
             }
         }
-        bb.remove_instruction(vdef);
+        remove_scalar(bb, vdef);
     }
 
     return any_changed;

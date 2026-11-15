@@ -12,7 +12,8 @@
 // A call whose callee reaches no GC point (SymbolRole::NoCollect or Pure: the
 // LIR's no_gc_point) is no GC point to the register allocator: a reference
 // live across it keeps a register, and the call records no roots. A
-// reference that also spans a call that can collect still lives in its slot.
+// reference that also spans a call that can collect is in its slot at that
+// call, and for its whole life when the hot path makes such calls.
 // A function declared nocollect must itself reach no GC point, which the
 // verifier checks, and it gets no interrupt polls.
 
@@ -150,6 +151,102 @@ TEST_CASE("nocollect - a value that also spans a collecting call keeps its slot"
         CHECK(call_roots(*one.lir) >= 1u);
         Allocated both = allocate(kAcrossTwo, aarch64, {"g", "h"});
         CHECK_EQ(slot_moves(*both.lir), size_t(0));
+    }
+}
+
+namespace {
+
+// %t (tagged) is read on the hot path after a call only the cold arm makes.
+const char* kAcrossCold = R"(module @m
+
+func @g(%a: i64) -> i64 {
+entry:
+  %r = add.i64 %a, %a
+  ret %r
+}
+
+func @f(%x: i64, %c: i64) -> i64 {
+entry:
+  %t = bitcast.tagged.i64 %x
+  %z = iconst.i64 0
+  %lt = slt.i64 %c, %z
+  br_if %lt, slow, join(%z)
+slow:
+  %r = call.i64 @g(%c)
+  br join(%r)
+join(%m: i64):
+  %u = bitcast.i64.tagged %t
+  %s = xor.i64 %u, %m
+  ret %s
+}
+)";
+
+}  // namespace
+
+// A reference live across a collecting call is in its slot at the call, where
+// the stack map names it, and no register holds it there. When only a cold
+// path makes the call, the hot path keeps the reference in a register: it is
+// stored before the call and read back after it, both on the cold path.
+TEST_CASE("nocollect - a reference only a cold path's call crosses keeps a register on the hot path") {
+    for (bool aarch64 : {false, true}) {
+        Allocated a;
+        a.mod = parse_module(kAcrossCold);
+        REQUIRE(a.mod != nullptr);
+        Function* fn = a.mod->get_function("f");
+        REQUIRE(fn != nullptr);
+        for (BasicBlock* bb : fn->blocks()) {
+            if (bb->name() == "slow") bb->set_cold();
+        }
+        fn->rebuild_cfg_predecessors();
+        if (aarch64) {
+            brass::aarch64::AArch64ISel isel(Target::aarch64_linux(), CallingConvention::aapcs64());
+            a.lir = isel.lower(*fn);
+        } else {
+            brass::x64::X64ISel isel(Target::x64_linux(), CallingConvention::sysv64());
+            a.lir = isel.lower(*fn);
+        }
+        REQUIRE(a.lir != nullptr);
+        a.lir->sort_blocks_rpo();
+        LivenessAnalysis liveness(*a.lir);
+        liveness.run();
+        LinearScanAllocator regalloc(*a.lir, liveness,
+                                     aarch64 ? CallingConvention::aapcs64() : CallingConvention::sysv64());
+        regalloc.allocate();
+
+        size_t hot_slot_moves = 0;
+        size_t cold_slot_writes = 0;
+        size_t cold_slot_reads = 0;
+        size_t roots = 0;
+        bool seen_call = false;
+        for (const auto& b : a.lir->blocks) {
+            for (const auto& inst : b->instructions) {
+                if (inst->is_call()) {
+                    seen_call = true;
+                    roots += inst->live_gcrefs.size();
+                    for (const auto& v : inst->live_gcrefs) {
+                        const auto& info = a.lir->get_vreg_info(v);
+                        CHECK(info.is_spilled);
+                        CHECK(info.assigned_spill_slot >= 0);
+                    }
+                    continue;
+                }
+                bool writes = false;
+                bool reads = false;
+                for (const auto& d : inst->defs) writes = writes || d.is_spill_slot();
+                for (const auto& u : inst->uses) reads = reads || u.is_spill_slot();
+                if (b->cold) {
+                    // The store is ahead of the call, the reload behind it.
+                    if (writes && !seen_call) ++cold_slot_writes;
+                    if (reads && seen_call) ++cold_slot_reads;
+                } else if (writes || reads) {
+                    ++hot_slot_moves;
+                }
+            }
+        }
+        CHECK_EQ(roots, size_t(1));
+        CHECK_EQ(hot_slot_moves, size_t(0));
+        CHECK(cold_slot_writes >= 1u);
+        CHECK(cold_slot_reads >= 1u);
     }
 }
 

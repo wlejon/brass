@@ -311,18 +311,23 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             VReg src = get_vreg(inst.operand(0));
             uint8_t sz = dst.size;
             if (dst.is_xmm()) {
-                uint64_t sign_mask = (sz == 4) ? 0x80000000ULL : 0x8000000000000000ULL;
-                VReg tmp_gpr = lir_fn_->allocate_vreg(RegClass::GPR, sz == 4 ? 4 : 8);
-                VReg tmp_xmm = lir_fn_->allocate_vreg(RegClass::XMM, sz == 4 ? 4 : 8);
-                auto mabs = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Movabs);
-                mabs->add_def(LirOperand::vreg(tmp_gpr, sz == 4 ? 4 : 8));
-                mabs->add_use(LirOperand::imm(static_cast<int64_t>(sign_mask), sz == 4 ? 4 : 8));
-                lir_bb.append_inst(std::move(mabs));
-
-                auto mq = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movd_xg : LirOpcode::Movq_xg);
-                mq->add_def(LirOperand::vreg(tmp_xmm, sz == 4 ? 4 : 8));
-                mq->add_use(LirOperand::vreg(tmp_gpr, sz == 4 ? 4 : 8));
-                lir_bb.append_inst(std::move(mq));
+                // The sign mask in an xmm; a double's is shared with the
+                // block's other negations (xmm_constant).
+                VReg tmp_xmm;
+                if (sz == 8) {
+                    tmp_xmm = xmm_constant(lir_bb, static_cast<int64_t>(0x8000000000000000ULL));
+                } else {
+                    VReg tmp_gpr = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+                    tmp_xmm = lir_fn_->allocate_vreg(RegClass::XMM, 4);
+                    auto mabs = std::make_unique<LirInst>(LirOpcode::Mov32);
+                    mabs->add_def(LirOperand::vreg(tmp_gpr, 4));
+                    mabs->add_use(LirOperand::imm(static_cast<int64_t>(0x80000000ULL), 4));
+                    lir_bb.append_inst(std::move(mabs));
+                    auto mq = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+                    mq->add_def(LirOperand::vreg(tmp_xmm, 4));
+                    mq->add_use(LirOperand::vreg(tmp_gpr, 4));
+                    lir_bb.append_inst(std::move(mq));
+                }
 
                 auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
                 mov_inst->add_def(LirOperand::vreg(dst, sz));
@@ -335,6 +340,7 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
                 xor_inst->add_use(LirOperand::vreg(tmp_xmm, sz));
                 xor_inst->mir_origin = &inst;
                 lir_bb.append_inst(std::move(xor_inst));
+                if (sz == 8) xmm_constants_[static_cast<int64_t>(0x8000000000000000ULL)].end = lir_bb.instructions.size();
             } else {
                 auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
                 mov_inst->add_def(LirOperand::vreg(dst, sz));

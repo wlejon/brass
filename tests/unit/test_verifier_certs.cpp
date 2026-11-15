@@ -3,6 +3,7 @@
 #include <brass/mir/proof_cert.hpp>
 #include <brass/mir/write_barrier_elim.hpp>
 #include <brass/mir/bounds_check_elim.hpp>
+#include <brass/mir/scalar_opt.hpp>
 #include <brass/mir/verifier.hpp>
 
 using namespace brass;
@@ -312,6 +313,35 @@ TEST_CASE("Verifier Certs - DominatedSameCond witness folded to constant 0") {
         CHECK(verify_function(*fn, &diag) == with_guard);
         CHECK(diag.has_errors() == !with_guard);
     }
+}
+
+TEST_CASE("Verifier Certs - a witness dead code elimination deletes leaves its certificate without one") {
+    // The certificate names a compare nothing reads any more (a vectorizer
+    // replaced its reader): once DCE deletes it the certificate must not go
+    // on naming a value the function does not have.
+    Module mod("dead_witness");
+    Builder b(mod);
+    Function* fn = mod.create_function("dead_witness", Type::i32(), {Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* x = b.add_block_param(entry, Type::i32());
+    b.position_at_end(entry);
+    Value* lt = b.build_slt(x, b.build_iconst_i32(10));
+    b.build_ret(x);
+    fn->rebuild_cfg_predecessors();
+
+    GuardElimCert cert;
+    cert.eliminated_resume_id = 3;
+    cert.block_id = entry->id();
+    cert.reason = GuardElimCert::Reason::ImpliedRelational;
+    cert.witness_inst_or_val_id = lt->id();
+    fn->add_guard_elim_cert(cert);
+
+    CHECK(eliminate_dead_code(*fn));
+    REQUIRE_EQ(fn->guard_elim_certs().size(), size_t{1});
+    CHECK_EQ(fn->guard_elim_certs().front().witness_inst_or_val_id, 0u);
+    DiagnosticReporter diag;
+    CHECK(verify_function(*fn, &diag));
 }
 
 #ifdef BRASS_STANDALONE_TEST

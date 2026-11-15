@@ -93,6 +93,18 @@ bool X64ISel::find_peeled_branch(const Instruction& br) {
     return true;
 }
 
+bool X64ISel::find_parity_guard(const Instruction& guard) {
+    const Value* cond = guard.operand_count() > 0 ? guard.operand(0) : nullptr;
+    const Instruction* def = cond && cond->is_instruction() ? cond->defining_instruction() : nullptr;
+    if (!def || def->parent() != guard.parent() || def->opcode() != Opcode::eq || def->operand_count() != 2) return false;
+    if (use_count_[cond] != 1 || is_self_nan_test(*def)) return false;
+    const Type t = def->operand(0) ? def->operand(0)->type() : Type::void_type();
+    if (!t.is_float() || t.is_vector()) return false;
+    skipped_insts_.insert(def);
+    parity_guards_.insert(&guard);
+    return true;
+}
+
 void X64ISel::count_peeled_folds(const PeeledBranch& pb, std::unordered_map<const Value*, uint32_t>& folded_uses) const {
     for (const Instruction* p : pb.peeled) {
         for (size_t i = 0; i < 2; ++i) {

@@ -174,7 +174,7 @@ size_t LinearScanAllocator::first_constrained(int cls, bool wide, size_t i, size
 void LinearScanAllocator::reg_limits(const AllocPiece& p, uint32_t out[32]) const {
     const VReg v = p.vreg();
     const int cls = class_index(v.reg_class);
-    const bool wide = cls == 1 && fpr_wider_than_callee_saved(v);
+    const bool wide = cls == 1 ? fpr_wider_than_callee_saved(v) : v.is_gcref;
     uint32_t pool_mask = 0;
     for (PReg r : (cls == 0 ? available_gprs_ : available_xmms_)) {
         if (r.code < 32) pool_mask |= (1u << r.code);
@@ -194,7 +194,7 @@ void LinearScanAllocator::reg_limits(const AllocPiece& p, uint32_t out[32]) cons
             i = first_constrained(cls, wide, i, iend, remaining);
             if (i == iend) break;
             const ConstraintWord& w = words[i];
-            uint32_t hit = w.clob | (wide ? w.call : 0u);
+            uint32_t hit = w.clob | (wide ? (cls == 1 ? w.call : w.gc) : 0u);
             if (w.pin & remaining) hit |= w.pin & ~own_fixed_regs(p, ids[i]);
             hit &= remaining;
             for (uint32_t m = hit; m; m &= m - 1) out[std::countr_zero(m)] = ids[i];
@@ -723,8 +723,14 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
 
 // Values that live across calls, settled before the scan.
 //
-// One live across two or more calls is not split: it lives in one place for
-// its whole life, a callee-saved register or its slot. Split, the scan gave
+// One live across two or more calls of the hot path is not split: it lives
+// in one place for its whole life, a callee-saved register or its slot (a GC
+// reference its slot: no register holds one across a call that may
+// collect). A call in a loop counts twice, as it runs each iteration, and a
+// call in a cold block does not count: a value only such calls
+// cross keeps a register on the hot path and leaves it on the cold one, and
+// held in its slot for a cache miss's sake every receiver of a function was
+// read from the frame at each use. Split, the scan gave
 // such a value (a function-wide table address, a receiver read again after
 // each call) a caller-saved register between each pair of calls and moved it
 // back to its slot around each, and the moves on the edges between those
@@ -743,7 +749,14 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
     constexpr uint32_t kManyCalls = 2;
     std::vector<uint32_t> calls;
     for (size_t i = 0; i < constrained_ids_[0].size(); ++i) {
-        if (constraint_words_[0][i].call) calls.push_back(constrained_ids_[0][i]);
+        if (!constraint_words_[0][i].call) continue;
+        const uint32_t at = constrained_ids_[0][i];
+        auto sp = std::upper_bound(spans_.begin(), spans_.end(), at,
+                                   [](uint32_t x, const BlockSpan& b) { return x < b.start; });
+        if (sp != spans_.begin() && ((sp - 1)->block->cold || is_guard_exit((sp - 1)->block))) continue;
+        calls.push_back(at);
+        // One call in a loop is a call an iteration.
+        if (liveness_.get_loop_depth_at(at) > 0) calls.push_back(at);
     }
     struct Cand {
         uint32_t idx;
@@ -753,7 +766,7 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
     for (uint32_t idx : unhandled) {
         const AllocPiece& p = pieces_[idx];
         const VReg v = p.vreg();
-        if (!v.is_gpr() || v.is_gcref || !p.base->spans_call) continue;
+        if (!v.is_gpr() || !p.base->spans_call) continue;
         uint32_t n = 0;
         for (const auto& sg : p.base->segments) {
             n += static_cast<uint32_t>(std::upper_bound(calls.begin(), calls.end(), sg.end) -
@@ -761,6 +774,8 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
             if (n >= kManyCalls) break;
         }
         if (n >= kManyCalls) unsplittable_[v.id] = 1;
+        // No register holds a GC reference across a call.
+        if (v.is_gcref) continue;
         double w = 0;
         bool fixed = false;
         for (const UsePosition& u : p.base->use_positions) {
@@ -839,9 +854,9 @@ void LinearScanAllocator::run_scan() {
                                      [&](uint32_t a) { return pieces_[a].end <= pos; }),
                       active_.end());
         const VReg v = pieces_[idx].vreg();
-        // A GC reference live across a call stays in its slot, where the
-        // stack map finds it.
-        if (v.is_gcref && pieces_[idx].base->spans_call) {
+        // A GC reference that is not split and lives across a call stays in
+        // its slot, where the stack map finds it.
+        if (v.is_gcref && pieces_[idx].base->spans_call && unsplittable_[v.id]) {
             pieces_[idx].spilled = true;
             slot_of(v);
             continue;

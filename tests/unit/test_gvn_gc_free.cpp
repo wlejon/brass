@@ -82,7 +82,32 @@ size_t bitcasts_after_gvn_loop(bool gc_in_body) {
     return count_opcodes(*fn, Opcode::bitcast_i64_tagged);
 }
 
+// Bits made into a tagged value and read back, with `call @gc_point` between
+// or not.
+size_t round_trips_after_gvn(bool gc_between) {
+    Module mod("gc_free_round_trip");
+    Builder b(mod);
+    Function* fn = mod.create_function("f", Type::i64(), {Type::i64()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* bits = b.add_block_param(entry, Type::i64());
+    Value* t = b.build_bitcast_tagged_i64(bits);
+    if (gc_between) b.build_call("gc_point", Type::void_type());
+    b.build_ret(b.build_bitcast_i64_tagged(t));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    gvn_function(*fn);
+    REQUIRE(verify_function(*fn));
+    return count_opcodes(*fn, Opcode::bitcast_i64_tagged);
+}
+
 } // namespace
+
+TEST_CASE("GVN - the bits a tagged value was made from stand for its read with no GC point between") {
+    CHECK_EQ(round_trips_after_gvn(false), 0ULL);
+    CHECK_EQ(round_trips_after_gvn(true), 1ULL);
+}
 
 TEST_CASE("GVN - tagged bitcasts merge with no GC point between, not across one") {
     CHECK_EQ(bitcasts_after_gvn_straight(false), 1ULL);

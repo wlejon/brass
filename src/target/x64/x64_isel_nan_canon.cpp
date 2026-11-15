@@ -64,6 +64,35 @@ void X64ISel::find_nan_canon_stores(const Function& mir_fn, std::unordered_map<c
     }
 }
 
+// A 64-bit constant in an xmm: the one this block last made or used, unless a
+// call came since (it would be kept across the call for what two instructions
+// cost) or that is far back (it would hold a register).
+VReg X64ISel::xmm_constant(LirBlock& lir_bb, int64_t bits) {
+    if (const auto kc = xmm_constants_.find(bits); kc != xmm_constants_.end() && kc->second.block == &lir_bb) {
+        constexpr size_t kWindow = 64;
+        const size_t from = kc->second.end;
+        const size_t to = lir_bb.instructions.size();
+        bool reusable = from <= to && to - from <= kWindow;
+        for (size_t i = from; reusable && i < to; ++i) reusable = !lir_bb.instructions[i]->is_call();
+        if (reusable) {
+            kc->second.end = to;
+            return kc->second.vreg;
+        }
+    }
+    const VReg g = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mabs = std::make_unique<LirInst>(LirOpcode::Movabs);
+    mabs->add_def(LirOperand::vreg(g, 8));
+    mabs->add_use(LirOperand::imm(bits, 8));
+    lir_bb.append_inst(std::move(mabs));
+    const VReg k = lir_fn_->allocate_vreg(RegClass::XMM, 8);
+    auto mq = std::make_unique<LirInst>(LirOpcode::Movq_xg);
+    mq->add_def(LirOperand::vreg(k, 8));
+    mq->add_use(LirOperand::vreg(g, 8));
+    lir_bb.append_inst(std::move(mq));
+    xmm_constants_[bits] = XmmConstant{&lir_bb, lir_bb.instructions.size(), k};
+    return k;
+}
+
 bool X64ISel::lower_nan_canon_store(const Instruction& inst, const LirOperand& mem_op, LirBlock& lir_bb) {
     const auto it = nan_canon_stores_.find(&inst);
     if (it == nan_canon_stores_.end()) return false;
@@ -79,30 +108,7 @@ bool X64ISel::lower_nan_canon_store(const Instruction& inst, const LirOperand& m
     cmp->mir_origin = &inst;
     lir_bb.append_inst(std::move(cmp));
 
-    // K in an xmm: the one an earlier store of this block made, unless a call
-    // came between (it would be kept across the call for what two
-    // instructions cost) or it is far back (it would hold a register).
-    VReg k{};
-    if (const auto kc = xmm_constants_.find(c.canon); kc != xmm_constants_.end() && kc->second.block == &lir_bb) {
-        constexpr size_t kWindow = 64;
-        const size_t from = kc->second.end;
-        const size_t to = lir_bb.instructions.size();
-        bool reusable = from <= to && to - from <= kWindow;
-        for (size_t i = from; reusable && i < to; ++i) reusable = !lir_bb.instructions[i]->is_call();
-        if (reusable) k = kc->second.vreg;
-    }
-    if (!k.is_valid()) {
-        const VReg g = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        auto mabs = std::make_unique<LirInst>(LirOpcode::Movabs);
-        mabs->add_def(LirOperand::vreg(g, 8));
-        mabs->add_use(LirOperand::imm(c.canon, 8));
-        lir_bb.append_inst(std::move(mabs));
-        k = lir_fn_->allocate_vreg(RegClass::XMM, 8);
-        auto mq = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-        mq->add_def(LirOperand::vreg(k, 8));
-        mq->add_use(LirOperand::vreg(g, 8));
-        lir_bb.append_inst(std::move(mq));
-    }
+    const VReg k = xmm_constant(lir_bb, c.canon);
 
     const VReg r = lir_fn_->allocate_vreg(RegClass::XMM, 8);
     auto blend = std::make_unique<LirInst>(LirOpcode::Vblendvpd);
@@ -112,7 +118,7 @@ bool X64ISel::lower_nan_canon_store(const Instruction& inst, const LirOperand& m
     blend->add_use(LirOperand::vreg(nan_mask, 8));
     blend->mir_origin = &inst;
     lir_bb.append_inst(std::move(blend));
-    xmm_constants_[c.canon] = XmmConstant{&lir_bb, lir_bb.instructions.size(), k};
+    xmm_constants_[c.canon].end = lir_bb.instructions.size();
 
     auto st = std::make_unique<LirInst>(LirOpcode::Movsd);
     st->add_def(mem_op);

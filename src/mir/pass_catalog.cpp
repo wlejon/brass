@@ -13,6 +13,7 @@
 #include <brass/mir/sincos_fuse.hpp>
 #include <brass/mir/code_sinking.hpp>
 #include <brass/mir/untag_reuse.hpp>
+#include <brass/mir/fp_load.hpp>
 #include <brass/mir/fdiv_pow2.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
@@ -149,6 +150,17 @@ PassStep sccp(bool guard_elim, FunctionFilter filter) {
     });
 }
 
+PassStep gvn_follow_up(bool guard_elim, FunctionFilter filter) {
+    return function_step("gvn 2", filter, [guard_elim](Function& fn) {
+        if (!gvn_function(fn, GvnOptions{})) return false;
+        SccpOptions o;
+        o.enable_guard_elim = guard_elim;
+        sccp_function(fn, o);
+        cfg_simplify_function(fn, CfgSimplifyOptions{});
+        return true;
+    });
+}
+
 PassStep cfg_simplify(std::string name, FunctionFilter filter) {
     return function_step(std::move(name), filter,
                          [](Function& fn) { return cfg_simplify_function(fn, CfgSimplifyOptions{}); });
@@ -242,6 +254,11 @@ PassStep code_sinking() {
 PassStep untag_reuse() {
     return function_step("untag_reuse", FunctionFilter::All,
                          [](Function& fn) { return reuse_untagged_addresses(fn) != 0; });
+}
+
+PassStep fp_load() {
+    return function_step("fp_load", FunctionFilter::All,
+                         [](Function& fn) { return read_doubles_as_doubles(fn) != 0; });
 }
 
 PassStep fdiv_pow2() {

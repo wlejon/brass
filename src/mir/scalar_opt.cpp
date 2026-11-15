@@ -650,6 +650,8 @@ bool eliminate_dead_code(Function& fn) {
                         for_each_use(*cur, [&](const Value* v) {
                             if (uint32_t* n = use_counts.find(v); n && *n > 0) --*n;
                         });
+                        // A certificate that named the dead value as its witness has none now.
+                        if (cur->result()) fn.retarget_guard_elim_witness(cur->result(), nullptr);
                         bb->remove_instruction(cur);
                         progress = true;
                         changed = true;

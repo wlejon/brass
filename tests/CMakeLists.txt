@@ -85,8 +85,10 @@ add_executable(brass_unit_tests
     unit/test_fast_arctrig.cpp
     unit/test_code_sinking.cpp
     unit/test_untag_reuse.cpp
+    unit/test_fp_load.cpp
     unit/test_fdiv_pow2.cpp
     unit/test_f64_demote_step.cpp
+    unit/test_f64_demote_index.cpp
     unit/test_inliner.cpp
     differential/test_inlining_differential.cpp
     unit/test_simd_mir.cpp

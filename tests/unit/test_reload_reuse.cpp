@@ -84,6 +84,36 @@ TEST_CASE("Reload reuse - a second reload of the same slot into the same scratch
     CHECK_EQ(reloads_left(std::move(add)), size_t(1));
 }
 
+TEST_CASE("Reload reuse - a reload of the slot the scratch was just spilled to is dropped") {
+    auto spilled = [](PReg r, std::unique_ptr<LirInst> between) {
+        LirFunction fn;
+        fn.calling_conv = CallingConvention::sysv64();
+        LirBlock* bb = fn.create_block("entry");
+        // r = [rax + 16]; slot 3 = r; (between); r = slot 3; rcx = [r + 16].
+        bb->append_inst(use_base(kRax, r));
+        auto spill = std::make_unique<LirInst>(LirOpcode::Mov);
+        spill->add_def(LirOperand::slot(3, 8));
+        spill->add_use(LirOperand::preg(r, 8));
+        bb->append_inst(std::move(spill));
+        if (between) bb->append_inst(std::move(between));
+        bb->append_inst(reload(r, 3));
+        bb->append_inst(use_base(r, kRcx));
+        run_lir_peephole_optimizations(fn);
+        return count_reloads(*bb, r, 3);
+    };
+    CHECK_EQ(spilled(kR10, nullptr), size_t(0));
+    CHECK_EQ(spilled(kR11, nullptr), size_t(0));
+    // The scratch written between: the reload stays.
+    auto add = std::make_unique<LirInst>(LirOpcode::Add);
+    add->add_def(LirOperand::preg(kR10, 8));
+    add->add_use(LirOperand::preg(kR10, 8));
+    add->add_use(LirOperand::imm(5, 8));
+    CHECK_EQ(spilled(kR10, std::move(add)), size_t(1));
+    // A call between: the reload stays.
+    auto call = std::make_unique<LirInst>(LirOpcode::Call);
+    CHECK_EQ(spilled(kR10, std::move(call)), size_t(1));
+}
+
 TEST_CASE("Reload reuse - a write of the scratch keeps the reload") {
     // Explicit def (not a plain move, which the dead-move pass would drop
     // before the reload that overwrites it).

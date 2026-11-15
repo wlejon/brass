@@ -1,4 +1,5 @@
 #include "loop_unroll_analysis.hpp"
+#include "loop_affine.hpp"
 #include <brass/mir/verifier.hpp>
 #include <algorithm>
 
@@ -132,7 +133,6 @@ bool analyze_loop(
     CountedLoopAnalysis& cla,
     const LoopUnrollOptions& options
 ) {
-    (void)fn;
     (void)dom;
     BasicBlock* header = loop.header();
     if (!header || loop.latches().size() != 1) return false;
@@ -210,6 +210,10 @@ bool analyze_loop(
             if (in_loop_uses(inst->result(), loop, nullptr) > expected_uses) {
                 return false;
             }
+            // Read after the loop, it would be read from a header the
+            // unrolled loop no longer runs: only a header parameter is
+            // handed to the exit (unroll_loop).
+            if (affine::used_outside(fn, loop, inst->result())) return false;
         }
     }
 

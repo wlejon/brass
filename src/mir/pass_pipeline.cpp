@@ -24,6 +24,9 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     if ((options.enable_loop_unswitch || options.enable_jump_threading) && options.enable_cfg_simplify) {
         p.add(passes::cfg_simplify("cfg_simplify 2"));
     }
+    if (options.enable_gvn && options.enable_sccp && options.enable_cfg_simplify) {
+        p.add(passes::gvn_follow_up(options.enable_guard_elim));
+    }
     // The early BCE run, before loop restructuring; the loop stage runs the
     // late one ("bce 2").
     if (options.enable_bce) {
@@ -45,6 +48,7 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     // put them has run.
     p.add(passes::code_sinking());
     p.add(passes::untag_reuse());
+    p.add(passes::fp_load());
     return p;
 }
 

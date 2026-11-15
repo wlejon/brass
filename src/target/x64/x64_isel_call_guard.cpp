@@ -213,7 +213,16 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     // when it does not hold (a float one also when its operands are
     // unordered).
     Condition deopt_cond = Condition::E;
-    if (fused_into(cmp_inst, inst)) {
+    const bool parity = parity_guards_.count(&inst) != 0;
+    if (parity) {
+        uint8_t sz = static_cast<uint8_t>(cmp_inst->operand(0)->type().size_in_bytes());
+        if (sz == 0) sz = 8;
+        auto ucomi = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Ucomiss : LirOpcode::Ucomisd);
+        ucomi->add_use(LirOperand::vreg(get_vreg(cmp_inst->operand(0)), sz));
+        ucomi->add_use(LirOperand::vreg(get_vreg(cmp_inst->operand(1)), sz));
+        lir_bb.append_inst(std::move(ucomi));
+        deopt_cond = Condition::NE;
+    } else if (fused_into(cmp_inst, inst)) {
         deopt_cond = invert(append_fused_compare(*cmp_inst, inst, lir_bb));
     } else {
         VReg cond = get_vreg(cond_val);
@@ -227,6 +236,13 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     auto* deopt_block = lir_fn_->create_block("guard_deopt");
     link_blocks(lir_bb, *deopt_block);
 
+    if (parity) {
+        // Unordered operands are not equal.
+        auto jp_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
+        jp_inst->condition = Condition::P;
+        jp_inst->add_use(LirOperand::label(deopt_block->id));
+        lir_bb.append_inst(std::move(jp_inst));
+    }
     auto jcc_inst = std::make_unique<LirInst>(LirOpcode::Jcc);
     jcc_inst->condition = deopt_cond;
     jcc_inst->add_use(LirOperand::label(deopt_block->id));

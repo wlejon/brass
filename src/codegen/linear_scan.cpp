@@ -277,7 +277,8 @@ void LinearScanAllocator::build_constraint_index() {
             for (int c = 0; c < 2; ++c) {
                 if (blocked[c] == 0 && pinned[c] == 0 && !is_call) continue;
                 constrained_ids_[c].push_back(inst->id);
-                constraint_words_[c].push_back(ConstraintWord{blocked[c], pinned[c], is_call ? ~0u : 0u});
+                const bool gc_point = (inst->is_call() && !inst->no_gc_point) || inst->opcode == LirOpcode::Safepoint;
+                constraint_words_[c].push_back(ConstraintWord{blocked[c], pinned[c], is_call ? ~0u : 0u, gc_point ? ~0u : 0u});
             }
             for (const auto& op : inst->defs) note_mem_index(op);
             for (const auto& op : inst->uses) note_mem_index(op);
@@ -288,11 +289,14 @@ void LinearScanAllocator::build_constraint_index() {
         const std::vector<ConstraintWord>& words = constraint_words_[c];
         const size_t n = words.size();
         if (n == 0) continue;
-        // Only a vector register can be too wide for the callee-saved ones.
-        for (int wide = 0; wide < (c == 1 ? 2 : 1); ++wide) {
+        // The second table is for what no register holds across a call: a
+        // vector too wide for the callee-saved ones, a GC reference.
+        for (int wide = 0; wide < 2; ++wide) {
             auto& table = constraint_or_[c][wide];
             std::vector<uint32_t> base(n);
-            for (size_t i = 0; i < n; ++i) base[i] = words[i].clob | words[i].pin | (wide ? words[i].call : 0u);
+            for (size_t i = 0; i < n; ++i) {
+                base[i] = words[i].clob | words[i].pin | (wide ? (c == 1 ? words[i].call : words[i].gc) : 0u);
+            }
             table.push_back(std::move(base));
             for (size_t span = 2; span <= n; span *= 2) {
                 const std::vector<uint32_t>& prev = table.back();
@@ -563,17 +567,14 @@ void LinearScanAllocator::allocate() {
     for (VReg v : mem_index_vregs_) {
         if (v.id < num_vregs) is_mem_index_[v.id] = 1;
     }
-    // A GC reference live across a GC point has one location for its whole
-    // life, the slot the stack map names (run_scan). One that crosses none is
-    // in no stack map and is split like any other value: a guard's state
-    // keeps the boxed operands of a function's fast paths live to its last
-    // guard, and held whole each kept the register its one read was given.
-    for (size_t id = 0; id < num_vregs; ++id) {
-        const VReg v = fn_.vreg_table[id].vreg;
-        if (!v.is_gcref) continue;
-        const LiveInterval* iv = liveness_.get_interval(v);
-        if (iv == nullptr || iv->spans_call) unsplittable_[id] = 1;
-    }
+    // A GC reference live across a call is in its slot there, where the stack
+    // map names it: a call blocks every register for it (reg_limits), the
+    // callee-saved ones too, which a collector cannot rewrite. Between calls
+    // it is split like any other value, so one that only a cold path's call
+    // crosses (a cache miss, a loop's interrupt poll) lives in a register on
+    // the hot path and is read back from its slot on the way out of the cold
+    // one. One that crosses calls of the hot path stays in its slot for its
+    // whole life (settle_call_spanning).
     mark_folded_uses();
     whole_life_cost_.assign(num_vregs, 0.0);
     for (const auto& interval : liveness_.intervals()) {
@@ -635,18 +636,24 @@ void LinearScanAllocator::allocate() {
 
     // 3. The vreg table and the intervals keep the first piece's location,
     // which is the value's only one unless it was split. After allocation
-    // only GC references are looked up there, and those are never split.
+    // only GC references are looked up there, for the stack map of a call
+    // they are live across: such a reference is in its slot at every call
+    // (above), whatever its first piece is.
     for (auto& interval : liveness_.intervals()) {
         if (!interval.vreg.is_valid() || interval.vreg.id >= num_vregs) continue;
         const auto& list = vreg_pieces_[interval.vreg.id];
         if (list.empty()) continue;
         const AllocPiece& first = pieces_[list.front()];
-        interval.assigned_preg = first.spilled ? PReg{} : first.reg;
-        interval.assigned_spill_slot = first.spilled ? vreg_slot_[interval.vreg.id] : -1;
+        const bool in_slot = first.spilled || (interval.vreg.is_gcref && interval.spans_call);
+        if (in_slot && !first.spilled && vreg_slot_[interval.vreg.id] < 0) {
+            throw std::logic_error("register allocation: a GC reference live across a call has no slot in " + fn_.name);
+        }
+        interval.assigned_preg = in_slot ? PReg{} : first.reg;
+        interval.assigned_spill_slot = in_slot ? vreg_slot_[interval.vreg.id] : -1;
         VRegInfo& info = fn_.get_vreg_info(interval.vreg);
         info.assigned_preg = interval.assigned_preg;
         info.assigned_spill_slot = interval.assigned_spill_slot;
-        info.is_spilled = first.spilled;
+        info.is_spilled = in_slot;
     }
 
     // 4. Update function frame info
