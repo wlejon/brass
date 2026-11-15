@@ -1,5 +1,6 @@
 #include <brass/codegen/emit_context.hpp>
 #include <brass/codegen/branch_threading.hpp>
+#include <brass/core/env.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <iostream>
 #include <stdexcept>
@@ -9,6 +10,9 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#if defined(_MSC_VER)
+#include <share.h>
+#endif
 
 namespace brass::codegen {
 
@@ -263,8 +267,8 @@ CompilationResult EmitContext::compile_once() {
     // offset <tab> c|h <tab> block`, appended. With a profiler's samples by
     // offset in the function's symbol, where the time of a function is by
     // the names its front end gave its blocks.
-    if (static const char* const map_path = std::getenv("BRASS_BLOCK_MAP"); map_path && map_path[0] != '\0') {
-        static std::mutex map_mutex;
+    if (static const std::string* const map_path = new std::string(env_value("BRASS_BLOCK_MAP")); !map_path->empty()) {
+        static std::mutex* const map_mutex = new std::mutex();
         std::string lines;
         for (const auto& block : fn_.blocks) {
             const auto it = result.block_offsets.find(block->id);
@@ -272,8 +276,13 @@ CompilationResult EmitContext::compile_once() {
             lines += std::string(fn_.name) + '\t' + std::to_string(it->second) + '\t' + (block->cold ? 'c' : 'h') +
                      '\t' + block->name + '\n';
         }
-        const std::lock_guard<std::mutex> lock(map_mutex);
-        if (std::FILE* f = std::fopen(map_path, "a")) {
+        const std::lock_guard<std::mutex> lock(*map_mutex);
+#if defined(_MSC_VER)
+        std::FILE* f = _fsopen(map_path->c_str(), "a", _SH_DENYNO);
+#else
+        std::FILE* f = std::fopen(map_path->c_str(), "a");
+#endif
+        if (f) {
             std::fwrite(lines.data(), 1, lines.size(), f);
             std::fclose(f);
         }
