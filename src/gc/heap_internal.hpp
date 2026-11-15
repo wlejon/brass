@@ -417,6 +417,14 @@ struct HeapState {
     // running average of the serial ones, parallel_minor_threads): how long
     // the next would take on one thread.
     double minor_ns_per_byte = 0.4;  // 0.4 ms per MB until one is measured
+    // The same of the parallel ones, wall time per byte of that work: the
+    // last one's, the lower of the last two (0 until two are measured), and
+    // how many collections have gone serial because that was clearly the
+    // higher rate (parallel_minor_threads).
+    double parallel_minor_last_ns_per_byte = 0.0;
+    double parallel_minor_ns_per_byte = 0.0;
+    bool minor_ns_measured = false;  // minor_ns_per_byte is a measurement, not its start
+    uint32_t parallel_minor_passed_over = 0;
 
     // The marking cycle, from start_marking (or a full collection's start)
     // to its finish. While it is Marking the mutator runs: the barrier's
@@ -892,6 +900,9 @@ unsigned parallel_minor_threads(GcState& g);
 // A serial evacuation `g` took `ns`: folded into the cost per byte of work
 // (its copying and GcState::serial_card_bytes) the next estimate uses.
 void note_serial_evacuation(GcState& g, uint64_t ns);
+// The same of a parallel one, whose wall time per byte is what decides
+// whether the next long one is parallel at all.
+void note_parallel_evacuation(GcState& g, uint64_t ns);
 // The young generation's evacuation (heap_collect.cpp, evacuate) on
 // `threads` threads, the calling one among them: roots on the calling
 // thread, then the card work and the copying shared out, then the

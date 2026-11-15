@@ -774,6 +774,13 @@ constexpr double kParallelMinorMs = 1.0;
 // long enough (a 16 MB eden two thirds of which survives) that the threads
 // past minor_threads shorten it more than waking them costs.
 constexpr double kLargeMinorCopyBytes = 4.0 * 1024 * 1024;
+// How often a heap whose parallel collections have run slower per byte than
+// its serial ones tries one again.
+constexpr uint32_t kParallelMinorRetry = 16;
+// ...and how much slower: the two rates are near each other on a few threads
+// over small flat data, where a parallel collection is still the shorter
+// pause on a loaded machine.
+constexpr double kParallelMinorLoss = 2.0;
 
 } // namespace
 
@@ -807,8 +814,20 @@ unsigned parallel_minor_threads(GcState& g) {
         const uint64_t expected = static_cast<uint64_t>(s.minor_survival * static_cast<double>(young));
         const uint64_t work = expected + kDirtyRegionBytes * dirty_regions(s);
         const double ms = static_cast<double>(work) * s.minor_ns_per_byte / 1e6;
-        if (ms < kParallelMinorMs) {
-            g.serial_card_bytes = work - expected;
+        g.serial_card_bytes = work - expected;
+        if (ms < kParallelMinorMs) return 1;
+        // And not while the parallel ones have been clearly the slower per
+        // byte.
+        // Young data that is one long chain (a cache's linked list, a pool's
+        // free list) gives the helpers nothing to take: one thread walks it
+        // at the parallel path's cost while the rest look for work. pixi's
+        // text scene copied 4.8 MB of a 16 MB eden in 3-7 ms on 16 threads,
+        // 0.88 ms per MB against 0.36 on one, and its helpers ran as many
+        // cycles as the program did. Both rates are measurements of this
+        // heap; every kParallelMinorRetry'th such collection is parallel
+        // again, to measure what the heap holds now.
+        if (s.minor_ns_measured && s.parallel_minor_ns_per_byte > kParallelMinorLoss * s.minor_ns_per_byte &&
+            ++s.parallel_minor_passed_over % kParallelMinorRetry != 0) {
             return 1;
         }
     }
@@ -832,6 +851,20 @@ void note_serial_evacuation(GcState& g, uint64_t ns) {
     if (!g.learns_cost || work < (uint64_t{256} << 10)) return;
     const double sample = static_cast<double>(ns) / static_cast<double>(work);
     g.s.minor_ns_per_byte = 0.75 * g.s.minor_ns_per_byte + 0.25 * sample;
+    g.s.minor_ns_measured = true;
+}
+
+void note_parallel_evacuation(GcState& g, uint64_t ns) {
+    const uint64_t work = g.copied_bytes + g.serial_card_bytes;
+    if (!g.learns_cost || work < (uint64_t{256} << 10)) return;
+    const double sample = static_cast<double>(ns) / static_cast<double>(work);
+    // The better of the last two: one collection the machine interrupted
+    // does not send the next sixteen to one thread, and one good retry
+    // brings the parallel ones back.
+    HeapState& s = g.s;
+    s.parallel_minor_ns_per_byte =
+        s.parallel_minor_last_ns_per_byte == 0.0 ? 0.0 : std::min(s.parallel_minor_last_ns_per_byte, sample);
+    s.parallel_minor_last_ns_per_byte = sample;
 }
 
 void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
@@ -853,6 +886,8 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     MarkThreads& helpers = heap_helpers(s);
     const unsigned helper_count = std::min(helpers.ensure(threads - 1), threads - 1);
     pm.threads = helper_count + 1;
+    // Timed from here: the first one's helper threads are created above.
+    const uint64_t began = gc_now_ns();
     const uintptr_t lo = g.shade ? g.heap.reservation_base() : g.heap.young_base();
     const size_t span = g.shade ? g.heap.reservation_bytes() : g.heap.young_span();
     for (unsigned i = 0; i < pm.threads; ++i) pm.workers.push_back(std::make_unique<Worker>(pm, g.heap, lo, lo + span));
@@ -910,6 +945,7 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     g.minor_threads = pm.threads;
     settle_weakness(g);
     clock.lap(kPhaseWeak);
+    note_parallel_evacuation(g, gc_now_ns() - began);
 }
 
 } // namespace brass::gc::detail

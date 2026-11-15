@@ -193,11 +193,12 @@ void evacuate(GcState& young, PhaseClock& clock) {
     pin_stack_objects(young);
     // Large enough to pay for the helpers: the same evacuation on several
     // threads (heap_minor_parallel.cpp).
-    if (const unsigned threads = parallel_minor_threads(young); threads > 1) {
+    const unsigned threads = parallel_minor_threads(young);
+    const uint64_t began = gc_now_ns();
+    if (threads > 1) {
         evacuate_parallel(young, clock, threads);
         return;
     }
-    const uint64_t began = gc_now_ns();
     // Shading, old references reach minor_visit too: the range is the heap.
     const uintptr_t lo = young.shade ? young.heap.reservation_base() : young.heap.young_base();
     const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
