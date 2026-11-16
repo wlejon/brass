@@ -8,9 +8,9 @@
 #pragma fp_contract(off)
 #endif
 
-// asin, atan and atan2: fdlibm's e_asin.c, s_atan.c and e_atan2.c as V8 runs
-// them (ieee754::asin/atan/atan2), so Math.asin, Math.atan and Math.atan2
-// agree with V8's bit for bit. glibc's atan2 saves, sets and restores the
+// asin, acos, atan and atan2: fdlibm's e_asin.c, e_acos.c, s_atan.c and
+// e_atan2.c as V8 runs them (ieee754::asin/acos/atan/atan2), so Math.asin,
+// Math.acos, Math.atan and Math.atan2 agree with V8's bit for bit. glibc's atan2 saves, sets and restores the
 // rounding mode on every call and works in double-double; these touch no FP
 // state. Every expression is fdlibm's, in fdlibm's order, so the results are
 // its bits; the special cases are ordered so that a finite, non-zero pair
@@ -173,21 +173,26 @@ double atan2_f64(double y, double x) noexcept {
     }
 }
 
-double asin_f64(double x) noexcept {
-    constexpr double pio2_hi = 1.57079632679489655800e+00;
-    constexpr double pio2_lo = 6.12323399573676603587e-17;
-    constexpr double pio4_hi = 7.85398163397448278999e-01;
-    constexpr double pS0 = 1.66666666666666657415e-01;
-    constexpr double pS1 = -3.25565818622400915405e-01;
-    constexpr double pS2 = 2.01212532134862925881e-01;
-    constexpr double pS3 = -4.00555345006794114027e-02;
-    constexpr double pS4 = 7.91534994289814532176e-04;
-    constexpr double pS5 = 3.47933107596021167570e-05;
-    constexpr double qS1 = -2.40339491173441421878e+00;
-    constexpr double qS2 = 2.02094576023350569471e+00;
-    constexpr double qS3 = -6.88283971605453293030e-01;
-    constexpr double qS4 = 7.70381505559019352791e-02;
+namespace {
 
+// e_asin.c's and e_acos.c's shared rational approximation.
+constexpr double pio2_hi = 1.57079632679489655800e+00;
+constexpr double pio2_lo = 6.12323399573676603587e-17;
+constexpr double pS0 = 1.66666666666666657415e-01;
+constexpr double pS1 = -3.25565818622400915405e-01;
+constexpr double pS2 = 2.01212532134862925881e-01;
+constexpr double pS3 = -4.00555345006794114027e-02;
+constexpr double pS4 = 7.91534994289814532176e-04;
+constexpr double pS5 = 3.47933107596021167570e-05;
+constexpr double qS1 = -2.40339491173441421878e+00;
+constexpr double qS2 = 2.02094576023350569471e+00;
+constexpr double qS3 = -6.88283971605453293030e-01;
+constexpr double qS4 = 7.70381505559019352791e-02;
+
+} // namespace
+
+double asin_f64(double x) noexcept {
+    constexpr double pio4_hi = 7.85398163397448278999e-01;
     const uint64_t bits = to_bits(x);
     const uint64_t abs = bits & ~kSignMask;
     const auto ix = static_cast<int32_t>(abs >> 32);
@@ -220,6 +225,44 @@ double asin_f64(double x) noexcept {
         t = pio4_hi - (p - q);
     }
     return (bits >> 63) != 0 ? -t : t;
+}
+
+// e_acos.c.
+double acos_f64(double x) noexcept {
+    const uint64_t bits = to_bits(x);
+    const auto hx = static_cast<int32_t>(bits >> 32);
+    const int32_t ix = hx & 0x7fffffff;
+    if (ix >= 0x3ff00000) {  // |x| >= 1
+        if ((bits & ~kSignMask) == to_bits(1.0)) return hx > 0 ? 0.0 : kPi + 2.0 * pio2_lo;
+        return (x - x) / (x - x);  // NaN
+    }
+    if (ix < 0x3fe00000) {  // |x| < 0.5
+        if (ix <= 0x3c600000) return pio2_hi + pio2_lo;  // |x| < 2^-57
+        const double z = x * x;
+        const double p = z * (pS0 + z * (pS1 + z * (pS2 + z * (pS3 + z * (pS4 + z * pS5)))));
+        const double q = 1.0 + z * (qS1 + z * (qS2 + z * (qS3 + z * qS4)));
+        const double r = p / q;
+        return pio2_hi - (x - (pio2_lo - x * r));
+    }
+    if (hx < 0) {  // x < -0.5
+        const double z = (1.0 + x) * 0.5;
+        const double p = z * (pS0 + z * (pS1 + z * (pS2 + z * (pS3 + z * (pS4 + z * pS5)))));
+        const double q = 1.0 + z * (qS1 + z * (qS2 + z * (qS3 + z * qS4)));
+        const double s = std::sqrt(z);
+        const double r = p / q;
+        const double w = r * s - pio2_lo;
+        return kPi - 2.0 * (s + w);
+    }
+    // x > 0.5
+    const double z = (1.0 - x) * 0.5;
+    const double s = std::sqrt(z);
+    const double df = from_bits(to_bits(s) & 0xffffffff00000000ULL);
+    const double c = (z - df * df) / (s + df);
+    const double p = z * (pS0 + z * (pS1 + z * (pS2 + z * (pS3 + z * (pS4 + z * pS5)))));
+    const double q = 1.0 + z * (qS1 + z * (qS2 + z * (qS3 + z * qS4)));
+    const double r = p / q;
+    const double w = r * s + c;
+    return 2.0 * (df + w);
 }
 
 } // namespace brass::math

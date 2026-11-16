@@ -8,8 +8,9 @@
 #pragma fp_contract(off)
 #endif
 
-// sin and cos: fdlibm's kernels and argument reduction, as V8 runs them
-// (ieee754::sin/cos), so Math.sin and Math.cos agree with V8's bit for bit.
+// sin, cos and tan: fdlibm's kernels and argument reduction, as V8 runs them
+// (ieee754::sin/cos/tan), so Math.sin, Math.cos and Math.tan agree with V8's
+// bit for bit.
 // glibc's sin/cos save, set and restore the rounding mode on every call
 // (stmxcsr, then a load of what it stored, which stalls) and a sine and a
 // cosine of one angle are two calls; these touch no FP state and sincos_f64
@@ -488,7 +489,73 @@ BRASS_TRIG_NOINLINE double cos_slow(double x) noexcept {
     return sign_by((un & 1u) ? kernel_sin(y0, y1) : kernel_cos(y0, y1), un + 1u);
 }
 
+// fdlibm's __kernel_tan as V8 runs it: tan(x + y) for |x + y| <= pi/4 when
+// iy is 1, -1 / tan(x + y) when iy is -1.
+double kernel_tan(double x, double y, int32_t iy) noexcept {
+    constexpr double T[13] = {
+        3.33333333333334091986e-01, 1.33333333333201242699e-01,  5.39682539762260521377e-02,
+        2.18694882948595424599e-02, 8.86323982359930005737e-03,  3.59207910759131235356e-03,
+        1.45620945432529025516e-03, 5.88041240820264096874e-04,  2.46463134818469906812e-04,
+        7.81794442939557092300e-05, 7.14072491382608190305e-05,  -1.85586374855275456654e-05,
+        2.59073051863633712884e-05,
+    };
+    constexpr double pio4 = 7.85398163397448278999e-01;
+    constexpr double pio4lo = 3.06161699786838301793e-17;
+    // -1 / (x + r), computed carefully: its high half t, then the correction.
+    auto negInverse = [](double x, double r, double w) {
+        const double z = from_bits(to_bits(w) & 0xffffffff00000000ULL);
+        const double v = r - (z - x);  // z + v = r + x
+        const double a = -1.0 / w;
+        const double t = from_bits(to_bits(a) & 0xffffffff00000000ULL);
+        const double s = 1.0 + t * z;
+        return t + a * (s + t * v);
+    };
+    const int32_t hx = high_word(x);
+    const int32_t ix = hx & 0x7fffffff;
+    if (ix < 0x3e300000) {  // |x| < 2^-28
+        const uint32_t low = static_cast<uint32_t>(to_bits(x));
+        if ((static_cast<uint32_t>(ix) | low | static_cast<uint32_t>(iy + 1)) == 0) return 1.0 / abs_f64(x);
+        if (iy == 1) return x;
+        return negInverse(x, y, x + y);
+    }
+    const bool big = ix >= 0x3fe59428;  // |x| >= 0.6744
+    if (big) {
+        if (hx < 0) {
+            x = -x;
+            y = -y;
+        }
+        const double z = pio4 - x;
+        const double w = pio4lo - y;
+        x = z + w;
+        y = 0.0;
+    }
+    const double z = x * x;
+    double w = z * z;
+    // x^5 (T1 + x^4 T3 + ... + x^20 T11) + x^5 (x^2 (T2 + x^4 T4 + ... + x^20 T12))
+    double r = T[1] + w * (T[3] + w * (T[5] + w * (T[7] + w * (T[9] + w * T[11]))));
+    double v = z * (T[2] + w * (T[4] + w * (T[6] + w * (T[8] + w * (T[10] + w * T[12])))));
+    const double s = z * x;
+    r = y + z * (s * (r + v) + y);
+    r += T[0] * s;
+    w = x + r;
+    if (big) {
+        v = static_cast<double>(iy);
+        return static_cast<double>(1 - ((hx >> 30) & 2)) * (v - 2.0 * (x - (w * w / (w + v) - r)));
+    }
+    if (iy == 1) return w;
+    return negInverse(x, r, w);
+}
+
 } // namespace
+
+double tan_f64(double x) noexcept {
+    const int32_t ix = high_word(x) & 0x7fffffff;
+    if (ix <= 0x3fe921fb) return kernel_tan(x, 0.0, 1);  // |x| <= pi/4
+    if (ix >= 0x7ff00000) return qnan();
+    double y0, y1;
+    const int32_t n = fdlibm_rem_pio2(x, y0, y1);
+    return kernel_tan(y0, y1, 1 - ((n & 1) << 1));
+}
 
 double sin_f64(double x) noexcept {
     const int32_t hx = high_word(x);
