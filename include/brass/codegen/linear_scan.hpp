@@ -175,6 +175,12 @@ private:
         uint32_t end = 0;
         uint32_t depth = 0;      // loop depth of the block
         uint32_t entry_depth = 0; // loop depth of entering it in layout order
+        // How often the block runs, as a power of 8 over a cold block
+        // outside loops: its loop depth, plus kHotLevel unless it is cold
+        // (an off-path arm, a miss, a guard's exit). entry_level is the
+        // same for a move placed where the block begins (entry_depth).
+        uint32_t level = 0;
+        uint32_t entry_level = 0;
         // The run of blocks around it at its depth or deeper, first start
         // and last end: its innermost loop, the layout keeping loops
         // contiguous (LirFunction::sort_blocks_rpo).
@@ -182,8 +188,20 @@ private:
         uint32_t loop_to = 0;
     };
     std::vector<BlockSpan> spans_;   // non-empty blocks, by start position
-    // Range-minimum over spans_[i].entry_depth: level k, index i holds the
-    // index in [i, i + 2^k) of the least depth, the last one among equals.
+    // A cold block runs 8^kHotLevel times less often than a hot one of its
+    // loop depth.
+    static constexpr uint32_t kHotLevel = 2;
+    // The level (BlockSpan::level) of the block holding position `pos`, or
+    // of the next block when pos lies between two.
+    uint32_t level_at(uint32_t pos) const;
+    // The relative frequency of a level: 1 for hot code outside loops.
+    static double level_weight(uint32_t level) {
+        return static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(level, 8))) /
+               static_cast<double>(uint64_t{1} << (3 * kHotLevel));
+    }
+    double weight_at(uint32_t pos) const { return level_weight(level_at(pos)); }
+    // Range-minimum over spans_[i].entry_level: level k, index i holds the
+    // index in [i, i + 2^k) of the least level, the last one among equals.
     std::vector<std::vector<uint32_t>> depth_rmq_;
 
     void init_register_pools();

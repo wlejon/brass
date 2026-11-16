@@ -215,7 +215,7 @@ uint32_t LinearScanAllocator::split_position(uint32_t lo, uint32_t hi) const {
     }
     if (lo > hi) return kNever;
     uint32_t best = hi;
-    uint32_t best_depth = liveness_.get_loop_depth_at(hi - 1);
+    uint32_t best_depth = level_at(hi - 1);
     // Blocks starting in [lo + 1, hi + 1]: splitting at start - 1.
     auto i0 = std::lower_bound(spans_.begin(), spans_.end(), lo + 1,
         [](const BlockSpan& s, uint32_t v) { return s.start < v; });
@@ -228,13 +228,13 @@ uint32_t LinearScanAllocator::split_position(uint32_t lo, uint32_t hi) const {
         const uint32_t x = depth_rmq_[k][a];
         const uint32_t y = depth_rmq_[k][b - (size_t{1} << k)];
         uint32_t m;
-        if (spans_[x].entry_depth != spans_[y].entry_depth) {
-            m = spans_[x].entry_depth < spans_[y].entry_depth ? x : y;
+        if (spans_[x].entry_level != spans_[y].entry_level) {
+            m = spans_[x].entry_level < spans_[y].entry_level ? x : y;
         } else {
             m = std::max(x, y);
         }
         const uint32_t q = spans_[m].start - 1;
-        if (spans_[m].entry_depth < best_depth || q == hi) best = q;
+        if (spans_[m].entry_level < best_depth || q == hi) best = q;
     }
     // Not between two branches of a block to one target: a move there is
     // seen by the later one only, and the edge reads the value where the
@@ -567,18 +567,13 @@ void LinearScanAllocator::allocate_blocked(uint32_t idx, std::vector<uint32_t>& 
     // loop this is in: store elimination wrote it there). Among equals, the
     // one needed furthest away. Only a register whose holders are not needed
     // before this value's first use is a candidate.
-    auto weight = [this](uint32_t pos) {
-        const uint32_t d = std::min<uint32_t>(liveness_.get_loop_depth_at(pos), 6);
-        return static_cast<double>(uint64_t{1} << (3 * d));
-    };
+    auto weight = [this](uint32_t pos) { return weight_at(pos); };
     // A move at a split opening a block runs on the edges into it: the
     // depth of entering the block.
     auto weight_split = [&](uint32_t q) {
         auto it = std::lower_bound(spans_.begin(), spans_.end(), q + 1,
             [](const BlockSpan& s, uint32_t v) { return s.start < v; });
-        if (it != spans_.end() && it->start == q + 1) {
-            return static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(it->entry_depth, 6)));
-        }
+        if (it != spans_.end() && it->start == q + 1) return level_weight(it->entry_level);
         return weight(q);
     };
     // The block this piece starts in; a piece split off at a block boundary
@@ -782,7 +777,7 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
             if (u.fixed_reg.is_valid()) fixed = true;
             // A guard's state reads the value wherever it is.
             if (!u.is_def && !u.requires_reg) continue;
-            w += static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(liveness_.get_loop_depth_at(u.inst_id), 6)));
+            w += weight_at(u.inst_id);
         }
         if (fixed || w < kPreassignWeight) continue;
         cands.push_back(Cand{idx, w});

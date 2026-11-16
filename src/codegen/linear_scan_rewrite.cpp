@@ -308,6 +308,66 @@ void LinearScanAllocator::rewrite_instructions() {
     PReg base_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X12) : PReg::gpr(brass::x64::GPR::R10);
     PReg idx_scratch_reg = is_aarch64 ? PReg::aarch64_gpr(brass::aarch64::GPR::X13) : PReg::gpr(brass::x64::GPR::R11);
 
+    // x64: R15, R14, XMM13 and XMM12 hold values, and are the rewrite's
+    // third and fourth scratches. Where an instruction needs one that a value
+    // lives in across it, the value is stored to a save slot of the
+    // register's own before the instruction's reloads and loaded back after
+    // its write-back. Calls never get here: build_constraint_index keeps
+    // them blocked at a call that could need them.
+    std::vector<uint32_t> held_in[2][16];
+    if (!is_aarch64) {
+        for (uint32_t i = 0; i < pieces_.size(); ++i) {
+            const AllocPiece& p = pieces_[i];
+            if (p.spilled || !p.reg.is_valid() || p.reg.code >= 16) continue;
+            held_in[p.reg.is_gpr() ? 0 : 1][p.reg.code].push_back(i);
+        }
+    }
+    // The piece holding `r` at `pos`, or none.
+    auto holder_of = [&](PReg r, uint32_t pos) -> const AllocPiece* {
+        for (uint32_t i : held_in[r.is_gpr() ? 0 : 1][r.code]) {
+            if (piece_covers(pieces_[i], pos)) return &pieces_[i];
+        }
+        return nullptr;
+    };
+    std::unordered_map<uint32_t, int32_t> save_slots;  // (class, code, size) -> slot
+    // A save right after the previous instruction's restore of the same
+    // register would store what the slot still holds: the restore goes
+    // instead (the instruction overwrites the register), and `at_index`, the
+    // instruction's start, moves back over it.
+    auto save_moves = [&](PReg r, uint32_t pos, std::vector<std::unique_ptr<LirInst>>& out, size_t& at_index) {
+        if (r != kX64GprScratches[2] && r != kX64GprScratches[3] && r != kX64XmmScratches[2] &&
+            r != kX64XmmScratches[3]) {
+            return;
+        }
+        const AllocPiece* h = holder_of(r, pos);
+        if (h == nullptr) return;
+        const VReg v = h->vreg();
+        const uint8_t sz = r.is_gpr() ? uint8_t{8} : static_cast<uint8_t>(std::max<uint8_t>(v.size, 8));
+        const uint32_t key = (r.is_gpr() ? 0u : 1u) << 16 | uint32_t{r.code} << 8 | sz;
+        auto [it, fresh] = save_slots.emplace(key, -1);
+        if (fresh) it->second = allocate_spill_slot(false, sz);
+        const LirOpcode op = r.is_gpr() ? LirOpcode::Mov
+                             : sz == 32 ? LirOpcode::Vmovups
+                             : sz == 16 ? LirOpcode::Movaps
+                                        : LirOpcode::Movsd;
+        const LirInst* prev = at_index > 0 ? out[at_index - 1].get() : nullptr;
+        if (prev != nullptr && prev->opcode == op && prev->defs.size() == 1 && prev->uses.size() == 1 &&
+            prev->defs[0].is_preg() && prev->defs[0].preg_val == r && prev->uses[0].is_spill_slot() &&
+            prev->uses[0].spill_slot == it->second) {
+            out.erase(out.begin() + static_cast<std::ptrdiff_t>(at_index - 1));
+            --at_index;
+        } else {
+            auto save = std::make_unique<LirInst>(op);
+            save->add_def(LirOperand::slot(it->second, sz));
+            save->add_use(LirOperand::preg(r, sz));
+            out.insert(out.begin() + static_cast<std::ptrdiff_t>(at_index), std::move(save));
+        }
+        auto restore = std::make_unique<LirInst>(op);
+        restore->add_def(LirOperand::preg(r, sz));
+        restore->add_use(LirOperand::slot(it->second, sz));
+        out.push_back(std::move(restore));
+    };
+
     const auto& guard_exits = liveness_.guard_exits();
     // Reused across blocks and instructions: allocating these per block and
     // per instruction was a tenth of rewriting.
@@ -339,6 +399,7 @@ void LinearScanAllocator::rewrite_instructions() {
             at = exit_at != UINT32_MAX && inst->opcode == LirOpcode::GuardExit ? exit_at : inst->id;
             emit_pending(moves_before_, inst->id);
             if (inst_index + 1 == count && inst->opcode == LirOpcode::Jmp) emit_pending(moves_at_end_, block->id);
+            size_t inst_start = rewritten.size();
             bool base_reloaded = false;
             bool idx_reloaded = false;
 
@@ -407,6 +468,25 @@ void LinearScanAllocator::rewrite_instructions() {
                 throw std::logic_error(std::string(e.what()) + " (instruction `" + to_string(*inst) +
                                        "` in block " + block->name + ")");
             }
+
+            // The registers the instruction names after allocation: no
+            // scratch may be one of them.
+            uint32_t named[2] = {0, 0};
+            auto name = [&](const PReg& r) {
+                if (r.is_valid() && r.code < 32) named[r.is_gpr() ? 0 : 1] |= 1u << r.code;
+            };
+            for (const auto* list : {&inst->defs, &inst->uses}) {
+                for (const auto& op : *list) {
+                    if (op.is_preg()) name(op.preg_val);
+                    else if (op.is_mem()) {
+                        name(op.mem_val.base_preg);
+                        name(op.mem_val.index_preg);
+                    }
+                }
+            }
+            auto is_named = [&](const PReg& r) {
+                return r.is_valid() && r.code < 32 && ((named[r.is_gpr() ? 0 : 1] >> r.code) & 1u);
+            };
 
             // A keep_alive's use is satisfied wherever the value lives, a
             // spill slot included, so it takes no reload.
@@ -497,6 +577,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 store_scratch->add_def(widen ? LirOperand::slot(inst->defs[0].spill_slot, 8) : inst->defs[0]);
                 store_scratch->add_use(LirOperand::preg(scratch, widen ? uint8_t{8} : sz));
                 rewritten.push_back(std::move(store_scratch));
+                if (!is_aarch64) save_moves(scratch, at, rewritten, inst_start);
                 continue;
             }
 
@@ -553,7 +634,10 @@ void LinearScanAllocator::rewrite_instructions() {
                         if (std::find(slots.begin(), slots.end(), u.spill_slot) == slots.end()) slots.push_back(u.spill_slot);
                     }
                     size_t skip = slots.size();
-                    if (skip < 4) def_scratch = kX64XmmScratches[skip];
+                    for (PReg r : kX64XmmScratches) {
+                        if (is_named(r)) continue;
+                        if (skip-- == 0) { def_scratch = r; break; }
+                    }
                     if (!def_scratch.is_valid()) {
                         throw std::runtime_error("Insufficient XMM scratch registers for a spilled definition");
                     }
@@ -572,7 +656,10 @@ void LinearScanAllocator::rewrite_instructions() {
                     }
                     size_t skip = slots.size();
                     for (PReg r : kX64GprScratches) {
-                        if ((base_reloaded && r == base_scratch_reg) || (idx_reloaded && r == idx_scratch_reg)) continue;
+                        if ((base_reloaded && r == base_scratch_reg) || (idx_reloaded && r == idx_scratch_reg) ||
+                            is_named(r)) {
+                            continue;
+                        }
                         if (skip-- == 0) { def_scratch = r; break; }
                     }
                     if (!def_scratch.is_valid()) {
@@ -634,6 +721,13 @@ void LinearScanAllocator::rewrite_instructions() {
             }
             if (has_spill_def) {
                 busy_registers.push_back(def_scratch);
+            }
+            if (!is_aarch64) {
+                for (const PReg* list : {gpr_scratches, xmm_scratches}) {
+                    for (size_t k = 0; k < 4; ++k) {
+                        if (is_named(list[k])) busy_registers.push_back(list[k]);
+                    }
+                }
             }
 
             std::vector<PReg> assigned_use_scratches;
@@ -742,6 +836,10 @@ void LinearScanAllocator::rewrite_instructions() {
                 store_back->add_use(LirOperand::preg(def_scratch, sz));
                 def_scratch_stores_.insert(store_back.get());
                 rewritten.push_back(std::move(store_back));
+            }
+            if (!is_aarch64) {
+                for (PReg r : assigned_use_scratches) save_moves(r, at, rewritten, inst_start);
+                if (has_spill_def) save_moves(def_scratch, at, rewritten, inst_start);
             }
         }
         if (prev_id != UINT32_MAX) emit_pending(moves_after_, prev_id);

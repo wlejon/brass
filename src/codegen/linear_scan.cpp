@@ -52,8 +52,9 @@ void LinearScanAllocator::init_register_pools() {
 
         // Available GPRs: all but RSP, RBP and the rewrite's scratches R10
         // and R11. R15 and R14, its third and fourth, hold values too: they
-        // are blocked only where an instruction could need them
-        // (build_constraint_index). With them, four callee-saved registers
+        // are blocked only at calls (build_constraint_index), and elsewhere
+        // a value in one is saved around an instruction taking it
+        // (rewrite_instructions). With them, four callee-saved registers
         // (RBX, R12, R14, R15; R13 is often the pinned TLS register) for
         // values live across calls instead of two.
         std::vector<GPR> gprs = {
@@ -70,8 +71,7 @@ void LinearScanAllocator::init_register_pools() {
         // Available XMMs: all but the rewrite's first two scratches XMM14 and
         // XMM15 (which the emitters also take for memory-to-memory moves,
         // ParallelCopy cycles, and Fabs masks). XMM13 and XMM12, its third
-        // and fourth scratches, hold values too and are blocked only where an
-        // instruction can need them (build_constraint_index).
+        // and fourth scratches, hold values too, as R15 and R14 do.
         available_xmms_.clear();
         for (int i = 0; i <= 13; ++i) {
             available_xmms_.push_back(PReg::xmm(static_cast<XMM>(i)));
@@ -196,16 +196,18 @@ void LinearScanAllocator::build_constraint_index() {
     // x64: the rewrite takes R10, R11, R15 and R14 (GPR) and XMM14, XMM15,
     // XMM13 and XMM12 (XMM) in that order for an instruction's spilled
     // operands (each register use or definition, and for GPRs each memory
-    // operand's base and index): the third scratch (R15 / XMM13) is blocked
-    // where there are three of them, the fourth (R14 / XMM12) where there are
-    // four, so each is free wherever the rewrite takes it.
+    // operand's base and index). R15, R14, XMM13 and XMM12 hold values
+    // everywhere else: where the rewrite takes one a value lives in, it saves
+    // that value around the one instruction (rewrite_instructions). Only a
+    // call keeps them blocked where it could need them, as a value saved
+    // around a call that may collect would be a stale reference after it.
     const bool x64_scratches = cc_.target().is_x64();
     struct ScratchPair {
         uint32_t gpr = 0;
         uint32_t xmm = 0;
     };
     auto rewrite_scratches = [&](const LirInst& inst) -> ScratchPair {
-        if (!x64_scratches) return {};
+        if (!x64_scratches || !inst.is_call()) return {};
         switch (inst.opcode) {
             case LirOpcode::Safepoint:
             case LirOpcode::ParallelCopy:
@@ -308,6 +310,16 @@ void LinearScanAllocator::build_constraint_index() {
     }
 }
 
+uint32_t LinearScanAllocator::level_at(uint32_t pos) const {
+    if (spans_.empty()) return kHotLevel;
+    auto it = std::upper_bound(spans_.begin(), spans_.end(), pos,
+                               [](uint32_t v, const BlockSpan& s) { return v < s.start; });
+    if (it == spans_.begin()) return it->level;
+    const BlockSpan& s = *(it - 1);
+    if (pos <= s.end || it == spans_.end()) return s.level;
+    return it->level;
+}
+
 // Blocks by position, each with the loop depth at which a move placed where
 // it begins runs: its own depth, or its layout predecessor's when that is
 // shallower (the edge into a loop header from its preheader), and a
@@ -326,6 +338,9 @@ void LinearScanAllocator::build_block_spans() {
         s.depth = block->loop_depth;
         s.entry_depth = spans_.empty() ? s.depth : std::min(s.depth, prev_depth);
         prev_depth = s.depth;
+        const uint32_t hot = (block->cold || is_guard_exit(block.get())) ? 0u : kHotLevel;
+        s.level = s.depth + hot;
+        s.entry_level = s.entry_depth + hot;
         spans_.push_back(s);
     }
     const size_t n = spans_.size();
@@ -350,8 +365,8 @@ void LinearScanAllocator::build_block_spans() {
     for (size_t i = 0; i < n; ++i) base[i] = static_cast<uint32_t>(i);
     depth_rmq_.push_back(std::move(base));
     auto better = [this](uint32_t a, uint32_t b) {
-        // Least depth; the later block among equals.
-        if (spans_[a].entry_depth != spans_[b].entry_depth) return spans_[a].entry_depth < spans_[b].entry_depth ? a : b;
+        // Least level; the later block among equals.
+        if (spans_[a].entry_level != spans_[b].entry_level) return spans_[a].entry_level < spans_[b].entry_level ? a : b;
         return std::max(a, b);
     };
     for (size_t span = 2; span <= n; span *= 2) {
@@ -582,7 +597,7 @@ void LinearScanAllocator::allocate() {
         double c = 0;
         for (const auto& u : interval.use_positions) {
             if (!u.is_def && !u.requires_reg) continue;
-            c += static_cast<double>(uint64_t{1} << (3 * std::min<uint32_t>(liveness_.get_loop_depth_at(u.inst_id), 6)));
+            c += weight_at(u.inst_id);
         }
         whole_life_cost_[interval.vreg.id] = c;
     }

@@ -109,13 +109,13 @@ TEST_CASE("Linear Scan - a copy out of a spill slot is the reload itself") {
 
 namespace {
 
-// Ten gcrefs loaded off %p and handed to a join, filling every register
+// Twelve gcrefs loaded off %p and handed to a join, filling every register
 // but %p's; then twelve more loads off %p, each summed at once. A gcref
 // cannot be split and is read only by the block-argument copy; %p is read
 // by every load. Short of registers at the first i64 load, the value to
 // give one up is a gcref, which then waits in its slot for the copy, not %p,
 // which was reloaded at each of the twelve.
-constexpr int kRefs = 10;
+constexpr int kRefs = 12;
 
 std::string gather_text() {
     std::string s = "module @m\n\nfunc @gather(%p: ptr) -> i64 {\nentry:\n";
