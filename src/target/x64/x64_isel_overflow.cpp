@@ -5,15 +5,54 @@ namespace brass::x64 {
 
 using namespace brass::codegen;
 
+// The constant operand of an overflow check the lowering takes as an
+// immediate (a 32-bit one, either side of a commuting add / mul, the right of
+// a subtraction), with the other operand: `i + 1` and `i * 3` are one `add` /
+// `imul` with no register held for the constant (count_overflow_imm_folds
+// counts the folded uses so the constant is never materialized for them).
+X64ISel::OverflowImm X64ISel::overflow_imm(const Instruction& check) const {
+    OverflowImm r;
+    const ImmIntInfo i0 = get_imm_int_info(check.operand(0));
+    const ImmIntInfo i1 = get_imm_int_info(check.operand(1));
+    if (i0.is_imm && i1.is_imm) return r;  // the folder's to decide
+    const Type t = check.operand(0)->type();
+    if (t != Type::i32() && t != Type::i64()) return r;  // narrow ones widen (x64_isel_narrow.cpp)
+    const Opcode op = check.opcode();
+    const bool commutes = op == Opcode::sadd_overflow || op == Opcode::uadd_overflow || op == Opcode::smul_overflow;
+    const bool known = commutes || op == Opcode::ssub_overflow || op == Opcode::usub_overflow;
+    if (!known) return r;
+    if (i1.is_imm && i1.fits_i32) {
+        r.imm = check.operand(1);
+        r.reg = check.operand(0);
+        r.val = i1.val;
+    } else if (commutes && i0.is_imm && i0.fits_i32) {
+        r.imm = check.operand(0);
+        r.reg = check.operand(1);
+        r.val = i0.val;
+    }
+    return r;
+}
+
 Condition X64ISel::append_overflow_arith(const Instruction& check, const Instruction* sum, LirBlock& lir_bb) {
-    VReg op0 = get_vreg(check.operand(0));
-    VReg op1 = get_vreg(check.operand(1));
+    const OverflowImm oi = overflow_imm(check);
+    VReg op0 = get_vreg(oi.imm ? oi.reg : check.operand(0));
     const uint8_t sz = op0.size;
     VReg t = sum != nullptr ? get_vreg(sum->result()) : lir_fn_->allocate_vreg(RegClass::GPR, sz);
+    if (oi.imm && check.opcode() == Opcode::smul_overflow) {
+        // imul t, r, imm: three operands, no copy.
+        auto op = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Imul32 : LirOpcode::Imul);
+        op->add_def(LirOperand::vreg(t, sz));
+        op->add_use(LirOperand::vreg(op0, sz));
+        op->add_use(LirOperand::imm(oi.val, sz));
+        op->mir_origin = &check;
+        lir_bb.append_inst(std::move(op));
+        return Condition::O;
+    }
     auto mov = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
     mov->add_def(LirOperand::vreg(t, sz));
     mov->add_use(LirOperand::vreg(op0, sz));
     lir_bb.append_inst(std::move(mov));
+    const LirOperand rhs = oi.imm ? LirOperand::imm(oi.val, sz) : LirOperand::vreg(get_vreg(check.operand(1)), sz);
     LirOpcode alu = LirOpcode::Add;
     Condition cond = Condition::O;
     switch (check.opcode()) {
@@ -27,10 +66,25 @@ Condition X64ISel::append_overflow_arith(const Instruction& check, const Instruc
     auto op = std::make_unique<LirInst>(alu);
     op->add_def(LirOperand::vreg(t, sz));
     op->add_use(LirOperand::vreg(t, sz));
-    op->add_use(LirOperand::vreg(op1, sz));
+    op->add_use(rhs);
     op->mir_origin = &check;
     lir_bb.append_inst(std::move(op));
     return cond;
+}
+
+void X64ISel::count_overflow_imm_folds(const Instruction& check, const Instruction* sum,
+                                       std::unordered_map<const Value*, uint32_t>& folded_uses) const {
+    const OverflowImm oi = overflow_imm(check);
+    if (!oi.imm) return;
+    folded_uses[oi.imm]++;
+    // The sum the check computes (skipped, its value made by the check's
+    // instruction) read the same constant.
+    if (sum != nullptr) {
+        for (size_t i = 0; i < sum->operand_count(); ++i) {
+            const ImmIntInfo ii = get_imm_int_info(sum->operand(i));
+            if (sum->operand(i) == oi.imm || (ii.is_imm && ii.val == oi.val)) folded_uses[sum->operand(i)]++;
+        }
+    }
 }
 
 void X64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb) {
@@ -192,7 +246,30 @@ void X64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb) {
         }
     }
 
+    const OverflowImm oi = overflow_imm(inst);
     VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, sz);
+    LirOperand rhs = LirOperand::vreg(op1, sz);
+    if (oi.imm && op == Opcode::smul_overflow) {
+        auto imul = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Imul32 : LirOpcode::Imul);
+        imul->add_def(LirOperand::vreg(tmp, sz));
+        imul->add_use(LirOperand::vreg(get_vreg(oi.reg), sz));
+        imul->add_use(LirOperand::imm(oi.val, sz));
+        lir_bb.append_inst(std::move(imul));
+        auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
+        setcc->condition = Condition::O;
+        setcc->add_def(LirOperand::vreg(dst, 1));
+        lir_bb.append_inst(std::move(setcc));
+        auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
+        movzx->add_def(LirOperand::vreg(dst, dst_sz));
+        movzx->add_use(LirOperand::vreg(dst, 1));
+        movzx->mir_origin = &inst;
+        lir_bb.append_inst(std::move(movzx));
+        return;
+    }
+    if (oi.imm) {
+        op0 = get_vreg(oi.reg);
+        rhs = LirOperand::imm(oi.val, sz);
+    }
     auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
     mov_inst->add_def(LirOperand::vreg(tmp, sz));
     mov_inst->add_use(LirOperand::vreg(op0, sz));
@@ -229,7 +306,7 @@ void X64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb) {
     auto alu_inst = std::make_unique<LirInst>(alu_op);
     alu_inst->add_def(LirOperand::vreg(tmp, sz));
     alu_inst->add_use(LirOperand::vreg(tmp, sz));
-    alu_inst->add_use(LirOperand::vreg(op1, sz));
+    alu_inst->add_use(rhs);
     lir_bb.append_inst(std::move(alu_inst));
 
     auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);

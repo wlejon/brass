@@ -170,6 +170,7 @@ private:
     // (x64_isel.cpp append_fused_compare).
     bool fuses_compare_imm_load(const Value* side, const Instruction* user) const;
     codegen::LirOperand compare_imm_side(const Value* side, uint8_t sz);
+    const Value* int64_min_equality_operand(const Instruction& cmp) const;
     codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
     bool is_value_dead_after(const Function& mir_fn, const BasicBlock& bb, const Instruction* inst, const Value* val) const;
     void analyze_function(const Function& mir_fn);
@@ -225,6 +226,14 @@ private:
     // A peeled branch on an overflow check: the arithmetic into `sum`'s
     // register (or a fresh one), and the flag condition overflow sets.
     Condition append_overflow_arith(const Instruction& check, const Instruction* sum, codegen::LirBlock& lir_bb);
+    struct OverflowImm {
+        const Value* imm = nullptr;  // the constant operand taken as an immediate
+        const Value* reg = nullptr;  // the other operand
+        int64_t val = 0;
+    };
+    OverflowImm overflow_imm(const Instruction& check) const;
+    void count_overflow_imm_folds(const Instruction& check, const Instruction* sum,
+                                  std::unordered_map<const Value*, uint32_t>& folded_uses) const;
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_alloca(const Instruction& inst, codegen::LirBlock& lir_bb);
     // bitcast_i64_tagged / bitcast_tagged_i64: a 64-bit register move.

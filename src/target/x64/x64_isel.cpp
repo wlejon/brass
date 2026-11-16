@@ -2,6 +2,7 @@
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/module.hpp>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <algorithm>
 #include <unordered_map>
@@ -224,7 +225,9 @@ void X64ISel::analyze_function(const Function& mir_fn) {
     for (const Instruction* cmp : remat_cmps_) {
         const Value* lhs = cmp->operand(0);
         const Value* rhs = cmp->operand(1);
-        if (get_imm_int_info(rhs).fits_i32) {
+        if (const Value* x = int64_min_equality_operand(*cmp)) {
+            folded_uses[x == lhs ? rhs : lhs]++;
+        } else if (get_imm_int_info(rhs).fits_i32) {
             folded_uses[rhs]++;
         } else if (get_imm_int_info(lhs).fits_i32) {
             folded_uses[lhs]++;
@@ -307,7 +310,9 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 // constant index 0, `ult 0, length`, is this shape.)
                 const bool tests_zero =
                     (rhs_imm.is_imm && rhs_imm.val == 0) || (lhs_imm.is_imm && lhs_imm.val == 0);
-                if (rhs_imm.is_imm && rhs_imm.fits_i32) {
+                if (const Value* x = int64_min_equality_operand(*def_inst)) {
+                    folded_uses[x == lhs ? rhs : lhs]++;
+                } else if (rhs_imm.is_imm && rhs_imm.fits_i32) {
                     folded_uses[rhs]++;
                     if (!tests_zero && fuses_compare_imm_load(lhs, inst)) {
                         skipped_insts_.insert(lhs->defining_instruction());
@@ -336,6 +341,8 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                     count_peeled_folds(peeled->second, folded_uses);
                     if (!peeled->second.parity && is_comparison(peeled->second.cmp->opcode())) {
                         count_compare_folds(peeled->second.cmp);
+                    } else if (!peeled->second.parity) {
+                        count_overflow_imm_folds(*peeled->second.cmp, peeled->second.sum, folded_uses);
                     }
                     continue;
                 }
@@ -392,6 +399,14 @@ void X64ISel::analyze_function(const Function& mir_fn) {
                 continue;
             }
 
+            switch (inst->opcode()) {
+                case Opcode::sadd_overflow: case Opcode::ssub_overflow: case Opcode::smul_overflow:
+                case Opcode::uadd_overflow: case Opcode::usub_overflow:
+                    count_overflow_imm_folds(*inst, nullptr, folded_uses);
+                    continue;
+                default:
+                    break;
+            }
             // A lea `a + (b << k)` (step 2) reads both from registers.
             if (inst->opcode() == Opcode::add) {
                 const Instruction* sh = scaled_lea_shift(*inst);
@@ -835,6 +850,22 @@ LirOperand X64ISel::compare_imm_side(const Value* side, uint8_t sz) {
     return LirOperand::vreg(get_vreg(side), sz);
 }
 
+// The non-constant side of `eq` / `ne` of a 64-bit integer against the
+// constant INT64_MIN, or null: append_fused_compare tests it with `cmp x, 1`
+// and the overflow flag, so the constant is never materialized for it.
+const Value* X64ISel::int64_min_equality_operand(const Instruction& cmp) const {
+    if (cmp.opcode() != Opcode::eq && cmp.opcode() != Opcode::ne) return nullptr;
+    if (cmp.operand_count() != 2 || !cmp.operand(0) || !cmp.operand(1)) return nullptr;
+    if (cmp.operand(0)->type() != Type::i64()) return nullptr;
+    const ImmIntInfo a = get_imm_int_info(cmp.operand(0));
+    const ImmIntInfo b = get_imm_int_info(cmp.operand(1));
+    constexpr int64_t kMin = std::numeric_limits<int64_t>::min();
+    if (a.is_imm && b.is_imm) return nullptr;
+    if (b.is_imm && b.val == kMin) return cmp.operand(0);
+    if (a.is_imm && a.val == kMin) return cmp.operand(1);
+    return nullptr;
+}
+
 // The flags of a comparison analyze_function folded into its branch `user`
 // (a br_if, or one leaf of an and-chain, x64_isel_and_chain.cpp), emitted
 // into `lir_bb`, and the condition that holds exactly when it is true.
@@ -900,6 +931,14 @@ Condition X64ISel::append_fused_compare(const Instruction& cmp, const Instructio
             test_lir->add_use(LirOperand::vreg(get_vreg(rhs), sz));
             lir_bb.append_inst(std::move(test_lir));
             branch_cond = swap_relational_condition(gpr_c);
+        } else if (const Value* x = int64_min_equality_operand(*cmp_inst)) {
+            // x == INT64_MIN exactly when x - 1 overflows: `cmp x, 1; jo`,
+            // no movabs (cvttsd2si's out-of-range answer is this value).
+            branch_cond = cmp_op == Opcode::eq ? Condition::O : Condition::NO;
+            auto cmp_lir = std::make_unique<LirInst>(LirOpcode::Cmp);
+            cmp_lir->add_use(LirOperand::vreg(get_vreg(x), 8));
+            cmp_lir->add_use(LirOperand::imm(1, 8));
+            lir_bb.append_inst(std::move(cmp_lir));
         } else if (rhs_imm.is_imm && rhs_imm.fits_i32) {
             branch_cond = gpr_c;
             auto cmp_lir = std::make_unique<LirInst>(cmp_lir_op);
