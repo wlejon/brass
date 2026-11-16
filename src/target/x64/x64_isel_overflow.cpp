@@ -5,6 +5,34 @@ namespace brass::x64 {
 
 using namespace brass::codegen;
 
+Condition X64ISel::append_overflow_arith(const Instruction& check, const Instruction* sum, LirBlock& lir_bb) {
+    VReg op0 = get_vreg(check.operand(0));
+    VReg op1 = get_vreg(check.operand(1));
+    const uint8_t sz = op0.size;
+    VReg t = sum != nullptr ? get_vreg(sum->result()) : lir_fn_->allocate_vreg(RegClass::GPR, sz);
+    auto mov = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+    mov->add_def(LirOperand::vreg(t, sz));
+    mov->add_use(LirOperand::vreg(op0, sz));
+    lir_bb.append_inst(std::move(mov));
+    LirOpcode alu = LirOpcode::Add;
+    Condition cond = Condition::O;
+    switch (check.opcode()) {
+        case Opcode::sadd_overflow: alu = sz == 4 ? LirOpcode::Add32 : LirOpcode::Add; break;
+        case Opcode::ssub_overflow: alu = sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub; break;
+        case Opcode::smul_overflow: alu = sz == 4 ? LirOpcode::Imul32 : LirOpcode::Imul; break;
+        case Opcode::uadd_overflow: alu = sz == 4 ? LirOpcode::Add32 : LirOpcode::Add; cond = Condition::B; break;
+        case Opcode::usub_overflow: alu = sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub; cond = Condition::B; break;
+        default: codegen::throw_unsupported("x64 isel (overflow branch)", opcode_name(check.opcode()));
+    }
+    auto op = std::make_unique<LirInst>(alu);
+    op->add_def(LirOperand::vreg(t, sz));
+    op->add_use(LirOperand::vreg(t, sz));
+    op->add_use(LirOperand::vreg(op1, sz));
+    op->mir_origin = &check;
+    lir_bb.append_inst(std::move(op));
+    return cond;
+}
+
 void X64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     const Value* op0_val = inst.operand(0);

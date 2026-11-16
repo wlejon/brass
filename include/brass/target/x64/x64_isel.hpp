@@ -74,8 +74,15 @@ private:
     // block (x64_isel_branch.cpp). The branch tests the comparison's flags,
     // inverted when `negate`; `parity` is a float eq / ne, tested with the
     // parity flag beside the zero flag. Every one of them is in skipped_insts_.
+    // `cmp` may also be an overflow check (sadd/ssub/smul/uadd/usub
+    // _overflow): the branch is the arithmetic and `jo` / `jb`, and `sum` is
+    // the same arithmetic on the same operands in the successor the check
+    // passes to (its only predecessor this block), which then reads the
+    // register the branch's arithmetic left (x64_isel_branch.cpp); `sum` is
+    // in skipped_insts_ too.
     struct PeeledBranch {
         const Instruction* cmp = nullptr;
+        const Instruction* sum = nullptr;
         bool negate = false;
         bool parity = false;
         std::vector<const Instruction*> peeled;
@@ -215,6 +222,9 @@ private:
     void lower_and_chain_branch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_switch(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_overflow_check(const Instruction& inst, codegen::LirBlock& lir_bb);
+    // A peeled branch on an overflow check: the arithmetic into `sum`'s
+    // register (or a fresh one), and the flag condition overflow sets.
+    Condition append_overflow_arith(const Instruction& check, const Instruction* sum, codegen::LirBlock& lir_bb);
     void lower_return(const Instruction& inst, codegen::LirBlock& lir_bb);
     void lower_alloca(const Instruction& inst, codegen::LirBlock& lir_bb);
     // bitcast_i64_tagged / bitcast_tagged_i64: a 64-bit register move.

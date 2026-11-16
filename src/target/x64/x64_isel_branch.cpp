@@ -28,6 +28,14 @@
 // Only single-use instructions of the branch's own block are peeled, so no
 // value anything else reads is lost, and the comparison's operands are
 // read where the comparison was.
+//
+// An OVERFLOW CHECK (`sadd_overflow a, b`, ...) is a 0/1 like a comparison:
+// branched on, it is the arithmetic itself and a jump on the overflow (or
+// carry) flag. A front end checks before it computes, so the successor the
+// check passes to usually makes the same `add a, b`: when that block has no
+// other predecessor, the branch's arithmetic is its result and the add is
+// not made again (`add t, b ; jo exit` where it was `mov t, a ; add t, b ;
+// seto ; movzx ; and ; test ; jne exit ; lea s, [a + b]`).
 
 #include <brass/target/x64/x64_isel.hpp>
 
@@ -37,9 +45,55 @@ using namespace brass::codegen;
 
 namespace {
 
+bool is_overflow_check(const Instruction& inst) {
+    switch (inst.opcode()) {
+        case Opcode::sadd_overflow:
+        case Opcode::ssub_overflow:
+        case Opcode::smul_overflow:
+        case Opcode::uadd_overflow:
+        case Opcode::usub_overflow: {
+            if (inst.operand_count() != 2 || !inst.operand(0)) return false;
+            const Type t = inst.operand(0)->type();
+            return t.is_integer() && !t.is_vector() && (t.size_in_bytes() == 4 || t.size_in_bytes() == 8);
+        }
+        default:
+            return false;
+    }
+}
+
 bool is_comparison_value(const Value* v) {
     const Instruction* def = v && v->is_instruction() ? v->defining_instruction() : nullptr;
-    return def && is_comparison(def->opcode()) && def->operand_count() == 2;
+    return def && (is_comparison(def->opcode()) || is_overflow_check(*def)) && def->operand_count() == 2;
+}
+
+// The arithmetic an overflow check stands for.
+Opcode overflow_arith(Opcode check) {
+    switch (check) {
+        case Opcode::sadd_overflow:
+        case Opcode::uadd_overflow: return Opcode::add;
+        case Opcode::ssub_overflow:
+        case Opcode::usub_overflow: return Opcode::sub;
+        default: return Opcode::mul;
+    }
+}
+
+// The instruction of `bb` (whose only predecessor is `from`) computing the
+// arithmetic `check` tests on the same operands (either order where it
+// commutes), or null.
+const Instruction* matching_sum(const Instruction& check, const BasicBlock* bb, const BasicBlock* from) {
+    if (bb == nullptr || bb == from || bb->predecessors().size() != 1 || bb->predecessors()[0] != from) return nullptr;
+    const Opcode op = overflow_arith(check.opcode());
+    const bool commutes = op != Opcode::sub;
+    const Value* a = check.operand(0);
+    const Value* b = check.operand(1);
+    for (const Instruction* inst : *bb) {
+        if (inst->opcode() != op || inst->operand_count() != 2 || inst->result() == nullptr) continue;
+        if (inst->result()->type() != a->type()) continue;
+        const Value* x = inst->operand(0);
+        const Value* y = inst->operand(1);
+        if ((x == a && y == b) || (commutes && x == b && y == a)) return inst;
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -68,7 +122,7 @@ bool X64ISel::find_peeled_branch(const Instruction& br) {
             flips = def->opcode() == Opcode::eq;
         }
         if (!inner) {
-            if (is_comparison(def->opcode())) pb.cmp = def;
+            if (is_comparison(def->opcode()) || is_overflow_check(*def)) pb.cmp = def;
             break;
         }
         pb.peeled.push_back(def);
@@ -80,7 +134,11 @@ bool X64ISel::find_peeled_branch(const Instruction& br) {
     const bool float_eq = t.is_float() && !t.is_vector() &&
                           (pb.cmp->opcode() == Opcode::eq || pb.cmp->opcode() == Opcode::ne) &&
                           !is_self_nan_test(*pb.cmp);
-    if (float_eq) {
+    if (is_overflow_check(*pb.cmp)) {
+        const BasicBlock* passes = pb.negate ? br.true_target().block : br.false_target().block;
+        pb.sum = matching_sum(*pb.cmp, passes, bb);
+        if (pb.sum != nullptr) skipped_insts_.insert(pb.sum);
+    } else if (float_eq) {
         // The two jumps to one side need that side to take no copies.
         if (!br.true_target().args.empty() || !br.false_target().args.empty()) return false;
         pb.parity = true;
@@ -160,8 +218,10 @@ void X64ISel::lower_branch_if(const Instruction& inst, LirBlock& lir_bb) {
         return;
     }
     if (peeled != peeled_branches_.end()) {
-        const Condition c = append_fused_compare(*peeled->second.cmp, inst, lir_bb);
-        branch_cond = peeled->second.negate ? invert(c) : c;
+        const PeeledBranch& pb = peeled->second;
+        const Condition c = is_comparison(pb.cmp->opcode()) ? append_fused_compare(*pb.cmp, inst, lir_bb)
+                                                            : append_overflow_arith(*pb.cmp, pb.sum, lir_bb);
+        branch_cond = pb.negate ? invert(c) : c;
     } else if (is_fused_cmp) {
         branch_cond = append_fused_compare(*cmp_inst, inst, lir_bb);
     } else {

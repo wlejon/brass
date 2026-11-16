@@ -333,7 +333,9 @@ void X64ISel::analyze_function(const Function& mir_fn) {
             if (inst->opcode() == Opcode::br_if) {
                 if (auto peeled = peeled_branches_.find(inst); peeled != peeled_branches_.end()) {
                     count_peeled_folds(peeled->second, folded_uses);
-                    if (!peeled->second.parity) count_compare_folds(peeled->second.cmp);
+                    if (!peeled->second.parity && is_comparison(peeled->second.cmp->opcode())) {
+                        count_compare_folds(peeled->second.cmp);
+                    }
                     continue;
                 }
                 if (auto chain = and_chains_.find(inst); chain != and_chains_.end()) {
@@ -557,6 +559,11 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
             }
             get_or_alloc_vreg(inst->result());
         }
+    }
+    // The arithmetic an overflow branch makes is the result of the sum it
+    // stands for (x64_isel_branch.cpp), which is skipped.
+    for (const auto& [br, pb] : peeled_branches_) {
+        if (pb.sum != nullptr) get_or_alloc_vreg(pb.sum->result());
     }
     // The bits of a tagged value are its register: a read of them names the
     // value's own register rather than a copy. A copy was a second value,
