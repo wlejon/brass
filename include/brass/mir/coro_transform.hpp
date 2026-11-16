@@ -17,6 +17,10 @@ struct CoroTransformStats {
 struct CoroTransformOptions {
     uint32_t first_slot_index = 0;
     CoroTransformStats* stats = nullptr;
+    // run_on_module lowers bodies on up to this many threads (0: the
+    // machine's), each in its own FunctionWorkScope; the result does not
+    // depend on it. With `stats` set it runs on the calling thread.
+    size_t threads = 1;
 };
 
 // Frame shape of a lowered coroutine body, as `coro_create` must allocate it.
@@ -94,8 +98,9 @@ uint32_t coro_create_slot_count(const Instruction& create);
 // Lowers every coroutine body of `mod` that is not lowered yet (a body
 // already lowered is left alone), so a module can be handed to any tier:
 // what the tiered pipeline, the JIT engine and the embedding compiler run
-// before they execute a module. Returns whether anything changed.
-bool lower_coroutines(Module& mod);
+// before they execute a module. Returns whether anything changed. `threads`
+// as CoroTransformOptions::threads.
+bool lower_coroutines(Module& mod, size_t threads = 1);
 
 class CoroTransformPass {
 public:

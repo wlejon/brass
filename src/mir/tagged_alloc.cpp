@@ -278,7 +278,6 @@ void Analyzer::classify(uint32_t site, const Value* v, const TaggedDerivation& d
 }
 
 void Analyzer::run() {
-    index_uses();
     for (BasicBlock* bb : fn_.blocks()) {
         if (!bb) continue;
         for (Instruction* inst : *bb) {
@@ -290,6 +289,10 @@ void Analyzer::run() {
             add_derived(inst->result(), {static_cast<uint32_t>(sites_.size() - 1), TaggedForm::Box, 0}, inst);
         }
     }
+    // The uses are indexed only for a function that allocates: most do not,
+    // and the index is the whole cost of asking.
+    if (sites_.empty()) return;
+    index_uses();
     // The closure of the deriving instructions and the edges.
     std::unordered_set<const Value*> assumed;
     while (!work_.empty()) {

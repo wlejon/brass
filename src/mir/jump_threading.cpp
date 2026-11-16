@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <algorithm>
 
 namespace brass {
 
@@ -90,47 +91,113 @@ int evaluate_condition_along_edge(
     return -1;
 }
 
-std::unordered_set<const BasicBlock*> reachable_from(const BasicBlock* start) {
-    std::unordered_set<const BasicBlock*> seen{start};
-    std::vector<const BasicBlock*> work{start};
-    while (!work.empty()) {
-        const BasicBlock* bb = work.back();
-        work.pop_back();
-        for (const BasicBlock* s : bb->successors()) {
-            if (s && seen.insert(s).second) work.push_back(s);
+// Membership by id for the values or blocks of one function, asked about
+// every use or block of it: a vector indexed by id (an object whose id
+// another holds is kept aside in a set, so the answer is exact), cleared by
+// undoing what was marked.
+template <typename T>
+class IdMarks {
+public:
+    void mark(const T* x) {
+        const uint32_t id = x->id();
+        if (id < kMaxId && id >= slots_.size()) slots_.resize(static_cast<size_t>(id) + 1 + id / 2, nullptr);
+        if (id < kMaxId && !slots_[id]) {
+            slots_[id] = x;
+            marked_.push_back(id);
+        } else if (!has(x)) {
+            extra_.insert(x);
         }
     }
-    return seen;
-}
+    bool has(const T* x) const {
+        const uint32_t id = x->id();
+        if (id < slots_.size() && slots_[id] == x) return true;
+        return !extra_.empty() && extra_.count(x) != 0;
+    }
+    void clear() {
+        for (uint32_t id : marked_) slots_[id] = nullptr;
+        marked_.clear();
+        extra_.clear();
+    }
+
+private:
+    static constexpr uint32_t kMaxId = 1u << 24;
+    std::vector<const T*> slots_;
+    std::vector<uint32_t> marked_;
+    std::unordered_set<const T*> extra_;
+};
+
+// What the decisions of one run reuse: the dominator tree of the CFG as it
+// stands (built when a decision first asks, dropped by every change), scratch
+// marks, and the values read outside their home block.
+struct ThreadingState {
+    explicit ThreadingState(Function& f) : fn(f) {}
+
+    const DominatorTree& dom() {
+        if (!dom_) dom_ = std::make_unique<DominatorTree>(fn);
+        return *dom_;
+    }
+    void cfg_changed() {
+        dom_.reset();
+        if (outside_built) outside.clear();
+        outside_built = false;
+    }
+
+    Function& fn;
+    IdMarks<Value> values;
+    IdMarks<BasicBlock> blocks;
+    std::vector<const BasicBlock*> work;
+    // The values read in a block other than their home block (a block
+    // parameter's block, an instruction's parent), when outside_built.
+    IdMarks<Value> outside;
+    bool outside_built = false;
+
+private:
+    std::unique_ptr<DominatorTree> dom_;
+};
 
 // Threading adds an edge into `dest` that skips B. A value B defines stays
 // dominated where it is used unless the use is reachable from `dest`; those
 // uses are allowed only inside dest's dominance region, where the caller
 // routes the value through a new parameter of `dest`. Collects the values
 // that need that parameter; false when some use cannot be repaired.
-bool collect_escaping_defs(
-    const Function& fn,
-    const BasicBlock* B,
-    const BasicBlock* dest,
-    const DominatorTree& dom,
-    std::vector<Value*>& escaping
-) {
-    std::unordered_set<const Value*> defs(B->params().begin(), B->params().end());
+//
+// The walk of the region reachable from `dest` and the scan of its blocks
+// mark blocks and values by id rather than in hash sets.
+bool collect_escaping_defs(ThreadingState& st, const BasicBlock* B, const BasicBlock* dest,
+                           std::vector<Value*>& escaping) {
+    st.values.clear();
+    for (const Value* p : B->params()) st.values.mark(p);
     for (const Instruction* inst : *B) {
-        if (inst && inst->result()) defs.insert(inst->result());
+        if (inst && inst->result()) st.values.mark(inst->result());
     }
-    const std::unordered_set<const BasicBlock*> reach = reachable_from(dest);
-    std::unordered_set<const Value*> seen;
+    st.blocks.clear();
+    st.blocks.mark(dest);
+    st.work.assign(1, dest);
+    while (!st.work.empty()) {
+        const BasicBlock* bb = st.work.back();
+        st.work.pop_back();
+        for (const BasicBlock* s : bb->successors()) {
+            if (s && !st.blocks.has(s)) {
+                st.blocks.mark(s);
+                st.work.push_back(s);
+            }
+        }
+    }
+    std::vector<const Value*> seen;
     bool ok = true;
-    for (const BasicBlock* Z : fn.blocks()) {
-        if (!Z || Z == B || !reach.count(Z)) continue;
-        const bool in_region = Z == dest || dom.dominates(dest, Z);
+    for (const BasicBlock* Z : st.fn.blocks()) {
+        if (!Z || Z == B || !st.blocks.has(Z)) continue;
+        int in_region = -1;  // asked of the dominator tree at the first use
         for (const Instruction* inst : *Z) {
             if (!inst) continue;
             for_each_use(*inst, [&](Value* v) {
-                if (!defs.count(v)) return;
+                if (!st.values.has(v)) return;
+                if (in_region < 0) in_region = Z == dest || st.dom().dominates(dest, Z) ? 1 : 0;
                 if (!in_region) ok = false;
-                else if (seen.insert(v).second) escaping.push_back(v);
+                else if (std::find(seen.begin(), seen.end(), v) == seen.end()) {
+                    seen.push_back(v);
+                    escaping.push_back(v);
+                }
             });
             if (!ok) return false;
         }
@@ -175,17 +242,9 @@ void retarget_edge(Instruction* p_term, bool is_true_edge, bool is_false_edge, B
     }
 }
 
-bool try_thread_edge(
-    Function& fn,
-    BasicBlock* B,
-    BasicBlock* P,
-    const DominatorTree& dom
-) {
+bool try_thread_edge(ThreadingState& st, BasicBlock* B, BasicBlock* P) {
+    Function& fn = st.fn;
     if (!B || !P || B == P) return false;
-
-    // Skipping a loop header from outside the loop would make the loop
-    // irreducible; from inside it is a back edge. Neither is threaded.
-    if (dom.dominates(B, P) || is_loop_header(B, dom)) return false;
 
     Instruction* b_term = B->terminator();
     if (!b_term || b_term->opcode() != Opcode::br_if) return false;
@@ -236,8 +295,13 @@ bool try_thread_edge(
         if (inst->has_side_effects() || inst->is_call()) return false;
     }
 
+    // Skipping a loop header from outside the loop would make the loop
+    // irreducible; from inside it is a back edge. Neither is threaded. (Asked
+    // after the checks above, which need no dominator tree.)
+    if (st.dom().dominates(B, P) || is_loop_header(B, st.dom())) return false;
+
     std::vector<Value*> escaping;
-    if (!collect_escaping_defs(fn, B, dest, dom, escaping)) return false;
+    if (!collect_escaping_defs(st, B, dest, escaping)) return false;
     if (!escaping.empty()) {
         // The repair gives dest one parameter per escaping value, fed by
         // each incoming edge; that needs B to be dest's only way in so far.
@@ -307,7 +371,7 @@ bool try_thread_edge(
             auto it = thread_val_map.find(v);
             thread_dest_args.push_back(it != thread_val_map.end() ? it->second : v);
         }
-        replace_in_region(blocks_before, dest, dom, repl);
+        replace_in_region(blocks_before, dest, st.dom(), repl);
     }
 
     Instruction* br_dest = fn.parent()
@@ -367,27 +431,37 @@ bool condition_is_incoming_compare(const BasicBlock* B, const Value* cond, const
     return false;
 }
 
-// Values read outside the block that defines them (a block parameter's
-// block, an instruction's parent).
-std::unordered_set<const Value*> values_used_outside(const Function& fn) {
-    std::unordered_set<const Value*> out;
-    for (const BasicBlock* Z : fn.blocks()) {
-        if (!Z) continue;
-        for (const Instruction* inst : *Z) {
-            if (!inst) continue;
-            for_each_use(*inst, [&](Value* v) {
-                const BasicBlock* home = v->is_block_param() ? v->defining_block()
-                                       : v->is_instruction() && v->defining_instruction()
-                                           ? v->defining_instruction()->parent() : nullptr;
-                if (home && home != Z) out.insert(v);
-            });
+// Whether a value of B (a parameter, an instruction's result) is read in
+// a block other than its home block (a block parameter's block, an
+// instruction's parent). The function's values so read are marked once
+// between changes.
+bool values_used_outside(ThreadingState& st, const BasicBlock* B) {
+    if (!st.outside_built) {
+        st.outside_built = true;
+        for (const BasicBlock* Z : st.fn.blocks()) {
+            if (!Z) continue;
+            for (const Instruction* inst : *Z) {
+                if (!inst) continue;
+                for_each_use(*inst, [&](Value* v) {
+                    const BasicBlock* home = v->is_block_param() ? v->defining_block()
+                                           : v->is_instruction() && v->defining_instruction()
+                                               ? v->defining_instruction()->parent() : nullptr;
+                    if (home && home != Z) st.outside.mark(v);
+                });
+            }
         }
     }
-    return out;
+    for (const Value* p : B->params()) {
+        if (st.outside.has(p)) return true;
+    }
+    for (const Instruction* inst : *B) {
+        if (inst && inst->result() && st.outside.has(inst->result())) return true;
+    }
+    return false;
 }
 
-bool try_duplicate_branch_block(Function& fn, BasicBlock* B, BasicBlock* P, const DominatorTree& dom,
-                                std::optional<std::unordered_set<const Value*>>& outside) {
+bool try_duplicate_branch_block(ThreadingState& st, BasicBlock* B, BasicBlock* P) {
+    Function& fn = st.fn;
     if (!B || !P || B == P || B == fn.entry_block()) return false;
     Instruction* p_term = P->terminator();
     if (!p_term || p_term->opcode() != Opcode::br || p_term->branch_target().block != B) return false;
@@ -399,20 +473,16 @@ bool try_duplicate_branch_block(Function& fn, BasicBlock* B, BasicBlock* P, cons
     const std::vector<Value*>& incoming = p_term->branch_target().args;
     if (incoming.size() != B->param_count()) return false;
     if (!condition_is_incoming_compare(B, b_term->operand(0), incoming)) return false;
-    if (dom.dominates(B, P) || is_loop_header(B, dom) || dom.dominates(T, P) || dom.dominates(F, P)) return false;
 
     size_t n = 0;
     for (Instruction* inst : *B) {
         if (!inst || inst->is_terminator()) break;
         if (inst->has_side_effects() || inst->is_call() || ++n > kMaxDuplicated) return false;
     }
-    if (!outside) outside = values_used_outside(fn);
-    for (const Value* p : B->params()) {
-        if (outside->count(p)) return false;
-    }
-    for (const Instruction* inst : *B) {
-        if (inst && inst->result() && outside->count(inst->result())) return false;
-    }
+    // After the checks above, which need no dominator tree.
+    const DominatorTree& dom = st.dom();
+    if (dom.dominates(B, P) || is_loop_header(B, dom) || dom.dominates(T, P) || dom.dominates(F, P)) return false;
+    if (values_used_outside(st, B)) return false;
 
     ir::ValueMap vals;
     for (size_t i = 0; i < B->param_count(); ++i) vals[B->param(i)] = incoming[i];
@@ -434,10 +504,10 @@ bool run_jump_threading(Function& fn, const JumpThreadingOptions& opts, JumpThre
     // Each sweep visits every block once and takes every edge it can; a
     // change recomputes the predecessors and dominators the next decision
     // reads, so a function with many joins is not limited to a few edges.
+    ThreadingState st(fn);
     for (size_t iter = 0; iter < opts.max_iterations; ++iter) {
         fn.rebuild_cfg_predecessors();
-        auto dom = std::make_unique<DominatorTree>(fn);
-        std::optional<std::unordered_set<const Value*>> outside;
+        st.cfg_changed();
 
         bool iter_changed = false;
         std::vector<BasicBlock*> blocks = fn.blocks();
@@ -453,15 +523,14 @@ bool run_jump_threading(Function& fn, const JumpThreadingOptions& opts, JumpThre
 
                 std::vector<BasicBlock*> preds = B->predecessors();
                 for (BasicBlock* P : preds) {
-                    const bool threaded = try_thread_edge(fn, B, P, *dom);
-                    if (!threaded && !try_duplicate_branch_block(fn, B, P, *dom, outside)) continue;
+                    const bool threaded = try_thread_edge(st, B, P);
+                    if (!threaded && !try_duplicate_branch_block(st, B, P)) continue;
                     iter_changed = changed = progress = true;
                     if (stats && threaded) stats->edges_threaded++;
                     // The CFG changed: what the next decision reads is
                     // recomputed.
                     fn.rebuild_cfg_predecessors();
-                    dom = std::make_unique<DominatorTree>(fn);
-                    outside.reset();
+                    st.cfg_changed();
                     break;
                 }
             }

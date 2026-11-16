@@ -1,11 +1,13 @@
 #include <brass/mir/call_graph.hpp>
+#include <brass/core/parallel_for.hpp>
 #include <algorithm>
 #include <stack>
+#include <unordered_set>
 
 namespace brass {
 
-CallGraph::CallGraph(Module& module)
-    : module_(module) {
+CallGraph::CallGraph(Module& module, size_t threads)
+    : module_(module), threads_(threads) {
     build();
 }
 
@@ -51,101 +53,76 @@ void CallGraph::build() {
         auto node = std::make_unique<CallGraphNode>();
         node->function = fn;
         node->name = fn->name();
-
-        size_t inst_count = 0;
-        for (const BasicBlock* bb : fn->blocks()) {
-            if (bb) {
-                inst_count += bb->instruction_count();
-            }
-        }
-        node->instruction_count = inst_count;
-
         name_map_[fn->name()] = node.get();
         ordered_nodes_.push_back(node.get());
         node_map_[fn] = std::move(node);
     }
 
-    // 2. Discover call sites and connect edges
+    // 2. Each function's size, call sites and callees (each once, in the
+    // order first called), functions in parallel: a scan writes only its own
+    // node and reads the maps step 1 filled.
+    std::vector<size_t> weights(ordered_nodes_.size());
+    size_t total = 0;
+    for (size_t i = 0; i < ordered_nodes_.size(); ++i) {
+        weights[i] = ordered_nodes_[i]->function->block_count();
+        total += weights[i];
+    }
+    const size_t n = threads_for_work(threads_, ordered_nodes_.size(), total, kMinBlocksPerThread);
+    parallel_for_each(heaviest_first(weights), n, [this](size_t i) { scan(*ordered_nodes_[i]); });
+
+    // 3. Callers, each once per callee, in module order.
     for (CallGraphNode* node : ordered_nodes_) {
-        Function* caller_fn = node->function;
-        if (!caller_fn) continue;
-
-        for (BasicBlock* bb : caller_fn->blocks()) {
-            if (!bb) continue;
-
-            for (Instruction* inst : *bb) {
-                if (!inst) continue;
-
-                if (inst->opcode() == Opcode::call) {
-                    std::string_view callee_name = inst->symbol();
-                    auto it = name_map_.find(callee_name);
-                    Function* callee_fn = (it != name_map_.end()) ? it->second->function : nullptr;
-
-                    CallSite cs;
-                    cs.instruction = inst;
-                    cs.caller_block = bb;
-                    cs.caller = caller_fn;
-                    cs.callee = callee_fn;
-                    cs.callee_name = callee_name;
-                    cs.is_patchable = false;
-                    cs.is_indirect = false;
-                    node->call_sites.push_back(cs);
-
-                    if (callee_fn) {
-                        CallGraphNode* callee_node = get_node(callee_fn);
-                        if (callee_node) {
-                            if (std::find(node->callees.begin(), node->callees.end(), callee_node) == node->callees.end()) {
-                                node->callees.push_back(callee_node);
-                            }
-                            if (std::find(callee_node->callers.begin(), callee_node->callers.end(), node) == callee_node->callers.end()) {
-                                callee_node->callers.push_back(node);
-                            }
-                        }
-                    }
-                } else if (inst->opcode() == Opcode::patchable_call) {
-                    std::string_view callee_name = inst->extra_symbol().empty() ? inst->symbol() : inst->extra_symbol();
-                    Function* callee_fn = module_.get_function(callee_name);
-
-                    CallSite cs;
-                    cs.instruction = inst;
-                    cs.caller_block = bb;
-                    cs.caller = caller_fn;
-                    cs.callee = callee_fn;
-                    cs.callee_name = callee_name;
-                    cs.is_patchable = true;
-                    cs.is_indirect = false;
-                    node->call_sites.push_back(cs);
-
-                    if (callee_fn) {
-                        CallGraphNode* callee_node = get_node(callee_fn);
-                        if (callee_node) {
-                            if (std::find(node->callees.begin(), node->callees.end(), callee_node) == node->callees.end()) {
-                                node->callees.push_back(callee_node);
-                            }
-                            if (std::find(callee_node->callers.begin(), callee_node->callers.end(), node) == callee_node->callers.end()) {
-                                callee_node->callers.push_back(node);
-                            }
-                        }
-                    }
-                } else if (inst->opcode() == Opcode::call_indirect) {
-                    CallSite cs;
-                    cs.instruction = inst;
-                    cs.caller_block = bb;
-                    cs.caller = caller_fn;
-                    cs.callee = nullptr;
-                    cs.callee_name = "";
-                    cs.is_patchable = false;
-                    cs.is_indirect = true;
-                    node->call_sites.push_back(cs);
-                }
+        for (CallGraphNode* callee_node : node->callees) {
+            if (callee_node->callers.empty() || callee_node->callers.back() != node) {
+                callee_node->callers.push_back(node);
             }
         }
-
-        node->is_leaf = node->call_sites.empty();
     }
 
-    // 3. Compute SCCs and bottom-up order
+    // 4. Compute SCCs and bottom-up order
     compute_sccs_and_order();
+}
+
+void CallGraph::scan(CallGraphNode& node) {
+    Function* caller_fn = node.function;
+    std::unordered_set<const CallGraphNode*> linked;
+    auto add_site = [&](Instruction* inst, BasicBlock* bb, Function* callee_fn, std::string_view callee_name,
+                        bool patchable, bool indirect) {
+        CallSite cs;
+        cs.instruction = inst;
+        cs.caller_block = bb;
+        cs.caller = caller_fn;
+        cs.callee = callee_fn;
+        cs.callee_name = callee_name;
+        cs.is_patchable = patchable;
+        cs.is_indirect = indirect;
+        node.call_sites.push_back(cs);
+        if (!callee_fn) return;
+        CallGraphNode* callee_node = get_node(callee_fn);
+        if (callee_node && linked.insert(callee_node).second) node.callees.push_back(callee_node);
+    };
+
+    size_t inst_count = 0;
+    for (BasicBlock* bb : caller_fn->blocks()) {
+        if (!bb) continue;
+        inst_count += bb->instruction_count();
+        for (Instruction* inst : *bb) {
+            if (!inst) continue;
+            if (inst->opcode() == Opcode::call) {
+                std::string_view callee_name = inst->symbol();
+                auto it = name_map_.find(callee_name);
+                Function* callee_fn = (it != name_map_.end()) ? it->second->function : nullptr;
+                add_site(inst, bb, callee_fn, callee_name, false, false);
+            } else if (inst->opcode() == Opcode::patchable_call) {
+                std::string_view callee_name = inst->extra_symbol().empty() ? inst->symbol() : inst->extra_symbol();
+                add_site(inst, bb, module_.get_function(callee_name), callee_name, true, false);
+            } else if (inst->opcode() == Opcode::call_indirect) {
+                add_site(inst, bb, nullptr, "", false, true);
+            }
+        }
+    }
+    node.instruction_count = inst_count;
+    node.is_leaf = node.call_sites.empty();
 }
 
 void CallGraph::compute_sccs_and_order() {

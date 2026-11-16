@@ -230,7 +230,7 @@ bool gvn_function(Function& fn, const GvnOptions& options) {
         std::unordered_map<Value*, Value*> subst_map;
         // The bitcasts of tagged values in scope, by operand: a later one
         // with no GC point since stands for the same bits (gvn_gc_free.hpp).
-        GcFreePaths gc_free(fn);
+        GcFreePaths gc_free(fn, dom);
         std::vector<std::pair<const Value*, Instruction*>> tagged_reads;
         std::vector<size_t> tagged_scopes;
         // What the branch into a block says of its condition, for the blocks

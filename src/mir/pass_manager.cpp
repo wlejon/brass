@@ -168,7 +168,7 @@ PipelineResult run_pipeline(Module& mod, const Pipeline& pipeline, const PassPip
             {
                 PhaseTimeScope timing(step.name);
                 if (step.scope == PassScope::Module) {
-                    const bool mod_changed = step.run_module(mod);
+                    const bool mod_changed = step.run_module(mod, run.threads);
                     result.changed |= mod_changed;
                     if (mod_changed) preds_valid.assign(fns.size(), 0);
                 } else {

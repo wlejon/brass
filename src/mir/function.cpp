@@ -276,12 +276,16 @@ void Function::rebuild_cfg_predecessors() {
         }
     }
 
+    // Each block adds itself to its successors' lists in block order, so a
+    // block already listed as a predecessor is the last one listed (a br_if
+    // with both edges to one block): no scan of the list, which a block with
+    // thousands of predecessors made quadratic.
     for (BasicBlock* bb : blocks_) {
         if (!bb) continue;
         for (BasicBlock* succ : bb->successors()) {
-            if (succ) {
-                succ->add_predecessor(bb);
-            }
+            if (!succ) continue;
+            std::vector<BasicBlock*>& preds = succ->predecessors();
+            if (preds.empty() || preds.back() != bb) preds.push_back(bb);
         }
     }
 }

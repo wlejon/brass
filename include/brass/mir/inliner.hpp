@@ -33,6 +33,9 @@ struct InlinerOptions {
     const pgo::ProfileData* profile_data = nullptr;
     bool enable_pgo = true;
     bool only_inline_leaf_functions = false;
+    // Threads inline_module's per-function scans may use (0: the
+    // machine's); what it inlines does not depend on it.
+    size_t threads = 1;
 };
 
 // Profitability decision for inlining a specific call site

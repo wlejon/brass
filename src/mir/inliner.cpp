@@ -14,7 +14,9 @@
 #include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/speculative_inliner.hpp>
 #include <brass/mir/pass_catalog.hpp>
+#include <brass/core/parallel_for.hpp>
 #include <cstdio>
+#include <unordered_map>
 
 namespace brass {
 
@@ -32,6 +34,22 @@ size_t get_function_instruction_count(const Function& fn) {
     return count;
 }
 
+// Function sizes as inlining weighs them, kept while inline_module runs: a
+// function's size changes only when calls are inlined into it (forget()),
+// and a callee called from thousands of sites is otherwise walked for each.
+class InlineSizes {
+public:
+    size_t of(const Function& fn) {
+        auto [it, fresh] = sizes_.try_emplace(&fn, 0);
+        if (fresh) it->second = get_function_instruction_count(fn);
+        return it->second;
+    }
+    void forget(const Function& fn) { sizes_.erase(&fn); }
+
+private:
+    std::unordered_map<const Function*, size_t> sizes_;
+};
+
 struct InlineCandidate {
     Instruction* call_inst = nullptr;
     Function* callee = nullptr;
@@ -41,35 +59,92 @@ struct InlineCandidate {
     double priority = 0.0;
 };
 
+// The calls in `fn`'s blocks that are not cold to a function of `mod` with
+// a body, other than `fn`, in block order: the sites inlining considers.
+std::vector<std::pair<Instruction*, Function*>> inline_sites(Function& fn, const Module& mod) {
+    std::vector<std::pair<Instruction*, Function*>> sites;
+    for (BasicBlock* bb : fn.blocks()) {
+        if (!bb || bb->is_cold()) continue;
+        for (Instruction* inst : *bb) {
+            if (!inst || (inst->opcode() != Opcode::call && inst->opcode() != Opcode::invoke)) continue;
+            Function* callee = mod.get_function(inst->symbol());
+            if (!callee || callee == &fn) continue;
+            if (callee->blocks().empty() || !callee->entry_block()) continue;
+            sites.emplace_back(inst, callee);
+        }
+    }
+    return sites;
+}
+
+// The depth of the innermost loop around each of `sites` (0: none).
+std::vector<size_t> site_loop_depths(Function& fn, const std::vector<std::pair<Instruction*, Function*>>& sites) {
+    DominatorTree dom(fn);
+    LoopAnalysis loops(fn, dom);
+    std::vector<LoopInfo*> post_loops = loops.post_order_loops();
+    std::vector<size_t> depths;
+    depths.reserve(sites.size());
+    for (const auto& site : sites) {
+        size_t l_depth = 0;
+        for (LoopInfo* loop : post_loops) {
+            if (loop && loop->contains(site.first)) {
+                l_depth = std::max(l_depth, loop->depth());
+            }
+        }
+        depths.push_back(l_depth);
+    }
+    return depths;
+}
+
+// A function's first round of inlining as it can be weighed before any
+// function is inlined into: its sites and their loop depths.
+struct FirstRound {
+    bool ready = false;
+    std::vector<std::pair<Instruction*, Function*>> sites;
+    std::vector<size_t> loop_depths;
+};
+
 } // namespace
 
-bool should_inline_call(
+namespace {
+
+// What decides a call before the loop it is in: refused, taken, or taken
+// when the callee's size is within `threshold` once the loop bonus is
+// applied.
+struct InlineGate {
+    enum Verdict { No, Yes, BySize } verdict = No;
+    double threshold = 0.0;
+    size_t callee_size = 0;
+};
+
+InlineGate inline_gate(
     const Function& caller,
     const CallSite& site,
     const Function& callee,
     const CallGraph& cg,
     size_t current_depth,
-    size_t loop_depth,
     size_t baseline_caller_size,
     size_t current_caller_size,
-    const InlinerOptions& options
+    const InlinerOptions& options,
+    InlineSizes& sizes
 ) {
-    if (&caller == &callee) return false;
-    if (caller.name().starts_with("__wrapper_") || callee.name().starts_with("__wrapper_")) return false;
-    if (callee.blocks().empty() || !callee.entry_block()) return false;
+    InlineGate no;
+    if (&caller == &callee) return no;
+    if (caller.name().starts_with("__wrapper_") || callee.name().starts_with("__wrapper_")) return no;
+    if (callee.blocks().empty() || !callee.entry_block()) return no;
 
     // Reject recursive cycles to prevent code explosion
-    if (cg.is_recursive(&callee)) return false;
+    if (cg.is_recursive(&callee)) return no;
 
     // A call its front end asks to inline: the hinted budget alone.
     if (site.instruction && site.instruction->inline_hint()) {
-        const size_t size = get_function_instruction_count(callee);
-        return current_depth < options.max_inline_depth && size <= options.hinted_callee_instruction_count &&
-               current_caller_size + size <= options.max_total_caller_instructions;
+        const size_t size = sizes.of(callee);
+        const bool yes = current_depth < options.max_inline_depth && size <= options.hinted_callee_instruction_count &&
+                         current_caller_size + size <= options.max_total_caller_instructions;
+        return {yes ? InlineGate::Yes : InlineGate::No, 0.0, 0};
     }
 
     // If restricted to leaf functions for stack trace / unwind safety, reject non-leaf callees
-    if (options.only_inline_leaf_functions && !cg.is_leaf(&callee)) return false;
+    if (options.only_inline_leaf_functions && !cg.is_leaf(&callee)) return no;
 
     size_t effective_max_depth = options.max_inline_depth;
     double threshold = static_cast<double>(options.leaf_instruction_threshold);
@@ -86,7 +161,7 @@ bool should_inline_call(
 
             // Cold call site: suppress inlining
             if (call_count == 0 || call_freq < 0.001) {
-                return false;
+                return no;
             }
 
             // Hot call site: grant significant bonus to inline depth and instruction thresholds
@@ -98,24 +173,42 @@ bool should_inline_call(
     }
 
     // Depth limit
-    if (current_depth >= effective_max_depth) return false;
+    if (current_depth >= effective_max_depth) return no;
 
     // Callee size check
-    size_t callee_size = get_function_instruction_count(callee);
-    if (callee_size > options.max_callee_instruction_count) return false;
+    size_t callee_size = sizes.of(callee);
+    if (callee_size > options.max_callee_instruction_count) return no;
 
     // Projected caller size
     size_t projected_caller_size = current_caller_size + (callee_size > 0 ? callee_size - 1 : 0);
-    if (projected_caller_size > options.max_total_caller_instructions) return false;
+    if (projected_caller_size > options.max_total_caller_instructions) return no;
 
     // Caller growth limit
     if (current_caller_size > 40) {
         double growth = static_cast<double>(projected_caller_size) / static_cast<double>(std::max<size_t>(1, baseline_caller_size));
-        if (growth > options.max_caller_growth_factor) return false;
+        if (growth > options.max_caller_growth_factor) return no;
     }
+    return {InlineGate::BySize, threshold, callee_size};
+}
+
+bool decide_inline(
+    const Function& caller,
+    const CallSite& site,
+    const Function& callee,
+    const CallGraph& cg,
+    size_t current_depth,
+    size_t loop_depth,
+    size_t baseline_caller_size,
+    size_t current_caller_size,
+    const InlinerOptions& options,
+    InlineSizes& sizes
+) {
+    const InlineGate gate = inline_gate(caller, site, callee, cg, current_depth, baseline_caller_size,
+                                        current_caller_size, options, sizes);
+    if (gate.verdict != InlineGate::BySize) return gate.verdict == InlineGate::Yes;
 
     // Profitability model
-    // threshold initialized above and modified by PGO if active
+    double threshold = gate.threshold;
 
     // Loop call priority bonus
     if (options.enable_loop_priority && loop_depth >= 1) {
@@ -136,7 +229,25 @@ bool should_inline_call(
         threshold = std::max(threshold, 40.0);
     }
 
-    return static_cast<double>(callee_size) <= threshold;
+    return static_cast<double>(gate.callee_size) <= threshold;
+}
+
+} // namespace
+
+bool should_inline_call(
+    const Function& caller,
+    const CallSite& site,
+    const Function& callee,
+    const CallGraph& cg,
+    size_t current_depth,
+    size_t loop_depth,
+    size_t baseline_caller_size,
+    size_t current_caller_size,
+    const InlinerOptions& options
+) {
+    InlineSizes sizes;
+    return decide_inline(caller, site, callee, cg, current_depth, loop_depth, baseline_caller_size,
+                         current_caller_size, options, sizes);
 }
 
 bool inline_function(Function& fn, Module& mod) {
@@ -144,62 +255,85 @@ bool inline_function(Function& fn, Module& mod) {
     return inline_function(fn, mod, opts);
 }
 
+namespace {
+
+bool inline_into(Function& fn, Module& mod, const InlinerOptions& options, const CallGraph& cg,
+                 InlineSizes& sizes, FirstRound* first = nullptr);
+
+} // namespace
+
 bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, const CallGraph* external_cg) {
+    std::unique_ptr<CallGraph> local_cg;
+    const CallGraph& cg = external_cg ? *external_cg : *(local_cg = std::make_unique<CallGraph>(mod));
+    InlineSizes sizes;
+    return inline_into(fn, mod, options, cg, sizes);
+}
+
+namespace {
+
+bool inline_into(Function& fn, Module& mod, const InlinerOptions& options, const CallGraph& cg,
+                 InlineSizes& sizes, FirstRound* first) {
     if (fn.blocks().empty() || !fn.entry_block()) return false;
 
     if (options.enable_devirtualization) {
         devirtualize_function(fn, mod);
+        sizes.forget(fn);
     }
 
     bool any_changed = false;
     size_t baseline_size = get_function_instruction_count(fn);
     size_t current_size = baseline_size;
 
-    std::unique_ptr<CallGraph> local_cg;
-    const CallGraph& cg = external_cg ? *external_cg : *(local_cg = std::make_unique<CallGraph>(mod));
-
     for (size_t depth = 0; depth < options.max_inline_depth; ++depth) {
         fn.rebuild_cfg_predecessors();
-        DominatorTree dom(fn);
-        LoopAnalysis loops(fn, dom);
 
-        std::vector<LoopInfo*> post_loops = loops.post_order_loops();
-
-        // Discover candidate call sites
-        std::vector<InlineCandidate> candidates;
-        for (BasicBlock* bb : fn.blocks()) {
-            if (!bb || bb->is_cold()) continue;
-            for (Instruction* inst : *bb) {
-                if (!inst || (inst->opcode() != Opcode::call && inst->opcode() != Opcode::invoke)) continue;
-
-                Function* callee = mod.get_function(inst->symbol());
-                if (!callee || callee == &fn) continue;
-                if (callee->blocks().empty() || !callee->entry_block()) continue;
-
-                // Find loop depth
-                size_t l_depth = 0;
-                for (LoopInfo* loop : post_loops) {
-                    if (loop && loop->contains(inst)) {
-                        l_depth = std::max(l_depth, loop->depth());
-                    }
-                }
-
-                size_t c_size = get_function_instruction_count(*callee);
-                bool is_leaf = cg.is_leaf(callee);
-
-                double priority = static_cast<double>(l_depth) * 1000.0 +
-                                  (1000.0 / (static_cast<double>(c_size) + 1.0)) +
-                                  (is_leaf ? 500.0 : 0.0);
-
-                InlineCandidate cand;
-                cand.call_inst = inst;
-                cand.callee = callee;
-                cand.loop_depth = l_depth;
-                cand.callee_size = c_size;
-                cand.is_leaf = is_leaf;
-                cand.priority = priority;
-                candidates.push_back(cand);
+        // The call sites a callee body could be inlined at, found before
+        // the dominator tree and loops that only weigh them are built: most
+        // functions have none. The first round's were found by
+        // inline_module, from the function as it is now.
+        const bool given = depth == 0 && first && first->ready;
+        const std::vector<std::pair<Instruction*, Function*>> sites =
+            given ? std::move(first->sites) : inline_sites(fn, mod);
+        // Nor when every site is refused whatever loop it is in: then no
+        // candidate below would be taken.
+        bool any_possible = false;
+        for (const auto& [inst, callee] : sites) {
+            CallSite site;
+            site.instruction = inst;
+            site.caller = &fn;
+            site.callee = callee;
+            if (inline_gate(fn, site, *callee, cg, depth, baseline_size, current_size, options, sizes).verdict !=
+                InlineGate::No) {
+                any_possible = true;
+                break;
             }
+        }
+        if (!any_possible) break;
+
+        const std::vector<size_t> loop_depths = given ? std::move(first->loop_depths) : site_loop_depths(fn, sites);
+
+        // Weigh them
+        std::vector<InlineCandidate> candidates;
+        candidates.reserve(sites.size());
+        for (size_t k = 0; k < sites.size(); ++k) {
+            const auto& [inst, callee] = sites[k];
+            const size_t l_depth = loop_depths[k];
+
+            size_t c_size = sizes.of(*callee);
+            bool is_leaf = cg.is_leaf(callee);
+
+            double priority = static_cast<double>(l_depth) * 1000.0 +
+                              (1000.0 / (static_cast<double>(c_size) + 1.0)) +
+                              (is_leaf ? 500.0 : 0.0);
+
+            InlineCandidate cand;
+            cand.call_inst = inst;
+            cand.callee = callee;
+            cand.loop_depth = l_depth;
+            cand.callee_size = c_size;
+            cand.is_leaf = is_leaf;
+            cand.priority = priority;
+            candidates.push_back(cand);
         }
 
         if (candidates.empty()) break;
@@ -220,7 +354,8 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, c
             dummy_site.caller = &fn;
             dummy_site.callee = cand.callee;
 
-            if (!should_inline_call(fn, dummy_site, *cand.callee, cg, depth, cand.loop_depth, baseline_size, current_size, options)) {
+            if (!decide_inline(fn, dummy_site, *cand.callee, cg, depth, cand.loop_depth, baseline_size, current_size,
+                               options, sizes)) {
                 continue;
             }
 
@@ -228,6 +363,7 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, c
             if (res.success) {
                 inlined_any_in_round = true;
                 any_changed = true;
+                sizes.forget(fn);
                 current_size = get_function_instruction_count(fn);
                 // Re-evaluate CFG after each inline to avoid stale blocks
                 break;
@@ -243,6 +379,8 @@ bool inline_function(Function& fn, Module& mod, const InlinerOptions& options, c
     return any_changed;
 }
 
+} // namespace
+
 bool inline_module(Module& mod) {
     InlinerOptions opts;
     return inline_module(mod, opts);
@@ -253,15 +391,47 @@ bool inline_module(Module& mod, const InlinerOptions& options) {
         devirtualize_module(mod);
     }
 
-    CallGraph cg(mod);
+    CallGraph cg(mod, options.threads);
     const std::vector<Function*>& order = cg.bottom_up_order();
 
+    // What inline_function does first to a function, for all of them at
+    // once: rebuild its predecessor lists, find the calls it could inline,
+    // and the loops they are in. Inlining into one function reads its
+    // callees and changes only it, so a function is the same here as when
+    // its turn comes, and one without calls is done: inline_function would
+    // stop there. (Devirtualization rewrites calls first, so it takes the
+    // serial way.)
+    std::vector<uint8_t> has_sites(order.size(), 1);
+    std::vector<FirstRound> firsts(order.size());
+    if (!options.enable_devirtualization) {
+        std::vector<size_t> weights(order.size(), 0);
+        size_t total = 0;
+        for (size_t i = 0; i < order.size(); ++i) {
+            if (order[i]) weights[i] = order[i]->block_count();
+            total += weights[i];
+        }
+        const size_t n = threads_for_work(options.threads, order.size(), total, 2000);
+        parallel_for_each(heaviest_first(weights), n, [&](size_t i) {
+            Function* fn = order[i];
+            if (!fn || fn->name().starts_with("__wrapper_") || fn->blocks().empty() || !fn->entry_block()) return;
+            fn->rebuild_cfg_predecessors();
+            FirstRound& f = firsts[i];
+            f.sites = inline_sites(*fn, mod);
+            has_sites[i] = f.sites.empty() ? 0 : 1;
+            if (f.sites.empty()) return;
+            f.loop_depths = site_loop_depths(*fn, f.sites);
+            f.ready = true;
+        });
+    }
+
+    InlineSizes sizes;
     bool changed = false;
-    for (Function* fn : order) {
-        if (!fn) continue;
+    for (size_t i = 0; i < order.size(); ++i) {
+        Function* fn = order[i];
+        if (!fn || !has_sites[i]) continue;
         if (fn->name().starts_with("__wrapper_")) continue;
-        // Don't inline into a function that is strictly recursive with itself if forbidden
-        changed |= inline_function(*fn, mod, options, &cg);
+        changed |= inline_into(*fn, mod, options, cg, sizes, &firsts[i]);
+        firsts[i] = FirstRound{};
     }
 
     return changed;

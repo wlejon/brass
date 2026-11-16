@@ -5,6 +5,7 @@
 #include <brass/mir/branch_probability.hpp>
 #include <brass/mir/branch_split.hpp>
 #include <brass/mir/cfg_simplify.hpp>
+#include <brass/mir/dense_id_map.hpp>
 #include <brass/mir/critical_edge.hpp>
 #include <brass/mir/devirtualize.hpp>
 #include <brass/mir/dominators.hpp>
@@ -70,12 +71,16 @@ PassStep loop_step(std::string name, std::function<bool(Function&)> run,
     return function_step(std::move(name), FunctionFilter::LoopEligible, std::move(run), std::move(follow_up));
 }
 
-PassStep module_step(std::string name, std::function<bool(Module&)> run) {
+PassStep module_step(std::string name, std::function<bool(Module&, size_t threads)> run) {
     PassStep s;
     s.name = std::move(name);
     s.scope = PassScope::Module;
     s.run_module = std::move(run);
     return s;
+}
+
+PassStep module_step(std::string name, std::function<bool(Module&)> run) {
+    return module_step(std::move(name), [run = std::move(run)](Module& mod, size_t) { return run(mod); });
 }
 
 // The cleanup the loop driver has always run after a transform: the full
@@ -116,6 +121,39 @@ bool has_hot_loop(Function& fn, const pgo::ProfileData* profile, uint64_t min_he
         const uint64_t ph_cnt = ph ? bpa.block_frequency_info().get_block_count(ph) : 0;
         const uint64_t iters = ph_cnt > 0 ? hdr_cnt / ph_cnt : hdr_cnt;
         if (iters >= min_iterations && hdr_cnt >= min_header_count) return true;
+    }
+    return false;
+}
+
+// Whether a walk from the entry along successor edges meets a block still
+// on its path (a retreating edge): the CFG the entry reaches has a cycle.
+bool reaches_a_cycle(const Function& fn) {
+    const BasicBlock* entry = fn.entry_block();
+    if (!entry) return false;
+    DenseIdMap<BasicBlock, uint8_t> state(fn.current_next_block_id());  // 1 on the path, 2 done
+    struct Frame {
+        const BasicBlock* bb;
+        SuccessorList succs;
+        size_t next;
+    };
+    std::vector<Frame> stack;
+    state.insert(entry, 1);
+    stack.push_back({entry, entry->successors(), 0});
+    while (!stack.empty()) {
+        Frame& f = stack.back();
+        if (f.next == f.succs.size()) {
+            *state.find(f.bb) = 2;
+            stack.pop_back();
+            continue;
+        }
+        const BasicBlock* succ = f.succs[f.next++];
+        if (!succ) continue;
+        if (const uint8_t* st = state.find(succ)) {
+            if (*st == 1) return true;
+            continue;
+        }
+        state.insert(succ, 1);
+        stack.push_back({succ, succ->successors(), 0});
     }
     return false;
 }
@@ -334,6 +372,14 @@ PassStep parallel_loops(const LoopOptOptions& options) {
     // (Module::create_function), named and placed in the order the loops
     // are found.
     return serial_when(true, loop_step("parallel_loops", [base, forced](Function& fn) {
+        // No cycle among the blocks the entry reaches, no loop: all
+        // auto_parallelize_function would do is make the predecessor lists
+        // current, which is done here without its dominator tree and loop
+        // analysis. Most functions take this way out of the serial step.
+        if (fn.name().find("_par_k_") == std::string_view::npos && !reaches_a_cycle(fn)) {
+            fn.rebuild_cfg_predecessors();
+            return false;
+        }
         ParallelLoopOptions o = base;
         o.allow_fp_reassociation = fp_reassociation_allowed(fn, forced);
         DominatorTree dom(fn);
@@ -445,7 +491,11 @@ PassStep speculative_devirtualization(const runtime::FeedbackRegistry& registry,
 PassStep inline_calls(const InlinerOptions& options) {
     InlinerOptions o = options;
     o.enable_devirtualization = false;
-    return module_step("inline", [o](Module& mod) { return inline_module(mod, o); });
+    return module_step("inline", [o](Module& mod, size_t threads) {
+        InlinerOptions with = o;
+        with.threads = threads;
+        return inline_module(mod, with);
+    });
 }
 
 } // namespace brass::passes

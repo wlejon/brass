@@ -35,7 +35,9 @@ struct PassStep {
     std::string name;
     PassScope scope = PassScope::Function;
     FunctionFilter filter = FunctionFilter::All;
-    std::function<bool(Module&)> run_module;
+    // A module step is given the threads the run may use
+    // (PipelineRunOptions::threads); its output must not depend on them.
+    std::function<bool(Module&, size_t threads)> run_module;
     std::function<bool(Function&)> run_function;
     // Optional: runs on each function the step changed (a cleanup the step
     // needs, such as DCE after vectorization). Part of the step, reported

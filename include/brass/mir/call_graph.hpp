@@ -34,7 +34,9 @@ struct CallGraphNode {
 
 class CallGraph {
 public:
-    explicit CallGraph(Module& module);
+    // `threads`: how many the per-function scan may use (0: the machine's);
+    // the graph does not depend on it.
+    explicit CallGraph(Module& module, size_t threads = 1);
     ~CallGraph() = default;
 
     CallGraph(const CallGraph&) = delete;
@@ -61,7 +63,13 @@ public:
     void rebuild();
 
 private:
+    // A thread per this many blocks of the module, at most `threads_`.
+    static constexpr size_t kMinBlocksPerThread = 2000;
+
+    void scan(CallGraphNode& node);
+
     Module& module_;
+    size_t threads_ = 1;
     std::vector<CallGraphNode*> ordered_nodes_;
     std::unordered_map<const Function*, std::unique_ptr<CallGraphNode>> node_map_;
     std::unordered_map<std::string_view, CallGraphNode*> name_map_;

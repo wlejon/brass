@@ -1,5 +1,6 @@
 #include <brass/mir/coro_transform.hpp>
 #include <brass/mir/block_liveness.hpp>
+#include <brass/core/parallel_for.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
 #include <brass/mir/instruction.hpp>
@@ -73,13 +74,6 @@ BasicBlock* def_block_of(const Value* v) {
     if (v->is_block_param()) return v->defining_block();
     Instruction* d = v->defining_instruction();
     return d ? d->parent() : nullptr;
-}
-
-bool block_uses(BasicBlock* bb, const Value* v) {
-    for (Instruction* inst : *bb) {
-        if (uses_value(*inst, v)) return true;
-    }
-    return false;
 }
 
 std::string fn_desc(const Function& fn) {
@@ -270,49 +264,14 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
 
     // 3. Liveness over the original CFG. A use is any value slot of an
     // instruction: operands, deopt state and the arguments of every edge.
-    std::unordered_map<BasicBlock*, std::unordered_set<Value*>> def_map;
-    std::unordered_map<BasicBlock*, std::unordered_set<Value*>> use_map;
-
-    for (BasicBlock* bb : fn.blocks()) {
-        auto& defs = def_map[bb];
-        auto& uses = use_map[bb];
-        for (Value* p : bb->params()) defs.insert(p);
-        for (Instruction* inst : *bb) {
-            for_each_use(*inst, [&](Value* op) {
-                if (defs.find(op) == defs.end()) uses.insert(op);
-            });
-            if (inst->result()) defs.insert(inst->result());
-        }
+    // Only what is live out of a suspend's block is asked: the live-ins of
+    // those blocks' successors (block_live_ins walks each value from its
+    // uses back to its definition, so the cost is the size of the answer).
+    std::vector<const BasicBlock*> suspend_succs;
+    for (const auto& sp : suspends) {
+        for (const BasicBlock* s : sp.block->successors()) suspend_succs.push_back(s);
     }
-
-    std::unordered_map<BasicBlock*, std::unordered_set<Value*>> live_in;
-    std::unordered_map<BasicBlock*, std::unordered_set<Value*>> live_out;
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (BasicBlock* bb : fn.blocks()) {
-            std::unordered_set<Value*> new_out;
-            for (BasicBlock* succ : bb->successors()) {
-                const auto& in_succ = live_in[succ];
-                new_out.insert(in_succ.begin(), in_succ.end());
-            }
-            if (new_out != live_out[bb]) {
-                live_out[bb] = std::move(new_out);
-                changed = true;
-            }
-
-            std::unordered_set<Value*> new_in = use_map[bb];
-            for (Value* v : live_out[bb]) {
-                if (def_map[bb].find(v) == def_map[bb].end()) {
-                    new_in.insert(v);
-                }
-            }
-            if (new_in != live_in[bb]) {
-                live_in[bb] = std::move(new_in);
-                changed = true;
-            }
-        }
-    }
+    const BlockLiveIns succ_live_in = block_live_ins(fn, suspend_succs);
 
     // An alloca is stack memory of one invocation of the body, and each
     // resume is a new invocation: the entry block's allocas are re-created by
@@ -326,7 +285,12 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
     // Values live just after each suspend: they cross it.
     std::unordered_set<Value*> crossing;
     for (auto& sp : suspends) {
-        std::unordered_set<Value*> cur_live = live_out[sp.block];
+        std::unordered_set<Value*> cur_live;
+        for (const BasicBlock* s : sp.block->successors()) {
+            auto it = succ_live_in.find(s);
+            if (it == succ_live_in.end()) continue;
+            for (const Value* v : it->second) cur_live.insert(const_cast<Value*>(v));
+        }
         for (Instruction* inst = sp.block->tail(); inst && inst != sp.inst; inst = inst->prev()) {
             if (inst->result()) cur_live.erase(inst->result());
             for_each_use(*inst, [&](Value* op) { cur_live.insert(op); });
@@ -550,15 +514,35 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
         if (it != slot_map.end()) reloads.emplace_back(it->first, it->second);
     }
     for (Value* v : spilled) reloads.emplace_back(v, slot_map[v]);
-    for (const auto& [v, slot] : reloads) {
+    // The blocks reading each of them, in block order, from one walk of the
+    // body. A reload reads only the frame and renames only its own value, so
+    // which blocks read the others does not change as they are placed.
+    std::unordered_map<const Value*, size_t> reload_of;
+    reload_of.reserve(reloads.size());
+    for (size_t i = 0; i < reloads.size(); ++i) reload_of.emplace(reloads[i].first, i);
+    std::vector<std::vector<BasicBlock*>> readers(reloads.size());
+    if (!reloads.empty()) {
+        for (BasicBlock* bb : fn.blocks()) {
+            for (Instruction* inst : *bb) {
+                for_each_use(*inst, [&](Value* op) {
+                    auto it = reload_of.find(op);
+                    if (it == reload_of.end()) return;
+                    std::vector<BasicBlock*>& r = readers[it->second];
+                    if (r.empty() || r.back() != bb) r.push_back(bb);
+                });
+            }
+        }
+    }
+    for (size_t ri = 0; ri < reloads.size(); ++ri) {
+        Value* v = reloads[ri].first;
+        const uint32_t slot = reloads[ri].second;
         BasicBlock* def_bb = def_block_of(v);
         if (!def_bb) {
             throw std::logic_error(fn_desc(fn) + "a value live across a suspend has no defining block");
         }
-        for (BasicBlock* bb : fn.blocks()) {
+        for (BasicBlock* bb : readers[ri]) {
             if (bb == def_bb || bb == entry_bb) continue;
             if (dom.is_reachable(bb) && dom.dominates(def_bb, bb)) continue;
-            if (!block_uses(bb, v)) continue;
             Instruction* ld = make_load(fn, arena, v->type(), global_frame_param, slot_offset(slot));
             // A landing pad stays its block's first instruction.
             Instruction* head = bb->head();
@@ -580,37 +564,81 @@ bool CoroTransformPass::run_on_function(Function& fn, bool force, int64_t create
 }
 
 bool CoroTransformPass::run_on_module(Module& mod) {
+    // One scan of every body for its coroutine ops, a function per item. A
+    // lazy body has no coroutine ops (Module::materialize checks), and
+    // another thread may be building it.
+    const std::vector<Function*> fns = mod.functions();
+    struct Scan {
+        bool suspends = false;
+        std::vector<std::pair<std::string_view, int64_t>> creates;
+    };
+    std::vector<Scan> scans(fns.size());
+    std::vector<size_t> weights(fns.size());
+    size_t total = 0;
+    for (size_t i = 0; i < fns.size(); ++i) {
+        weights[i] = (fns[i] && fns[i]->body_ready() ? fns[i]->block_count() : 0) + 1;
+        total += weights[i];
+    }
+    const size_t threads = options_.stats ? 1 : options_.threads;
+    parallel_for_each(heaviest_first(weights), threads_for_work(threads, fns.size(), total, 256), [&](size_t i) {
+        const Function* fn = fns[i];
+        if (!fn || !fn->body_ready()) return;
+        for (const BasicBlock* bb : fn->blocks()) {
+            for (const Instruction* inst : *bb) {
+                if (inst->opcode() == Opcode::coro_suspend) scans[i].suspends = true;
+                if (inst->opcode() == Opcode::coro_create) {
+                    scans[i].creates.emplace_back(inst->symbol(), static_cast<int64_t>(inst->operand_count()));
+                }
+            }
+        }
+    });
+
     // Every coro_create target is a coroutine body, suspends or not; every
     // coro_create of one body passes the same number of arguments.
     std::unordered_map<std::string_view, int64_t> coro_targets;
-    // A lazy body has no coroutine ops (Module::materialize checks), and
-    // another thread may be building it.
-    for (Function* fn : mod.functions()) {
-        if (!fn || !fn->body_ready()) continue;
-        for (BasicBlock* bb : fn->blocks()) {
-            for (Instruction* inst : *bb) {
-                if (inst->opcode() != Opcode::coro_create) continue;
-                const auto n = static_cast<int64_t>(inst->operand_count());
-                auto [it, fresh] = coro_targets.emplace(inst->symbol(), n);
-                if (!fresh && it->second != n) {
-                    throw std::logic_error("coroutine lowering: coro_create @" + std::string(inst->symbol()) +
-                                           " is passed both " + std::to_string(it->second) + " and " +
-                                           std::to_string(n) + " arguments");
-                }
+    for (const Scan& scan : scans) {
+        for (const auto& [sym, n] : scan.creates) {
+            auto [it, fresh] = coro_targets.emplace(sym, n);
+            if (!fresh && it->second != n) {
+                throw std::logic_error("coroutine lowering: coro_create @" + std::string(sym) + " is passed both " +
+                                       std::to_string(it->second) + " and " + std::to_string(n) + " arguments");
             }
         }
     }
 
-    bool changed = false;
-    for (Function* fn : mod.functions()) {
+    // The bodies to lower, each on its own (its IR in its own work arena),
+    // on up to `threads` threads: a body reads and writes only itself.
+    std::vector<size_t> bodies;
+    std::vector<int64_t> arg_counts(fns.size(), -1);
+    std::vector<uint8_t> forced(fns.size(), 0);
+    std::vector<size_t> body_weights(fns.size(), 0);
+    size_t body_total = 0;
+    for (size_t i = 0; i < fns.size(); ++i) {
+        Function* fn = fns[i];
         if (!fn || !fn->body_ready()) continue;
         auto it = coro_targets.find(fn->name());
-        const bool target = it != coro_targets.end();
-        if (run_on_function(*fn, target, target ? it->second : -1)) {
-            changed = true;
+        if (it != coro_targets.end()) {
+            forced[i] = 1;
+            arg_counts[i] = it->second;
         }
+        if (!scans[i].suspends && !forced[i]) continue;
+        bodies.push_back(i);
+        // Superlinear in a body's size: its largest bodies start first.
+        body_weights[i] = fn->block_count() * fn->block_count() + 1;
+        body_total += fn->block_count() + 1;
     }
-    return changed;
+    std::vector<uint8_t> changed(fns.size(), 0);
+    std::vector<size_t> order;
+    for (size_t i : heaviest_first(body_weights)) {
+        if (body_weights[i]) order.push_back(i);
+    }
+    parallel_for_each(order, threads_for_work(threads, bodies.size(), body_total, 256), [&](size_t i) {
+        FunctionWorkScope work(*fns[i]);
+        changed[i] = run_on_function(*fns[i], forced[i] != 0, arg_counts[i]) ? 1 : 0;
+    });
+    bool any = false;
+    for (uint8_t c : changed) any |= c != 0;
+    return any;
 }
 
 bool is_lowered_coro_body(const Function& fn) {
@@ -690,23 +718,11 @@ CoroFrameLayout compute_coro_frame_layout(const Function& fn) {
     return layout;
 }
 
-bool lower_coroutines(Module& mod) {
+bool lower_coroutines(Module& mod, size_t threads) {
     // Cheap when there is nothing to lower: a scan for the coroutine ops.
-    bool any = false;
-    for (const Function* fn : mod.functions()) {
-        if (!fn || !fn->body_ready()) continue;
-        for (const BasicBlock* bb : fn->blocks()) {
-            for (const Instruction* inst : *bb) {
-                if (inst->opcode() == Opcode::coro_suspend || inst->opcode() == Opcode::coro_create) {
-                    any = true;
-                    break;
-                }
-            }
-            if (any) break;
-        }
-        if (any) break;
-    }
-    return any && CoroTransformPass().run_on_module(mod);
+    CoroTransformOptions options;
+    options.threads = threads;
+    return CoroTransformPass(options).run_on_module(mod);
 }
 
 } // namespace brass

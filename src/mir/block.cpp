@@ -1,10 +1,14 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/function.hpp>
 #include <algorithm>
+#include <unordered_set>
 
 namespace brass {
 
 namespace {
+// Switches up to this many cases find duplicate targets by a scan.
+constexpr size_t kLinearDedupCases = 16;
+
 // A guard arriving with an id of its own (cloned, inlined, moved) keeps the
 // function's next fresh id past it (Function::take_guard_resume_id).
 void note_guard(const BasicBlock* bb, const Instruction* inst) noexcept {
@@ -147,9 +151,19 @@ SuccessorList BasicBlock::successors() const {
         if (term->default_target().block) {
             succs.push_back(term->default_target().block);
         }
-        for (const auto& sc : term->switch_cases()) {
-            if (sc.target.block && std::find(succs.begin(), succs.end(), sc.target.block) == succs.end()) {
-                succs.push_back(sc.target.block);
+        const auto& cases = term->switch_cases();
+        if (cases.size() <= kLinearDedupCases) {
+            for (const auto& sc : cases) {
+                if (sc.target.block && std::find(succs.begin(), succs.end(), sc.target.block) == succs.end()) {
+                    succs.push_back(sc.target.block);
+                }
+            }
+        } else {
+            // A large switch (a coroutine's resume dispatch): each target
+            // once, in case order, without a scan of those taken so far.
+            std::unordered_set<const BasicBlock*> taken(succs.begin(), succs.end());
+            for (const auto& sc : cases) {
+                if (sc.target.block && taken.insert(sc.target.block).second) succs.push_back(sc.target.block);
             }
         }
     } else if (term->opcode() == Opcode::invoke) {
