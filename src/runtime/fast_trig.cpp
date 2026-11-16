@@ -32,9 +32,9 @@
 // Every expression is fdlibm's, so the results are its bits. What the fast
 // path cannot give the same bits for (fdlibm's cancellation steps, which its
 // quick check against the multiples' high words decides, and |x| > 2^19 *
-// pi/2) takes fdlibm_rem_pio2 whole, on a branch taken about never. On ELF
-// x86-64 the three entry points are cloned for AVX (an ifunc, resolved once
-// into the GOT): the VEX forms take no register copies.
+// pi/2) takes fdlibm_rem_pio2 whole, on a branch taken about never. On
+// x86-64 the three entry points have an AVX body beside the plain one, picked
+// on the first call (see the entry points at the end of this file).
 
 #include <brass/runtime/fast_trig.hpp>
 #include <bit>
@@ -487,12 +487,6 @@ inline double eval_quadrant(double y0, double y1, uint32_t use_cos) noexcept {
     return select_f64(use_cos, sin_val, cos_val);
 }
 
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__ELF__)
-#define BRASS_TRIG_CLONES __attribute__((target_clones("avx", "default")))
-#else
-#define BRASS_TRIG_CLONES
-#endif
-
 // Out of line, so the fast path takes no local's address: one would give it
 // a stack canary, a dozen instructions on every call.
 #if defined(_MSC_VER)
@@ -667,12 +661,71 @@ void sincos_f64(double x, double* out) noexcept { brass_sincos_f64(x, out); }
 
 } // namespace brass::math
 
-// The bodies are the C entry points, the symbols compiled code calls, so a
-// call reaches the kernel with no hop between.
+// The C entry points, the symbols compiled code calls. On x86-64 with GCC or
+// clang each has two bodies, one compiled for AVX (the VEX forms take no
+// register copies), and jumps through a pointer that the first call sets
+// from the CPU. Not target_clones: that makes the symbol an ifunc, and the
+// loader refuses a shared library's reference to an ifunc when an executable
+// that links brass statically defines the symbol too ("unsatisfied circular
+// dependency"), which is how bro's test executables are linked.
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+#define BRASS_TRIG_BASE __attribute__((flatten))
+#define BRASS_TRIG_AVX __attribute__((flatten, target("avx")))
+
+namespace {
+
+BRASS_TRIG_BASE double sin_base(double x) { return brass::math::sin_impl(x); }
+BRASS_TRIG_BASE double cos_base(double x) { return brass::math::cos_impl(x); }
+BRASS_TRIG_BASE void sincos_base(double x, double* out) { brass::math::sincos_impl(x, out); }
+BRASS_TRIG_AVX double sin_avx(double x) { return brass::math::sin_impl(x); }
+BRASS_TRIG_AVX double cos_avx(double x) { return brass::math::cos_impl(x); }
+BRASS_TRIG_AVX void sincos_avx(double x, double* out) { brass::math::sincos_impl(x, out); }
+
+double sin_first(double x);
+double cos_first(double x);
+void sincos_first(double x, double* out);
+
+// Plain words written with the same values by any thread that gets there
+// first: a race on them is between equal stores.
+double (*g_sin)(double) = sin_first;
+double (*g_cos)(double) = cos_first;
+void (*g_sincos)(double, double*) = sincos_first;
+
+void choose() {
+    const bool avx = __builtin_cpu_supports("avx");
+    g_sin = avx ? sin_avx : sin_base;
+    g_cos = avx ? cos_avx : cos_base;
+    g_sincos = avx ? sincos_avx : sincos_base;
+}
+
+double sin_first(double x) {
+    choose();
+    return g_sin(x);
+}
+double cos_first(double x) {
+    choose();
+    return g_cos(x);
+}
+void sincos_first(double x, double* out) {
+    choose();
+    g_sincos(x, out);
+}
+
+} // namespace
+
 extern "C" {
 
-BRASS_TRIG_CLONES double brass_sin_f64(double x) { return brass::math::sin_impl(x); }
-BRASS_TRIG_CLONES double brass_cos_f64(double x) { return brass::math::cos_impl(x); }
-BRASS_TRIG_CLONES void brass_sincos_f64(double x, double* out) { brass::math::sincos_impl(x, out); }
+double brass_sin_f64(double x) { return g_sin(x); }
+double brass_cos_f64(double x) { return g_cos(x); }
+void brass_sincos_f64(double x, double* out) { g_sincos(x, out); }
 
 } // extern "C"
+#else
+extern "C" {
+
+double brass_sin_f64(double x) { return brass::math::sin_impl(x); }
+double brass_cos_f64(double x) { return brass::math::cos_impl(x); }
+void brass_sincos_f64(double x, double* out) { brass::math::sincos_impl(x, out); }
+
+} // extern "C"
+#endif
