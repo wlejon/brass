@@ -6,11 +6,21 @@
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/proof_cert.hpp>
+#include <algorithm>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace brass {
+
+uint32_t count_guards_with_resume_id(const BasicBlock& bb, uint32_t resume_id) {
+    uint32_t n = 0;
+    for (const Instruction* inst : const_cast<BasicBlock&>(bb)) {
+        if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == resume_id) ++n;
+    }
+    return n;
+}
+
 
 namespace {
 
@@ -226,12 +236,9 @@ void verify_guard_elim_certificates(
             continue;
         }
 
-        for (const Instruction* inst : *bb) {
-            if (inst && inst->opcode() == Opcode::guard && inst->resume_id() == cert.eliminated_resume_id) {
-                report_error(cert_prefix + "claims guard was eliminated in block '" + std::string(bb->name()) +
-                             "', but guard is still present.");
-                break;
-            }
+        if (count_guards_with_resume_id(*bb, cert.eliminated_resume_id) >= std::max(1u, cert.same_id_guards)) {
+            report_error(cert_prefix + "claims guard was eliminated in block '" + std::string(bb->name()) +
+                         "', but guard is still present.");
         }
 
         if (cert.bound_min > cert.bound_max) {

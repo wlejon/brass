@@ -275,7 +275,7 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
     // Every state value keeps its position (the resume side maps them by
     // index) and its kind, so the lower tier rebuilds exactly typed values.
     exit_inst->deopt_kinds.reserve(inst.state_map().size());
-    for (const auto* val : inst.state_map()) {
+    for (const Value* val : inst.state_map()) {
         if (!val) {
             exit_inst->add_use(LirOperand::imm(0, 8));
             exit_inst->deopt_kinds.push_back(static_cast<uint8_t>(runtime::DeoptValueKind::Int64));
@@ -300,9 +300,24 @@ void X64ISel::lower_guard(const Instruction& inst, LirBlock& lir_bb) {
         } else {
             kind = runtime::DeoptValueKind::Int32;
         }
+        // A value only exits read is written by the exit from its source
+        // (x64_isel_guard_state.cpp).
+        GuardStateConv conv = GuardStateConv::None;
+        int64_t conv_imm = 0;
+        if (const auto fold = guard_state_folds_.find(val); fold != guard_state_folds_.end()) {
+            val = fold->second.src;
+            conv = fold->second.conv;
+            conv_imm = fold->second.imm;
+        }
         VReg vr = get_vreg(val);
         exit_inst->add_use(LirOperand::vreg(vr, vr.size));
         exit_inst->deopt_kinds.push_back(static_cast<uint8_t>(kind));
+        if (conv != GuardStateConv::None) {
+            exit_inst->state_convs.resize(inst.state_map().size(), static_cast<uint8_t>(GuardStateConv::None));
+            exit_inst->state_conv_imms.resize(inst.state_map().size(), 0);
+            exit_inst->state_convs[exit_inst->uses.size() - 1] = static_cast<uint8_t>(conv);
+            exit_inst->state_conv_imms[exit_inst->uses.size() - 1] = conv_imm;
+        }
     }
     deopt_block->append_inst(std::move(exit_inst));
 }

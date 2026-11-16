@@ -665,6 +665,7 @@ bool run_smt_guard_elimination(
                         GuardElimCert cert;
                         cert.eliminated_resume_id = cur->resume_id();
                         cert.block_id = bb->id();
+                        cert.same_id_guards = count_guards_with_resume_id(*bb, cur->resume_id());
                         cert.reason = GuardElimCert::Reason::SmtProven;
                         cert.witness_inst_or_val_id = 0;
                         fn.add_guard_elim_cert(cert);

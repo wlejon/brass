@@ -829,6 +829,7 @@ bool eliminate_range_decided_checks(
                     }
                     cert.eliminated_resume_id = cur->resume_id();
                     cert.block_id = bb->id();
+                    cert.same_id_guards = count_guards_with_resume_id(*bb, cur->resume_id());
                     fn.add_guard_elim_cert(cert);
                     bb->remove_instruction(cur);
                     if (opts.stats) opts.stats->guards_eliminated++;

@@ -160,6 +160,35 @@ void EmitContext::store_guard_state(const LirInst& inst, int32_t slots_disp) {
                               std::string("state value operand of kind ") + std::string(to_string(op.kind)));
         }
     }
+    // The exit-only conversions (GuardStateConv), each in its slot. Every
+    // state value is stored by now and the exit's call clobbers RAX and
+    // XMM0 anyway, so they are free.
+    for (size_t i = 0; i < inst.state_convs.size(); ++i) {
+        const auto slot = ptr(GPR::RSP, slots_disp + static_cast<int32_t>(i * 8));
+        switch (static_cast<GuardStateConv>(inst.state_convs[i])) {
+            case GuardStateConv::None:
+                break;
+            case GuardStateConv::CanonF64Bits:
+                enc_.mov(GPR::RAX, slot);
+                enc_.mov(GPR::R11, inst.state_conv_imms[i]);
+                enc_.movsd(XMM::XMM0, slot);
+                enc_.ucomisd(XMM::XMM0, XMM::XMM0);
+                enc_.cmovcc(Condition::P, GPR::RAX, GPR::R11);
+                enc_.mov(slot, GPR::RAX);
+                break;
+            case GuardStateConv::I32ToF64Bits:
+                enc_.cvtsi2sd32(XMM::XMM0, slot);
+                enc_.movsd(slot, XMM::XMM0);
+                break;
+            case GuardStateConv::BoolTag:
+                enc_.mov(GPR::RAX, slot);
+                enc_.and_(GPR::RAX, 1);
+                enc_.mov(GPR::R11, inst.state_conv_imms[i]);
+                enc_.or_(GPR::RAX, GPR::R11);
+                enc_.mov(slot, GPR::RAX);
+                break;
+        }
+    }
 }
 
 void EmitContext::emit_guard_exit_epilogue() {

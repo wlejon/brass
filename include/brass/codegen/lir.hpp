@@ -186,6 +186,22 @@ struct LirOperand {
 
 std::string to_string(const LirOperand& op);
 
+// What a GuardExit does to a state value once it has the value's bits in its
+// 8-byte slot (LirInst::state_convs): the boxing a NaN-boxing front end does
+// only for its exits, done there instead of on the guarded path.
+enum class GuardStateConv : uint8_t {
+    None = 0,
+    // An f64 written as its bits, a NaN as the use's constant
+    // (`select(ne f, f, K, bitcast_i64_f64 f)`).
+    CanonF64Bits = 1,
+    // An i32 written as the bits of the f64 it converts to
+    // (`bitcast_i64_f64(sitofp_f64_i32 x)`).
+    I32ToF64Bits = 2,
+    // A 0/1 written as bit 0 of the word, ORed with the use's constant (a
+    // Boolean's box: `or (zext_i64 (and x, 1)), K`, or of a compare's 0/1).
+    BoolTag = 3,
+};
+
 enum class LirOpcode : uint16_t {
     Nop,
     // MIR keep_alive: uses its operand and emits nothing.
@@ -489,6 +505,14 @@ public:
     bool twin_exit = false;
     // GuardExit: one runtime::DeoptValueKind per use, in use order.
     std::vector<uint8_t> deopt_kinds;
+    // GuardExit: per use (empty when none has one), work the exit does to a
+    // state value after reading it, which isel took out of the guarded code
+    // because only exits read its result (GuardStateConv).
+    std::vector<uint8_t> state_convs;
+    // GuardExit: per use when state_convs is not empty, the conversion's
+    // constant (CanonF64Bits: the bits a NaN is written as; BoolTag: the tag
+    // bits).
+    std::vector<int64_t> state_conv_imms;
     bool is_patchable = false;
     std::string patch_symbol;
     std::string callee_symbol;

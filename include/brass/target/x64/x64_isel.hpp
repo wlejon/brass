@@ -257,6 +257,17 @@ private:
         int64_t canon = 0;
     };
     std::unordered_map<const Instruction*, NanCanonStore> nan_canon_stores_;
+    // EXIT-ONLY STATE (x64_isel_guard_state.cpp): a guard state value read
+    // by nothing but guards' states that is a conversion GuardStateConv
+    // names (through tagged bitcasts) is not computed on the guarded path:
+    // each exit writes it from its source.
+    struct GuardStateFold {
+        const Value* src = nullptr;
+        codegen::GuardStateConv conv = codegen::GuardStateConv::None;
+        int64_t imm = 0;
+    };
+    std::unordered_map<const Value*, GuardStateFold> guard_state_folds_;
+    void find_guard_state_folds(const Function& mir_fn, std::unordered_map<const Value*, uint32_t>& folded_uses);
     struct XmmConstant {
         const codegen::LirBlock* block = nullptr;
         size_t end = 0;

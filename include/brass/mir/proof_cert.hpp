@@ -53,6 +53,15 @@ struct GuardElimCert {
     Opcode check_op = Opcode::unreachable;
     int64_t bound_min = 0;
     int64_t bound_max = 0;
+    // The guards with this resume id the block held when this one went,
+    // itself included: copies of one exit (a front end's guards into one
+    // resume twin entry) may share a block, and the verifier then expects
+    // one fewer. 0 when not recorded: then none may be left.
+    uint32_t same_id_guards = 0;
 };
+
+class BasicBlock;
+// The guards in `bb` with resume id `resume_id` (GuardElimCert::same_id_guards).
+uint32_t count_guards_with_resume_id(const BasicBlock& bb, uint32_t resume_id);
 
 } // namespace brass
