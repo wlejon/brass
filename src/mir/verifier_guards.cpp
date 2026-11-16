@@ -62,14 +62,24 @@ void verify_guard_resume_state(
         auto it = live_in.find(target);
         if (it == live_in.end()) continue;
         const std::unordered_set<const Value*> state(guard->state_map().begin(), guard->state_map().end());
-        std::vector<uint32_t> missing;
+        std::vector<const Value*> missing;
         for (const Value* v : it->second) {
-            if (!state.count(v)) missing.push_back(v->id());
+            if (!state.count(v)) missing.push_back(v);
         }
         if (missing.empty()) continue;
-        std::sort(missing.begin(), missing.end());
+        std::sort(missing.begin(), missing.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });
+        // Each one named by what defines it, as the printer's numbering
+        // differs from value ids.
         std::string ids;
-        for (uint32_t id : missing) ids += (ids.empty() ? "%" : ", %") + std::to_string(id);
+        for (const Value* v : missing) {
+            ids += (ids.empty() ? "%" : ", %") + std::to_string(v->id());
+            if (const Instruction* def = v->is_instruction() ? v->defining_instruction() : nullptr) {
+                ids += " (" + std::string(opcode_name(def->opcode())) +
+                       (def->parent() ? " in '" + std::string(def->parent()->name()) + "'" : std::string()) + ")";
+            } else if (v->is_block_param() && v->defining_block()) {
+                ids += " (parameter of '" + std::string(v->defining_block()->name()) + "')";
+            }
+        }
         report_error(fn_prefix + "Guard (resume id " + std::to_string(guard->resume_id()) + ") resumes at '" +
                      std::string(target->name()) + "', which reads " + ids +
                      " (value ids) that is neither a parameter of the block nor one of the guard's state values: "
