@@ -106,4 +106,10 @@ constexpr int version_minor() noexcept { return 1; }
 constexpr int version_patch() noexcept { return 0; }
 constexpr std::string_view version_string() noexcept { return "0.1.0"; }
 
+// A hash of every file this brass was built from (16 hex digits), derived by
+// the build (cmake/brass_codegen_fingerprint.cmake): it changes whenever
+// brass's generated code can, and the artifact cache keys on it
+// (KeyBuilder::add_brass_codegen).
+std::string_view codegen_fingerprint() noexcept;
+
 } // namespace brass

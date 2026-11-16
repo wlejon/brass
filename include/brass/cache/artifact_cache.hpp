@@ -77,7 +77,8 @@ public:
     KeyBuilder& add_key(std::string_view name, const CacheKey& value);
 
     // What brass contributes to a key of anything it compiled or will run:
-    // the cache format, brass's version, the identity of the binary holding
+    // the cache format, brass's codegen fingerprint (a hash of the files it
+    // was built from, brass::codegen_fingerprint), the identity of the binary holding
     // brass (path, size and modification time: any rebuild of brass, or of
     // the library or executable it is linked into, is a new key space), the
     // target, and — for the host target — the CPU features codegen reads
@@ -87,9 +88,11 @@ public:
     KeyBuilder& add_brass_build(const Target& target = Target::host());
 
     // The same without the binary's identity: for an artifact that must
-    // outlive a rebuild of the compiler as long as its ABI holds (a module
-    // compiled ahead of time and shipped). The caller then owns the ABI
-    // half of the key (its runtime's ABI fingerprint, its format versions).
+    // outlive a rebuild of the compiler's host as long as brass's sources
+    // and the ABI hold (a module compiled ahead of time and shipped); an edit
+    // to brass still changes the key through its codegen fingerprint. The
+    // caller then owns the ABI half of the key (its runtime's ABI
+    // fingerprint, its format versions).
     KeyBuilder& add_brass_codegen(const Target& target = Target::host());
 
     CacheKey finish() const noexcept;

@@ -133,6 +133,23 @@ if(MSVC)
     endif()
 endif()
 
+# brass::codegen_fingerprint() (include/brass/brass.hpp): a hash of every
+# file brass is built from, recomputed at build time whenever one changes
+# (cmake/brass_codegen_fingerprint.cmake). The artifact cache keys on it.
+file(GLOB_RECURSE _brass_fingerprint_inputs CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/*")
+set(_brass_fingerprint_cpp "${CMAKE_CURRENT_BINARY_DIR}/generated/brass_codegen_fingerprint.cpp")
+add_custom_command(
+    OUTPUT "${_brass_fingerprint_cpp}"
+    COMMAND "${CMAKE_COMMAND}" "-DBRASS_ROOT=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUT=${_brass_fingerprint_cpp}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/brass_codegen_fingerprint.cmake"
+    DEPENDS ${_brass_fingerprint_inputs} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/brass_codegen_fingerprint.cmake"
+    COMMENT "Fingerprinting brass's sources"
+    VERBATIM)
+list(APPEND BRASS_SOURCES "${_brass_fingerprint_cpp}")
+
 add_library(brass STATIC ${BRASS_SOURCES})
 add_library(brass::brass ALIAS brass)
 

@@ -131,7 +131,7 @@ KeyBuilder& KeyBuilder::add_key(std::string_view name, const CacheKey& value) {
 
 KeyBuilder& KeyBuilder::add_brass_codegen(const Target& target) {
     add_u64("brass.cache_format", kFormatVersion);
-    add("brass.version", version_string());
+    add("brass.codegen", codegen_fingerprint());
     add("brass.target.arch", to_string(target.arch()));
     add("brass.target.os", to_string(target.os()));
     add("brass.target.object", to_string(target.object_format()));

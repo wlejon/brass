@@ -3,6 +3,7 @@
 // eviction, and several caches, threads and processes on one directory.
 #include "test_framework.hpp"
 
+#include <brass/brass.hpp>
 #include <brass/cache/artifact_cache.hpp>
 #include <brass/core/hash128.hpp>
 
@@ -99,6 +100,12 @@ TEST_CASE("artifact_cache: keys are sensitive to every field, its name, boundari
     CHECK(with != KeyBuilder("d/1").add_brass_codegen().finish());
     CHECK(KeyBuilder("d").add_brass_codegen(Target::x64_linux()).finish() !=
           KeyBuilder("d").add_brass_codegen(Target::aarch64_linux()).finish());
+    // The codegen half names brass's sources: the build's hash of them, 16
+    // hex digits (cmake/brass_codegen_fingerprint.cmake), not a version.
+    const std::string_view fingerprint = codegen_fingerprint();
+    CHECK(fingerprint.size() == 16);
+    CHECK(fingerprint.find_first_not_of("0123456789abcdef") == std::string_view::npos);
+    CHECK(fingerprint != std::string_view("0000000000000000"));
     // An invalid key makes whatever derives from it invalid.
     CHECK_FALSE(KeyBuilder("d").add_key("k", CacheKey{}).finish().valid);
 }
