@@ -46,6 +46,23 @@ Id SpirvISel::indexed_address(const brass::Instruction& inst, const Value* base,
 
 Id SpirvISel::load_global(Id addr, Id type, uint32_t align) {
     Id p = op(spv::OpConvertUToPtr, psb_pointer(type), {addr});
+    if (opts_.loads_through_variable) {
+        // (SpirvOptions::loads_through_variable.) One variable a type, in
+        // the entry block with the allocas.
+        Id& var = load_vars_[type];
+        if (!var) {
+            Id ptr_t = m_.t_pointer(spv::StorageClassFunction, psb_pointer(type));
+            var = m_.new_id();
+            m_.register_value_type(var, ptr_t);
+            m_.decorate(var, spv::DecorationAliasedPointer);
+            Inst vinst(spv::OpVariable, ptr_t, var);
+            vinst.lit(spv::StorageClassFunction);
+            fn().blocks[0].insts.insert(fn().blocks[0].insts.begin() + static_cast<std::ptrdiff_t>(num_local_vars_++),
+                                        std::move(vinst));
+        }
+        emit(Inst(spv::OpStore).id(var).id(p));
+        p = op(spv::OpLoad, psb_pointer(type), {var});
+    }
     Id r = m_.new_id();
     emit(Inst(spv::OpLoad, type, r).id(p).lit(spv::MemoryAccessAlignedMask).lit(align));
     return r;
