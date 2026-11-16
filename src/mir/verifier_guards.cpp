@@ -64,7 +64,11 @@ void verify_guard_resume_state(
         const std::unordered_set<const Value*> state(guard->state_map().begin(), guard->state_map().end());
         std::vector<const Value*> missing;
         for (const Value* v : it->second) {
-            if (!state.count(v)) missing.push_back(v);
+            if (state.count(v)) continue;
+            // A scratch alloca the resuming code makes afresh.
+            const Instruction* def = v->is_instruction() ? v->defining_instruction() : nullptr;
+            if (def && def->opcode() == Opcode::alloca_ && def->fresh_in_twin()) continue;
+            missing.push_back(v);
         }
         if (missing.empty()) continue;
         std::sort(missing.begin(), missing.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });

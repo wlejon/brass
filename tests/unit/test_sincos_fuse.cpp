@@ -179,6 +179,11 @@ constexpr TrigGolden kTrigGoldens[] = {
     {1e10, 0xbfdf334c7896a4e3ULL, 0x3febf098901c931aULL},
     {1e22, 0xbfeb453ab76bf397ULL, 0x3fe0be2cef01c8f4ULL},
     {1e300, 0xbfea2c16b010e385ULL, 0xbfe2699022adc4c1ULL},
+    // Near a multiple of pi/2 with a different high word: fdlibm's quick
+    // check skips the second reduction step although y0 lost over 16 bits.
+    {6.2831912992942582, 0x3ed921fbf06af119ULL, 0x3feffffffffd8858ULL},
+    {6.2831883032286848, 0x3ec921f769170396ULL, 0x3fefffffffff6216ULL},
+    {10.995576909110206, 0xbfefffffffff8719ULL, 0x3ec5fdba1db072edULL},
 };
 
 } // namespace

@@ -183,6 +183,27 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
 
     // The region's blocks and their parameters, then each entry.
     ir::ValueMap values;
+    // A scratch alloca of fn's the region uses and no state carries: the
+    // twin's own, made here at its entry.
+    {
+        std::unordered_set<const Value*> carried;
+        for (const auto& [id, e] : entries) carried.insert(e.state.begin(), e.state.end());
+        for (const BasicBlock* src_bb : region) {
+            for (const Instruction* inst : *const_cast<BasicBlock*>(src_bb)) {
+                if (!inst) continue;
+                for_each_use(*const_cast<Instruction*>(inst), [&](Value* u) {
+                    const Instruction* def = u && u->is_instruction() ? u->defining_instruction() : nullptr;
+                    if (!def || def->opcode() != Opcode::alloca_ || !def->fresh_in_twin() || carried.count(u) ||
+                        values.count(u) || reach.count(def->parent())) {
+                        return;
+                    }
+                    Instruction* copy = ir::clone_shell(*out, *def, values);
+                    entry->append_instruction(copy);
+                    copy->set_parent(entry);
+                });
+            }
+        }
+    }
     ir::BlockMap blocks;
     for (const BasicBlock* src_bb : region) {
         BasicBlock* bb = ir::new_block(*out, src_bb->name());

@@ -15,7 +15,10 @@
 //     values from `state`, 8 bytes each in state order, and continues at the
 //     resume block. A guard of the site form is a branch in the twin (to its
 //     resume block when its condition fails), so the twin never exits: it is
-//     ordinary code and the whole optimizer runs on it.
+//     ordinary code and the whole optimizer runs on it. An alloca marked
+//     fresh_in_twin (scratch whose contents never cross a guard) that the
+//     code from a resume block on uses is not read from the state: the twin
+//     makes its own in its entry block.
 //
 //   - the speculated function (speculate_against_twin): a copy of the site
 //     form, with whatever guards the front end armed, whose guards exit into
