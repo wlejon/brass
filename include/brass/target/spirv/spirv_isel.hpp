@@ -100,6 +100,7 @@ private:
     std::unordered_map<const Value*, SharedRef> shared_;
     std::unordered_map<const Value*, LocalRef> local_;
     size_t num_local_vars_ = 0;
+    std::unordered_map<Id, Id> load_vars_;                    // pointee type -> its loads' pointer variable (loads_through_variable)
     std::unordered_map<const Value*, uint32_t> value_uses_;   // uses other than as a br_if/select condition
     std::unordered_map<std::string, Id> prologue_cache_;      // per-kernel values computed in the prologue
     std::vector<Id> prologue_args_;                           // kernel parameter values when the entry has phis

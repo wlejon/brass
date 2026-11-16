@@ -86,6 +86,7 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     shared_.clear();
     local_.clear();
     num_local_vars_ = 0;
+    load_vars_.clear();
     value_uses_.clear();
     prologue_cache_.clear();
     prologue_args_.clear();

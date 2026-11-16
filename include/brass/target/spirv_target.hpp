@@ -84,6 +84,14 @@ struct SpirvOptions {
     // versions are rejected (PhysicalStorageBuffer and 8/16-bit storage are
     // core from 1.5).
     uint32_t spirv_version = 0x00010500;
+    // Each global load's pointer goes through a Function variable of its
+    // type (OpStore, then OpLoad of it). The same code for a Vulkan driver;
+    // for SPIRV-Cross before 2026 (MoltenVK 1.4.2's), which inlines a load
+    // at its first use and does not see a store through an OpConvertUToPtr
+    // pointer as writing anything it read, it keeps a load ahead of a later
+    // store to the same address: a kernel that read a value and then
+    // overwrote it otherwise read what it wrote.
+    bool loads_through_variable = false;
 };
 
 struct SpirvParam {
