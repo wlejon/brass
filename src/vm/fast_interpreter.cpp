@@ -307,7 +307,7 @@ loop_start:
         UN(sext8, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(x))))
         UN(sext16, static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(x))))
         UN(fptosi32, static_cast<uint32_t>(static_cast<int32_t>(get_f64(x))))
-        UN(fptosi64, static_cast<uint64_t>(static_cast<int64_t>(get_f64(x))))
+        UN(fptosi64, static_cast<uint64_t>(fptosi_i64_value(get_f64(x))))
         UN(fptosi32_f32, static_cast<uint32_t>(static_cast<int32_t>(get_f32(x))))
         UN(fptosi64_f32, static_cast<uint64_t>(static_cast<int64_t>(get_f32(x))))
         UN(sitofp_f64, put_f64(static_cast<double>(static_cast<int32_t>(x))))

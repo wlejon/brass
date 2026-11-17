@@ -481,8 +481,14 @@ inline RuntimeValue val_fptosi_i32(RuntimeValue v) noexcept {
     return RuntimeValue::from_i32(static_cast<int32_t>(v.as_f64()));
 }
 
+// fptosi_i64: the truncation, and INT64_MIN for NaN and a double outside
+// [-2^63, 2^63) (what cvttsd2si answers; a bare cast is undefined there).
+inline int64_t fptosi_i64_value(double d) noexcept {
+    return d >= -9223372036854775808.0 && d < 9223372036854775808.0 ? static_cast<int64_t>(d) : INT64_MIN;
+}
+
 inline RuntimeValue val_fptosi_i64(RuntimeValue v) noexcept {
-    return RuntimeValue::from_i64(static_cast<int64_t>(v.as_f64()));
+    return RuntimeValue::from_i64(fptosi_i64_value(v.as_f64()));
 }
 
 inline RuntimeValue val_fptosi_i32_f32(RuntimeValue v) noexcept {

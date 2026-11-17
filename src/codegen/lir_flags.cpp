@@ -158,6 +158,9 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Safepoint:
         case LirOpcode::WriteBarrier:
         case LirOpcode::GuardExit:
+        // fcvtzs saturates and makes NaN 0; the cmn/fcmp after it make
+        // NaN and out of range INT64_MIN, as cvttsd2si does.
+        case LirOpcode::Cvttsd2si:
             return FlagEffect::Clobbers;
 
         // AArch64 arithmetic does not touch NZCV unless it is the S form:
@@ -198,7 +201,7 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Xorpd:
         case LirOpcode::Fneg: case LirOpcode::Fneg32:
         case LirOpcode::Cvtsi2sd: case LirOpcode::Cvtsi2sd32:
-        case LirOpcode::Cvttsd2si: case LirOpcode::Cvttsd2si32:
+        case LirOpcode::Cvttsd2si32:
         case LirOpcode::Cvtsi2ss: case LirOpcode::Cvtsi2ss32:
         case LirOpcode::Cvttss2si: case LirOpcode::Cvttss2si32:
         case LirOpcode::Cvtsd2ss: case LirOpcode::Cvtss2sd:

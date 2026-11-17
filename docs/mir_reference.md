@@ -65,7 +65,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `zext.i64 <val:i32>` -> `i64`
 - `trunc.i32 <val:i64>` -> `i32`
 - `fptosi.i32 <val:f64>` -> `i32`
-- `fptosi.i64 <val:f64>` -> `i64`
+- `fptosi.i64 <val:f64>` -> `i64` (truncates toward zero; NaN and a value outside [-2^63, 2^63) give INT64_MIN on every target and in the interpreters)
 - `sitofp.f64 <val:i32|i64>` -> `f64` (the bare form takes its source width from the operand; `sitofp.f64.i32` / `sitofp.f64.i64` name it explicitly; `sitofp.f32` likewise)
 - `bitcast.i64 <val:f64>` -> `i64` (also spelled `bitcast.i64.f64`, as the printer writes it)
 - `bitcast.f64 <val:i64>` -> `f64` (also spelled `bitcast.f64.i64`, as the printer writes it)

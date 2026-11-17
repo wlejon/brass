@@ -151,6 +151,13 @@ bool emit_baseline_aarch64_fp_op(AArch64BaselineEmitter& em, const Instruction& 
         case Opcode::fptosi_i64:
             enc.ldr(FPR::V0, em.slot_addr(inst.operand(0), 8));
             enc.fcvtzs_d(GPR::X0, FPR::V0);
+            // NaN and out of range are INT64_MIN (fcvtzs gives 0 and the
+            // saturated INT64_MAX), as in the optimizing tier.
+            enc.movz(GPR::X16, 0x8000, 3);
+            enc.cmn(GPR::X0, 1u);
+            enc.csel(GPR::X0, GPR::X16, GPR::X0, Condition::VS);
+            enc.fcmp(FPR::V0, FPR::V0);
+            enc.csel(GPR::X0, GPR::X16, GPR::X0, Condition::VS);
             enc.str(GPR::X0, em.slot_addr(inst.result(), 8));
             return true;
         case Opcode::fptosi_i32_f32:

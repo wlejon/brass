@@ -414,13 +414,21 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             break;
         }
         case LirOpcode::Cvttsd2si: {
+            // fptosi_i64: NaN and out of range are INT64_MIN, as cvttsd2si
+            // answers. fcvtzs saturates (+big is INT64_MAX, which no
+            // in-range double truncates to) and makes NaN 0, so both are
+            // replaced by INT64_MIN.
             GPR dst = to_gpr(inst.defs[0]);
             const auto& src = inst.uses[0];
-            if (src.is_preg()) enc_.fcvtzs_d(dst, to_fpr(src));
-            else {
-                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
-                enc_.fcvtzs_d(dst, FPR::V31);
-            }
+            FPR in = FPR::V31;
+            if (src.is_preg()) in = to_fpr(src);
+            else enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+            enc_.fcvtzs_d(dst, in);
+            enc_.movz(GPR::X16, 0x8000, 3);
+            enc_.cmn(dst, 1u);
+            enc_.csel(dst, GPR::X16, dst, Condition::VS);
+            enc_.fcmp(in, in);
+            enc_.csel(dst, GPR::X16, dst, Condition::VS);
             break;
         }
         case LirOpcode::Cvttsd2si32: {
