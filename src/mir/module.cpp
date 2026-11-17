@@ -21,6 +21,8 @@ struct Module::LazyBodies {
     // other's).
     std::atomic<uint32_t> readers{0};
     std::atomic<bool> releasing{false};
+    // Where a release that ran out of its budget stopped (release_bodies).
+    size_t release_cursor = 0;
 };
 
 namespace {
@@ -232,7 +234,8 @@ Module::BodyRead::~BodyRead() {
     if (before == 1 && release_stress_now()) const_cast<Module*>(mod_)->release_bodies();
 }
 
-size_t Module::release_bodies() {
+size_t Module::release_bodies(size_t budget, bool* finished) {
+    if (finished) *finished = true;
     LazyBodies* lazy = lazy_.get();
     if (!lazy || !lazy->provider) return 0;
     std::unique_lock<std::mutex> lock(lazy->mutex, std::try_to_lock);
@@ -241,11 +244,19 @@ size_t Module::release_bodies() {
     size_t bytes = 0;
     if (lazy->readers.load(std::memory_order_seq_cst) == 0) {
         size_t count = 0;
-        for (Function* fn : functions_) {
+        const size_t n = functions_.size();
+        size_t i = lazy->release_cursor < n ? lazy->release_cursor : 0;
+        for (; i < n; ++i) {
+            if (bytes >= budget) {
+                if (finished) *finished = false;
+                break;
+            }
+            Function* fn = functions_[i];
             if (!fn || !fn->body_releasable()) continue;
             bytes += fn->release_body();
             ++count;
         }
+        lazy->release_cursor = i < n ? i : 0;
         lazy->released.fetch_add(count, std::memory_order_relaxed);
     }
     lazy->releasing.store(false, std::memory_order_seq_cst);
@@ -256,10 +267,22 @@ size_t Module::released_count() const noexcept {
     return lazy_ ? lazy_->released.load(std::memory_order_relaxed) : 0;
 }
 
-size_t Module::release_idle_bodies() {
+size_t Module::release_idle_bodies(size_t budget, bool* finished) {
+    if (finished) *finished = true;
     std::lock_guard<std::mutex> lock(provider_modules_mutex());
     size_t bytes = 0;
-    for (Module* mod : provider_modules()) bytes += mod->release_bodies();
+    for (Module* mod : provider_modules()) {
+        if (bytes >= budget) {
+            if (finished) *finished = false;
+            break;
+        }
+        bool done = true;
+        bytes += mod->release_bodies(budget - bytes, &done);
+        if (!done) {
+            if (finished) *finished = false;
+            break;
+        }
+    }
     return bytes;
 }
 

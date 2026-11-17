@@ -2,7 +2,118 @@
 #include <algorithm>
 #include <cstdlib>
 
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  include <sys/mman.h>
+#  include <unistd.h>
+#endif
+
 namespace brass {
+
+namespace {
+
+// A chunk this large or larger is pages of its own from the OS, given back
+// when the arena frees it. From the C heap, a freed chunk's pages stayed in
+// the process: macOS's malloc keeps a freed small block dirty until the
+// system runs short, so a JIT's released function bodies (Module::
+// release_bodies; about 1.5 GB of 64 KB chunks in a game) never left its
+// footprint. Smaller chunks (the first of a function body's arena) stay on
+// the C heap, where a page would mostly be empty.
+constexpr size_t kPageChunkMin = 64 * 1024;
+
+size_t page_granularity() {
+#if defined(_WIN32)
+    static const size_t g = [] {
+        SYSTEM_INFO info;
+        GetSystemInfo(&info);
+        return static_cast<size_t>(info.dwAllocationGranularity);
+    }();
+#else
+    static const size_t g = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+#endif
+    return g;
+}
+
+// Rounds `size` up to what chunk_alloc gives for it.
+size_t chunk_capacity(size_t size) {
+    if (size < kPageChunkMin) return size;
+    const size_t g = page_granularity();
+    return (size + g - 1) / g * g;
+}
+
+void pages_free(uint8_t* memory, size_t capacity) {
+#if defined(_WIN32)
+    (void)capacity;
+    VirtualFree(memory, 0, MEM_RELEASE);
+#else
+    munmap(memory, capacity);
+#endif
+}
+
+// A few freed chunks of the smallest paged size kept on each thread for its
+// next arena: a compile makes and drops many short-lived arenas of one
+// 64 KB chunk, and a map and an unmap (and the pages' first touch) for each
+// cost a cold smallworlds compile about 2% (70 s on an M2 Pro). At most
+// kCacheChunks a thread stay dirty; the rest go back to the OS.
+constexpr size_t kCacheChunks = 8;
+
+// (An arena freed after its thread's cache, a static one at exit, finds it
+// `closed` and maps and unmaps its own.)
+struct ChunkCache {
+    uint8_t* chunks[kCacheChunks] = {};
+    size_t count = 0;
+    bool closed = false;
+    ~ChunkCache() {
+        for (size_t i = 0; i < count; ++i) pages_free(chunks[i], kPageChunkMin);
+        count = 0;
+        closed = true;
+    }
+};
+
+ChunkCache& chunk_cache() {
+    thread_local ChunkCache cache;
+    return cache;
+}
+
+uint8_t* chunk_alloc(size_t capacity) {
+    if (capacity < kPageChunkMin) return static_cast<uint8_t*>(::operator new(capacity));
+    if (capacity == kPageChunkMin) {
+        ChunkCache& cache = chunk_cache();
+        if (!cache.closed && cache.count > 0) return cache.chunks[--cache.count];
+    }
+#if defined(_WIN32)
+    void* p = VirtualAlloc(nullptr, capacity, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!p) throw std::bad_alloc();
+#else
+    void* p = mmap(nullptr, capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) throw std::bad_alloc();
+#endif
+    return static_cast<uint8_t*>(p);
+}
+
+void chunk_free(uint8_t* memory, size_t capacity) {
+    if (capacity < kPageChunkMin) {
+        ::operator delete(memory);
+        return;
+    }
+    if (capacity == kPageChunkMin) {
+        ChunkCache& cache = chunk_cache();
+        if (!cache.closed && cache.count < kCacheChunks) {
+            cache.chunks[cache.count++] = memory;
+            return;
+        }
+    }
+    pages_free(memory, capacity);
+}
+
+} // namespace
 
 Arena::Arena(size_t default_chunk_size)
     : default_chunk_size_(default_chunk_size) {}
@@ -50,8 +161,8 @@ void Arena::allocate_new_chunk(size_t min_size) {
     if (max_chunk_size_ > default_chunk_size_) {
         chunk_size = std::min(max_chunk_size_, std::max(default_chunk_size_, bytes_capacity_));
     }
-    chunk_size = std::max(chunk_size, min_size);
-    uint8_t* mem = static_cast<uint8_t*>(::operator new(chunk_size));
+    chunk_size = chunk_capacity(std::max(chunk_size, min_size));
+    uint8_t* mem = chunk_alloc(chunk_size);
     chunks_.push_back(Chunk{mem, chunk_size, 0});
     bytes_capacity_ += chunk_size;
     current_chunk_idx_ = chunks_.size() - 1;
@@ -161,7 +272,7 @@ void Arena::clear() {
     }
     for (auto& chunk : chunks_) {
         if (chunk.memory != nullptr) {
-            ::operator delete(chunk.memory);
+            chunk_free(chunk.memory, chunk.capacity);
             chunk.memory = nullptr;
         }
     }
