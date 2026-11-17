@@ -156,7 +156,17 @@ void take_result(EmittedFunction& out, const Function& fn, const codegen::LirFun
 
 } // namespace
 
-EmittedFunction compile_function(const Module& mod, const Function& fn, const FunctionCodegenConfig& cfg) {
+EmittedFunction compile_function(const Module& mod, const Function& fn, const FunctionCodegenConfig& config) {
+    // A cold function (Function::is_cold) gets none of the optional work.
+    FunctionCodegenConfig cold;
+    if (fn.is_cold()) {
+        cold = config;
+        cold.loop_pipes[0] = cold.loop_pipes[1] = nullptr;
+        cold.sched.enable_post_ra = false;
+        cold.sched.enable_software_pipelining = false;
+        cold.enable_trace_layout = false;
+    }
+    const FunctionCodegenConfig& cfg = fn.is_cold() ? cold : config;
     EmittedFunction out;
     const bool reassoc = fn.allow_fp_reassociation() || mod.allow_fp_reassociation();
 

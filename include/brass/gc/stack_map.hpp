@@ -146,12 +146,12 @@ private:
 
 // Binary serialization format
 // Magic: 0x4D435342 ("BSCM")
-// Version: 2 (each function carries its slot area after its code size;
-// version 1, without it, still decodes, with an empty area)
-// Each root is 8 bytes: int32 rbp offset, then the location kind, register
-// class, register code and value kind (StackMapValueKind) as bytes.
+// Version: 3, compact (varints, each record only what differs from the one
+// before it; stack_map.cpp encode_stack_maps has the layout). Versions 1 and
+// 2 (fixed-width words, 16 bytes a record and 8 a root; 2 adds the slot
+// area) still decode.
 constexpr uint32_t STACK_MAP_MAGIC = 0x4D435342;
-constexpr uint32_t STACK_MAP_VERSION = 2;
+constexpr uint32_t STACK_MAP_VERSION = 3;
 
 std::vector<uint8_t> encode_stack_maps(const ModuleStackMap& stack_maps);
 ModuleStackMap decode_stack_maps(std::span<const uint8_t> data, uintptr_t text_base_address = 0);

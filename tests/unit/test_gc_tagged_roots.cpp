@@ -463,14 +463,14 @@ TEST_CASE("Tagged roots - stack maps encode and decode the value kind of each ro
     CHECK(roots[1].value == StackMapValueKind::Tagged);
     CHECK_EQ(roots[1].offset_from_rbp, -24);
 
-    // A value kind the format does not define is corrupt input.
+    // A root tag the format does not define is corrupt input: the second
+    // root's tag (tagged, no register: 2), then its offset from the first
+    // root's, -8 zigzagged (15); a bit past the defined ones is refused.
     std::vector<uint8_t> corrupt = bytes;
     bool patched = false;
-    for (size_t i = 0; i + 8 <= corrupt.size(); ++i) {
-        int32_t off = 0;
-        std::memcpy(&off, &corrupt[i], 4);
-        if (off == -24 && corrupt[i + 7] == 1) {
-            corrupt[i + 7] = 9;
+    for (size_t i = 0; i + 2 <= corrupt.size(); ++i) {
+        if (corrupt[i] == 2 && corrupt[i + 1] == 15) {
+            corrupt[i] = 2 | 8;
             patched = true;
             break;
         }

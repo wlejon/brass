@@ -413,7 +413,11 @@ bool inline_module(Module& mod, const InlinerOptions& options) {
         const size_t n = threads_for_work(options.threads, order.size(), total, 2000);
         parallel_for_each(heaviest_first(weights), n, [&](size_t i) {
             Function* fn = order[i];
-            if (!fn || fn->name().starts_with("__wrapper_") || fn->blocks().empty() || !fn->entry_block()) return;
+            if (!fn || fn->name().starts_with("__wrapper_") || fn->is_cold() || fn->blocks().empty() ||
+                !fn->entry_block()) {
+                has_sites[i] = 0;
+                return;
+            }
             fn->rebuild_cfg_predecessors();
             FirstRound& f = firsts[i];
             f.sites = inline_sites(*fn, mod);
@@ -429,7 +433,7 @@ bool inline_module(Module& mod, const InlinerOptions& options) {
     for (size_t i = 0; i < order.size(); ++i) {
         Function* fn = order[i];
         if (!fn || !has_sites[i]) continue;
-        if (fn->name().starts_with("__wrapper_")) continue;
+        if (fn->name().starts_with("__wrapper_") || fn->is_cold()) continue;
         changed |= inline_into(*fn, mod, options, cg, sizes, &firsts[i]);
         firsts[i] = FirstRound{};
     }

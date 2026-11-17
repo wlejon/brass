@@ -24,6 +24,7 @@ void check_step(const PassStep& step) {
 }
 
 bool admitted(const PassStep& step, const Function& fn) {
+    if (fn.is_cold()) return false;
     switch (step.filter) {
         case FunctionFilter::All: return true;
         case FunctionFilter::NonWrapper: return !fn.name().starts_with("__wrapper_");

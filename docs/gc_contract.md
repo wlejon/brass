@@ -25,19 +25,22 @@ LICM, CSE, GVN and PRE never hoist, merge or rematerialize derived references, s
 The interpreters are the exception: their frames keep every value they computed, so an interpreter frame can hold a derived reference across a call it does not outlive. The interpreters report their registers with `Tracer::visit_derived`, which keeps the containing object alive and preserves the offset when it moves.
 
 ### 1.3. Stack Maps
-Stack maps are serialized as read-only `BSCM` metadata:
+Stack maps are serialized as read-only `BSCM` metadata, version 3: integers are LEB128 varints (`s` marks a signed one, zigzagged), and a record holds only what differs from the record before it (`encode_stack_maps`, `src/gc/stack_map.cpp`):
 
 ```
-Header:   uint32 magic = 0x4D435342 ("BSCM"), uint32 version = 2, uint32 function_count
-Function: uint32 name_length, name bytes, uint64 code_offset, uint32 code_size,
-          int32 slot_area_lo, int32 slot_area_hi, uint32 record_count
-Record:   uint32 instruction_offset (return IP - function base), uint32 frame_size,
-          uint32 safepoint_id, uint32 root_count
-Root:     int32 offset_from_fp, uint8 kind (0 FrameSlot, 1 CalleeSaved), uint8 reg_class,
-          uint8 reg_code, uint8 value (0 GcRef, 1 Tagged)
+Header:   uint32 magic = 0x4D435342 ("BSCM"), uint32 version = 3, function_count
+Function: name_length, name bytes, code_offset, code_size, s slot_area_lo, s slot_area_hi, record_count
+Record:   s (instruction_offset - previous record's), uint8 flags,
+          frame_size        if flags & 1 (else the previous record's),
+          safepoint_id      if flags & 2 (else the previous record's plus one),
+          root_count, roots if flags & 4 (else the previous record's roots)
+Root:     uint8 tag (1 CalleeSaved, 2 Tagged, 4 register follows), [uint8 reg_class, uint8 reg_code],
+          s (offset_from_fp - the previous root's)
 ```
 
-The decoder rejects any other `value` byte. Records are sorted by instruction offset and looked up by binary search. `[slot_area_lo, slot_area_hi)` is the function's stack slots (its spill slots and its locals, the allocas) as offsets from the frame pointer, which the optimizing emitters (Tier 2, OSR and AOT code, x64 and AArch64) set and the baseline tier leaves empty: every reference live across a GC point that the function keeps in a word there is one of that point's roots (a spill slot, or a word of an `alloca.tagged`; a plain alloca holds no reference across a GC point, 1.1), so the stack scan passes over the area's other words (2.5). A version 1 map (no slot area) still decodes, with the area empty.
+The first record's "previous" is offset 0, frame size 0, safepoint id `UINT32_MAX` and no roots. A map is about a sixth of the size of version 2's fixed-width words (16 bytes a record, 8 a root): on a 3D game's module 13.7 MB against 71.3 MB. Versions 1 and 2 still decode. A map registered encoded is decoded on its first lookup (`code_stack_maps.hpp`).
+
+The decoder rejects a tag with other bits, and a truncated map. Records are sorted by instruction offset and looked up by binary search. `[slot_area_lo, slot_area_hi)` is the function's stack slots (its spill slots and its locals, the allocas) as offsets from the frame pointer, which the optimizing emitters (Tier 2, OSR and AOT code, x64 and AArch64) set and the baseline tier leaves empty: every reference live across a GC point that the function keeps in a word there is one of that point's roots (a spill slot, or a word of an `alloca.tagged`; a plain alloca holds no reference across a GC point, 1.1), so the stack scan passes over the area's other words (2.5). A version 1 map (no slot area) still decodes, with the area empty.
 
 Every module brass loads registers its maps with the code registry (`code_stack_maps.hpp`). `brass_stack_walk` walks frame-pointer chains from a (frame pointer, return address) pair: for each frame whose return address a map describes, it visits `fp + offset_from_fp` for each root, then moves to the caller frame. Generated code always keeps the chain. Where it leads into compiled (C++) code, which need not keep one, the walk steps through the compiled frames by their unwind information until it returns to generated code: the Win64 unwind data on Windows x64, and on the other x86-64 and AArch64 hosts their DWARF CFI (`native_unwind.hpp`: the `.eh_frame` of every loaded image and of generated code, which brass registers as it loads it; libunwind on Apple platforms). On Windows ARM64 it follows the chain through compiled frames too. It checks alignment, monotonic growth and the thread's stack bounds, and walks the whole chain with no frame limit.
 

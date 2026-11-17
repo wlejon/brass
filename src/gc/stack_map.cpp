@@ -1,5 +1,7 @@
 #include <brass/gc/stack_map.hpp>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <algorithm>
 #include <ostream>
 
@@ -26,6 +28,18 @@ void write_u64(std::vector<uint8_t>& buf, uint64_t v) {
     for (int i = 0; i < 8; ++i) {
         buf.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
     }
+}
+
+void write_var(std::vector<uint8_t>& buf, uint64_t v) {
+    while (v >= 0x80) {
+        buf.push_back(static_cast<uint8_t>(v | 0x80));
+        v >>= 7;
+    }
+    buf.push_back(static_cast<uint8_t>(v));
+}
+
+void write_svar(std::vector<uint8_t>& buf, int64_t v) {
+    write_var(buf, (static_cast<uint64_t>(v) << 1) ^ static_cast<uint64_t>(v >> 63));
 }
 
 void write_bytes(std::vector<uint8_t>& buf, const void* data, size_t count) {
@@ -80,6 +94,32 @@ public:
             val |= (static_cast<uint64_t>(data_[pos_ + static_cast<size_t>(i)]) << (i * 8));
         }
         pos_ += 8;
+        return true;
+    }
+
+    bool read_var(uint64_t& val) noexcept {
+        val = 0;
+        for (int shift = 0; shift < 64; shift += 7) {
+            uint8_t b = 0;
+            if (!read_u8(b)) return false;
+            val |= static_cast<uint64_t>(b & 0x7F) << shift;
+            if ((b & 0x80) == 0) return true;
+        }
+        return false;
+    }
+
+    template <typename T>
+    bool read_var_as(T& val) noexcept {
+        uint64_t v = 0;
+        if (!read_var(v) || v > static_cast<uint64_t>(std::numeric_limits<T>::max())) return false;
+        val = static_cast<T>(v);
+        return true;
+    }
+
+    bool read_svar(int64_t& val) noexcept {
+        uint64_t v = 0;
+        if (!read_var(v)) return false;
+        val = static_cast<int64_t>(v >> 1) ^ -static_cast<int64_t>(v & 1);
         return true;
     }
 
@@ -240,46 +280,155 @@ void ModuleStackMap::register_function_address(std::string_view name, uintptr_t 
     functions_.push_back(std::move(new_fn));
 }
 
+// Version 3, compact: integers are LEB128 varints (signed ones zigzagged),
+// and a record says only what differs from the record before it.
+//   header   magic u32, version u32, function count
+//   function name length + bytes, code offset, code size, slot area lo and
+//            hi (signed), record count
+//   record   instruction offset minus the previous record's (signed), a
+//            flags byte, then what the flags name: kRecFrame its frame
+//            size, kRecSafepoint its safepoint id (otherwise the previous
+//            one plus one), kRecRoots its roots (otherwise the previous
+//            record's): their count, and per root a tag byte (kind, value
+//            kind, kRootReg when the register is not PReg()'s default, then
+//            its class and code bytes) and its fp offset minus the previous
+//            root's (signed).
+// The first record's "previous" is offset 0, frame size 0, safepoint id
+// UINT32_MAX (so an id of 0 needs no field) and no roots.
+namespace {
+constexpr uint8_t kRecFrame = 1;
+constexpr uint8_t kRecSafepoint = 2;
+constexpr uint8_t kRecRoots = 4;
+constexpr uint8_t kRootKind = 1;
+constexpr uint8_t kRootTagged = 2;
+constexpr uint8_t kRootReg = 4;
+
+bool default_reg(const codegen::PReg& r) noexcept {
+    return r.reg_class == codegen::PReg().reg_class && r.code == codegen::PReg().code;
+}
+} // namespace
+
 std::vector<uint8_t> encode_stack_maps(const ModuleStackMap& stack_maps) {
     std::vector<uint8_t> out;
-    out.reserve(256);
-
-    // 1. Header
+    out.reserve(64);
     write_u32(out, STACK_MAP_MAGIC);
     write_u32(out, STACK_MAP_VERSION);
-    write_u32(out, static_cast<uint32_t>(stack_maps.functions().size()));
-
-    // 2. Function Records
+    write_var(out, stack_maps.functions().size());
     for (const auto& fn : stack_maps.functions()) {
-        uint32_t name_len = static_cast<uint32_t>(fn.function_name.size());
-        write_u32(out, name_len);
-        if (name_len > 0) {
-            write_bytes(out, fn.function_name.data(), name_len);
-        }
-        write_u64(out, static_cast<uint64_t>(fn.code_offset));
-        write_u32(out, fn.code_size);
-        write_i32(out, fn.slot_area_lo);
-        write_i32(out, fn.slot_area_hi);
-        write_u32(out, static_cast<uint32_t>(fn.records.size()));
-
+        write_var(out, fn.function_name.size());
+        write_bytes(out, fn.function_name.data(), fn.function_name.size());
+        write_var(out, fn.code_offset);
+        write_var(out, fn.code_size);
+        write_svar(out, fn.slot_area_lo);
+        write_svar(out, fn.slot_area_hi);
+        write_var(out, fn.records.size());
+        const StackMapRecord* prev = nullptr;
+        uint32_t prev_offset = 0, prev_frame = 0, prev_safepoint = UINT32_MAX;
         for (const auto& rec : fn.records) {
-            write_u32(out, rec.instruction_offset);
-            write_u32(out, rec.frame_size);
-            write_u32(out, rec.safepoint_id);
-            write_u32(out, static_cast<uint32_t>(rec.roots.size()));
-
-            for (const auto& root : rec.roots) {
-                write_i32(out, root.offset_from_rbp);
-                write_u8(out, static_cast<uint8_t>(root.kind));
-                write_u8(out, static_cast<uint8_t>(root.reg.reg_class));
-                write_u8(out, root.reg.code);
-                write_u8(out, static_cast<uint8_t>(root.value));
+            write_svar(out, static_cast<int64_t>(rec.instruction_offset) - static_cast<int64_t>(prev_offset));
+            uint8_t flags = 0;
+            if (rec.frame_size != prev_frame) flags |= kRecFrame;
+            if (rec.safepoint_id != prev_safepoint + 1) flags |= kRecSafepoint;
+            const bool same_roots = prev ? rec.roots == prev->roots : rec.roots.empty();
+            if (!same_roots) flags |= kRecRoots;
+            write_u8(out, flags);
+            if (flags & kRecFrame) write_var(out, rec.frame_size);
+            if (flags & kRecSafepoint) write_var(out, rec.safepoint_id);
+            if (flags & kRecRoots) {
+                write_var(out, rec.roots.size());
+                int64_t prev_root = 0;
+                for (const auto& root : rec.roots) {
+                    const bool reg = !default_reg(root.reg);
+                    write_u8(out, static_cast<uint8_t>((root.kind == StackMapRootKind::CalleeSavedReg ? kRootKind : 0) |
+                                                       (root.value == StackMapValueKind::Tagged ? kRootTagged : 0) |
+                                                       (reg ? kRootReg : 0)));
+                    if (reg) {
+                        write_u8(out, static_cast<uint8_t>(root.reg.reg_class));
+                        write_u8(out, root.reg.code);
+                    }
+                    write_svar(out, root.offset_from_rbp - prev_root);
+                    prev_root = root.offset_from_rbp;
+                }
             }
+            prev = &rec;
+            prev_offset = rec.instruction_offset;
+            prev_frame = rec.frame_size;
+            prev_safepoint = rec.safepoint_id;
         }
     }
-
     return out;
 }
+
+namespace {
+
+bool decode_v3(BinaryReader& reader, ModuleStackMap& out, uintptr_t text_base_address) {
+    uint32_t fn_count = 0;
+    if (!reader.read_var_as(fn_count)) return false;
+    for (uint32_t f = 0; f < fn_count; ++f) {
+        FunctionStackMap fn_map;
+        uint32_t name_len = 0;
+        if (!reader.read_var_as(name_len) || !reader.read_string(fn_map.function_name, name_len)) return false;
+        int64_t lo = 0, hi = 0;
+        if (!reader.read_var_as(fn_map.code_offset) || !reader.read_var_as(fn_map.code_size) ||
+            !reader.read_svar(lo) || !reader.read_svar(hi)) {
+            return false;
+        }
+        if (lo < INT32_MIN || hi > INT32_MAX || hi < lo) return false;
+        fn_map.slot_area_lo = static_cast<int32_t>(lo);
+        fn_map.slot_area_hi = static_cast<int32_t>(hi);
+        if (text_base_address > 0) fn_map.function_address = text_base_address + fn_map.code_offset;
+        uint32_t rec_count = 0;
+        if (!reader.read_var_as(rec_count) || rec_count > reader.remaining()) return false;
+        fn_map.records.reserve(rec_count);
+        int64_t offset = 0;
+        uint32_t frame = 0, safepoint = UINT32_MAX;
+        for (uint32_t r = 0; r < rec_count; ++r) {
+            StackMapRecord rec;
+            int64_t delta = 0;
+            uint8_t flags = 0;
+            if (!reader.read_svar(delta) || !reader.read_u8(flags)) return false;
+            offset += delta;
+            if (offset < 0 || offset > UINT32_MAX) return false;
+            rec.instruction_offset = static_cast<uint32_t>(offset);
+            if ((flags & kRecFrame) && !reader.read_var_as(frame)) return false;
+            safepoint += 1;
+            if ((flags & kRecSafepoint) && !reader.read_var_as(safepoint)) return false;
+            rec.frame_size = frame;
+            rec.safepoint_id = safepoint;
+            if (flags & kRecRoots) {
+                uint32_t root_count = 0;
+                if (!reader.read_var_as(root_count) || root_count > reader.remaining()) return false;
+                rec.roots.reserve(root_count);
+                int64_t root_offset = 0;
+                for (uint32_t k = 0; k < root_count; ++k) {
+                    StackMapRootLocation root;
+                    uint8_t tag = 0;
+                    if (!reader.read_u8(tag) || tag > (kRootKind | kRootTagged | kRootReg)) return false;
+                    root.kind = (tag & kRootKind) ? StackMapRootKind::CalleeSavedReg : StackMapRootKind::FrameSlot;
+                    root.value = (tag & kRootTagged) ? StackMapValueKind::Tagged : StackMapValueKind::GcRef;
+                    if (tag & kRootReg) {
+                        uint8_t reg_class = 0;
+                        if (!reader.read_u8(reg_class) || !reader.read_u8(root.reg.code)) return false;
+                        root.reg.reg_class = static_cast<codegen::RegClass>(reg_class);
+                    }
+                    int64_t d = 0;
+                    if (!reader.read_svar(d)) return false;
+                    root_offset += d;
+                    if (root_offset < INT32_MIN || root_offset > INT32_MAX) return false;
+                    root.offset_from_rbp = static_cast<int32_t>(root_offset);
+                    rec.roots.push_back(root);
+                }
+            } else if (!fn_map.records.empty()) {
+                rec.roots = fn_map.records.back().roots;
+            }
+            fn_map.records.push_back(std::move(rec));
+        }
+        out.add_function(std::move(fn_map));
+    }
+    return true;
+}
+
+} // namespace
 
 bool decode_stack_maps_into(std::span<const uint8_t> data, ModuleStackMap& out, uintptr_t text_base_address) {
     out.clear();
@@ -294,6 +443,7 @@ bool decode_stack_maps_into(std::span<const uint8_t> data, ModuleStackMap& out, 
     if (!reader.read_u32(version) || version < 1 || version > STACK_MAP_VERSION) {
         return false;
     }
+    if (version == 3) return decode_v3(reader, out, text_base_address);
 
     uint32_t fn_count = 0;
     if (!reader.read_u32(fn_count)) {
@@ -371,6 +521,16 @@ bool peek_stack_maps(std::span<const uint8_t> data, uint32_t& function_count, ui
     uint32_t magic = 0, version = 0;
     if (!reader.read_u32(magic) || magic != STACK_MAP_MAGIC) return false;
     if (!reader.read_u32(version) || version < 1 || version > STACK_MAP_VERSION) return false;
+    if (version == 3) {
+        if (!reader.read_var_as(function_count)) return false;
+        if (function_count == 0) return true;
+        uint32_t name_len = 0, code_size = 0, code_offset = 0;
+        int64_t area = 0;
+        if (!reader.read_var_as(name_len) || !reader.skip(name_len)) return false;
+        if (!reader.read_var_as(code_offset) || !reader.read_var_as(code_size)) return false;
+        if (!reader.read_svar(area) || !reader.read_svar(area)) return false;
+        return reader.read_var_as(first_record_count);
+    }
     if (!reader.read_u32(function_count)) return false;
     if (function_count == 0) return true;
     // The first function: its name, code offset and size, then its count.

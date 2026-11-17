@@ -191,6 +191,55 @@ TEST_CASE("GC Stack Map - Binary Serialization and Deserialization Roundtrip") {
     }
 }
 
+TEST_CASE("GC Stack Map - compact encoding round-trips records that repeat and records that differ") {
+    ModuleStackMap original;
+    FunctionStackMap fn;
+    fn.function_name = "f";
+    fn.code_offset = 0x1234;
+    fn.code_size = 4000;
+    fn.slot_area_lo = -512;
+    fn.slot_area_hi = -16;
+    const std::vector<StackMapRootLocation> a = {
+        StackMapRootLocation::frame_slot(-40, StackMapValueKind::Tagged),
+        StackMapRootLocation::frame_slot(-24),
+        StackMapRootLocation::callee_saved(-8, codegen::PReg::gpr(x64::GPR::RBX), StackMapValueKind::Tagged),
+        StackMapRootLocation::frame_slot(16)};
+    const uint32_t ids[] = {0, 1, 2, 7, 3, 3, 4000000000u};
+    const uint32_t frames[] = {64, 64, 64, 96, 96, 64, 64};
+    for (int r = 0; r < 7; ++r) {
+        StackMapRecord rec;
+        rec.instruction_offset = r == 3 ? 5 : static_cast<uint32_t>(10 + 300 * r);  // one out of order
+        rec.frame_size = frames[r];
+        rec.safepoint_id = ids[r];
+        if (r != 1 && r != 4) {
+            rec.roots = r % 2 ? a : std::vector<StackMapRootLocation>(a.begin(), a.begin() + r % 4);
+        } else if (r == 4) {
+            rec.roots = a;
+        }
+        fn.add_record(std::move(rec));
+    }
+    original.add_function(fn);
+    const std::vector<uint8_t> encoded = encode_stack_maps(original);
+    const ModuleStackMap decoded = decode_stack_maps(encoded);
+    REQUIRE_EQ(decoded.size(), 1u);
+    const FunctionStackMap& d = decoded.functions()[0];
+    CHECK_EQ(d.code_offset, fn.code_offset);
+    CHECK_EQ(d.code_size, fn.code_size);
+    CHECK_EQ(d.slot_area_lo, fn.slot_area_lo);
+    CHECK_EQ(d.slot_area_hi, fn.slot_area_hi);
+    REQUIRE_EQ(d.records.size(), fn.records.size());
+    for (size_t r = 0; r < fn.records.size(); ++r) CHECK(d.records[r] == fn.records[r]);
+    uint32_t functions = 0, records = 0;
+    CHECK(peek_stack_maps(encoded, functions, records));
+    CHECK_EQ(functions, 1u);
+    CHECK_EQ(records, 7u);
+    // Every truncation is refused rather than read past.
+    for (size_t n = 8; n < encoded.size(); ++n) {
+        ModuleStackMap out;
+        CHECK_FALSE(decode_stack_maps_into(std::span<const uint8_t>(encoded.data(), n), out));
+    }
+}
+
 TEST_CASE("GC Stack Map - Binary Deserialization Robustness and Errors") {
     // 1. Empty buffer
     ModuleStackMap empty_map = decode_stack_maps({});

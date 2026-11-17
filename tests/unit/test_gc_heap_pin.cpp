@@ -585,11 +585,29 @@ TEST_CASE("Stack maps - the slot area round-trips, and a version 1 map decodes w
     uint32_t functions = 0, records = 0;
     CHECK(brass::peek_stack_maps(encoded, functions, records));
     CHECK_EQ(records, uint32_t{1});
-    // Version 1: no slot area after the code size.
-    std::vector<uint8_t> v1(encoded.begin(), encoded.end());
-    v1[4] = 1;
-    const size_t area_at = 12 + 4 + 1 + 8 + 4;  // header, name length, "f", code offset, code size
-    v1.erase(v1.begin() + static_cast<std::ptrdiff_t>(area_at), v1.begin() + static_cast<std::ptrdiff_t>(area_at + 8));
+    // Version 1, fixed-width words: no slot area after the code size.
+    std::vector<uint8_t> v1;
+    auto u32 = [&](uint32_t v) {
+        for (int i = 0; i < 4; ++i) v1.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    };
+    u32(brass::STACK_MAP_MAGIC);
+    u32(1);           // version
+    u32(1);           // functions
+    u32(1);           // name length
+    v1.push_back('f');
+    u32(0);           // code offset, u64
+    u32(0);
+    u32(32);          // code size
+    u32(1);           // records
+    u32(8);           // instruction offset
+    u32(0);           // frame size
+    u32(0);           // safepoint id
+    u32(1);           // roots
+    u32(static_cast<uint32_t>(-24));  // offset from the frame pointer
+    v1.push_back(0);  // kind: frame slot
+    v1.push_back(0);  // register class
+    v1.push_back(0);  // register code
+    v1.push_back(0);  // value: gcref
     const brass::ModuleStackMap old = brass::decode_stack_maps(v1);
     REQUIRE_EQ(old.size(), size_t{1});
     CHECK_EQ(old.functions()[0].slot_area_lo, 0);

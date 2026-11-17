@@ -189,6 +189,17 @@ public:
     bool allow_fp_reassociation() const noexcept { return allow_fp_reassociation_; }
     void set_allow_fp_reassociation(bool allow) noexcept { allow_fp_reassociation_ = allow; }
 
+    // COLD: the front end expects the function to run seldom if ever (a
+    // profile saw it never run, or run briefly), so it is compiled for size
+    // and for the time compiling takes rather than for speed: the optimizer's
+    // function steps pass over it (pass_manager.hpp), the inliner inlines
+    // nothing into it, and the backend skips its optional work (scheduling,
+    // software pipelining, trace layout, loop transforms; ModuleCompiler).
+    // What it computes is the same: no step it skips is required. A pipeline
+    // with a step a function needs to be correct must not be given one.
+    bool is_cold() const noexcept { return cold_; }
+    void set_cold(bool cold = true) noexcept { cold_ = cold; }
+
     bool requires_barrier_certs() const noexcept { return requires_barrier_certs_; }
     void set_requires_barrier_certs(bool req = true) noexcept { requires_barrier_certs_ = req; }
 
@@ -268,6 +279,7 @@ private:
     bool allow_fp_reassociation_ = false;
     bool requires_barrier_certs_ = false;
     bool resume_twin_ = false;
+    bool cold_ = false;
     std::unordered_map<uint32_t, std::vector<Type>> twin_states_;
 
     bool has_coro_frame_layout_ = false;

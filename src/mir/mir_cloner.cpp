@@ -133,6 +133,7 @@ Function* clone_function(const Function& src, Module& dst_mod, std::string_view 
     dst_fn->set_allow_fp_reassociation(src.allow_fp_reassociation());
     dst_fn->set_requires_barrier_certs(src.requires_barrier_certs());
     dst_fn->set_resume_twin(src.is_resume_twin());
+    dst_fn->set_cold(src.is_cold());
     for (const auto& [id, types] : src.twin_states()) dst_fn->set_twin_state_types(id, types);
     dst_fn->guard_elim_certs() = src.guard_elim_certs();
     if (src.has_coro_frame_layout()) {

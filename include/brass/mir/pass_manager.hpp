@@ -22,6 +22,8 @@ enum class PassScope : uint8_t {
     Function,  // runs on each function the step's filter admits
 };
 
+// Which functions a function step runs on. None of them admits a cold
+// function (Function::is_cold): it is compiled as the front end built it.
 enum class FunctionFilter : uint8_t {
     All,
     // Every function but the `__wrapper_*` ABI wrappers.
