@@ -577,9 +577,15 @@ std::unique_ptr<LirFunction> X64ISel::lower(const Function& mir_fn) {
         }
     }
     // The arithmetic an overflow branch makes is the result of the sum it
-    // stands for (x64_isel_branch.cpp), which is skipped.
-    for (const auto& [br, pb] : peeled_branches_) {
-        if (pb.sum != nullptr) get_or_alloc_vreg(pb.sum->result());
+    // stands for (x64_isel_branch.cpp), which is skipped. In block order,
+    // not the map's: its order is the branches' addresses, which differ
+    // from one compile to the next (parallel compiles share the arena's
+    // chunk cache), and a vreg's number breaks the allocator's ties.
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            const auto pb = peeled_branches_.find(inst);
+            if (pb != peeled_branches_.end() && pb->second.sum != nullptr) get_or_alloc_vreg(pb->second.sum->result());
+        }
     }
     // The bits of a tagged value are its register: a read of them names the
     // value's own register rather than a copy. A copy was a second value,

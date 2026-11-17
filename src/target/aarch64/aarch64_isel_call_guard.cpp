@@ -224,6 +224,10 @@ void AArch64ISel::lower_safepoint(const Instruction& inst, LirBlock& lir_bb) {
             sp_inst->live_gcrefs.push_back(entry.second);
         }
     }
+    // By number: the map's order is its keys' addresses, which vary from
+    // one compile to the next.
+    std::sort(sp_inst->live_gcrefs.begin(), sp_inst->live_gcrefs.end(),
+              [](const codegen::VReg& a, const codegen::VReg& b) { return a.id < b.id; });
     sp_inst->mir_origin = &inst;
     lir_bb.append_inst(std::move(sp_inst));
 }
