@@ -62,6 +62,16 @@ struct TieringConfig {
     // stopping the mutator for the compile of it and every function it
     // reaches.
     bool enable_background_tier1 = false;
+    // A function's first call from native code, through its lazy stub
+    // (MultiTierPipeline::function_address), asks for its baseline code:
+    // compiled then, or in the background with enable_background_tier1. Off,
+    // native callers run it in Tier 0 through its native-to-Tier-0 bridge,
+    // and it is compiled when its invocation count says so, as for a Tier-0
+    // caller: a program of code its build saw run seldom or never (bronze's
+    // interpreted cold functions), where one call is the common case and a
+    // compile for it is work that never pays back. A function no bridge can
+    // call is compiled on its first call either way.
+    bool native_call_requests_tier1 = true;
     Tier0Interpreter tier0_interpreter = Tier0Interpreter::Oracle;
     // The highest tier the pipeline compiles a program function to. At
     // Tier0_Interpreter nothing of the program is compiled: every function

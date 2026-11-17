@@ -292,8 +292,18 @@ void FastInterpreter::resolve_call_target(FastFnInfo& info, uint32_t cs_idx) {
         if (it != external_functions_.end()) t.host = &it->second;
     }
     t.handle = dispatch_table().find(name);
+    // Native code the program names by symbol and does not define: a
+    // function of an image the host loaded, registered as an external
+    // symbol (bronze's interpreted cold functions call their module's
+    // compiled ones so), called as native code called through a pointer.
+    if (!t.callee && !t.host && !(t.handle && t.handle->native_entry())) {
+        if (void* addr = find_external_symbol(name)) {
+            t.indirect_ptr = reinterpret_cast<uintptr_t>(addr);
+            t.raw_native = true;
+        }
+    }
     // A miss is never cached: the next call resolves again.
-    const bool found = t.callee || t.host || (t.handle && t.handle->native_entry());
+    const bool found = t.callee || t.host || t.raw_native || (t.handle && t.handle->native_entry());
     t.epoch = found ? resolve_epoch_ : 0;
     t.registry_gen = gen;
     info.calls[cs_idx] = std::move(t);

@@ -617,6 +617,14 @@ void* MultiTierPipeline::compile_tier1_on_demand(std::string_view name) {
     if (!handle) return nullptr;
     // Nothing of the program is compiled: the call runs it in Tier 0.
     if (config_.max_tier < TierLevel::Tier1_Baseline) return tier0_bridge(name);
+    // Tier 0 until the function is warm (TieringConfig::
+    // native_call_requests_tier1): its invocation count asks for tier 1.
+    if (!config_.native_call_requests_tier1 && !handle->native_entry()) {
+        const Function* fn = handle->mir_function();
+        if (fn && tier0_bridge_supported(*fn)) {
+            if (void* bridge = tier0_bridge(name)) return bridge;
+        }
+    }
     // In the background: this call and the ones after it run in Tier 0
     // through the bridge until the worker installs the code, which points
     // the stub at it (install_tier1_group). The stub keeps whichever of the

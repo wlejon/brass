@@ -534,6 +534,15 @@ bool JitExecutionEngine::load_object(const object::ObjectFile& obj, size_t code_
                         std::memcpy(patch_loc, &inst, 4);
                     } else {
                         int64_t disp = reinterpret_cast<int64_t>(target_addr) + r.addend - reinterpret_cast<int64_t>(patch_loc);
+                        // A call through a word (`call [rip + cell]`,
+                        // X64Encoder::call_through) reads the word: a
+                        // trampoline in its place would be read as the
+                        // address called.
+                        if ((disp < INT32_MIN || disp > INT32_MAX) && r.offset >= 2 && patch_loc[-2] == 0xFF &&
+                            patch_loc[-1] == 0x15) {
+                            std::cerr << "JIT Error: call through '" << r.symbol_name << "' is out of 32-bit range\n";
+                            return false;
+                        }
                         if (disp < INT32_MIN || disp > INT32_MAX) {
                             // Out of 32-bit reach: generate or reuse a 64-bit indirect jump PLT trampoline
                             void* tramp_addr = nullptr;
