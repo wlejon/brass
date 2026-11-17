@@ -901,9 +901,20 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     const uintptr_t lo = g.shade ? g.heap.reservation_base() : g.heap.young_base();
     const size_t span = g.shade ? g.heap.reservation_bytes() : g.heap.young_span();
     for (unsigned i = 0; i < pm.threads; ++i) pm.workers.push_back(std::make_unique<Worker>(pm, g.heap, lo, lo + span));
-    // The pinned objects (evacuate pinned them before choosing this path)
-    // are the calling thread's first grey work, shared like the rest.
-    pm.workers[0]->stack.insert(pm.workers[0]->stack.end(), s.pinned.begin(), s.pinned.end());
+    // The pinned objects (evacuate pinned them before choosing this path) and
+    // what the pretenured objects' pass left grey (promote_pretenured: copies
+    // it promoted, and the ephemerons it met) are the calling thread's first
+    // work, shared like the rest. That pass copies nothing into the survivor
+    // space, which the threads hand out from its start.
+    if (g.to_frag != 0 || g.to_cursor != g.to_frags[0].lo) {
+        gc_fatal("a parallel minor collection found its survivor space already in use");
+    }
+    Worker& first = *pm.workers[0];
+    first.stack.insert(first.stack.end(), s.pinned.begin(), s.pinned.end());
+    first.stack.insert(first.stack.end(), g.gray.begin(), g.gray.end());
+    g.gray.clear();
+    first.ephemerons.insert(first.ephemerons.end(), g.ephemerons.begin(), g.ephemerons.end());
+    g.ephemerons.clear();
 
     gather_dirty_cards(g, pm.cards);
     clock.lap(kPhaseCards);

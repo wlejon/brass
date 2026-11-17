@@ -183,6 +183,72 @@ TEST_CASE("gc::Heap pretenuring - minor collections in a marking cycle judge pro
     CHECK_EQ(site.refused, 0u);
 }
 
+// The chain from `slot` down word 0: whether it is `n` nodes whose word 1 is
+// `first`, `first` + 1, ... in order.
+bool chain_intact(const uint64_t* slot, size_t n, uint64_t first) {
+    return from_own_frame([&] {
+        uintptr_t at = static_cast<uintptr_t>(*slot);
+        for (size_t i = 0; i < n; ++i) {
+            if (at == 0 || Heap::load(at, 1) != first + i) return false;
+            at = static_cast<uintptr_t>(Heap::load(at, 0));
+        }
+        return at == 0;
+    });
+}
+
+// A young chain of `n` nodes from `slot` (pushed at its head, so the newest
+// is first): word 1 numbers them from `first`, in order from the head.
+void make_young_chain(Heap& h, uint64_t* slot, size_t n, uint64_t first) {
+    in_own_frame([&] {
+        for (size_t i = n; i-- > 0;) {
+            const uintptr_t o = h.allocate(16, kNode);
+            reinterpret_cast<uint64_t*>(o)[0] = *slot;
+            reinterpret_cast<uint64_t*>(o)[1] = first + i;
+            *slot = o;
+        }
+    });
+}
+
+TEST_CASE("gc::Heap pretenuring - a parallel minor collection keeps what the pretenured objects' pass left young") {
+    // A pretenured object holding a young chain deeper than one object's
+    // copying reaches (kCopyDepth): the pass promotes the head of the chain and
+    // leaves the rest to age as any other, copied into the survivor space by
+    // the evacuation proper, which here runs on several threads. When the pass
+    // copied them itself, the threads handed out the same survivor space
+    // again from its start, and wrote other survivors over them.
+    HeapConfig c = plain_config();
+    c.eden_bytes = size_t{1} << 20;
+    c.parallel_minor = ParallelMinor::Always;
+    c.minor_threads = 4;
+    c.mark_threads = 4;
+    Heap h(c);
+    REQUIRE(h.stress() == StressMode::None);
+    PretenureSite site;
+    collect_scrubbed(h, CollectionKind::Minor);  // pretenured objects are young before the first
+    HeapRoot<Heap> owner(h);
+    HeapRoot<Heap> other(h);
+    constexpr size_t kDeep = 256;
+    in_own_frame([&] {
+        CHECK(h.is_young(h.try_allocate_pretenured(16, kNode, site)));  // the site's probe
+        const uintptr_t old = h.try_allocate_pretenured(16, kNode, site);
+        REQUIRE(old != 0);
+        CHECK(h.is_old(old));
+        reinterpret_cast<uint64_t*>(old)[1] = 0;
+        *owner.slot = old;
+    });
+    // Filled with no barrier, as a pretenured literal's fields are.
+    make_young_chain(h, reinterpret_cast<uint64_t*>(static_cast<uintptr_t>(*owner.slot)), kDeep, 1);
+    make_young_chain(h, other.slot, kDeep, 1000);
+    const uint64_t parallel = h.stats().parallel_evacuations;
+    collect_scrubbed(h, CollectionKind::Minor);
+    CHECK(h.stats().parallel_evacuations > parallel);
+    CHECK(chain_intact(owner.slot, kDeep + 1, 0));
+    CHECK(chain_intact(other.slot, kDeep, 1000));
+    collect_scrubbed(h, CollectionKind::Minor);
+    CHECK(chain_intact(owner.slot, kDeep + 1, 0));
+    CHECK(chain_intact(other.slot, kDeep, 1000));
+}
+
 TEST_CASE("gc::Heap pretenuring - a memento follows its object and counts its promotion") {
     Heap h(plain_config());
     REQUIRE(h.stress() == StressMode::None);

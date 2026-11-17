@@ -200,10 +200,15 @@ void drain(Tracer& t, GcState& g) {
 // its objects live long, and the parts one is made with (an array, its
 // strings, a vector) mostly live as long as it does: aged through the
 // survivor space, they would be copied twice to end up old anyway. Past the
-// budget the copies wait on the grey stack and age as any other (a long-lived
-// object may hold a working set that turns over: promoted, that would be old
-// garbage). Before the evacuation proper, on this thread; their cards are
-// dirty, so the card scan sees the promoted slots again, and finds them old.
+// budget the copies wait on the grey stack (g.gray), and what they hold ages
+// as any other (a long-lived object may hold a working set that turns over:
+// promoted, that would be old garbage). Before the evacuation proper, on this
+// thread; their cards are dirty, so the card scan sees the promoted slots
+// again, and finds them old. Everything this pass copies is promoted: the
+// grey copies, and the ephemerons it met (g.ephemerons), are the evacuation
+// proper's first work, serial or parallel (evacuate_parallel), so that
+// nothing is in the survivor space before it starts, where the parallel
+// copying hands out the space from its start.
 void promote_pretenured(GcState& young) {
     HeapState& s = young.s;
     if (s.pretenured.empty()) return;
@@ -218,7 +223,7 @@ void promote_pretenured(GcState& young) {
         scan_object(t, object, true);
     }
     young.tenure_age = age;
-    drain(t, young);
+    young.copy_budget = 0;  // roots and cards have none
     s.pretenured.clear();
 }
 
