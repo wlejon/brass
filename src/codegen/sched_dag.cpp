@@ -249,7 +249,7 @@ struct MemoryRef {
     uint8_t size = 8;
 };
 
-static std::vector<MemoryRef> get_memory_refs(const LirInst& inst) {
+static std::vector<MemoryRef> get_memory_refs(const LirInst& inst, PReg frame_pointer) {
     std::vector<MemoryRef> refs;
 
     auto check_op = [&](const LirOperand& op) {
@@ -264,7 +264,7 @@ static std::vector<MemoryRef> get_memory_refs(const LirInst& inst) {
             r.size = op.size;
             r.disp = op.mem_val.disp;
             r.has_index = op.mem_val.has_index();
-            if (op.mem_val.base_preg == PReg::gpr(x64::GPR::RBP)) {
+            if (op.mem_val.base_preg == frame_pointer) {
                 r.is_rbp_spill = true;
                 r.rbp_offset = op.mem_val.disp;
             } else {
@@ -592,12 +592,17 @@ void SchedDAG::build_register_dependencies() {
 }
 
 void SchedDAG::build_memory_dependencies() {
+    // The frame register, whose slots are the stack's: a PReg is a bare
+    // register code, so x64's RBP (5) is AArch64's X5, an ordinary register
+    // that holds heap pointers.
+    const PReg frame_pointer =
+        arch_ == Arch::aarch64 ? PReg::aarch64_gpr(aarch64::GPR::X29) : PReg::gpr(x64::GPR::RBP);
     std::vector<uint32_t> mem;
     std::vector<std::vector<MemoryRef>> refs(nodes_.size());
     for (uint32_t i = 0; i < nodes_.size(); ++i) {
         if (!nodes_[i].is_load && !nodes_[i].is_store) continue;
         mem.push_back(i);
-        refs[i] = get_memory_refs(*nodes_[i].inst);
+        refs[i] = get_memory_refs(*nodes_[i].inst, frame_pointer);
     }
 
     for (size_t a = 0; a < mem.size(); ++a) {
