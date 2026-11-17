@@ -48,15 +48,15 @@ struct TwinEntry {
 
 } // namespace
 
-Function* build_resume_twin(const Function& fn, Module& dst, std::string_view name,
-                            const ResumeTwinOptions& options, std::string* why) {
+std::optional<ResumeTwinDraft> draft_resume_twin(const Function& fn, Module& dst, std::string_view name,
+                                                 const ResumeTwinOptions& options, std::string* why) {
     if (fn.has_coro_frame_layout()) {
         fail(why, "a coroutine body");
-        return nullptr;
+        return std::nullopt;
     }
     if (fn.block_count() == 0) {
         fail(why, "no body");
-        return nullptr;
+        return std::nullopt;
     }
 
     // The entries: one per resume id a site-form guard names. Guards sharing
@@ -75,24 +75,24 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
             for (const Value* v : inst->state_map()) {
                 if (!v) {
                     fail(why, "guard " + std::to_string(e.id) + " has an empty state value");
-                    return nullptr;
+                    return std::nullopt;
                 }
                 if (v->type().is_vector()) {
                     fail(why, "guard " + std::to_string(e.id) + " has a vector state value");
-                    return nullptr;
+                    return std::nullopt;
                 }
                 e.state.push_back(v);
             }
             if (e.target->param_count() > e.state.size()) {
                 fail(why, "resume block of guard " + std::to_string(e.id) + " has more parameters than state values");
-                return nullptr;
+                return std::nullopt;
             }
         }
     }
     if (options.entry_id) {
         if (entries.count(*options.entry_id)) {
             fail(why, "entry id " + std::to_string(*options.entry_id) + " is a guard's resume id");
-            return nullptr;
+            return std::nullopt;
         }
         TwinEntry& e = entries[*options.entry_id];
         e.id = *options.entry_id;
@@ -100,14 +100,14 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
         for (const Value* p : e.target->params()) {
             if (p->type().is_vector()) {
                 fail(why, "a vector parameter");
-                return nullptr;
+                return std::nullopt;
             }
             e.state.push_back(p);
         }
     }
     if (entries.empty()) {
         fail(why, "no guard resumes in the function");
-        return nullptr;
+        return std::nullopt;
     }
 
     // The region: everything reachable from an entry's target.
@@ -339,29 +339,44 @@ Function* build_resume_twin(const Function& fn, Module& dst, std::string_view na
     }
 
     out->rebuild_cfg_predecessors();
-    if (!slots.empty()) sroa_function(*out);
+    ResumeTwinDraft draft;
+    draft.twin = out;
+    draft.slotted = !slots.empty();
+    for (const auto& [v, slot] : slots) {
+        if (v->type().is_gcref()) draft.ref_slots.push_back(slot);
+    }
+    return draft;
+}
+
+bool finish_resume_twin(const ResumeTwinDraft& draft, std::string* why) {
+    Function& out = *draft.twin;
+    // What SROA builds is the twin's own (module.hpp), whichever thread runs it.
+    FunctionWorkScope work(out);
+    if (draft.slotted) sroa_function(out);
     // A reference must not sit in a frame word the collector does not know:
     // every slot of one has to be gone again.
-    std::unordered_set<const Value*> ref_slots;
-    for (const auto& [v, slot] : slots) {
-        if (v->type().is_gcref()) ref_slots.insert(slot);
-    }
-    for (const BasicBlock* bb : out->blocks()) {
+    const std::unordered_set<const Value*> ref_slots(draft.ref_slots.begin(), draft.ref_slots.end());
+    for (const BasicBlock* bb : out.blocks()) {
         for (const Instruction* inst : *const_cast<BasicBlock*>(bb)) {
             if (inst && inst->result() && ref_slots.count(inst->result())) {
-                fail(why, "a gcref state value's slot could not be turned back into a value");
-                dst.remove_function(out);
-                return nullptr;
+                return fail(why, "a gcref state value's slot could not be turned back into a value");
             }
         }
     }
     DiagnosticReporter diag;
-    if (!verify_function(*out, &diag)) {
-        fail(why, "the resume twin does not verify:\n" + diag.format_all());
-        dst.remove_function(out);
+    if (!verify_function(out, &diag)) return fail(why, "the resume twin does not verify:\n" + diag.format_all());
+    return true;
+}
+
+Function* build_resume_twin(const Function& fn, Module& dst, std::string_view name,
+                            const ResumeTwinOptions& options, std::string* why) {
+    const std::optional<ResumeTwinDraft> draft = draft_resume_twin(fn, dst, name, options, why);
+    if (!draft) return nullptr;
+    if (!finish_resume_twin(*draft, why)) {
+        dst.remove_function(draft->twin);
         return nullptr;
     }
-    return out;
+    return draft->twin;
 }
 
 Function* build_twin_entry(const Function& fn, const Function& twin, uint32_t entry_id, std::string_view name,

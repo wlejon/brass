@@ -35,6 +35,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace brass {
 
@@ -64,6 +65,23 @@ struct ResumeTwinOptions {
 // does not verify; `dst` is then as it was.
 Function* build_resume_twin(const Function& fn, Module& dst, std::string_view name,
                             const ResumeTwinOptions& options = {}, std::string* why = nullptr);
+
+// build_resume_twin in two steps, for a front end with many twins to build.
+// draft_resume_twin adds the twin to `dst` with its state values still going
+// through stack slots (it changes the module: one at a time);
+// finish_resume_twin turns the slots back into values and verifies the twin,
+// touching that function alone (in a FunctionWorkScope of it), so drafts of
+// one module may be finished on several threads at once. A twin whose finish fails is the caller's to
+// remove (Module::remove_function).
+struct ResumeTwinDraft {
+    Function* twin = nullptr;
+    bool slotted = false;              // some state value goes through a slot
+    std::vector<const Value*> ref_slots;  // the slots of gcref state values
+};
+std::optional<ResumeTwinDraft> draft_resume_twin(const Function& fn, Module& dst, std::string_view name,
+                                                 const ResumeTwinOptions& options = {},
+                                                 std::string* why = nullptr);
+bool finish_resume_twin(const ResumeTwinDraft& draft, std::string* why = nullptr);
 
 // Adds `name` to the twin's module: a function with `fn`'s signature that
 // runs the twin from its `entry_id` entry (ResumeTwinOptions::entry_id), so
