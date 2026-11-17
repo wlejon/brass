@@ -31,6 +31,10 @@ BRASS_API double atan2_f64(double y, double x) noexcept;
 // correctly rounded more often, so they differ from V8's in the last bit.
 BRASS_API double exp_f64(double x) noexcept;
 BRASS_API double log_f64(double x) noexcept;
+// x^y as V8 computes Math.pow and ** (fdlibm's e_pow.c, fast_explog.cpp).
+// The language's rules for pow(+-1, +-inf) and pow(x, NaN), where C's pow
+// answers 1, are the caller's.
+BRASS_API double pow_f64(double x, double y) noexcept;
 
 } // namespace brass::math
 
