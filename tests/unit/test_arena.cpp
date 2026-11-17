@@ -1,6 +1,8 @@
 #include "test_framework.hpp"
 #include <brass/core/arena.hpp>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <vector>
 
 using namespace brass;
@@ -133,4 +135,44 @@ TEST_CASE("Arena reset and clear") {
     CHECK_EQ(arena.bytes_allocated(), size_t{0});
     CHECK_EQ(arena.bytes_capacity(), size_t{0});
     CHECK_EQ(arena.chunk_count(), size_t{0});
+}
+
+// A chunk of 64 KB or more is pages of its own (src/core/arena.cpp): its
+// capacity is whole pages, all of it can be written, and many of them made
+// and dropped (more than a thread keeps for its next arena), on this thread
+// and on one that ends, come and go cleanly.
+TEST_CASE("Arena paged chunks") {
+    {
+        Arena arena(100 * 1024);
+        auto* p = static_cast<uint8_t*>(arena.allocate(100 * 1024, 8));
+        CHECK(p != nullptr);
+        std::memset(p, 0xAB, 100 * 1024);
+        CHECK(arena.bytes_capacity() >= 100 * 1024);
+        CHECK_EQ(arena.bytes_capacity() % 4096, size_t{0});
+        CHECK_EQ(p[100 * 1024 - 1], uint8_t{0xAB});
+    }
+    auto churn = [] {
+        std::vector<std::unique_ptr<Arena>> arenas;
+        for (int i = 0; i < 24; ++i) {
+            auto a = std::make_unique<Arena>(64 * 1024);
+            for (int k = 0; k < 3; ++k) {
+                auto* q = static_cast<uint8_t*>(a->allocate(60 * 1024, 16));
+                std::memset(q, i + k, 60 * 1024);
+            }
+            arenas.push_back(std::move(a));
+        }
+        for (size_t i = 0; i < arenas.size(); ++i) {
+            auto* q = static_cast<uint8_t*>(arenas[i]->allocate(16, 8));
+            CHECK(q != nullptr);
+        }
+        arenas.clear();
+        Arena again(64 * 1024);
+        auto* r = static_cast<uint8_t*>(again.allocate(64 * 1024, 8));
+        std::memset(r, 1, 64 * 1024);
+        CHECK_EQ(r[0], uint8_t{1});
+    };
+    churn();
+    std::thread worker(churn);
+    worker.join();
+    churn();
 }

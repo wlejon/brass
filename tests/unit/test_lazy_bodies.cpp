@@ -224,4 +224,60 @@ TEST_CASE("Lazy bodies - a caller's tier-up compiles a released callee, which ha
     CHECK_EQ(built, 2);
 }
 
+// A release on a budget (a host's slice a frame) stops once it has released
+// that much, says it is not finished, and the next call goes on from there.
+TEST_CASE("Lazy bodies - a release on a budget goes on where it stopped") {
+    DiagnosticReporter diag;
+    auto mod = parse_module(R"(module @sliced
+func @lb_a(%n: i64) -> i64 {
+b0:
+  ret %n
+}
+func @lb_b(%n: i64) -> i64 {
+b0:
+  ret %n
+}
+)", &diag);
+    REQUIRE(mod != nullptr);
+    int built = 0;
+    for (const char* name : {"lb_a", "lb_b"}) {
+        Function* fn = mod->get_function(name);
+        REQUIRE(fn != nullptr);
+        while (!fn->blocks().empty()) fn->remove_block(fn->blocks().back());
+        fn->mark_lazy();
+    }
+    mod->set_body_provider([&built](Function& fn) {
+        ++built;
+        Builder b(fn);
+        BasicBlock* bb = b.append_block("b0");
+        Value* n = b.add_block_param(bb, Type::i64());
+        b.position_at_end(bb);
+        b.build_ret(n);
+        fn.rebuild_cfg_predecessors();
+        return true;
+    });
+    Function* a = mod->get_function("lb_a");
+    Function* bfn = mod->get_function("lb_b");
+    { Module::BodyRead ra(*a); Module::BodyRead rb(*bfn); }
+    CHECK_EQ(built, 2);
+    REQUIRE(a->body_ready());
+    REQUIRE(bfn->body_ready());
+
+    bool finished = true;
+    CHECK(mod->release_bodies(1, &finished) > 0);
+    CHECK(!finished);
+    CHECK_EQ(mod->released_count(), 1u);
+    CHECK(a->is_lazy());
+    CHECK(bfn->body_ready());
+
+    CHECK(mod->release_bodies(1, &finished) > 0);
+    CHECK(finished);
+    CHECK_EQ(mod->released_count(), 2u);
+    CHECK(bfn->is_lazy());
+
+    // Nothing left: done, and nothing released.
+    CHECK_EQ(mod->release_bodies(1, &finished), 0u);
+    CHECK(finished);
+}
+
 #endif

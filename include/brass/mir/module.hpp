@@ -6,6 +6,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/runtime_symbols.hpp>
 #include <brass/debug/source_loc.hpp>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string_view>
@@ -262,13 +263,19 @@ public:
     };
     // Drops every releasable body (Function::body_releasable) and returns
     // the bytes their arenas held; 0, releasing nothing, while a BodyRead is
-    // held or a body is being built. Any thread.
-    size_t release_bodies();
+    // held or a body is being built. Any thread. With a `budget`, stops
+    // once it has released that many bytes, sets *finished to false, and
+    // the next call goes on from there: a host on a frame budget releases a
+    // large module's bodies over several frames (freeing 1.5 GB of them took
+    // 245 ms at once on an M2 Pro), holding the bodies' lock for a slice at
+    // a time.
+    size_t release_bodies(size_t budget = SIZE_MAX, bool* finished = nullptr);
     // How many bodies release_bodies has dropped, for a host's report.
     size_t released_count() const noexcept;
     // release_bodies over every live module with a body provider, for a host
-    // gone idle. Returns the bytes released.
-    static size_t release_idle_bodies();
+    // gone idle. Returns the bytes released; `budget` and *finished as
+    // release_bodies', over the modules together.
+    static size_t release_idle_bodies(size_t budget = SIZE_MAX, bool* finished = nullptr);
     // Over every live module with a body provider: bodies built (first
     // builds and builds again), bodies released, and the bytes the bodies
     // held now keep in their own arenas.
