@@ -219,7 +219,14 @@ uint64_t ArtifactCache::walk() {
             const std::string hex(item.key.data(), item.key.size());
             if (is_protected(hex)) continue;
             std::error_code e2;
-            const bool removed = std::filesystem::remove(dir_ / (hex + kEntryExt), e2);
+            const std::filesystem::path entry = dir_ / (hex + kEntryExt);
+            // Stored or read again since the listing, by this process or
+            // another: it is no longer among the oldest, and removing it by
+            // the time the listing saw would throw away what was just made.
+            const auto current = std::filesystem::last_write_time(entry, e2);
+            if (!e2 && current != item.mtime) continue;
+            e2.clear();
+            const bool removed = std::filesystem::remove(entry, e2);
             // Removed now, or already gone: either way it no longer counts.
             // An error (Windows: open without delete sharing) leaves it.
             if (removed || !e2) total -= item.bytes;
