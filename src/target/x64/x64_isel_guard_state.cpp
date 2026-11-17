@@ -131,10 +131,23 @@ void X64ISel::find_guard_state_folds(const Function& mir_fn, std::unordered_map<
         };
         if (conversion()) {
             chain.insert(chain.end(), conv_chain.begin(), conv_chain.end());
-        } else if (!chain.empty()) {
-            fold = GuardStateFold{v, GuardStateConv::None, 0};
         } else {
-            continue;
+            // The exit reads the value as it is, and it is live from where it
+            // is made to the exit: across every safepoint between. Only a
+            // tagged value is in their stack maps, so the walk's last tagged
+            // value is the one read, never the word below it (a heap pointer
+            // as an i64, which a collection moving the object leaves stale).
+            // chain[i] makes the i-th value of the walk; top is the 0th.
+            size_t read = chain.size();
+            const Value* at = v;
+            while (read > 0 && !at->type().is_tagged()) {
+                --read;
+                at = read == 0 ? top : chain[read - 1]->operand(0);
+            }
+            if (!at->type().is_tagged()) at = v, read = chain.size();
+            chain.resize(read);
+            if (chain.empty()) continue;
+            fold = GuardStateFold{at, GuardStateConv::None, 0};
         }
         for (const Instruction* c : chain) skipped_insts_.insert(c);
         guard_state_folds_[top] = fold;
