@@ -453,6 +453,16 @@ struct HeapState {
     std::unique_ptr<MarkThreads, MarkThreadsDeleter> mark_threads;
 
     HeapStats stats;
+    // The mature object remember_interior last found for a slot, [lo, lo +
+    // size), and the collection count it was found at: a store into the same
+    // object before the next collection dirties its card without searching
+    // the start bits again. A collection may free it (and clean cards), so the
+    // entry holds only until the count moves; the lazy sweep frees only what
+    // the last finished cycle found dead, and a slot stored into since was
+    // live then or allocated after it.
+    uintptr_t remembered_lo = 0;
+    size_t remembered_size = 0;
+    uint64_t remembered_at = ~uint64_t{0};
     uint64_t relocation_epoch = 0;
     std::vector<uint64_t> reference_tag_bits;  // 65536 bits, empty: every tag
     std::shared_ptr<runtime::CoroFrameRegistry> coro_frames;

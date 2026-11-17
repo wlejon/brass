@@ -45,7 +45,11 @@ constexpr auto kRelaxed = std::memory_order_relaxed;
 uintptr_t Heap::try_allocate_pretenured(size_t bytes, LayoutId layout, PretenureSite& site) noexcept {
     HeapState& s = *s_;
     if (AtomicRef<uint32_t>(site.refused).load(kRelaxed) != 0) return try_allocate_young(bytes, layout);
-    const uint32_t tick = AtomicRef<uint32_t>(site.tick).fetch_add(1, kRelaxed);
+    // A plain relaxed increment, no locked one: a site shared by threads that
+    // race here only miscounts which object is a probe, and every allocation
+    // of a hot site pays for the tick.
+    const uint32_t tick = AtomicRef<uint32_t>(site.tick).load(kRelaxed);
+    AtomicRef<uint32_t>(site.tick).store(tick + 1, kRelaxed);
     if (tick % PretenureSite::kProbeEvery == 0 && tick < PretenureSite::kProbeEvery * kProbesPerMinor &&
         s.probes.size() < kMaxProbes) {
         const uintptr_t probe = try_allocate_young(bytes, layout);
@@ -80,6 +84,11 @@ uintptr_t Heap::try_allocate_pretenured(size_t bytes, LayoutId layout, Pretenure
     s.pretenured.push_back(object);
     if (s.mark_phase == detail::MarkPhase::Marking) Collector::allocated_old(*this, object);
     else dirty_card(object);
+    // The stores that fill it find it without a start-bit search
+    // (remember_interior).
+    s.remembered_lo = object;
+    s.remembered_size = payload;
+    s.remembered_at = s.stats.minor_collections + s.stats.full_collections;
     return object;
 }
 

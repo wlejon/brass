@@ -177,6 +177,11 @@ void Heap::remember_interior(uintptr_t address, uint64_t value) noexcept {
     // the nearest start below a live object's slot is still that object's:
     // objects never overlap.)
     if (s.in_mature(address)) {
+        const uint64_t collections = s.stats.minor_collections + s.stats.full_collections;
+        if (address - s.remembered_lo < s.remembered_size && s.remembered_at == collections) {
+            dirty_card(s.remembered_lo);
+            return;
+        }
         const uint32_t index = s.block_index(address);
         if (index < s.blocks.size() && s.blocks[index]->in_use) {
             const detail::BlockMeta& meta = *s.blocks[index];
@@ -186,8 +191,11 @@ void Heap::remember_interior(uintptr_t address, uint64_t value) noexcept {
             if (below != 0) {
                 const size_t start = (granule & ~size_t{63}) + detail::clz_index64(below);
                 const uintptr_t object = lo + start * kGranuleBytes;
-                if (address - object < header_of(object)->size) {
+                if (const size_t size = header_of(object)->size; address - object < size) {
                     dirty_card(object);
+                    s.remembered_lo = object;
+                    s.remembered_size = size;
+                    s.remembered_at = collections;
                     return;
                 }
             }
