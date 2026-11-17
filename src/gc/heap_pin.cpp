@@ -55,7 +55,7 @@
 // registers it reads only the callee-saved integer ones, where a caller's
 // references can be; the rest are the collector's scratch.
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <brass/gc/stack_walker.hpp>
 

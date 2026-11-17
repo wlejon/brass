@@ -27,7 +27,7 @@
 // cards into a list of pieces first, cleaning them, and its threads scan the
 // pieces (gather_dirty_cards, scan_card_work).
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <algorithm>
 #include <cstring>

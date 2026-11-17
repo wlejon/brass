@@ -1,4 +1,4 @@
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <brass/gc/fiber.hpp>
 #include <brass/gc/native_frames.hpp>

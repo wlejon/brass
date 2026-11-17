@@ -139,6 +139,21 @@ LayoutId register_layout(const LayoutDescriptor& descriptor);
 // thereafter: what brass_gc_alloc(size, mask, tag) allocates with.
 LayoutId mask_layout(uint64_t mask, uint32_t type_tag);
 
+// ALLOCATION MEMENTOS (docs/gc_contract.md 2.14, "Pretenuring"): `layout`, a Leaf
+// layout of one 8-byte word, is the memento layout from now on, process-wide.
+// A host that wants to know how many of a site's young objects reach the old
+// generation allocates a memento right behind each one, in the same bump
+// (header, then the object, then the memento's header and its word), whose
+// word is the address of a uint64_t counter. Every minor collection then
+// carries an object's memento along with it into the survivor space and,
+// when it promotes the object, adds one to the counter (atomically) and
+// drops the memento. A memento nothing allocated behind an object (a stale
+// word past an allocation buffer's end) is never read: it must be an object
+// start. The counter must outlive every memento that names it. Until this is
+// called mementos are ordinary dead objects; it costs a collection one
+// branch per copied object while unset.
+void set_memento_layout(LayoutId layout) noexcept;
+
 namespace detail {
 // The registry's chunks of descriptors (layout.cpp), each never moved or
 // freed once published: what layout_descriptor reads, with no call.

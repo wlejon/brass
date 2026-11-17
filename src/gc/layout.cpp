@@ -144,4 +144,14 @@ size_t layout_count() noexcept {
     return registry().count.load(std::memory_order_acquire);
 }
 
+namespace {
+std::atomic<LayoutId> g_memento_layout{0xFFFF};  // detail::kNoMemento
+}
+
+void set_memento_layout(LayoutId layout) noexcept { g_memento_layout.store(layout, std::memory_order_relaxed); }
+
+namespace detail {
+LayoutId memento_layout() noexcept { return g_memento_layout.load(std::memory_order_relaxed); }
+}  // namespace detail
+
 } // namespace brass::gc

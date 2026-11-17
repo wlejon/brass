@@ -59,6 +59,23 @@ inline constexpr uint32_t kAllocPinned = 1u << 1;  // old, and never moved by an
 // Any other layout is a fatal error.
 inline constexpr uint32_t kAllocUninitialized = 1u << 2;
 
+// A PRETENURED allocation site's record (Heap::try_allocate_pretenured;
+// docs/gc_contract.md 2.14): host storage, zero before first use, that
+// outlives every heap allocating through it (several heaps may share one;
+// the collector updates it atomically). The heap keeps its counts: every
+// kProbeEvery-th object the site asks for (up to a bound per minor
+// collection) is made young, a PROBE, and the minor collections that follow
+// it tell whether it lived to be promoted; once more than half the probes
+// died young, `refused` is set, and from then on the site's objects are all
+// made young.
+struct PretenureSite {
+    uint32_t tick = 0;     // objects asked for since a collection judged the site's probes
+    uint32_t made = 0;     // probes made (halved now and then, with `dead`)
+    uint32_t dead = 0;     // probes a minor collection found dead
+    uint32_t refused = 0;  // nonzero: the site's objects die young
+    static constexpr uint32_t kProbeEvery = 32;
+};
+
 struct HeapConfig {
     // The whole eden. A minor collection fills the adaptive limit below it,
     // which shrinks while much of eden survives as data the program keeps
@@ -250,6 +267,19 @@ public:
             default: std::memset(w, 0, bytes); return;
         }
     }
+    // A zeroed object of `bytes` payload bytes for PRETENURED site `site`
+    // (docs/gc_contract.md 2.14, "Pretenuring"): allocated straight into the
+    // old generation, or young as try_allocate_young makes it when the site
+    // is refused, the object is its probe, no minor collection has run yet,
+    // the object is too large for a mature block, or the old generation
+    // wants a collection first (one requested or due, past its growth limit,
+    // the reserve in use); 0 when it fits neither. Never collects, so the
+    // caller needs no roots to ask and falls back to allocate() on 0. An old
+    // object's card is dirty, so stores that fill it before the next GC point
+    // are rescanned whether or not their barrier ran; while a marking cycle
+    // is open it is grey, as any old allocation. The next minor collection
+    // promotes what it holds then.
+    uintptr_t try_allocate_pretenured(size_t bytes, LayoutId layout, PretenureSite& site) noexcept;
     // The Mask layout (mask_layout) for (pointer_mask, type_tag).
     uintptr_t allocate_masked(size_t bytes, uint64_t pointer_mask, uint32_t type_tag) {
         return allocate(bytes, mask_layout(pointer_mask, type_tag));

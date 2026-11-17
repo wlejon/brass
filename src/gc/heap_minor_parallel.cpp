@@ -76,7 +76,7 @@
 // threads drain again), weak slots, ephemerons and finalizers settled
 // exactly as in the serial copy (heap_weak.cpp).
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 #include "heap_mark_threads.hpp"
 
 #include <brass/core/atomic_ref.hpp>
@@ -440,7 +440,9 @@ uintptr_t copy(Worker& w, uintptr_t object, uint8_t bits) {
     const size_t total = kHeaderBytes + h->size;
     const unsigned age = std::min<unsigned>(((bits & kGcAgeMask) >> kGcAgeShift) + 1u, 7u);
     const bool young_enough = age < g.tenure_age;
-    uintptr_t dest = young_enough ? survivor_allocate(w, total) : 0;
+    uint64_t* const memento =
+        g.memento_layout == kNoMemento ? nullptr : memento_counter(s, g.memento_layout, object, total);
+    uintptr_t dest = young_enough ? survivor_allocate(w, memento ? total + kMementoBytes : total) : 0;
     const bool promoted = dest == 0;
     if (promoted) {
         if (young_enough) w.overflow = true;
@@ -448,6 +450,14 @@ uintptr_t copy(Worker& w, uintptr_t object, uint8_t bits) {
         if (dest == 0) gc_fatal("the old generation's reservation is exhausted while promoting a young object");
     }
     std::memcpy(reinterpret_cast<void*>(dest), h, total);
+    if (memento && promoted) {
+        AtomicRef<uint64_t>(*memento).fetch_add(1, std::memory_order_relaxed);
+    } else if (memento) {
+        // Behind the copy, in this thread's buffer like it.
+        std::memcpy(reinterpret_cast<void*>(dest + total), reinterpret_cast<const void*>(object - kHeaderBytes + total),
+                    kMementoBytes);
+        s.set_young_start(dest + total + kHeaderBytes);
+    }
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
     uint8_t nbits = static_cast<uint8_t>(bits & ~(kGcForwarded | kGcBusy | kGcAgeMask | kGcResident));
     if (!promoted) nbits = static_cast<uint8_t>(nbits | (age << kGcAgeShift));

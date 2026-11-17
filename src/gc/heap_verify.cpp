@@ -3,7 +3,7 @@
 // every object and root that checks each reference names a real object and
 // each old-to-young reference has a dirty card.
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <algorithm>
 #include <cstdio>

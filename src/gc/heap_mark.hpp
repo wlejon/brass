@@ -8,7 +8,7 @@
 // out of time leaves its grey work where it was (each worker's stack, the
 // pool's chunks) and the next slice resumes from there.
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <atomic>
 #include <memory>

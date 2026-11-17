@@ -28,8 +28,9 @@
 // each settles weak slots, ephemerons and finalizers the same way
 // (heap_weak.cpp).
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
+#include <brass/core/atomic_ref.hpp>
 #include <brass/gc/fiber.hpp>
 #include <brass/gc/native_frames.hpp>
 #include <brass/gc/runtime_gc.hpp>
@@ -77,7 +78,10 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     const size_t total = kHeaderBytes + h->size;
     const unsigned age = std::min<unsigned>(h->age() + 1u, 7u);
     const bool young_enough = age < g.tenure_age;
-    uintptr_t dest = young_enough ? to_space_allocate(g, total) : 0;
+    uint64_t* const memento =
+        g.memento_layout == kNoMemento ? nullptr : memento_counter(s, g.memento_layout, object, total);
+    const size_t room = memento ? total + kMementoBytes : total;
+    uintptr_t dest = young_enough ? to_space_allocate(g, room) : 0;
     bool promoted = false;
     if (dest == 0) {
         if (young_enough) g.survivor_overflow = true;
@@ -86,6 +90,13 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
         promoted = true;
     }
     std::memcpy(reinterpret_cast<void*>(dest), h, total);
+    if (memento && promoted) {
+        AtomicRef<uint64_t>(*memento).fetch_add(1, std::memory_order_relaxed);
+    } else if (memento) {
+        std::memcpy(reinterpret_cast<void*>(dest + total), reinterpret_cast<const void*>(object - kHeaderBytes + total),
+                    kMementoBytes);
+        s.set_young_start(dest + total + kHeaderBytes);
+    }
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
     uint8_t bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask | kGcResident));
     if (!promoted) bits = static_cast<uint8_t>(bits | (age << kGcAgeShift));
@@ -182,6 +193,35 @@ void drain(Tracer& t, GcState& g) {
     g.copy_budget = 0;
 }
 
+// PRETENURING (docs/gc_contract.md 2.14, heap_pretenure.cpp): what the
+// objects allocated old since the last collection hold is promoted without a
+// stay in the survivor space, with what that holds in turn as far as one object's
+// copy budget (kCopyBudget, kCopyDepth) reaches. A site is pretenured because
+// its objects live long, and the parts one is made with (an array, its
+// strings, a vector) mostly live as long as it does: aged through the
+// survivor space, they would be copied twice to end up old anyway. Past the
+// budget the copies wait on the grey stack and age as any other (a long-lived
+// object may hold a working set that turns over: promoted, that would be old
+// garbage). Before the evacuation proper, on this thread; their cards are
+// dirty, so the card scan sees the promoted slots again, and finds them old.
+void promote_pretenured(GcState& young) {
+    HeapState& s = young.s;
+    if (s.pretenured.empty()) return;
+    const uintptr_t lo = young.shade ? young.heap.reservation_base() : young.heap.young_base();
+    const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
+    Tracer t(young.heap, Tracer::Purpose::Minor, lo, lo + span, &minor_visit, &weak_visit, &ephemeron_visit,
+             &young);
+    const unsigned age = young.tenure_age;
+    young.tenure_age = 1;
+    for (const uintptr_t object : s.pretenured) {
+        young.copy_budget = kCopyBudget;
+        scan_object(t, object, true);
+    }
+    young.tenure_age = age;
+    drain(t, young);
+    s.pretenured.clear();
+}
+
 // Copies every young object the roots and the dirty cards reach, and settles
 // the weak slots and ephemerons that name young objects. `young` is a Minor
 // state; its phases are timed into `clock`'s collection.
@@ -191,6 +231,7 @@ void evacuate(GcState& young, PhaseClock& clock) {
     // updated like any other's): before anything is copied, so no slot is
     // ever rewritten to a copy of it.
     pin_stack_objects(young);
+    promote_pretenured(young);
     // Large enough to pay for the helpers: the same evacuation on several
     // threads (heap_minor_parallel.cpp).
     const unsigned threads = parallel_minor_threads(young);
@@ -355,7 +396,11 @@ void minor(GcState& g) {
     const bool shrunk = s.eden_limit < s.eden_hi;
     g.tenure_age = s.promote_all && !shrunk ? 1u : s.config.tenure_age;
     g.shade = s.mark_phase == MarkPhase::Marking;
+    // Mementos are found by eden's start bits (memento_counter).
+    g.memento_layout = memento_layout();
+    if (g.memento_layout != kNoMemento) s.sync_eden_starts();
     evacuate(g, clock);
+    g.sites_refused = judge_probes(s);
     run_hooks(g);
     clock.lap(kPhaseHooks);
 
@@ -421,6 +466,11 @@ void full_evacuate(GcState& g, PhaseClock& clock) {
 // Phase 3: weakness, hooks, reclamation.
 void full_reclaim(GcState& g, PhaseClock& clock) {
     HeapState& s = g.s;
+    // A pretenured object this collection did not promote the young
+    // referents of (it kept the young generation in place) may be swept, and
+    // a probe was promoted or kept in place unjudged.
+    s.pretenured.clear();
+    s.probes.clear();
     settle_weakness(g);
     clock.lap(kPhaseWeak);
     run_hooks(g);

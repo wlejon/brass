@@ -17,7 +17,7 @@
 // cycle_note_ephemeron), which settles them at its finish with the ones its
 // marker met.
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 namespace brass::gc::detail {
 

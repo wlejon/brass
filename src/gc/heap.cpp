@@ -2,7 +2,7 @@
 // hooks, finalizer registration, modes and statistics. The collections are
 // heap_collect.cpp and heap_weak.cpp; queries over objects heap_verify.cpp.
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <brass/core/env.hpp>
 #include <brass/gc/fiber.hpp>

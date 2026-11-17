@@ -8,7 +8,7 @@
 // (CLOCK_MONOTONIC on Linux) when it ended, so a pause lines up with a frame
 // of a host's flight recorder or a perf profile.
 
-#include "heap_internal.hpp"
+#include "heap_collection.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -75,6 +75,10 @@ void log_collection(const GcState& g, uint64_t pause_ns) {
                  static_cast<unsigned long long>(g.marked_objects), static_cast<unsigned long long>(g.dirty_cards),
                  mb(s.heap.old_used_bytes()), mb(s.full_threshold), mb(g.eden_limit), mb(s.eden_limit - s.eden_lo), cycle,
                  g.minor_threads, static_cast<unsigned long long>(g.pinned_objects), ms(gc_now_ns()));
+    if (g.sites_refused != 0) {
+        std::fprintf(stderr, "[brass gc %p] #%llu pretenure: %u sites refused, their probes dying young\n",
+                     static_cast<const void*>(&s.heap), static_cast<unsigned long long>(index), g.sites_refused);
+    }
 }
 
 void log_sweep(const HeapState& s) {
