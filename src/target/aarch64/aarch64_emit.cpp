@@ -111,6 +111,14 @@ MemAddress AArch64EmitContext::ensure_accessible_mem(const MemAddress& mem, GPR 
     if (size_bytes > 0 && off >= 0 && (off % size_bytes == 0) && (off / size_bytes <= 4095)) {
         return mem;
     }
+    // Size not given: an offset that is a multiple of 16 and under 4096 is
+    // a scaled immediate for a 1-, 2-, 4-, 8- or 16-byte access alike. The
+    // default was an 8-byte access's reach (to 32760), which a byte store
+    // through the same address cannot encode (a slow-site counter's arm
+    // byte at 4304 aborted a large harvest build).
+    if (size_bytes <= 0 && off >= 0 && off % 16 == 0 && off <= 4095) {
+        return mem;
+    }
     if (off >= 0 && off <= 4095) {
         enc_.add(scratch, mem.base, static_cast<uint32_t>(off));
     } else if (off < 0 && -off <= 4095) {

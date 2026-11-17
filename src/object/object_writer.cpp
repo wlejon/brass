@@ -174,12 +174,16 @@ ObjectFile ModuleCompiler::compile(const Module& mod) {
     // the order is the same at any thread count.
     std::unordered_set<std::string> mapped;
     detail::ObjectPlacement placement{obj, text_sec, mapped};
-    for (size_t k : detail::placement_order(fns, placement_)) {
+    const std::vector<size_t> order = detail::placement_order(fns, placement_);
+    detail::BranchIslands islands(target_, emitted, order, branch_reach_);
+    for (size_t k : order) {
         detail::EmittedFunction& fn = emitted[k];
         if (!fn.emitted) continue;
         detail::write_block_map(fn.block_map);
+        islands.before_function(placement);
         detail::place_function(placement, std::move(fn));
     }
+    islands.retarget(placement);
 
     // Emit compact binary stack maps to .rdata / .rodata / __const section
     if (emit_stack_map_symbol_ && !obj.stack_maps.empty()) {

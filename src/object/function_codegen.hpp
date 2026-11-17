@@ -14,6 +14,7 @@
 #include <brass/mir/pass_manager.hpp>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -66,5 +67,42 @@ std::vector<size_t> placement_order(const std::vector<const Function*>& fns, con
 
 // Appends BRASS_BLOCK_MAP's lines (the diagnostic's file, in function order).
 void write_block_map(const std::string& lines);
+
+// BRANCH ISLANDS. An AArch64 B or BL reaches +-128 MB (the reach given). A
+// module whose code is larger gets an island every half reach of .text: for
+// every symbol the module's branches name, a veneer
+//   adrp x16, :got:target ; ldr x16, [x16, :got_lo12:target] ; br x16
+// which the image writers relax to adrp / add for a symbol the object
+// defines (relax_got_loads). Once every function is placed, each branch
+// whose target lies out of reach is pointed at the nearest island's veneer
+// for that target, its displacement encoded in place and its relocation
+// dropped. x16 is IP0, which AAPCS64 lets a veneer clobber between a call
+// and its callee. Islands sit between functions and are placed before any
+// table records an offset (the stack maps are encoded after placement), so
+// nothing else moves. Inactive on x64 (rel32 reaches 2 GB) and for a module
+// whose code fits in reach.
+class BranchIslands {
+public:
+    BranchIslands(const Target& target, const std::vector<EmittedFunction>& emitted, const std::vector<size_t>& order,
+                  uint64_t reach);
+    // Before the next function is placed: an island, when .text has passed
+    // the next mark.
+    void before_function(ObjectPlacement& at);
+    // After the last function: the branches out of reach, through islands.
+    void retarget(ObjectPlacement& at);
+    bool active() const noexcept { return active_; }
+    size_t islands() const noexcept { return islands_.size(); }
+
+private:
+    void emit_island(ObjectPlacement& at);
+
+    bool active_ = false;
+    uint64_t reach_ = 0;
+    uint64_t spacing_ = 0;
+    uint64_t next_mark_ = 0;
+    std::vector<std::string> targets_;  // sorted: the islands' bytes do not depend on thread order
+    std::unordered_map<std::string, uint32_t> target_index_;
+    std::vector<uint64_t> islands_;     // the .text offset of each island's first veneer
+};
 
 } // namespace brass::object::detail

@@ -80,7 +80,11 @@ private:
 
     AArch64CompilationResult compile_pass(const std::vector<uint32_t>& long_branch_sites);
     MemAddress to_mem_address(const codegen::LirOperand& op);
-    MemAddress ensure_accessible_mem(const MemAddress& mem, GPR scratch = GPR::X16, int size_bytes = 8);
+    // `mem` as an address the access can encode, through `scratch` when its
+    // offset is out of the access's reach. `size_bytes` is the access's size;
+    // 0 (a site that does not say, or one address shared by accesses of
+    // several sizes) keeps only an offset every size up to 16 bytes reaches.
+    MemAddress ensure_accessible_mem(const MemAddress& mem, GPR scratch = GPR::X16, int size_bytes = 0);
     GPR to_gpr(const codegen::LirOperand& op) const;
     FPR to_fpr(const codegen::LirOperand& op) const;
 

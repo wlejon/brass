@@ -275,6 +275,11 @@ public:
     void set_placement(FunctionPlacement placement) { placement_ = std::move(placement); }
     const FunctionPlacement& placement() const noexcept { return placement_; }
 
+    // How far a direct AArch64 branch reaches (+-128 MB). A module whose
+    // code is larger gets branch islands (function_codegen.hpp,
+    // BranchIslands); a test sets less to exercise them on a small module.
+    void set_branch_reach(uint64_t bytes) { branch_reach_ = bytes; }
+
     ObjectFile compile(const Module& mod);
 
 private:
@@ -285,6 +290,7 @@ private:
     FunctionPlacement placement_;
     size_t threads_ = 0;
     size_t min_blocks_per_thread_ = 2000;
+    uint64_t branch_reach_ = uint64_t{1} << 27;
     bool enable_trace_layout_ = false;
     bool enable_mir_opts_ = true;
     bool x64_avx_ = false;

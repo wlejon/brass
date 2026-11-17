@@ -18,6 +18,9 @@
 #include <brass/target/aarch64/aarch64_frame.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/target/x64/x64_isel.hpp>
+#include <brass/object/aarch64_reloc.hpp>
+#include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -400,6 +403,111 @@ void place_function(ObjectPlacement& at, EmittedFunction&& fn) {
         r.offset += fn_offset;
         text.relocations.push_back(std::move(r));
     }
+}
+
+namespace {
+
+// Room after .text for what an image writer places right behind it (the
+// import stubs, alignment), whose distance a branch to an import must also
+// cover: such a branch's target is taken to be this far past .text's end.
+constexpr uint64_t kAfterTextSlack = uint64_t{1} << 20;
+constexpr uint32_t kVeneerBytes = 12;
+
+uint32_t read_u32(const std::vector<uint8_t>& data, size_t at) {
+    return static_cast<uint32_t>(data[at]) | (static_cast<uint32_t>(data[at + 1]) << 8) |
+           (static_cast<uint32_t>(data[at + 2]) << 16) | (static_cast<uint32_t>(data[at + 3]) << 24);
+}
+
+void write_u32(std::vector<uint8_t>& data, size_t at, uint32_t v) {
+    for (int i = 0; i < 4; ++i) data[at + i] = static_cast<uint8_t>(v >> (8 * i));
+}
+
+} // namespace
+
+BranchIslands::BranchIslands(const Target& target, const std::vector<EmittedFunction>& emitted,
+                             const std::vector<size_t>& order, uint64_t reach)
+    : reach_(reach), spacing_(reach / 2), next_mark_(reach / 2) {
+    if (!target.is_aarch64() || reach == 0) return;
+    uint64_t text = 0;
+    for (size_t k : order) {
+        const EmittedFunction& fn = emitted[k];
+        if (!fn.emitted) continue;
+        const uint64_t align = std::max<uint32_t>(fn.alignment, 1);
+        text = (text + align - 1) / align * align + fn.code.size();
+    }
+    if (text + kAfterTextSlack < reach) return;
+    std::unordered_set<std::string> names;
+    for (const EmittedFunction& fn : emitted) {
+        if (!fn.emitted) continue;
+        for (const ObjectRelocation& r : fn.relocations) {
+            if (r.kind == RelocKind::Plt32 && r.addend == 0) names.insert(r.symbol_name);
+        }
+    }
+    targets_.assign(names.begin(), names.end());
+    std::sort(targets_.begin(), targets_.end());
+    for (uint32_t i = 0; i < targets_.size(); ++i) target_index_.emplace(targets_[i], i);
+    active_ = !targets_.empty();
+}
+
+void BranchIslands::before_function(ObjectPlacement& at) {
+    if (!active_ || at.text.data.size() < next_mark_) return;
+    emit_island(at);
+    while (next_mark_ <= at.text.data.size()) next_mark_ += spacing_;
+}
+
+void BranchIslands::emit_island(ObjectPlacement& at) {
+    Section& text = at.text;
+    text.align_to(16);
+    islands_.push_back(text.data.size());
+    for (const std::string& target : targets_) {
+        const size_t here = text.data.size();
+        text.relocations.push_back(ObjectRelocation{here, RelocKind::GotPage21, target, 0, 0});
+        text.emit32(0x90000010u);   // adrp x16, :got:target
+        text.relocations.push_back(ObjectRelocation{here + 4, RelocKind::GotLo12, target, 0, 0});
+        text.emit32(0xF9400210u);   // ldr x16, [x16, :got_lo12:target]
+        text.emit32(0xD61F0200u);   // br x16
+    }
+}
+
+void BranchIslands::retarget(ObjectPlacement& at) {
+    if (!active_) return;
+    Section& text = at.text;
+    const int32_t text_index = at.obj.get_section_index(".text");
+    const auto reach = static_cast<int64_t>(reach_);
+    const auto in_reach = [reach](int64_t disp) { return disp >= -reach && disp < reach; };
+    const auto past_end = static_cast<int64_t>(text.data.size() + kAfterTextSlack);
+    std::vector<ObjectRelocation> kept;
+    kept.reserve(text.relocations.size());
+    for (ObjectRelocation& r : text.relocations) {
+        if (r.kind != RelocKind::Plt32 || r.addend != 0) {
+            kept.push_back(std::move(r));
+            continue;
+        }
+        const ObjectSymbol* sym = at.obj.find_symbol(r.symbol_name);
+        const int64_t target = sym != nullptr && sym->section_index == text_index ? static_cast<int64_t>(sym->value)
+                                                                                 : past_end;
+        const auto place = static_cast<int64_t>(r.offset);
+        const auto index = target_index_.find(r.symbol_name);
+        if (in_reach(target - place) || index == target_index_.end()) {
+            kept.push_back(std::move(r));
+            continue;
+        }
+        int64_t best = 0;
+        bool found = false;
+        for (uint64_t island : islands_) {
+            const int64_t veneer = static_cast<int64_t>(island) + static_cast<int64_t>(index->second) * kVeneerBytes;
+            if (!found || std::llabs(veneer - place) < std::llabs(best - place)) best = veneer;
+            found = true;
+        }
+        uint32_t inst = read_u32(text.data, r.offset);
+        if (!found || !in_reach(best - place) || !a64::is_branch26(inst)) {
+            kept.push_back(std::move(r));   // the writer reports it
+            continue;
+        }
+        inst = (inst & 0xFC000000u) | (static_cast<uint32_t>((best - place) >> 2) & 0x03FFFFFFu);
+        write_u32(text.data, r.offset, inst);
+    }
+    text.relocations = std::move(kept);
 }
 
 void write_block_map(const std::string& lines) {
