@@ -51,10 +51,17 @@ DynamicLibrary& DynamicLibrary::operator=(DynamicLibrary&& other) noexcept {
 
 std::unique_ptr<DynamicLibrary> DynamicLibrary::open(const std::string& path, std::string* error_out) {
 #if defined(_WIN32)
+    // Suppress Windows's modal "Bad Image" dialog (0xc000012f) when a caller
+    // probes or recovers from a damaged cached image.
+    DWORD prev_mode = 0;
+    const BOOL mode_set = SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &prev_mode);
     HMODULE mod = LoadLibraryA(path.c_str());
+    const DWORD err = mod ? 0 : GetLastError();
+    if (mode_set) {
+        SetThreadErrorMode(prev_mode, nullptr);
+    }
     if (!mod) {
         if (error_out) {
-            DWORD err = GetLastError();
             *error_out = "LoadLibraryA failed with error code " + std::to_string(err);
         }
         return nullptr;

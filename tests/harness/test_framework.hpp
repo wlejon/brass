@@ -26,6 +26,11 @@
 
 #include "stack_scrub.hpp"
 
+#if defined(_WIN32) && !defined(_ERRHANDLING_H_)
+// Declared directly so <windows.h> macros never leak into test sources.
+extern "C" __declspec(dllimport) unsigned int __stdcall SetErrorMode(unsigned int uMode);
+#endif
+
 namespace brass::test {
 
 // Per-process scratch directory for files a test writes (objects, DLLs,
@@ -149,7 +154,13 @@ public:
         int passed = 0;
         int failed = 0;
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#if defined(_MSC_VER)
+        _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+        // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        ::SetErrorMode(0x0001u | 0x0002u | 0x8000u);
+#else
         struct sigaction sa;
         std::memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = [](int sig, siginfo_t* info, void*) {
