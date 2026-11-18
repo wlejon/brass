@@ -242,9 +242,14 @@ TEST_CASE("OSR resume - the entry plan carries the header's parameters first and
     }
     CHECK_EQ(remat, 1u);
     CHECK(has_n);
-    // The region: the header and what it reaches, not the entry block.
-    CHECK_EQ(plan->region.size(), 2u);
-    for (const BasicBlock* bb : plan->region) CHECK(bb != fn.entry_block());
+    // The region: the loop alone. `done` is its exit, reading its parameter.
+    REQUIRE_EQ(plan->region.size(), 1u);
+    CHECK(plan->region[0] == loop);
+    REQUIRE_EQ(plan->exits.size(), 1u);
+    const BasicBlock* done = block_named(fn, "done");
+    CHECK(plan->exits[0].block == done);
+    REQUIRE_EQ(plan->exits[0].values.size(), 1u);
+    CHECK(plan->exits[0].values[0] == done->param(0));
 }
 
 TEST_CASE("OSR resume - no entry at the entry block, into a function with an unguarded resume point, or carrying a gcref") {
@@ -314,6 +319,18 @@ bb2:
     }
 }
 
+// What the frame would return after entry code that ran with `buf`: the
+// code's result, or, when it left by an exit to `done` (whose one value is
+// what `done` returns), that value.
+int64_t osr_answer(const OsrEntryPlan& plan, const std::vector<uint64_t>& buf, const RuntimeValue& r) {
+    if (!plan.can_leave() || buf[plan.left_slot()] == 0) return r.as_i64();
+    REQUIRE(buf[plan.left_slot()] >= 2);
+    const auto& x = plan.exits[buf[plan.left_slot()] - 2];
+    REQUIRE(x.block->name() == "done");
+    REQUIRE_EQ(x.values.size(), size_t{1});
+    return static_cast<int64_t>(buf[plan.exit_slot(0)]);
+}
+
 TEST_CASE("OSR resume - the entry function, compiled, continues the loop from a filled buffer") {
     auto mod = parse_or_fail(kSumLoop);
     const Function& fn = *mod->get_function("osr_sum");
@@ -335,7 +352,7 @@ TEST_CASE("OSR resume - the entry function, compiled, continues the loop from a 
     for (int64_t start : {int64_t{0}, int64_t{1}, int64_t{37}, int64_t{99}}) {
         const int64_t n = 100;
         const int64_t acc0 = start * 1000 + 11;
-        std::vector<uint64_t> buf(plan->live_ins.size(), 0xDEADBEEFDEADBEEFull);
+        std::vector<uint64_t> buf(plan->buffer_slots(), 0xDEADBEEFDEADBEEFull);
         for (size_t i = 0; i < plan->live_ins.size(); ++i) {
             const auto& li = plan->live_ins[i];
             if (li.rematerialize) continue;
@@ -345,7 +362,7 @@ TEST_CASE("OSR resume - the entry function, compiled, continues the loop from a 
             else buf[i] = static_cast<uint64_t>(n + 7); // %k
         }
         const RuntimeValue r = jit.invoke("osr_sum.osr", {RuntimeValue::from_ptr(buf.data())});
-        CHECK_EQ(r.as_i64(), sum_from(n, start, acc0));
+        CHECK_EQ(osr_answer(*plan, buf, r), sum_from(n, start, acc0));
     }
 }
 
@@ -428,7 +445,7 @@ TEST_CASE("OSR resume - an inner loop sees each outer pass's invoke result, not 
     for (int64_t j0 : {int64_t{0}, int64_t{1}, int64_t{4}}) {
         for (int64_t i0 : {int64_t{0}, int64_t{2}}) {
             const int64_t a0 = j0 * 100 + i0;
-            std::vector<uint64_t> buf(plan->live_ins.size(), 0xDEADBEEFDEADBEEFull);
+            std::vector<uint64_t> buf(plan->buffer_slots(), 0xDEADBEEFDEADBEEFull);
             for (size_t k = 0; k < plan->live_ins.size(); ++k) {
                 const auto& li = plan->live_ins[k];
                 if (li.rematerialize) continue;
@@ -439,7 +456,7 @@ TEST_CASE("OSR resume - an inner loop sees each outer pass's invoke result, not 
                 else buf[k] = static_cast<uint64_t>(3 * j0); // %x
             }
             const RuntimeValue r = jit.invoke("osr_nested.osr", {RuntimeValue::from_ptr(buf.data())});
-            CHECK_EQ(r.as_i64(), nested_from(n, j0, i0, a0));
+            CHECK_EQ(osr_answer(*plan, buf, r), nested_from(n, j0, i0, a0));
         }
     }
 }
@@ -505,7 +522,7 @@ TEST_CASE("OSR resume - a constant the enclosing loop defines reads the entry's 
     for (int64_t j0 : {int64_t{0}, int64_t{3}}) {
         for (int64_t i0 : {int64_t{0}, int64_t{3}}) {
             const int64_t a0 = j0 * 100 + i0;
-            std::vector<uint64_t> buf(plan->live_ins.size(), 0xDEADBEEFDEADBEEFull);
+            std::vector<uint64_t> buf(plan->buffer_slots(), 0xDEADBEEFDEADBEEFull);
             for (size_t k = 0; k < plan->live_ins.size(); ++k) {
                 const auto& li = plan->live_ins[k];
                 if (li.rematerialize) continue;
@@ -515,7 +532,7 @@ TEST_CASE("OSR resume - a constant the enclosing loop defines reads the entry's 
                 else if (li.value == n_param) buf[k] = static_cast<uint64_t>(n);
             }
             const RuntimeValue r = jit.invoke("osr_const.osr", {RuntimeValue::from_ptr(buf.data())});
-            CHECK_EQ(r.as_i64(), const_from(n, j0, i0, a0));
+            CHECK_EQ(osr_answer(*plan, buf, r), const_from(n, j0, i0, a0));
         }
     }
 }

@@ -45,6 +45,17 @@ struct OsrCoordinator::Entry {
     // a frame asked at while this entry compiled, whether `header` can be
     // reached from it (block_reaches).
     std::unordered_map<const BasicBlock*, bool> reached_from;
+    // Where a frame goes on after each exit of the plan (enter): the exit
+    // block's pc and the registers of its values, worked out once, on the
+    // interpreter's thread, against the frame's bytecode. `resumable` false:
+    // some exit has no pc or a value no register, and the code is not entered.
+    struct ExitResume {
+        uint32_t pc = 0;
+        std::vector<uint32_t> regs;
+    };
+    mutable bool resumes_known = false;
+    mutable bool resumable = false;
+    mutable std::vector<ExitResume> resumes;
 };
 
 namespace {
@@ -214,9 +225,9 @@ bool OsrCoordinator::try_osr_migration(FastInterpreter&, const Function& fn, Bas
         if (it == entries_.end()) {
             // One entry of a function compiles at a time. The backedge count
             // is the function's, so a frame past the threshold asks at every
-            // loop header it crosses, and an entry is a copy of the whole
-            // rest of the function: each would cost a full compile of the
-            // same code. The frame enters the first one at its header; a
+            // loop header it crosses, and an outer loop's entry carries its
+            // inner loops: each would cost a compile of the same code. The
+            // frame enters the first one at its header; a
             // header that can no longer lead there asks at once (below).
             for (const auto& [header, other] : entries_) {
                 if (header->parent() == loop_header->parent() &&
@@ -503,6 +514,30 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
         regs[i] = r;
         buffer[i] = frame.registers[r];
     }
+    if (!e.resumes_known) {
+        e.resumes_known = true;
+        e.resumable = true;
+        for (const auto& x : e.plan.exits) {
+            Entry::ExitResume res;
+            const uint32_t id = x.block->id();
+            bool found = false;
+            for (const auto& [pc, block_id] : bfn->pc_block_map) {
+                if (block_id == id) {
+                    res.pc = pc;
+                    found = true;
+                    break;
+                }
+            }
+            for (const Value* v : x.values) {
+                const BcReg r = bfn->reg_of_ssa(v->id());
+                if (r == kNoReg || r >= frame.num_registers) found = false;
+                res.regs.push_back(r);
+            }
+            if (!found) e.resumable = false;
+            e.resumes.push_back(std::move(res));
+        }
+    }
+    if (!e.resumable) return false;
     if (e.plan.leave_check) buffer[e.plan.leave_flag_slot()] = reinterpret_cast<uintptr_t>(&e.leave);
     const std::vector<Type> params{Type::ptr()};
     const std::vector<RuntimeValue> args{RuntimeValue::from_ptr(buffer.data())};
@@ -514,11 +549,13 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
         HiddenFrame hidden(frame);
         result = invoke_native_address(e.entry, fn.return_type(), &params, args);
     }
-    if (!e.plan.leave_check || buffer[e.plan.left_slot()] == 0) {
-        // The function's tier-2 code is on its way. The next call waits for
-        // it only if it would otherwise run baseline code, which has no OSR
-        // and would keep a long loop there; in Tier 0 it reaches this
-        // entry again at the loop's first backedge (request_tier1 holds
+    const uint64_t left = e.plan.can_leave() ? buffer[e.plan.left_slot()] : 0;
+    if (left != 1) {
+        // The loop is done (the call finished, or the frame goes on after
+        // it), and the function's tier-2 code is on its way. The next call
+        // waits for it only if it would otherwise run baseline code, which
+        // has no OSR and would keep a long loop there; in Tier 0 it reaches
+        // this entry again at the loop's first backedge (request_tier1 holds
         // tier 1 back meanwhile), at no cost to the mutator.
         MultiTierPipeline& pipeline = registry().dispatch_table().pipeline();
         const FunctionHandle* handle = registry().dispatch_table().find(fn.name());
@@ -528,6 +565,21 @@ bool OsrCoordinator::enter(const Function& fn, FastFrame& frame, const Entry& e,
             pipeline.background_compiler().is_queued_or_compiling(fn.name())) {
             pipeline.background_compiler().wait_for_function(fn.name(), std::chrono::milliseconds(50));
         }
+    }
+    if (left >= 2) {
+        // Out of the loop by an exit: the frame takes the values its block
+        // reads and goes on there, in the interpreter.
+        const size_t k = static_cast<size_t>(left - 2);
+        const auto& x = e.plan.exits[k];
+        const Entry::ExitResume& res = e.resumes[k];
+        for (size_t j = 0; j < x.values.size(); ++j) {
+            frame.registers[res.regs[j]] = register_bits(x.values[j]->type(), buffer[e.plan.exit_slot(j)]);
+        }
+        frame.osr_resume_pc = res.pc;
+        total_osr_exits_++;
+        return false;
+    }
+    if (left == 0) {
         out_result = result;
         return true;
     }

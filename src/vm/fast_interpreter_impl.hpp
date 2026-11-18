@@ -194,6 +194,11 @@ struct FastFrame {
     // The frame that was innermost on this thread, of any interpreter, when
     // this one was entered (FastInterpreter::for_each_frame_on_thread).
     FastFrame* thread_prev = nullptr;
+    // Set by an OSR entry that left its loop by an exit (osr_coordinator.cpp
+    // enter): the pc of the exit block, where the frame goes on, its values
+    // already in their registers. kNoResumePc otherwise.
+    static constexpr uint32_t kNoResumePc = UINT32_MAX;
+    uint32_t osr_resume_pc = kNoResumePc;
 
     // Vector state, kFastVecBytes per register, allocated on first use.
     uint8_t* vector_regs = nullptr;

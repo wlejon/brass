@@ -150,6 +150,11 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         if (BRASS_UNLIKELY(osr_on)) {                                                         \
             const uint32_t target_pc_ = static_cast<uint32_t>((pc - code_base) + (off));      \
             if (handle_osr_backedge(frame, target_pc_, osr_res_)) return osr_res_;            \
+            if (BRASS_UNLIKELY(frame.osr_resume_pc != FastFrame::kNoResumePc)) {              \
+                pc = code_base + frame.osr_resume_pc;                                         \
+                frame.osr_resume_pc = FastFrame::kNoResumePc;                                 \
+                DISPATCH();                                                                   \
+            }                                                                                 \
         } else {                                                                              \
             feedback->count_backedge_fast();                                                  \
         }                                                                                     \

@@ -54,36 +54,89 @@ std::optional<OsrEntryPlan> plan_osr_entry(const Function& fn, const BasicBlock&
     plan.function = &fn;
     plan.block = &block;
 
-    // The region: everything reachable from the block.
+    // The region: the loop the block heads, every block reachable from it
+    // that reaches it again (the block's strongly connected component,
+    // nested loops included).
     std::unordered_set<const BasicBlock*> reach{&block};
+    std::unordered_map<const BasicBlock*, std::vector<const BasicBlock*>> preds;
     std::vector<const BasicBlock*> work{&block};
     while (!work.empty()) {
         const BasicBlock* bb = work.back();
         work.pop_back();
         for (const BasicBlock* s : bb->successors()) {
-            if (s && reach.insert(s).second) work.push_back(s);
+            if (!s) continue;
+            preds[s].push_back(bb);
+            if (reach.insert(s).second) work.push_back(s);
         }
     }
+    std::unordered_set<const BasicBlock*> loop{&block};
+    work.assign(1, &block);
+    while (!work.empty()) {
+        const BasicBlock* bb = work.back();
+        work.pop_back();
+        for (const BasicBlock* p : preds[bb]) {
+            if (loop.insert(p).second) work.push_back(p);
+        }
+    }
+    // A landing pad an invoke in the loop unwinds to cannot be an exit (a pad
+    // begins its block, and the exception exists only in the code that
+    // caught it): the pad's block comes along, and its own edges out are
+    // exits.
+    std::unordered_set<const BasicBlock*> in_region = loop;
+    for (const BasicBlock* bb : loop) {
+        const Instruction* term = bb->terminator();
+        if (term && term->opcode() == Opcode::invoke && term->unwind_target().block) {
+            in_region.insert(term->unwind_target().block);
+        }
+    }
+    std::vector<const BasicBlock*> exit_blocks;
     for (const BasicBlock* bb : fn.blocks()) {
-        if (bb && reach.count(bb)) plan.region.push_back(bb);
+        if (!bb || !in_region.count(bb)) continue;
+        plan.region.push_back(bb);
+    }
+    {
+        std::unordered_set<const BasicBlock*> seen;
+        for (const BasicBlock* bb : plan.region) {
+            for (const BasicBlock* s : bb->successors()) {
+                if (s && !in_region.count(s) && seen.insert(s).second) exit_blocks.push_back(s);
+            }
+        }
     }
 
-    const auto live_in = block_live_ins(fn, {&block});
-    std::vector<const Value*> live(live_in.at(&block).begin(), live_in.at(&block).end());
-    std::sort(live.begin(), live.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });
-
-    auto add = [&](const Value* v) -> bool {
+    std::vector<const BasicBlock*> targets{&block};
+    targets.insert(targets.end(), exit_blocks.begin(), exit_blocks.end());
+    const auto live_in = block_live_ins(fn, targets);
+    auto sorted_live = [&](const BasicBlock* bb) {
+        std::vector<const Value*> live(live_in.at(bb).begin(), live_in.at(bb).end());
+        std::sort(live.begin(), live.end(), [](const Value* a, const Value* b) { return a->id() < b->id(); });
+        return live;
+    };
+    auto carried = [&](const Value* v) -> bool {
         const Type t = v->type();
         if (t.is_vector()) return fail(why, "value %" + std::to_string(v->id()) + " is a vector");
         if (t.is_gcref()) return fail(why, "value %" + std::to_string(v->id()) + " is a gcref");
-        plan.live_ins.push_back({v, is_rematerializable(v)});
         return true;
     };
+
     for (const Value* p : block.params()) {
-        if (!add(p)) return std::nullopt;
+        if (!carried(p)) return std::nullopt;
+        plan.live_ins.push_back({p, is_rematerializable(p)});
     }
-    for (const Value* v : live) {
-        if (!add(v)) return std::nullopt;
+    for (const Value* v : sorted_live(&block)) {
+        if (!carried(v)) return std::nullopt;
+        plan.live_ins.push_back({v, is_rematerializable(v)});
+    }
+    // Every value an exit block reads goes back to the frame, constants
+    // too: the interpreter never ran a definition the code ran for it.
+    for (const BasicBlock* x : exit_blocks) {
+        OsrEntryPlan::Exit exit;
+        exit.block = x;
+        for (const Value* p : x->params()) exit.values.push_back(p);
+        for (const Value* v : sorted_live(x)) exit.values.push_back(v);
+        for (const Value* v : exit.values) {
+            if (!carried(v)) return std::nullopt;
+        }
+        plan.exits.push_back(std::move(exit));
     }
     return plan;
 }
@@ -223,6 +276,21 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
         blocks[src_bb] = bb;
         for (const Value* p : src_bb->params()) values[p] = ir::new_block_param(*out, bb, p->type());
     }
+    // An exit's block stands for the block it leaves to: an edge out of the
+    // loop, cloned, lands in it with the arguments that block would get.
+    const Type rt = fn.return_type();
+    if (!plan.exits.empty() && rt.is_vector()) {
+        fail(why, "a loop with exits in a function returning a vector");
+        return nullptr;
+    }
+    std::vector<BasicBlock*> stubs;
+    for (const auto& x : plan.exits) {
+        BasicBlock* stub = ir::new_block(*out, "osr.exit");
+        stub->set_cold(true);
+        for (const Value* p : x.block->params()) ir::new_block_param(*out, stub, p->type());
+        blocks[x.block] = stub;
+        stubs.push_back(stub);
+    }
     b.build_br(blocks.at(plan.block), Span<Value* const>(header_args.data(), header_args.size()));
 
     std::vector<std::pair<const Instruction*, Instruction*>> cloned;
@@ -245,6 +313,34 @@ Function* build_osr_entry_function(const OsrEntryPlan& plan, Module& dst, std::s
         if (plan.live_ins[i].rematerialize) values[incoming[i].first] = incoming[i].second;
     }
     for (const auto& [src_inst, copy] : cloned) ir::clone_uses(*src_inst, *copy, values, blocks);
+
+    // Each exit writes the values its block reads and says which exit it is.
+    for (size_t k = 0; k < plan.exits.size(); ++k) {
+        const auto& x = plan.exits[k];
+        BasicBlock* stub = stubs[k];
+        b.position_at_end(stub);
+        const size_t nparams = x.block->param_count();
+        for (size_t j = 0; j < x.values.size(); ++j) {
+            const Value* v = x.values[j];
+            Value* src = nullptr;
+            if (j < nparams) {
+                src = stub->params()[j];
+            } else if (auto it = values.find(v); it != values.end()) {
+                src = it->second;
+            } else {
+                fail(why, "value %" + std::to_string(v->id()) + " read after the loop is not the loop's");
+                return nullptr;
+            }
+            b.build_store(v->type(), buffer, static_cast<int32_t>(plan.exit_slot(j) * 8), src);
+        }
+        b.build_store(Type::i64(), buffer, static_cast<int32_t>(plan.left_slot() * 8),
+                      b.build_iconst_i64(static_cast<int64_t>(2 + k)));
+        if (rt.is_void()) {
+            b.build_ret_void();
+        } else {
+            b.build_ret(b.build_load(rt, buffer, static_cast<int32_t>((plan.left_slot() + 1) * 8)));
+        }
+    }
 
     if (leave_check) {
         std::vector<BasicBlock*> region_blocks;

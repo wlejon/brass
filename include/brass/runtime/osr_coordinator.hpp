@@ -29,7 +29,9 @@ namespace brass::runtime {
 // on the interpreter's thread, then optimized with the program's tier-2
 // passes and compiled on the shared CompilePool while the interpreter keeps
 // running the loop. A later backedge to the header, once the code is ready,
-// hands it the frame's live values and returns what it returns. The code
+// hands it the frame's live values; the code runs the loop and returns what
+// the frame returns, or leaves by one of the loop's exits, and the frame
+// takes the exit block's values back and goes on there, interpreted. The code
 // links to the program as its tier-2 code does: calls go through the
 // program's stubs, a failed guard finishes the call in Tier 0, and the
 // program's host is told of it under the function's own name, so a stack
@@ -87,9 +89,13 @@ public:
     // Frames that left invalidated OSR code at a backedge and went on in
     // the interpreter.
     uint64_t total_osr_leaves() const noexcept { return total_osr_leaves_.load(std::memory_order_relaxed); }
+    // Frames that left OSR code by one of its loop's exits and went on at
+    // the exit's block in the interpreter.
+    uint64_t total_osr_exits() const noexcept { return total_osr_exits_.load(std::memory_order_relaxed); }
     void reset_stats() noexcept {
         total_osr_migrations_.store(0, std::memory_order_relaxed);
         total_osr_leaves_.store(0, std::memory_order_relaxed);
+        total_osr_exits_.store(0, std::memory_order_relaxed);
     }
 
 private:
@@ -124,6 +130,7 @@ private:
     uint64_t threshold_ = BACKEDGE_OSR_THRESHOLD;
     std::atomic<uint64_t> total_osr_migrations_{0};
     std::atomic<uint64_t> total_osr_leaves_{0};
+    std::atomic<uint64_t> total_osr_exits_{0};
 };
 
 } // namespace brass::runtime
