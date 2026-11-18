@@ -49,6 +49,8 @@ struct CompilationResult {
     FunctionDebugTable debug_table;
     runtime::FunctionExceptionTable exception_table;
     std::vector<StackAdjustRegion> stack_adjust_regions;
+    // BRASS_BLOCK_MAP (shuffle_marks_wanted): each instruction's code offset.
+    std::vector<std::pair<uint32_t, const LirInst*>> inst_offsets;
 };
 
 class EmitContext {

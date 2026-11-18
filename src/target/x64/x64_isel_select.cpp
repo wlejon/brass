@@ -73,7 +73,22 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     bool is_float = dst.is_xmm();
     bool inverted = false;
-    if (!is_float && is_pinned_tls(false_val) && !is_pinned_tls(true_val) && !get_imm_int_info(true_val).is_imm) {
+    // The result starts as the false value and the cmov moves the true one
+    // over it: a false value read again later is copied first (`mov dst, f`),
+    // while one that dies here shares its register. When only the true value
+    // dies here (its one use is this select), the swapped select starts from
+    // it instead and the copy is gone: `lea t, [p + 168]; cmovbe t, p`
+    // rather than `mov t, p; cmova t, lea`.
+    auto dies_here_only_true = [&]() {
+        if (true_val == false_val || is_pinned_tls(true_val)) return false;
+        if (get_imm_int_info(false_val).is_imm) return false;
+        auto t = use_count_.find(true_val);
+        auto f = use_count_.find(false_val);
+        if (t == use_count_.end() || t->second != 1 || f == use_count_.end() || f->second < 2) return false;
+        return mir_fn_ && inst.parent() && !is_value_dead_after(*mir_fn_, *inst.parent(), &inst, false_val);
+    };
+    if (!is_float && !get_imm_int_info(true_val).is_imm &&
+        ((is_pinned_tls(false_val) && !is_pinned_tls(true_val)) || dies_here_only_true())) {
         const Instruction* c = cond_val ? cond_val->defining_instruction() : nullptr;
         const bool float_compare = c && fused_into(c, inst) && is_comparison(c->opcode()) &&
                                    c->operand(0)->type().is_float();

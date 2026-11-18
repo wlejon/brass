@@ -135,13 +135,12 @@ void X64ISel::lower_call(const Instruction& inst, LirBlock& lir_bb) {
         }
     }
 
-    if (cc_.kind() == CallingConvKind::SysV) {
-        auto mov_al = std::make_unique<LirInst>(LirOpcode::Mov32);
-        mov_al->add_def(LirOperand::preg_gpr(GPR::RAX, 4), FixedConstraint::gpr(GPR::RAX));
-        mov_al->add_use(LirOperand::imm32(static_cast<int32_t>(std::min(xmm_idx, size_t(8)))));
-        lir_bb.append_inst(std::move(mov_al));
-        call_lir->add_use(LirOperand::preg_gpr(GPR::RAX, 4), FixedConstraint::gpr(GPR::RAX));
-    }
+    // No `mov al, <vector registers>`: SysV asks for it only of a call to a
+    // variadic function, and MIR calls none (its calls have fixed
+    // signatures, docs/mir_reference.md; on AArch64 Apple a variadic C
+    // function's extra arguments are not even passed where a fixed
+    // parameter is). It was an instruction before every call, and it tied
+    // RAX up at each.
 
     if (inst.opcode() == Opcode::call_indirect) {
         call_lir->add_use(LirOperand::vreg(callee_vreg, 8));

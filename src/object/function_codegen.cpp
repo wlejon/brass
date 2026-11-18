@@ -62,8 +62,13 @@ const std::string& block_map_path() {
 // "function<TAB>offset<TAB>block name<TAB>cold", offsets from the function's
 // start, in layout order — what maps a profile's hot or out-of-line address
 // back to the IR that made it.
+//
+// Then each instruction as "function<TAB>i<TAB>offset<TAB>shuffle<TAB>opcode":
+// LirInst::shuffle says which of them are data moves and what made them,
+// which a profile joined to the code weighs by how often each runs.
 std::string block_map_lines(std::string_view fn_name, const codegen::LirFunction& lir,
-                            const std::unordered_map<uint32_t, size_t>& offsets) {
+                            const std::unordered_map<uint32_t, size_t>& offsets,
+                            const std::vector<std::pair<uint32_t, const codegen::LirInst*>>& inst_offsets) {
     std::string out;
     if (block_map_path().empty()) return out;
     for (const auto& b : lir.blocks) {
@@ -72,6 +77,10 @@ std::string block_map_lines(std::string_view fn_name, const codegen::LirFunction
         if (it == offsets.end()) continue;
         out.append(fn_name).append("\t").append(std::to_string(it->second)).append("\t");
         out.append(b->name).append("\t").append(b->cold ? "1" : "0").append("\n");
+    }
+    for (const auto& [off, inst] : inst_offsets) {
+        out.append(fn_name).append("\ti\t").append(std::to_string(off)).append("\t");
+        out.append(std::to_string(inst->shuffle)).append("\t").append(codegen::to_string(inst->opcode)).append("\n");
     }
     return out;
 }
@@ -322,7 +331,7 @@ EmittedFunction compile_function(const Module& mod, const Function& fn, const Fu
         codegen::EmitContext emit_ctx(*lir, cfg.target);
         codegen::CompilationResult res = emit_ctx.compile();
         out.alignment = kX64FunctionAlignment;
-        out.block_map = block_map_lines(fn.name(), *lir, res.block_offsets);
+        out.block_map = block_map_lines(fn.name(), *lir, res.block_offsets, res.inst_offsets);
         out.info.stack_adjust_regions = std::move(res.stack_adjust_regions);
         take_result(out, fn, *lir, res, res.code_buffer);
         x64::X64FrameLayout::compute_layout(out.info.frame_info, cfg.cc);

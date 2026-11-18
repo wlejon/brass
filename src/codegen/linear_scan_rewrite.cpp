@@ -358,11 +358,13 @@ void LinearScanAllocator::rewrite_instructions() {
             --at_index;
         } else {
             auto save = std::make_unique<LirInst>(op);
+            save->shuffle = shuffle_tag(ShuffleCause::ScratchSave, v);
             save->add_def(LirOperand::slot(it->second, sz));
             save->add_use(LirOperand::preg(r, sz));
             out.insert(out.begin() + static_cast<std::ptrdiff_t>(at_index), std::move(save));
         }
         auto restore = std::make_unique<LirInst>(op);
+        restore->shuffle = shuffle_tag(ShuffleCause::ScratchSave, v);
         restore->add_def(LirOperand::preg(r, sz));
         restore->add_use(LirOperand::slot(it->second, sz));
         out.push_back(std::move(restore));
@@ -373,6 +375,7 @@ void LinearScanAllocator::rewrite_instructions() {
     // per instruction was a tenth of rewriting.
     std::vector<std::unique_ptr<LirInst>> rewritten;
     std::vector<char> orig_use_is_xmm;
+    std::vector<VReg> orig_use_vregs;
     for (const auto& block : fn_.blocks) {
         rewritten.clear();
         rewritten.reserve(block->instructions.size());
@@ -411,6 +414,7 @@ void LinearScanAllocator::rewrite_instructions() {
                             LirOperand loc = location_at(op.mem_val.base_vreg, at, 8);
                             if (loc.is_spill_slot()) {
                                 auto load_base = std::make_unique<LirInst>(LirOpcode::Mov);
+                                load_base->shuffle = shuffle_tag(ShuffleCause::Reload, op.mem_val.base_vreg);
                                 load_base->add_def(LirOperand::preg(base_scratch_reg, 8));
                                 load_base->add_use(LirOperand::slot(loc.spill_slot, 8));
                                 rewritten.push_back(std::move(load_base));
@@ -424,6 +428,7 @@ void LinearScanAllocator::rewrite_instructions() {
                             LirOperand loc = location_at(op.mem_val.index_vreg, at, 8);
                             if (loc.is_spill_slot()) {
                                 auto load_idx = std::make_unique<LirInst>(LirOpcode::Mov);
+                                load_idx->shuffle = shuffle_tag(ShuffleCause::Reload, op.mem_val.index_vreg);
                                 load_idx->add_def(LirOperand::preg(idx_scratch_reg, 8));
                                 load_idx->add_use(LirOperand::slot(loc.spill_slot, 8));
                                 rewritten.push_back(std::move(load_idx));
@@ -454,6 +459,13 @@ void LinearScanAllocator::rewrite_instructions() {
                 } else if (inst->uses[i].is_preg()) {
                     orig_use_is_xmm[i] = inst->uses[i].preg_val.is_xmm();
                 }
+            }
+
+            // The values the operands name, for the diagnostic's tags.
+            const VReg def_vreg = !inst->defs.empty() && inst->defs[0].is_vreg() ? inst->defs[0].vreg_val : VReg{};
+            orig_use_vregs.assign(shuffle_marks_wanted() ? inst->uses.size() : 0, VReg{});
+            for (size_t i = 0; i < orig_use_vregs.size(); ++i) {
+                if (inst->uses[i].is_vreg()) orig_use_vregs[i] = inst->uses[i].vreg_val;
             }
 
             // Rewrite defs and uses
@@ -522,6 +534,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 store->add_use(LirOperand::imm(*k, 8));
                 store->id = inst->id;
                 store->mir_origin = inst->mir_origin;
+                store->shuffle = shuffle_tag(ShuffleCause::SpillDef, def_vreg);
                 rewritten.push_back(std::move(store));
                 continue;
             }
@@ -565,6 +578,10 @@ void LinearScanAllocator::rewrite_instructions() {
                 LirOpcode op = is_xmm ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                       : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                 auto load_scratch = std::make_unique<LirInst>(op);
+                load_scratch->shuffle = inst->shuffle;
+                if (load_scratch->shuffle == 0 && inst->uses[0].is_spill_slot() && !orig_use_vregs.empty()) {
+                    load_scratch->shuffle = shuffle_tag(ShuffleCause::Reload, orig_use_vregs[0]);
+                }
                 load_scratch->add_def(LirOperand::preg(scratch, sz));
                 load_scratch->add_use(inst->uses[0]);
                 rewritten.push_back(std::move(load_scratch));
@@ -574,6 +591,10 @@ void LinearScanAllocator::rewrite_instructions() {
                 // memory destination keeps the instruction's width.
                 const bool widen = !is_xmm && sz == 4 && inst->defs[0].is_spill_slot();
                 auto store_scratch = std::make_unique<LirInst>(widen ? LirOpcode::Mov : op);
+                store_scratch->shuffle = inst->shuffle;
+                if (store_scratch->shuffle == 0 && inst->defs[0].is_spill_slot()) {
+                    store_scratch->shuffle = shuffle_tag(ShuffleCause::SpillDef, def_vreg);
+                }
                 store_scratch->add_def(widen ? LirOperand::slot(inst->defs[0].spill_slot, 8) : inst->defs[0]);
                 store_scratch->add_use(LirOperand::preg(scratch, widen ? uint8_t{8} : sz));
                 rewritten.push_back(std::move(store_scratch));
@@ -681,6 +702,7 @@ void LinearScanAllocator::rewrite_instructions() {
                     LirOpcode load_op = is_xmm_def ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                    : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                     auto load_def = std::make_unique<LirInst>(load_op);
+                    load_def->shuffle = shuffle_tag(ShuffleCause::Reload, def_vreg);
                     load_def->add_def(LirOperand::preg(def_scratch, sz));
                     load_def->add_use(original_spill_def);
                     rewritten.push_back(std::move(load_def));
@@ -808,6 +830,7 @@ void LinearScanAllocator::rewrite_instructions() {
                         LirOpcode load_op = is_xmm_use ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                        : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                         auto load_use = std::make_unique<LirInst>(load_op);
+                        if (i < orig_use_vregs.size()) load_use->shuffle = shuffle_tag(ShuffleCause::Reload, orig_use_vregs[i]);
                         load_use->add_def(LirOperand::preg(use_scratch, sz));
                         load_use->add_use(inst->uses[i]);
                         rewritten.push_back(std::move(load_use));
@@ -832,6 +855,7 @@ void LinearScanAllocator::rewrite_instructions() {
                 LirOpcode store_op = is_xmm_def ? ((sz == 32) ? LirOpcode::Vmovups : ((sz == 16) ? LirOpcode::Movaps : ((sz == 4) ? LirOpcode::Movss : LirOpcode::Movsd)))
                                                 : ((sz == 4) ? LirOpcode::Mov32 : LirOpcode::Mov);
                 auto store_back = std::make_unique<LirInst>(store_op);
+                store_back->shuffle = shuffle_tag(ShuffleCause::SpillDef, def_vreg);
                 store_back->add_def(LirOperand::slot(original_spill_def.spill_slot, sz));
                 store_back->add_use(LirOperand::preg(def_scratch, sz));
                 def_scratch_stores_.insert(store_back.get());

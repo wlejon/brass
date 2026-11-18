@@ -282,8 +282,9 @@ void LinearScanAllocator::collect_resolution_moves() {
             LirOperand dst = piece_location(right, sz);
             if (same_location(src, dst)) continue;
             if (src.is_preg() && dst.is_spill_slot() && slot_still_holds(list, k, q)) continue;
-            candidates.push_back(Candidate{PendingMove{dst, src, v.is_xmm(), sz}, static_cast<uint32_t>(id),
-                                           liveness_.get_loop_depth_at(q + 1), Place::Before, q + 1});
+            candidates.push_back(Candidate{PendingMove{dst, src, v.is_xmm(), sz, shuffle_tag(ShuffleCause::SplitMove, v)},
+                                           static_cast<uint32_t>(id), liveness_.get_loop_depth_at(q + 1), Place::Before,
+                                           q + 1});
         }
     }
 
@@ -318,7 +319,8 @@ void LinearScanAllocator::collect_resolution_moves() {
                 LirOperand src = location_at(v, pred_end, sz);
                 LirOperand dst = location_at(v, succ_start, sz);
                 if (src.is_none() || dst.is_none() || same_location(src, dst)) continue;
-                candidates.push_back(Candidate{PendingMove{dst, src, full.is_xmm(), sz}, v.id,
+                const ShuffleCause why = pred_end >= succ_start ? ShuffleCause::BackEdgeMove : ShuffleCause::EdgeMove;
+                candidates.push_back(Candidate{PendingMove{dst, src, full.is_xmm(), sz, shuffle_tag(why, full)}, v.id,
                                                std::min(depth_of(pred), depth_of(succ)), Place::OnEdge, 0});
             }
             if (candidates.size() == first) continue;
@@ -395,7 +397,8 @@ void LinearScanAllocator::collect_resolution_moves() {
             drop_stores[id] = 1;
         } else if (at_def.is_preg() && !cold_only && liveness_.get_loop_depth_at(def) <= store_depth[id]) {
             drop_stores[id] = 1;
-            moves_after_[def].push_back(PendingMove{LirOperand::slot(vreg_slot_[id], sz), at_def, v.is_xmm(), sz});
+            moves_after_[def].push_back(PendingMove{LirOperand::slot(vreg_slot_[id], sz), at_def, v.is_xmm(), sz,
+                                                    shuffle_tag(ShuffleCause::DefStore, v)});
         }
     }
 
@@ -449,6 +452,7 @@ void LinearScanAllocator::emit_moves(std::vector<PendingMove>& moves, std::vecto
         auto inst = std::make_unique<LirInst>(op);
         inst->add_def(m.dst);
         inst->add_use(m.src);
+        inst->shuffle = m.shuffle;
         return inst;
     };
     while (!moves.empty()) {
@@ -466,6 +470,7 @@ void LinearScanAllocator::emit_moves(std::vector<PendingMove>& moves, std::vecto
         }
         if (progress) continue;
         auto pc = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        pc->shuffle = moves.front().shuffle;
         for (const auto& m : moves) {
             pc->add_def(m.dst);
             pc->add_use(m.src);

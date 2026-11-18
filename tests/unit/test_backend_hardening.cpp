@@ -1,4 +1,5 @@
 #include "test_framework.hpp"
+#include <brass/brass.hpp>
 #include <brass/target/x64/x64_frame.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
 #include <brass/target/x64/x64_isel.hpp>
@@ -174,10 +175,13 @@ TEST_CASE("Backend Hardening - Linear scan coalesce hint between PReg use and VR
 }
 
 // =============================================================================
-// Task 4: SysV call lowering emits %al setup
+// Task 4: SysV call lowering sets no %al
 // =============================================================================
 
-TEST_CASE("Backend Hardening - SysV call lowering emits %al vector count setup") {
+// SysV asks for the vector-register count in %al only of a call to a
+// variadic function, and MIR calls none: the call takes nothing in RAX, and
+// calls with double arguments still compute the right answers.
+TEST_CASE("Backend Hardening - SysV call lowering sets no %al vector count") {
     Module mod;
     mod.create_function("vector_callee", Type::f64(), {Type::f64(), Type::f64()});
     Function* caller = mod.create_function("caller_fn", Type::f64(), {Type::f64(), Type::f64()});
@@ -191,7 +195,6 @@ TEST_CASE("Backend Hardening - SysV call lowering emits %al vector count setup")
     caller->rebuild_cfg_predecessors();
     CHECK(verify_function(*caller));
 
-    // Lower with SysV calling convention
     X64ISel isel(Target::x64_linux(), CallingConvention::sysv64());
     auto lir = isel.lower(*caller);
     REQUIRE(lir != nullptr);
@@ -202,20 +205,50 @@ TEST_CASE("Backend Hardening - SysV call lowering emits %al vector count setup")
     for (const auto& inst : lir->blocks[0]->instructions) {
         if (inst->opcode == LirOpcode::Mov32 && !inst->defs.empty() && inst->defs[0].is_preg() &&
             inst->defs[0].preg_val.as_gpr() == GPR::RAX && !inst->uses.empty() && inst->uses[0].is_imm_int()) {
-            if (inst->uses[0].imm_int == 2) {
-                found_al_setup = true;
-            }
+            found_al_setup = true;
         }
         if (inst->opcode == LirOpcode::Call) {
             for (const auto& u : inst->uses) {
-                if (u.is_preg() && u.preg_val.as_gpr() == GPR::RAX) {
-                    call_has_rax_use = true;
-                }
+                if (u.is_preg() && u.preg_val.is_gpr() && u.preg_val.as_gpr() == GPR::RAX) call_has_rax_use = true;
             }
         }
     }
-    CHECK(found_al_setup);
-    CHECK(call_has_rax_use);
+    CHECK(!found_al_setup);
+    CHECK(!call_has_rax_use);
+}
+
+TEST_CASE("Backend Hardening - calls with double arguments compute the same answers through the JIT") {
+    auto mod = parse_module(R"(module @calls
+
+func @twice_plus(%a: f64, %b: f64) -> f64 {
+entry:
+  %two = fconst.f64 2.0
+  %d = mul.f64 %two, %a
+  %r = add.f64 %d, %b
+  ret %r
+}
+
+func @f(%a: f64, %b: f64) -> f64 {
+entry:
+  %x = call.f64 @twice_plus(%a, %b)
+  %y = call.f64 @twice_plus(%x, %a)
+  %r = add.f64 %x, %y
+  ret %r
+}
+)");
+    REQUIRE(mod != nullptr);
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(*mod));
+    auto fn = jit.get_function_ptr<double (*)(double, double)>("f");
+    REQUIRE(fn != nullptr);
+    const double vals[] = {-3.5, -1.0, 0.0, 0.25, 7.0, 1e300};
+    for (double a : vals) {
+        for (double b : vals) {
+            const double x = 2.0 * a + b;
+            const double y = 2.0 * x + a;
+            CHECK_EQ(fn(a, b), x + y);
+        }
+    }
 }
 
 // =============================================================================

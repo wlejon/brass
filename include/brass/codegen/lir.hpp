@@ -476,6 +476,35 @@ struct FixedConstraint {
     }
 };
 
+// LirInst::shuffle's low four bits: what put a data move into the code.
+enum class ShuffleCause : uint8_t {
+    None = 0,
+    IselCopy,      // a copy between two values instruction selection made (Mov v, v)
+    IselToPreg,    // into a fixed register: a call's argument, a return value
+    IselFromPreg,  // out of one: a call's result, an incoming parameter
+    BlockArgs,     // a block's arguments (ParallelCopy before allocation)
+    SplitMove,     // between two pieces of a value inside a block
+    EdgeMove,      // between two pieces on a forward control-flow edge
+    BackEdgeMove,  // the same on a loop's back edge
+    DefStore,      // a value defined once, stored to its slot after its definition
+    Reload,        // a spilled operand loaded into a scratch register
+    SpillDef,      // a spilled definition stored from its scratch register
+    ScratchSave,   // a value saved around an instruction taking its register as a scratch
+    CrossClass,    // a value's bits moved between a general and a vector register (movq / movd)
+};
+// LirInst::shuffle's high four bits: the moved value's standing.
+enum class ShuffleClass : uint8_t {
+    Split = 0,       // split freely
+    GcAtCalls = 1,   // a GC reference live across calls, in its slot at each
+    GcWhole = 2,     // the same, unsplittable: in its slot for its whole life
+    CallsWhole = 3,  // live across calls of the hot path, unsplittable
+    Whole = 4,       // unsplittable for another reason (landing pad, shared exit)
+};
+
+// Whether LirInst::shuffle is filled in and each instruction's code offset
+// recorded: the BRASS_BLOCK_MAP diagnostic is on.
+bool shuffle_marks_wanted();
+
 // An instruction and its operand lists come from the compiling thread's
 // scratch pool (brass/core/scratch_alloc.hpp): a function's LIR is made and
 // dropped inside one compile, and the instruction plus four vectors each
@@ -526,6 +555,10 @@ public:
     // NoCollect, or the write barrier): no collection scans the frame while
     // it runs, so it is not where dead slots are cleared.
     bool no_gc_point = false;
+    // Diagnostic only (BRASS_BLOCK_MAP): why this instruction moves data
+    // rather than computing, a ShuffleCause in the low bits and the moved
+    // value's ShuffleClass in the high ones. Nothing reads it to decide.
+    uint8_t shuffle = 0;
     uint32_t unwind_block_id = UINT32_MAX;
 
     LirInst() = default;

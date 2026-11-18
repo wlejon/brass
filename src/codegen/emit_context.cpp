@@ -155,6 +155,7 @@ CompilationResult EmitContext::compile_once() {
     };
     // Whether the last block emitted runs into the next one's first byte.
     bool prev_falls_through = true;
+    const bool record_offsets = shuffle_marks_wanted();
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
         const auto& block = fn_.blocks[b_idx];
         if (threading.skipped(b_idx)) {
@@ -210,6 +211,7 @@ CompilationResult EmitContext::compile_once() {
             if (loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(cur_offset), loc);
             }
+            if (record_offsets) result.inst_offsets.emplace_back(static_cast<uint32_t>(cur_offset), &inst);
             emit_instruction(inst, b_idx == 0, i_idx == 0);
         }
 

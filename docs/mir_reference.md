@@ -100,7 +100,7 @@ Integer literals must fit the field they fill, or the parser reports "out of ran
 - `alloca.tagged <size>, <align>` -> `ptr` (a frame block of `size / 8` words, zeroed on entry. Every word is a tagged root at each GC point in the function, so values stored into it stay current across collections)
 
 ### Function Calls, Addresses & Safepoints
-- `call.<type> @fn_symbol(<args...>)` -> `<type>`
+- `call.<type> @fn_symbol(<args...>)` -> `<type>` (every call has a fixed signature: a variadic C function is not called through one, and the x64 SysV lowering sets no `%al` vector count)
 - `call.<type> @fn_symbol via @cell(<args...>)` -> `<type>` (and `invoke ... via @cell`: the call goes through the word `@cell` of the image, `call [rip + cell]` on x64, which holds `@fn_symbol`'s address or that of another entry computing the same thing. Passes read the callee; AArch64 and the interpreters call it directly)
 - `call_indirect.<type> <callee_ptr:ptr>(<args...>)` -> `<type>`
 - `patchable_call.<type> @patch_sym, @default_target(<args...>)` -> `<type>`

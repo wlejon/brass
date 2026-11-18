@@ -270,7 +270,11 @@ private:
         LirOperand src;
         bool is_xmm = false;
         uint8_t size = 8;
+        uint8_t shuffle = 0;  // LirInst::shuffle of the move
     };
+    // LirInst::shuffle for a move of `v` made for `cause`.
+    uint8_t shuffle_tag(ShuffleCause cause, VReg v) const;
+    void tag_isel_moves();
     struct EdgeSplit {
         LirBlock* pred = nullptr;
         LirBlock* succ = nullptr;

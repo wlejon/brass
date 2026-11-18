@@ -1,5 +1,6 @@
 #include <string_view>
 #include <brass/codegen/lir.hpp>
+#include <brass/core/env.hpp>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -8,6 +9,11 @@
 #include <unordered_map>
 
 namespace brass::codegen {
+
+bool shuffle_marks_wanted() {
+    static const bool wanted = !env_value("BRASS_BLOCK_MAP").empty();
+    return wanted;
+}
 
 std::string_view to_string(RegClass rc) noexcept {
     switch (rc) {

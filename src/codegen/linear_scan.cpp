@@ -154,6 +154,55 @@ void LinearScanAllocator::build_coalesce_hints() {
     }
 }
 
+uint8_t LinearScanAllocator::shuffle_tag(ShuffleCause cause, VReg v) const {
+    if (!shuffle_marks_wanted()) return 0;
+    ShuffleClass cls = ShuffleClass::Split;
+    if (v.is_valid() && v.id < fn_.vreg_table.size()) {
+        const VReg full = fn_.vreg_table[v.id].vreg;
+        const LiveInterval* iv = liveness_.get_interval(full);
+        const bool spans = iv != nullptr && iv->spans_call;
+        const bool whole = v.id < unsplittable_.size() && unsplittable_[v.id];
+        if (full.is_gcref && spans) cls = whole ? ShuffleClass::GcWhole : ShuffleClass::GcAtCalls;
+        else if (whole) cls = spans ? ShuffleClass::CallsWhole : ShuffleClass::Whole;
+    }
+    return static_cast<uint8_t>(static_cast<uint8_t>(cause) | (static_cast<uint8_t>(cls) << 4));
+}
+
+// The moves instruction selection made, tagged once the scan is done (so
+// the moved value's class is its final one) and before the rewrite adds the
+// allocator's own moves, which are tagged where they are made.
+void LinearScanAllocator::tag_isel_moves() {
+    for (const auto& block : fn_.blocks) {
+        for (const auto& inst : block->instructions) {
+            if (inst->opcode == LirOpcode::ParallelCopy) {
+                VReg v = !inst->defs.empty() && inst->defs[0].is_vreg() ? inst->defs[0].vreg_val : VReg{};
+                inst->shuffle = shuffle_tag(ShuffleCause::BlockArgs, v);
+                continue;
+            }
+            switch (inst->opcode) {
+                case LirOpcode::Movq_xg: case LirOpcode::Movq_gx: case LirOpcode::Movd_xg: case LirOpcode::Movd_gx:
+                    if (!inst->defs.empty() && inst->defs[0].is_vreg()) {
+                        inst->shuffle = shuffle_tag(ShuffleCause::CrossClass, inst->defs[0].vreg_val);
+                    }
+                    continue;
+                case LirOpcode::Mov: case LirOpcode::Mov32: case LirOpcode::Movsd: case LirOpcode::Movss:
+                case LirOpcode::Movaps: case LirOpcode::Vmovaps: case LirOpcode::Vmovups:
+                    break;
+                default:
+                    continue;
+            }
+            if (inst->defs.size() != 1 || inst->uses.size() != 1) continue;
+            const LirOperand& d = inst->defs[0];
+            const LirOperand& u = inst->uses[0];
+            if (d.is_vreg() && u.is_vreg()) {
+                inst->shuffle = shuffle_tag(ShuffleCause::IselCopy, d.vreg_val);
+            }
+            else if (d.is_preg() && u.is_vreg()) inst->shuffle = shuffle_tag(ShuffleCause::IselToPreg, u.vreg_val);
+            else if (d.is_vreg() && u.is_preg()) inst->shuffle = shuffle_tag(ShuffleCause::IselFromPreg, d.vreg_val);
+        }
+    }
+}
+
 void LinearScanAllocator::build_constraint_index() {
     for (int c = 0; c < 2; ++c) {
         constrained_ids_[c].clear();
@@ -648,6 +697,7 @@ void LinearScanAllocator::allocate() {
     run_scan();
     collect_resolution_moves();
     reorder_spill_slots();
+    if (shuffle_marks_wanted()) tag_isel_moves();
 
     // 3. The vreg table and the intervals keep the first piece's location,
     // which is the value's only one unless it was split. After allocation

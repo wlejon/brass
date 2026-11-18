@@ -25,6 +25,7 @@ add_executable(brass_unit_tests
     unit/test_x64_encoder.cpp
     unit/test_lir_isel.cpp
     unit/test_x64_cmp_remat.cpp
+    unit/test_x64_select_base.cpp
     unit/test_x64_and_chain_zero_load.cpp
     unit/test_x64_or_chain.cpp
     unit/test_x64_overflow_imm.cpp
