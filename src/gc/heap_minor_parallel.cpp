@@ -898,9 +898,15 @@ void evacuate_parallel(GcState& g, PhaseClock& clock, unsigned threads) {
     pm.threads = helper_count + 1;
     // Timed from here: the first one's helper threads are created above.
     const uint64_t began = gc_now_ns();
-    const uintptr_t lo = g.shade ? g.heap.reservation_base() : g.heap.young_base();
-    const size_t span = g.shade ? g.heap.reservation_bytes() : g.heap.young_span();
-    for (unsigned i = 0; i < pm.threads; ++i) pm.workers.push_back(std::make_unique<Worker>(pm, g.heap, lo, lo + span));
+    const uintptr_t lo = g.heap.young_base();
+    const size_t span = g.heap.young_span();
+    for (unsigned i = 0; i < pm.threads; ++i) {
+        pm.workers.push_back(std::make_unique<Worker>(pm, g.heap, lo, lo + span));
+        if (g.shade) {
+            pm.workers.back()->tracer.enable_shade_split(lo, lo + span, g.heap.reservation_base(),
+                                                           g.heap.reservation_base() + g.heap.reservation_bytes());
+        }
+    }
     // The pinned objects (evacuate pinned them before choosing this path) and
     // what the pretenured objects' pass left grey (promote_pretenured: copies
     // it promoted, and the ephemerons it met) are the calling thread's first

@@ -212,10 +212,14 @@ void drain(Tracer& t, GcState& g) {
 void promote_pretenured(GcState& young) {
     HeapState& s = young.s;
     if (s.pretenured.empty()) return;
-    const uintptr_t lo = young.shade ? young.heap.reservation_base() : young.heap.young_base();
-    const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
+    const uintptr_t lo = young.heap.young_base();
+    const size_t span = young.heap.young_span();
     Tracer t(young.heap, Tracer::Purpose::Minor, lo, lo + span, &minor_visit, &weak_visit, &ephemeron_visit,
              &young);
+    if (young.shade) {
+        t.enable_shade_split(lo, lo + span, young.heap.reservation_base(),
+                             young.heap.reservation_base() + young.heap.reservation_bytes());
+    }
     const unsigned age = young.tenure_age;
     young.tenure_age = 1;
     for (const uintptr_t object : s.pretenured) {
@@ -246,10 +250,14 @@ void evacuate(GcState& young, PhaseClock& clock) {
         return;
     }
     // Shading, old references reach minor_visit too: the range is the heap.
-    const uintptr_t lo = young.shade ? young.heap.reservation_base() : young.heap.young_base();
-    const size_t span = young.shade ? young.heap.reservation_bytes() : young.heap.young_span();
+    const uintptr_t lo = young.heap.young_base();
+    const size_t span = young.heap.young_span();
     Tracer t(young.heap, Tracer::Purpose::Minor, lo, lo + span, &minor_visit, &weak_visit, &ephemeron_visit,
              &young);
+    if (young.shade) {
+        t.enable_shade_split(lo, lo + span, young.heap.reservation_base(),
+                             young.heap.reservation_base() + young.heap.reservation_bytes());
+    }
     young.gray.insert(young.gray.end(), s.pinned.begin(), s.pinned.end());
     visit_roots(s, t);
     clock.lap(kPhaseRoots);

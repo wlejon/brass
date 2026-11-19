@@ -1,6 +1,7 @@
 #include "f64_demote_internal.hpp"
 #include <brass/mir/builder.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <cstdint>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
@@ -182,7 +183,170 @@ const Value* unbounded_step(const LoopInfo& loop, const DominatorTree& dom, Basi
     return nullptr;
 }
 
+bool value_has_use(const Function& fn, const Value* target) {
+    if (!target) return false;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (!bb) continue;
+        for (const Instruction* inst : *bb) {
+            if (!inst) continue;
+            for (const Value* op : inst->operands()) {
+                if (op == target) return true;
+            }
+            for (const BranchTarget* bt : {&inst->branch_target(), &inst->true_target(), &inst->false_target()}) {
+                for (const Value* arg : bt->args) {
+                    if (arg == target) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Normalizes `double(p) <rel> L` where p is i32 and L is loop-invariant f64.
+enum class BoundRel : uint8_t { LT, LE, GT, GE };
+
 } // namespace
+
+bool canonicalize_i32_f64_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis) {
+    if (!fn.parent()) return false;
+    bool changed = false;
+    for (const LoopInfo* loop : loop_analysis.post_order_loops()) {
+        if (!loop || !loop->header()) continue;
+        BasicBlock* header = loop->header();
+        BasicBlock* ph = nullptr;
+        for (BasicBlock* pred : header->predecessors()) {
+            if (!pred || loop->contains(pred)) continue;
+            if (ph) {
+                ph = nullptr;
+                break;
+            }
+            ph = pred;
+        }
+        Instruction* ph_term = ph ? ph->terminator() : nullptr;
+        if (!ph_term || ph_term->opcode() != Opcode::br || ph_term->branch_target().block != header) continue;
+
+        Instruction* hdr_term = header->terminator();
+        if (!hdr_term || hdr_term->opcode() != Opcode::br_if || !hdr_term->operand(0) ||
+            !hdr_term->operand(0)->is_instruction()) {
+            continue;
+        }
+        const bool stay_true =
+            loop->contains(hdr_term->true_target().block) && !loop->contains(hdr_term->false_target().block);
+        if (!stay_true) continue;
+
+        Instruction* hdr_cmp = hdr_term->operand(0)->defining_instruction();
+        if (!hdr_cmp || hdr_cmp->operand_count() != 2) continue;
+        const Opcode cmp_op = hdr_cmp->opcode();
+        if (cmp_op != Opcode::slt && cmp_op != Opcode::sle && cmp_op != Opcode::sgt && cmp_op != Opcode::sge) {
+            continue;
+        }
+        Value* lhs = hdr_cmp->operand(0);
+        Value* rhs = hdr_cmp->operand(1);
+        if (!lhs || !rhs || lhs->type() != Type::f64() || rhs->type() != Type::f64()) continue;
+
+        auto match_conv = [&](Value* v) -> Instruction* {
+            if (!v || !v->is_instruction()) return nullptr;
+            Instruction* ci = v->defining_instruction();
+            if (!ci || ci->opcode() != Opcode::sitofp_f64_i32 || ci->operand_count() != 1) return nullptr;
+            Value* pv = ci->operand(0);
+            if (!pv || pv->type() != Type::i32()) return nullptr;
+            const bool in_header = (pv->is_block_param() && pv->defining_block() == header) ||
+                                   (pv->is_instruction() && pv->defining_instruction()->parent() == header);
+            return in_header ? ci : nullptr;
+        };
+
+        Instruction* conv = match_conv(lhs);
+        Value* limit_v = rhs;
+        bool p_on_lhs = true;
+        if (!conv) {
+            conv = match_conv(rhs);
+            limit_v = lhs;
+            p_on_lhs = false;
+        }
+        if (!conv || !limit_v || !loop->is_loop_invariant(limit_v)) continue;
+
+        const bool limit_is_fconst =
+            limit_v->is_instruction() && limit_v->defining_instruction()->opcode() == Opcode::fconst_f64;
+        if (!limit_is_fconst) {
+            const BasicBlock* ldef_bb = defining_block(limit_v);
+            if (!ldef_bb || !dom.dominates(ldef_bb, ph)) continue;
+        }
+
+        BoundRel rel = BoundRel::LT;
+        if (p_on_lhs) {
+            rel = (cmp_op == Opcode::slt)   ? BoundRel::LT
+                  : (cmp_op == Opcode::sle) ? BoundRel::LE
+                  : (cmp_op == Opcode::sgt) ? BoundRel::GT
+                                            : BoundRel::GE;
+        } else {
+            rel = (cmp_op == Opcode::slt)   ? BoundRel::GT
+                  : (cmp_op == Opcode::sle) ? BoundRel::GE
+                  : (cmp_op == Opcode::sgt) ? BoundRel::LT
+                                            : BoundRel::LE;
+        }
+
+        Builder ph_b(*fn.parent());
+        ph_b.set_function(&fn);
+        ph_b.position_before(ph_term);
+        Value* L = limit_v;
+        if (limit_is_fconst &&
+            (!L->defining_instruction()->parent() || !dom.dominates(L->defining_instruction()->parent(), ph))) {
+            L = ph_b.build_fconst_f64(L->defining_instruction()->imm_f64());
+        }
+
+        constexpr double kI32Min = -2147483648.0;
+        constexpr double kI32Max = 2147483647.0;
+        Value* f_min = ph_b.build_fconst_f64(kI32Min);
+        Value* f_max = ph_b.build_fconst_f64(kI32Max);
+        Value* f_zero = ph_b.build_fconst_f64(0.0);
+
+        Value* bound_i64 = nullptr;
+        if (rel == BoundRel::LT || rel == BoundRel::GE) {
+            Value* in_range = ph_b.build_and(ph_b.build_sgt(L, f_min), ph_b.build_sle(L, f_max));
+            Value* safe_f = ph_b.build_select(in_range, L, f_zero);
+            Value* mid_i64 = ph_b.build_sext_i64(ph_b.build_fptosi_i32(ph_b.build_ceil_f64(safe_f)));
+            Value* oob_cond = rel == BoundRel::LT ? ph_b.build_sgt(L, f_max) : ph_b.build_sle(L, f_min);
+            Value* oob_true =
+                ph_b.build_iconst_i64(rel == BoundRel::LT ? int64_t{2147483648LL} : int64_t{-2147483648LL});
+            Value* oob_false =
+                ph_b.build_iconst_i64(rel == BoundRel::LT ? int64_t{-2147483648LL} : int64_t{2147483648LL});
+            Value* hi_or_lo = ph_b.build_select(oob_cond, oob_true, oob_false);
+            bound_i64 = ph_b.build_select(in_range, mid_i64, hi_or_lo);
+        } else {
+            Value* in_range = ph_b.build_and(ph_b.build_sge(L, f_min), ph_b.build_slt(L, f_max));
+            Value* safe_f = ph_b.build_select(in_range, L, f_zero);
+            Value* mid_i64 = ph_b.build_sext_i64(ph_b.build_fptosi_i32(ph_b.build_floor_f64(safe_f)));
+            Value* oob_cond = rel == BoundRel::LE ? ph_b.build_sge(L, f_max) : ph_b.build_slt(L, f_min);
+            Value* oob_true =
+                ph_b.build_iconst_i64(rel == BoundRel::LE ? int64_t{2147483647LL} : int64_t{-2147483649LL});
+            Value* oob_false =
+                ph_b.build_iconst_i64(rel == BoundRel::LE ? int64_t{-2147483649LL} : int64_t{2147483647LL});
+            Value* hi_or_lo = ph_b.build_select(oob_cond, oob_true, oob_false);
+            bound_i64 = ph_b.build_select(in_range, mid_i64, hi_or_lo);
+        }
+
+        Builder hdr_b(*fn.parent());
+        hdr_b.set_function(&fn);
+        hdr_b.position_before(hdr_term);
+        Value* p_i64 = hdr_b.build_sext_i64(conv->operand(0));
+        Value* new_cond = nullptr;
+        switch (rel) {
+            case BoundRel::LT: new_cond = hdr_b.build_slt(p_i64, bound_i64); break;
+            case BoundRel::LE: new_cond = hdr_b.build_sle(p_i64, bound_i64); break;
+            case BoundRel::GT: new_cond = hdr_b.build_sgt(p_i64, bound_i64); break;
+            case BoundRel::GE: new_cond = hdr_b.build_sge(p_i64, bound_i64); break;
+        }
+        hdr_term->set_operand(0, new_cond);
+        if (!value_has_use(fn, hdr_cmp->result()) && hdr_cmp->parent()) {
+            hdr_cmp->parent()->remove_instruction(hdr_cmp);
+        }
+        if (!value_has_use(fn, conv->result()) && conv->parent()) {
+            conv->parent()->remove_instruction(conv);
+        }
+        changed = true;
+    }
+    return changed;
+}
 
 bool version_loops_on_step(Function& fn) {
     constexpr int kMaxVersions = 8;

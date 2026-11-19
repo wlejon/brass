@@ -53,7 +53,7 @@ public:
     void visit_run(uint64_t* slots, size_t count) noexcept {
         const uintptr_t lo = range_lo_;
         const uintptr_t span = range_span_;
-        if (count >= 16 && detail::run_filter_avx2) {
+        if (count >= 8 && detail::run_filter_avx2) {
             do {
                 const size_t clear = detail::run_groups_outside_avx2(slots, count / 4, lo, span);
                 slots += clear * 4;
@@ -139,12 +139,27 @@ public:
         range_span_ = hi - lo;
     }
 
+    void enable_shade_split(uintptr_t young_lo, uintptr_t young_hi, uintptr_t full_lo, uintptr_t full_hi) noexcept {
+        young_lo_ = young_lo;
+        young_span_ = young_hi - young_lo;
+        full_lo_ = full_lo;
+        full_span_ = full_hi - full_lo;
+        shade_old_ = true;
+        set_range(owner_old_ ? full_lo : young_lo, owner_old_ ? full_hi : young_hi);
+    }
+
     // The object whose slots are being visited (0 for a root), and whether it
     // lives in the old generation: a minor collection re-dirties its card
-    // when a slot still names a young object afterwards.
+    // when a slot still names a young object afterwards. During an open marking
+    // cycle (`shade_old_`), roots and young objects only scan young pointers,
+    // while old objects scan the full heap so old referents get shaded.
     void set_owner(uintptr_t owner, bool owner_old) noexcept {
         owner_ = owner;
         owner_old_ = owner_old;
+        if (shade_old_) {
+            range_lo_ = owner_old ? full_lo_ : young_lo_;
+            range_span_ = owner_old ? full_span_ : young_span_;
+        }
     }
     [[nodiscard]] uintptr_t owner() const noexcept { return owner_; }
     [[nodiscard]] bool owner_old() const noexcept { return owner_old_; }
@@ -153,6 +168,10 @@ public:
 private:
     uintptr_t range_lo_;
     uintptr_t range_span_;
+    uintptr_t young_lo_ = 0;
+    uintptr_t young_span_ = 0;
+    uintptr_t full_lo_ = 0;
+    uintptr_t full_span_ = 0;
     VisitFn visit_slow_;
     WeakFn weak_;
     EphemeronFn ephemeron_;
@@ -160,6 +179,7 @@ private:
     void* state_;
     uintptr_t owner_ = 0;
     bool owner_old_ = false;
+    bool shade_old_ = false;
     Purpose purpose_;
 };
 

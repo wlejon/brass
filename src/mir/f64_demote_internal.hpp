@@ -62,6 +62,7 @@ bool version_loops_on_step(Function& fn);
 
 bool canonicalize_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis,
                               std::vector<ClampedLimit>* clamped);
+bool canonicalize_i32_f64_loop_bounds(Function& fn, const DominatorTree& dom, const LoopAnalysis& loop_analysis);
 
 // Whether `limit` is a value the entry block can compute again from the
 // function's parameters alone (constants, f64 parameters, and their sums,

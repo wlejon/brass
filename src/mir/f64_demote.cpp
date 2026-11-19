@@ -208,7 +208,9 @@ bool f64_demote_pass(Function& fn, const F64DemoteOptions& options) {
     // counted f64 loops with runtime f64 bounds (e.g. `i < n_f64`) have a
     // provably bounded i32 upper bound in the preheader.
     std::vector<ClampedLimit> all_clamped;
-    const bool canonicalized_bounds = canonicalize_loop_bounds(fn, *dom_p, *loops_p, &all_clamped);
+    const bool canonicalized_i32_bounds = canonicalize_i32_f64_loop_bounds(fn, *dom_p, *loops_p);
+    const bool canonicalized_bounds =
+        canonicalized_i32_bounds | canonicalize_loop_bounds(fn, *dom_p, *loops_p, &all_clamped);
     // A clamp shortens its loop whenever it fires, so each one stands only
     // where a check says it does not: the entry check for a limit made from
     // the parameters (kept in `clamped`), a copy of the loop with its own

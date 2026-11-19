@@ -5,6 +5,7 @@
 #include <brass/mir/verifier.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/codegen/jit_exec.hpp>
+#include <limits>
 #include <string_view>
 
 using namespace brass;
@@ -139,4 +140,99 @@ TEST_CASE("F64 Demote - Entry-Param Value Versioning Marks Fallback _f64v Blocks
         }
     }
     CHECK(cold_f64v > size_t{0});
+}
+
+TEST_CASE("F64 Demote - Canonicalizes i32 IV vs f64 Invariant Loop Bounds Across All Relations and Edge Values") {
+    for (Opcode cmp : {Opcode::slt, Opcode::sle, Opcode::sgt, Opcode::sge}) {
+        Module mod("test_i32_f64_bound");
+        Builder b(mod);
+        // count_trips(start: i32, limit: f64, step: i32) -> i32
+        Function* fn = mod.create_function("count_trips", Type::i32(), {Type::i32(), Type::f64(), Type::i32()});
+        b.set_function(fn);
+
+        BasicBlock* entry = b.append_block("entry");
+        Value* start = b.add_block_param(entry, Type::i32());
+        Value* limit = b.add_block_param(entry, Type::f64());
+        Value* step = b.add_block_param(entry, Type::i32());
+        BasicBlock* hdr = b.create_block("hdr");
+        BasicBlock* body = b.create_block("body");
+        BasicBlock* done = b.create_block("done");
+        b.build_br(hdr, {start, b.build_iconst_i32(0)});
+
+        fn->append_block(hdr);
+        b.position_at_end(hdr);
+        Value* iv = b.add_block_param(hdr, Type::i32());
+        Value* trips = b.add_block_param(hdr, Type::i32());
+        Value* iv_f = b.build_sitofp_f64_i32(iv);
+        Value* cond = nullptr;
+        switch (cmp) {
+            case Opcode::slt: cond = b.build_slt(iv_f, limit); break;
+            case Opcode::sle: cond = b.build_sle(iv_f, limit); break;
+            case Opcode::sgt: cond = b.build_sgt(iv_f, limit); break;
+            case Opcode::sge: cond = b.build_sge(iv_f, limit); break;
+            default: break;
+        }
+        b.build_br_if(cond, body, {}, done, {trips});
+
+        fn->append_block(body);
+        b.position_at_end(body);
+        Value* trips2 = b.build_add(trips, b.build_iconst_i32(1));
+        Value* iv2 = b.build_add(iv, step);
+        // Safety cap so +Inf bounds never spin infinitely when testing.
+        b.build_br_if(b.build_sge(trips2, b.build_iconst_i32(25)), done, {trips2}, hdr, {iv2, trips2});
+
+        fn->append_block(done);
+        Value* ret_v = b.add_block_param(done, Type::i32());
+        b.position_at_end(done);
+        b.build_ret(ret_v);
+
+        fn->rebuild_cfg_predecessors();
+        DiagnosticReporter diag;
+        REQUIRE(verify_function(*fn, &diag));
+
+        CHECK(f64_demote_pass(*fn, {}));
+        REQUIRE(verify_function(*fn, &diag));
+        size_t sitofp_in_hdr = 0;
+        for (const Instruction* inst : *hdr) {
+            if (inst && inst->opcode() == Opcode::sitofp_f64_i32) ++sitofp_in_hdr;
+        }
+        CHECK_EQ(sitofp_in_hdr, size_t{0});
+
+        LoopOptOptions opt;
+        optimize_function_loops(*fn, opt);
+        REQUIRE(verify_function(*fn, &diag));
+
+        codegen::JitExecutionEngine jit(Target::host());
+        REQUIRE(jit.compile_and_load(mod));
+        auto f = jit.get_function_ptr<int32_t (*)(int32_t, double, int32_t)>("count_trips");
+        REQUIRE(f != nullptr);
+
+        auto ref = [&](int32_t s, double lim, int32_t st) -> int32_t {
+            int64_t i = s;
+            int32_t t = 0;
+            while (true) {
+                const double d = static_cast<double>(static_cast<int32_t>(i));
+                const bool ok = cmp == Opcode::slt ? (d < lim)
+                              : cmp == Opcode::sle ? (d <= lim)
+                              : cmp == Opcode::sgt ? (d > lim)
+                                                   : (d >= lim);
+                if (!ok) return t;
+                ++t;
+                i = static_cast<int32_t>(i + st);
+                if (t >= 25) return t;
+            }
+        };
+
+        const int32_t st = (cmp == Opcode::slt || cmp == Opcode::sle) ? 1 : -1;
+        for (double lim : {5.0, 5.5, 4.999, -0.5, -5.5, 0.0, -0.0,
+                           std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(),
+                           -std::numeric_limits<double>::infinity(),
+                           2147483647.0, 2147483647.5, -2147483648.0, -2147483648.5}) {
+            CHECK_EQ(f(0, lim, st), ref(0, lim, st));
+            CHECK_EQ(f(2, lim, st), ref(2, lim, st));
+            CHECK_EQ(f(2147483640, lim, 1), ref(2147483640, lim, 1));
+            CHECK_EQ(f(-2147483642, lim, -1), ref(-2147483642, lim, -1));
+        }
+    }
 }
