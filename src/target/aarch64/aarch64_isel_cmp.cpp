@@ -28,102 +28,19 @@ void AArch64ISel::lower_comparison(
         ucomi->add_use(LirOperand::vreg(op1, sz));
         lir_bb.append_inst(std::move(ucomi));
 
-        if (float_cond == LirCond::E) {
-            auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc->condition = LirCond::E;
-            setcc->add_def(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(setcc));
+        // ARM64 fcmp NZCV: Less=1000, Equal=0110, Greater=0010, Unordered=0011.
+        // EQ (Z), NE (!Z), CC/LO (!C), LS (!C|Z), GT (!Z & N==V), GE (N==V) all
+        // produce the exact IEEE-754 ordered/unordered result in a single cset
+        // (no extra parity-flag mask/combine or uxtb needed).
+        LirCond a64_fc = float_cond;
+        if (float_cond == LirCond::A) a64_fc = LirCond::G;
+        else if (float_cond == LirCond::AE) a64_fc = LirCond::GE;
 
-            VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, 1);
-            auto setcc_np = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc_np->condition = LirCond::NP;
-            setcc_np->add_def(LirOperand::vreg(tmp, 1));
-            lir_bb.append_inst(std::move(setcc_np));
-
-            auto movzx_dst = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx_dst->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx_dst->add_use(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(movzx_dst));
-
-            auto movzx_tmp = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx_tmp->add_def(LirOperand::vreg(tmp, dst_sz));
-            movzx_tmp->add_use(LirOperand::vreg(tmp, 1));
-            lir_bb.append_inst(std::move(movzx_tmp));
-
-            auto and_inst = std::make_unique<LirInst>((dst_sz == 4) ? LirOpcode::And32 : LirOpcode::And);
-            and_inst->add_def(LirOperand::vreg(dst, dst_sz));
-            and_inst->add_use(LirOperand::vreg(dst, dst_sz));
-            and_inst->add_use(LirOperand::vreg(tmp, dst_sz));
-            and_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(and_inst));
-        } else if (float_cond == LirCond::NE) {
-            auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc->condition = LirCond::NE;
-            setcc->add_def(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(setcc));
-
-            VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, 1);
-            auto setcc_p = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc_p->condition = LirCond::P;
-            setcc_p->add_def(LirOperand::vreg(tmp, 1));
-            lir_bb.append_inst(std::move(setcc_p));
-
-            auto movzx_dst = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx_dst->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx_dst->add_use(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(movzx_dst));
-
-            auto movzx_tmp = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx_tmp->add_def(LirOperand::vreg(tmp, dst_sz));
-            movzx_tmp->add_use(LirOperand::vreg(tmp, 1));
-            lir_bb.append_inst(std::move(movzx_tmp));
-
-            auto or_inst = std::make_unique<LirInst>((dst_sz == 4) ? LirOpcode::Or32 : LirOpcode::Or);
-            or_inst->add_def(LirOperand::vreg(dst, dst_sz));
-            or_inst->add_use(LirOperand::vreg(dst, dst_sz));
-            or_inst->add_use(LirOperand::vreg(tmp, dst_sz));
-            or_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(or_inst));
-        } else if (float_cond == LirCond::B || float_cond == LirCond::BE || float_cond == LirCond::A || float_cond == LirCond::AE) {
-            auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc->condition = float_cond;
-            setcc->add_def(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(setcc));
-
-            VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, 1);
-            auto setcc_np = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc_np->condition = LirCond::NP;
-            setcc_np->add_def(LirOperand::vreg(tmp, 1));
-            lir_bb.append_inst(std::move(setcc_np));
-
-            auto movzx_dst = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx_dst->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx_dst->add_use(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(movzx_dst));
-
-            auto movzx_tmp = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx_tmp->add_def(LirOperand::vreg(tmp, dst_sz));
-            movzx_tmp->add_use(LirOperand::vreg(tmp, 1));
-            lir_bb.append_inst(std::move(movzx_tmp));
-
-            auto and_inst = std::make_unique<LirInst>((dst_sz == 4) ? LirOpcode::And32 : LirOpcode::And);
-            and_inst->add_def(LirOperand::vreg(dst, dst_sz));
-            and_inst->add_use(LirOperand::vreg(dst, dst_sz));
-            and_inst->add_use(LirOperand::vreg(tmp, dst_sz));
-            and_inst->mir_origin = &inst;
-            lir_bb.append_inst(std::move(and_inst));
-        } else {
-            auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
-            setcc->condition = float_cond;
-            setcc->add_def(LirOperand::vreg(dst, 1));
-            lir_bb.append_inst(std::move(setcc));
-
-            auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx->add_use(LirOperand::vreg(dst, 1));
-            movzx->mir_origin = &inst;
-            lir_bb.append_inst(std::move(movzx));
-        }
+        auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
+        setcc->condition = a64_fc;
+        setcc->add_def(LirOperand::vreg(dst, dst_sz));
+        setcc->mir_origin = &inst;
+        lir_bb.append_inst(std::move(setcc));
     } else {
         uint8_t sz = static_cast<uint8_t>(op0_val->type().size_in_bytes());
         if (sz == 0 || op0.size == 8 || op1.size == 8) sz = 8;
@@ -166,14 +83,9 @@ void AArch64ISel::lower_comparison(
 
         auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
         setcc->condition = final_cond;
-        setcc->add_def(LirOperand::vreg(dst, 1));
+        setcc->add_def(LirOperand::vreg(dst, dst_sz));
+        setcc->mir_origin = &inst;
         lir_bb.append_inst(std::move(setcc));
-
-        auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-        movzx->add_def(LirOperand::vreg(dst, dst_sz));
-        movzx->add_use(LirOperand::vreg(dst, 1));
-        movzx->mir_origin = &inst;
-        lir_bb.append_inst(std::move(movzx));
     }
 }
 

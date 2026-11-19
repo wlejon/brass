@@ -29,6 +29,9 @@ public:
     void add32(GPR dst, GPR src1, GPR src2);
     void add(GPR dst, GPR src, uint32_t imm);
     void add32(GPR dst, GPR src, uint32_t imm);
+    void add_shifted(GPR dst, GPR src1, GPR src2, ShiftType shift, uint8_t amount);
+    void add32_shifted(GPR dst, GPR src1, GPR src2, ShiftType shift, uint8_t amount);
+    void add_lsl(GPR dst, GPR src1, GPR src2, uint8_t amount);
 
     // ADDS (with flags)
     void adds(GPR dst, GPR src1, GPR src2);
@@ -41,6 +44,8 @@ public:
     void sub32(GPR dst, GPR src1, GPR src2);
     void sub(GPR dst, GPR src, uint32_t imm);
     void sub32(GPR dst, GPR src, uint32_t imm);
+    void sub_shifted(GPR dst, GPR src1, GPR src2, ShiftType shift, uint8_t amount);
+    void sub32_shifted(GPR dst, GPR src1, GPR src2, ShiftType shift, uint8_t amount);
 
     // SUBS (with flags)
     void subs(GPR dst, GPR src1, GPR src2);
@@ -384,6 +389,11 @@ public:
     // An image writer relaxes the pair to adrp + add for a symbol the image
     // defines; an import is read from the slot the loader binds.
     void load_symbol_address(GPR dst, const std::string& symbol);
+
+    // Load a 64-bit word stored directly at `symbol` (e.g. an indirect call entry cell):
+    //   adrp dst, symbol@PAGE
+    //   ldr  dst, [dst, symbol@PAGEOFF]
+    void load_symbol_u64(GPR dst, const std::string& symbol);
 
 private:
     CodeBuffer& buffer_;

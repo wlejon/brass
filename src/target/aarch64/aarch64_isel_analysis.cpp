@@ -209,8 +209,15 @@ bool AArch64ISel::is_elidable_materialization(const Instruction& inst) const {
         case Opcode::iconst_i64:
             return true;
         case Opcode::add:
+        case Opcode::sub:
+        case Opcode::mul:
         case Opcode::shl:
-            // Pure integer arithmetic an address may have folded.
+        case Opcode::lshr:
+        case Opcode::ashr:
+        case Opcode::neg:
+        case Opcode::xor_:
+        case Opcode::not_:
+            // Pure integer arithmetic that addressing, madd/msub, shifted ALU, or cs* may fold.
             return !inst.type().is_float() && !inst.type().is_vector();
         default:
             return false;

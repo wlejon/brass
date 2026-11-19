@@ -94,6 +94,26 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             break;
         }
 
+        case LirOpcode::AddShifted:
+        case LirOpcode::Add32Shifted:
+        case LirOpcode::SubShifted:
+        case LirOpcode::Sub32Shifted: {
+            GPR dst = to_gpr(inst.defs[0]);
+            GPR rn = to_gpr(inst.uses[0]);
+            GPR rm = to_gpr(inst.uses[1]);
+            const uint64_t imm = static_cast<uint64_t>(inst.uses[2].imm_int);
+            const ShiftType st = static_cast<ShiftType>((imm >> 8) & 3u);
+            const uint8_t amt = static_cast<uint8_t>(imm & 0x3Fu);
+            switch (inst.opcode) {
+                case LirOpcode::AddShifted:   enc_.add_shifted(dst, rn, rm, st, amt); break;
+                case LirOpcode::Add32Shifted: enc_.add32_shifted(dst, rn, rm, st, amt); break;
+                case LirOpcode::SubShifted:   enc_.sub_shifted(dst, rn, rm, st, amt); break;
+                case LirOpcode::Sub32Shifted: enc_.sub32_shifted(dst, rn, rm, st, amt); break;
+                default: break;
+            }
+            break;
+        }
+
         case LirOpcode::Adds: {
             GPR dst = to_gpr(inst.defs[0]);
             GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
@@ -638,6 +658,48 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             enc_.cset(to_gpr(inst.defs[0]), to_aarch64_cond(inst.condition));
             break;
 
+        case LirOpcode::Madd:
+        case LirOpcode::Madd32:
+        case LirOpcode::Msub:
+        case LirOpcode::Msub32: {
+            GPR dst = to_gpr(inst.defs[0]);
+            GPR s1 = to_gpr(inst.uses[0]);
+            GPR s2 = to_gpr(inst.uses[1]);
+            GPR acc = to_gpr(inst.uses[2]);
+            switch (inst.opcode) {
+                case LirOpcode::Madd:   enc_.madd(dst, s1, s2, acc); break;
+                case LirOpcode::Madd32: enc_.madd32(dst, s1, s2, acc); break;
+                case LirOpcode::Msub:   enc_.msub(dst, s1, s2, acc); break;
+                case LirOpcode::Msub32: enc_.msub32(dst, s1, s2, acc); break;
+                default: break;
+            }
+            break;
+        }
+
+        case LirOpcode::Csinc:
+        case LirOpcode::Csneg:
+        case LirOpcode::Csinv: {
+            auto to_gpr_or_zero = [&](const LirOperand& op) -> GPR {
+                return (op.is_imm_int() && op.imm_int == 0) ? GPR::XZR : to_gpr(op);
+            };
+            const Condition cond = to_aarch64_cond(inst.condition);
+            const GPR dst = to_gpr(inst.defs[0]);
+            const GPR true_src = to_gpr_or_zero(inst.uses[1]);
+            const GPR false_src = to_gpr_or_zero(inst.uses[0]);
+            const bool is32 = (inst.defs[0].size == 4);
+            if (inst.opcode == LirOpcode::Csinc) {
+                if (is32) enc_.csinc32(dst, true_src, false_src, cond);
+                else enc_.csinc(dst, true_src, false_src, cond);
+            } else if (inst.opcode == LirOpcode::Csneg) {
+                if (is32) enc_.csneg32(dst, true_src, false_src, cond);
+                else enc_.csneg(dst, true_src, false_src, cond);
+            } else {
+                if (is32) enc_.csinv32(dst, true_src, false_src, cond);
+                else enc_.csinv(dst, true_src, false_src, cond);
+            }
+            break;
+        }
+
         case LirOpcode::Cmovcc: {
             Condition cond = to_aarch64_cond(inst.condition);
             if (inst.defs[0].is_preg() && inst.defs[0].preg_val.is_xmm()) {
@@ -651,9 +713,12 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
                 }
                 break;
             }
+            auto to_gpr_or_zero = [&](const LirOperand& op) -> GPR {
+                return (op.is_imm_int() && op.imm_int == 0) ? GPR::XZR : to_gpr(op);
+            };
             GPR dst = to_gpr(inst.defs[0]);
-            GPR false_src = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
-            GPR src = to_gpr(inst.uses.back());
+            GPR false_src = (inst.uses.size() >= 2) ? to_gpr_or_zero(inst.uses[0]) : dst;
+            GPR src = to_gpr_or_zero(inst.uses.back());
             if (inst.defs[0].size == 4) {
                 enc_.csel32(dst, src, false_src, cond);
             } else {

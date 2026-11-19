@@ -1,5 +1,7 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/target/aarch64/aarch64_operands.hpp>
 #include <brass/codegen/div_magic.hpp>
+#include <bit>
 #include <cstring>
 
 namespace brass::aarch64 {
@@ -44,6 +46,74 @@ void AArch64ISel::lower_binary_alu(
         alu_inst->add_use(std::move(second_src));
         alu_inst->mir_origin = &inst;
         lir_bb.append_inst(std::move(alu_inst));
+    };
+
+    auto is_skipped_val = [&](const Value* v) -> bool {
+        return v && v->is_instruction() && skipped_insts_.count(v->defining_instruction()) != 0;
+    };
+
+    auto match_madd_mul = [&](const Value* v) -> const Instruction* {
+        if (sz != 4 && sz != 8) return nullptr;
+        if (!v || !v->is_instruction()) return nullptr;
+        const Instruction* d = v->defining_instruction();
+        if (!d || d->parent() != inst.parent() || skipped_insts_.count(d)) return nullptr;
+        if (d->opcode() != Opcode::mul || d->result()->type().is_gc_root()) return nullptr;
+        if (d->result()->type().size_in_bytes() != sz) return nullptr;
+        if (is_skipped_val(d->operand(0)) || is_skipped_val(d->operand(1))) return nullptr;
+        auto it = use_count_.find(v);
+        if (it == use_count_.end() || it->second != 1) return nullptr;
+        ImmIntInfo m0 = get_imm_int_info(d->operand(0));
+        ImmIntInfo m1 = get_imm_int_info(d->operand(1));
+        auto is_cheap_const = [](const ImmIntInfo& ii) {
+            if (!ii.is_imm) return false;
+            if (ii.val == 0 || ii.val == 1) return true;
+            return ii.val > 0 && (static_cast<uint64_t>(ii.val) & static_cast<uint64_t>(ii.val - 1)) == 0;
+        };
+        if (is_cheap_const(m0) || is_cheap_const(m1)) return nullptr;
+        return d;
+    };
+
+    auto match_shifted_op = [&](const Value* v, VReg& out_rm, ShiftType& out_stype, uint8_t& out_amt) -> bool {
+        if (sz != 4 && sz != 8) return false;
+        if (!v || !v->is_instruction()) return false;
+        const Instruction* d = v->defining_instruction();
+        if (!d || d->parent() != inst.parent() || skipped_insts_.count(d)) return false;
+        if (d->result()->type().is_gc_root() || d->result()->type().size_in_bytes() != sz) return false;
+        auto it = use_count_.find(v);
+        if (it == use_count_.end() || it->second != 1) return false;
+        const unsigned max_bits = (sz == 4) ? 32u : 64u;
+        if (d->opcode() == Opcode::shl || d->opcode() == Opcode::lshr || d->opcode() == Opcode::ashr) {
+            if (is_skipped_val(d->operand(0))) return false;
+            ImmIntInfo sh = get_imm_int_info(d->operand(1));
+            if (!sh.is_imm) return false;
+            uint8_t amt = static_cast<uint8_t>(sh.val & (max_bits - 1u));
+            if (amt == 0) return false;
+            VReg rm = get_vreg(d->operand(0));
+            if (!rm.is_valid() || rm.size != sz) return false;
+            out_rm = rm;
+            out_stype = (d->opcode() == Opcode::shl) ? ShiftType::LSL
+                      : (d->opcode() == Opcode::lshr ? ShiftType::LSR : ShiftType::ASR);
+            out_amt = amt;
+            return true;
+        }
+        if (d->opcode() == Opcode::mul) {
+            ImmIntInfo m0 = get_imm_int_info(d->operand(0));
+            ImmIntInfo m1 = get_imm_int_info(d->operand(1));
+            const Value* reg_v = m1.is_imm ? d->operand(0) : (m0.is_imm ? d->operand(1) : nullptr);
+            int64_t c = m1.is_imm ? m1.val : m0.val;
+            if (!reg_v || is_skipped_val(reg_v) || c <= 1) return false;
+            uint64_t u = static_cast<uint64_t>(c);
+            if ((u & (u - 1)) != 0) return false;
+            unsigned k = static_cast<unsigned>(std::countr_zero(u));
+            if (k == 0 || k >= max_bits) return false;
+            VReg rm = get_vreg(reg_v);
+            if (!rm.is_valid() || rm.size != sz) return false;
+            out_rm = rm;
+            out_stype = ShiftType::LSL;
+            out_amt = static_cast<uint8_t>(k);
+            return true;
+        }
+        return false;
     };
 
     if (inst.opcode() == Opcode::mul) {
@@ -94,6 +164,26 @@ void AArch64ISel::lower_binary_alu(
         return;
     }
 
+    auto emit_shifted_alu = [&](LirOpcode s_op, VReg rn, VReg rm, ShiftType st, uint8_t amt) {
+        auto alu = std::make_unique<LirInst>(s_op);
+        alu->add_def(LirOperand::vreg(dst, sz));
+        alu->add_use(LirOperand::vreg(rn, sz));
+        alu->add_use(LirOperand::vreg(rm, sz));
+        alu->add_use(LirOperand::imm((static_cast<int64_t>(st) << 8) | amt, 4));
+        alu->mir_origin = &inst;
+        lir_bb.append_inst(std::move(alu));
+    };
+
+    auto emit_madd_msub = [&](LirOpcode m_op, const Instruction* mul_d, VReg acc) {
+        auto mi = std::make_unique<LirInst>(m_op);
+        mi->add_def(LirOperand::vreg(dst, sz));
+        mi->add_use(LirOperand::vreg(get_vreg(mul_d->operand(0)), sz));
+        mi->add_use(LirOperand::vreg(get_vreg(mul_d->operand(1)), sz));
+        mi->add_use(LirOperand::vreg(acc, sz));
+        mi->mir_origin = &inst;
+        lir_bb.append_inst(std::move(mi));
+    };
+
     if (inst.opcode() == Opcode::add) {
         if (imm1.is_imm && imm1.fits_i32) {
             if (imm1.val == 0) {
@@ -121,6 +211,28 @@ void AArch64ISel::lower_binary_alu(
                 return;
             }
             emit_3addr_alu(src1, LirOperand::imm(imm0.val, sz));
+            return;
+        }
+
+        VReg sh_rm{};
+        ShiftType sh_type = ShiftType::LSL;
+        uint8_t sh_amt = 0;
+        const LirOpcode add_sh_op = (sz == 4) ? LirOpcode::Add32Shifted : LirOpcode::AddShifted;
+        const LirOpcode madd_op = (sz == 4) ? LirOpcode::Madd32 : LirOpcode::Madd;
+        if (match_shifted_op(op1_val, sh_rm, sh_type, sh_amt)) {
+            emit_shifted_alu(add_sh_op, src0, sh_rm, sh_type, sh_amt);
+            return;
+        }
+        if (match_shifted_op(op0_val, sh_rm, sh_type, sh_amt)) {
+            emit_shifted_alu(add_sh_op, src1, sh_rm, sh_type, sh_amt);
+            return;
+        }
+        if (const Instruction* mul_d = match_madd_mul(op0_val)) {
+            emit_madd_msub(madd_op, mul_d, src1);
+            return;
+        }
+        if (const Instruction* mul_d = match_madd_mul(op1_val)) {
+            emit_madd_msub(madd_op, mul_d, src0);
             return;
         }
 
@@ -164,6 +276,18 @@ void AArch64ISel::lower_binary_alu(
             sub_inst->add_use(LirOperand::vreg(src1, sz));
             sub_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(sub_inst));
+            return;
+        }
+
+        VReg sh_rm{};
+        ShiftType sh_type = ShiftType::LSL;
+        uint8_t sh_amt = 0;
+        if (match_shifted_op(op1_val, sh_rm, sh_type, sh_amt)) {
+            emit_shifted_alu(sz == 4 ? LirOpcode::Sub32Shifted : LirOpcode::SubShifted, src0, sh_rm, sh_type, sh_amt);
+            return;
+        }
+        if (const Instruction* mul_d = match_madd_mul(op1_val)) {
+            emit_madd_msub(sz == 4 ? LirOpcode::Msub32 : LirOpcode::Msub, mul_d, src0);
             return;
         }
 
@@ -288,19 +412,13 @@ void AArch64ISel::lower_div_mod(
         lir_bb.append_inst(std::move(add_s));
         if (!is_mod) return;
 
-        VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        auto mul_d = std::make_unique<LirInst>(LirOpcode::Imul);
-        mul_d->add_def(LirOperand::vreg(prod, 8));
-        mul_d->add_use(LirOperand::vreg(quot, 8));
-        mul_d->add_use(LirOperand::vreg(get_vreg(op1_val), 8));
-        lir_bb.append_inst(std::move(mul_d));
-
-        auto sub_r = std::make_unique<LirInst>(LirOpcode::Sub);
-        sub_r->add_def(LirOperand::vreg(dst, 8));
-        sub_r->add_use(LirOperand::vreg(op0, 8));
-        sub_r->add_use(LirOperand::vreg(prod, 8));
-        sub_r->mir_origin = &inst;
-        lir_bb.append_inst(std::move(sub_r));
+        auto msub_r = std::make_unique<LirInst>(LirOpcode::Msub);
+        msub_r->add_def(LirOperand::vreg(dst, 8));
+        msub_r->add_use(LirOperand::vreg(quot, 8));
+        msub_r->add_use(LirOperand::vreg(get_vreg(op1_val), 8));
+        msub_r->add_use(LirOperand::vreg(op0, 8));
+        msub_r->mir_origin = &inst;
+        lir_bb.append_inst(std::move(msub_r));
         return;
     }
 
@@ -366,7 +484,7 @@ void AArch64ISel::lower_div_mod(
         return;
     }
 
-    // Modulo (%): lowered as q = div a, b; rem = sub a, (mul q, b)
+    // Modulo (%): lowered as q = div a, b; rem = msub a, q, b
     VReg q = lir_fn_->allocate_vreg(RegClass::GPR, sz);
     auto div_inst = std::make_unique<LirInst>(div_op);
     div_inst->add_def(LirOperand::vreg(q, sz));
@@ -374,19 +492,13 @@ void AArch64ISel::lower_div_mod(
     div_inst->add_use(LirOperand::vreg(op1, sz));
     lir_bb.append_inst(std::move(div_inst));
 
-    VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, sz);
-    auto mul_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Imul32 : LirOpcode::Imul);
-    mul_inst->add_def(LirOperand::vreg(prod, sz));
-    mul_inst->add_use(LirOperand::vreg(q, sz));
-    mul_inst->add_use(LirOperand::vreg(op1, sz));
-    lir_bb.append_inst(std::move(mul_inst));
-
-    auto sub_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub);
-    sub_inst->add_def(LirOperand::vreg(dst, sz));
-    sub_inst->add_use(LirOperand::vreg(op0, sz));
-    sub_inst->add_use(LirOperand::vreg(prod, sz));
-    sub_inst->mir_origin = &inst;
-    lir_bb.append_inst(std::move(sub_inst));
+    auto msub_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Msub32 : LirOpcode::Msub);
+    msub_inst->add_def(LirOperand::vreg(dst, sz));
+    msub_inst->add_use(LirOperand::vreg(q, sz));
+    msub_inst->add_use(LirOperand::vreg(op1, sz));
+    msub_inst->add_use(LirOperand::vreg(op0, sz));
+    msub_inst->mir_origin = &inst;
+    lir_bb.append_inst(std::move(msub_inst));
 }
 
 } // namespace brass::aarch64

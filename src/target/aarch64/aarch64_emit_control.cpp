@@ -1,5 +1,6 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/branch_threading.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <algorithm>
 #include <cassert>
@@ -332,28 +333,82 @@ void AArch64EmitContext::record_gc_point(const LirInst& inst, size_t return_offs
 }
 
 void AArch64EmitContext::zero_tagged_locals() {
+    if (frame_.tagged_locals.empty()) return;
+    struct Span {
+        int64_t lo;
+        int64_t hi;
+    };
+    std::vector<Span> spans;
+    spans.reserve(frame_.tagged_locals.size());
     for (const auto& [start, bytes] : frame_.tagged_locals) {
-        for (uint32_t off = 0; off + 8 <= bytes; off += 8) {
-            const MemAddress mem = AArch64FrameLayout::local_frame_address(static_cast<int32_t>(start + off), frame_);
-            enc_.str(GPR::XZR, ensure_accessible_mem(mem, GPR::X16, 8));
+        const uint32_t whole = bytes & ~uint32_t(7);
+        if (whole == 0) continue;
+        const int64_t lo = AArch64FrameLayout::local_frame_address(static_cast<int32_t>(start), frame_).offset;
+        spans.push_back({lo, lo + static_cast<int64_t>(whole)});
+    }
+    if (spans.empty()) return;
+    std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) {
+        return a.lo != b.lo ? a.lo < b.lo : a.hi < b.hi;
+    });
+    std::vector<Span> merged;
+    for (const Span& s : spans) {
+        if (!merged.empty() && s.lo <= merged.back().hi) {
+            merged.back().hi = std::max(merged.back().hi, s.hi);
+        } else {
+            merged.push_back(s);
+        }
+    }
+
+    for (const Span& s : merged) {
+        int64_t cur = s.lo;
+        GPR chunk_base = GPR::None;
+        int64_t chunk_off = 0;
+        while (cur + 16 <= s.hi) {
+            if (cur >= -512 && cur <= 504 && (cur % 8 == 0)) {
+                enc_.stp(GPR::XZR, GPR::XZR, ptr(GPR::FP, cur));
+            } else {
+                if (chunk_base == GPR::None || (cur - chunk_off) < -512 || (cur - chunk_off) > 504 ||
+                    ((cur - chunk_off) % 8 != 0)) {
+                    chunk_off = cur;
+                    if (chunk_off >= 0 && chunk_off <= 4095) {
+                        enc_.add(GPR::X16, GPR::FP, static_cast<uint32_t>(chunk_off));
+                    } else if (chunk_off < 0 && -chunk_off <= 4095) {
+                        enc_.sub(GPR::X16, GPR::FP, static_cast<uint32_t>(-chunk_off));
+                    } else {
+                        enc_.mov(GPR::X16, static_cast<uint64_t>(chunk_off));
+                        enc_.add(GPR::X16, GPR::FP, GPR::X16);
+                    }
+                    chunk_base = GPR::X16;
+                }
+                enc_.stp(GPR::XZR, GPR::XZR, ptr(chunk_base, cur - chunk_off));
+            }
+            cur += 16;
+        }
+        if (cur + 8 <= s.hi) {
+            enc_.str(GPR::XZR, ensure_accessible_mem(ptr(GPR::FP, cur), GPR::X16, 8));
         }
     }
 }
 
 void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
     switch (inst.opcode) {
-        case LirOpcode::Jmp:
-            enc_.b(block_labels_[inst.uses[0].label_id]);
+        case LirOpcode::Jmp: {
+            const uint32_t id = threading_ ? threading_->target(inst.uses[0].label_id) : inst.uses[0].label_id;
+            enc_.b(block_labels_[id]);
             break;
+        }
 
-        case LirOpcode::Jcc:
-            enc_.b(to_aarch64_cond(inst.condition), block_labels_[inst.uses[0].label_id]);
+        case LirOpcode::Jcc: {
+            const uint32_t id = threading_ ? threading_->target(inst.uses[0].label_id) : inst.uses[0].label_id;
+            enc_.b(to_aarch64_cond(inst.condition), block_labels_[id]);
             break;
+        }
 
         case LirOpcode::Call: {
             size_t call_start = buffer_.size();
-            const auto& sym_op = inst.uses.back();
-            std::string callee = inst.callee_symbol.empty() ? sym_op.symbol_name : inst.callee_symbol;
+            std::string callee = !inst.callee_symbol.empty()
+                                     ? inst.callee_symbol
+                                     : (!inst.uses.empty() ? inst.uses.back().symbol_name : std::string{});
             if (inst.is_patchable) {
                 size_t site_start = buffer_.size();
                 enc_.bl(callee);
@@ -367,8 +422,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                     callee
                 );
             } else if (!inst.entry_cell.empty()) {
-                enc_.load_symbol_address(GPR::X16, inst.entry_cell);
-                enc_.ldr(GPR::X16, ptr(GPR::X16, 0));
+                enc_.load_symbol_u64(GPR::X16, inst.entry_cell);
                 call_start = buffer_.size();
                 enc_.blr(GPR::X16);
             } else {
@@ -438,8 +492,7 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                     else if (m.scale == x64::Scale::Two) shift = 1;
 
                     if (shift > 0) {
-                        enc_.lsl(GPR::X16, index, shift);
-                        enc_.add(dst, base, GPR::X16);
+                        enc_.add_lsl(dst, base, index, shift);
                     } else {
                         enc_.add(dst, base, index);
                     }

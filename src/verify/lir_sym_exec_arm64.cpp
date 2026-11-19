@@ -388,6 +388,36 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                 break;
             }
 
+            case LirOpcode::AddShifted: case LirOpcode::Add32Shifted:
+            case LirOpcode::SubShifted: case LirOpcode::Sub32Shifted: {
+                uint32_t w = (op == LirOpcode::Add32Shifted || op == LirOpcode::Sub32Shifted) ? 32 : 64;
+                BVNodeId rn = read_op(inst.uses[0], w);
+                BVNodeId rm = read_op(inst.uses[1], w);
+                uint64_t enc_imm = static_cast<uint64_t>(inst.uses[2].imm_int);
+                uint32_t stype = static_cast<uint32_t>((enc_imm >> 8) & 3u);
+                uint32_t amt = static_cast<uint32_t>(enc_imm) & (w - 1u);
+                BVNodeId shifted = rm;
+                if (amt > 0) {
+                    BVOp sop = (stype == 0) ? BVOp::Shl : (stype == 1 ? BVOp::LShr : BVOp::AShr);
+                    shifted = ctx.make_binary(sop, rm, ctx.make_const(amt, w), w);
+                }
+                BVOp bop = (op == LirOpcode::AddShifted || op == LirOpcode::Add32Shifted) ? BVOp::Add : BVOp::Sub;
+                write_op(inst.defs[0], ctx.make_binary(bop, rn, shifted, w));
+                break;
+            }
+
+            case LirOpcode::Madd: case LirOpcode::Madd32:
+            case LirOpcode::Msub: case LirOpcode::Msub32: {
+                uint32_t w = (op == LirOpcode::Madd32 || op == LirOpcode::Msub32) ? 32 : 64;
+                BVNodeId s1 = read_op(inst.uses[0], w);
+                BVNodeId s2 = read_op(inst.uses[1], w);
+                BVNodeId acc = read_op(inst.uses[2], w);
+                BVNodeId prod = ctx.make_binary(BVOp::Mul, s1, s2, w);
+                BVOp bop = (op == LirOpcode::Madd || op == LirOpcode::Madd32) ? BVOp::Add : BVOp::Sub;
+                write_op(inst.defs[0], ctx.make_binary(bop, acc, prod, w));
+                break;
+            }
+
             // Flag-setting ADDS / SUBS update NZCV deterministically.
             case LirOpcode::Adds: case LirOpcode::Adds32: {
                 uint32_t w = (op == LirOpcode::Adds32) ? 32 : 64;
@@ -519,6 +549,20 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                 uint32_t w = (inst.defs[0].size == 4) ? 32 : 64;
                 BVNodeId f_val = (inst.uses.size() >= 2) ? read_op(inst.uses[0], w) : read_op(inst.defs[0], w);
                 write_op(inst.defs[0], ctx.make_ite(cond_bit, read_op(inst.uses.back(), w), f_val));
+                break;
+            }
+
+            case LirOpcode::Csinc:
+            case LirOpcode::Csneg:
+            case LirOpcode::Csinv: {
+                BVNodeId cond_bit = eval_arm64_cond(ctx, st.nzcv, aarch64::to_aarch64_cond(inst.condition));
+                uint32_t w = (inst.defs[0].size == 4) ? 32 : 64;
+                BVNodeId t_val = read_op(inst.uses[1], w);
+                BVNodeId f_in = read_op(inst.uses[0], w);
+                BVNodeId f_val = (op == LirOpcode::Csinc) ? ctx.make_binary(BVOp::Add, f_in, ctx.make_const(1, w), w)
+                               : (op == LirOpcode::Csneg) ? ctx.make_unary(BVOp::Neg, f_in, w)
+                                                          : ctx.make_unary(BVOp::Not, f_in, w);
+                write_op(inst.defs[0], ctx.make_ite(cond_bit, t_val, f_val));
                 break;
             }
 

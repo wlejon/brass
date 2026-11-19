@@ -130,7 +130,7 @@ TEST_CASE("AArch64 branch relax - the emitter re-emits a function whose Jcc outg
     auto b0 = std::make_unique<LirBlock>(0, "entry");
     auto cmp = std::make_unique<LirInst>(LirOpcode::Cmp);
     cmp->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
-    cmp->add_use(LirOperand::imm(0, 8));
+    cmp->add_use(LirOperand::imm(1, 8));
     b0->append_inst(std::move(cmp));
     auto jcc = std::make_unique<LirInst>(LirOpcode::Jcc);
     jcc->condition = brass::x64::Condition::E;

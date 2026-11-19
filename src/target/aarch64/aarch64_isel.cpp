@@ -1,5 +1,6 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/codegen/unsupported_operation.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <brass/mir/module.hpp>
 #include <cstring>
 #include <stdexcept>
@@ -11,6 +12,7 @@ namespace brass::aarch64 {
 using namespace brass::codegen;
 
 // aarch64_isel_pinned_constants.cpp
+void fold_reserved_register_copies(LirFunction& fn, uint32_t pinned_mask);
 void fold_pinned_constants(LirFunction& fn);
 
 AArch64ISel::AArch64ISel()
@@ -53,6 +55,8 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     for (const auto* bb : mir_fn.blocks()) {
         lir_fn_->create_block_with_id(bb->id(), std::string(bb->name()))->cold = bb->is_cold();
     }
+
+    name_tagged_sources(mir_fn);
 
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* param : bb->params()) {
@@ -133,6 +137,7 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     }
 
     eliminate_dead_materializations();
+    fold_reserved_register_copies(*lir_fn_, lir_fn_->reserved_gprs);
     fold_pinned_constants(*lir_fn_);
     return lir;
 }
@@ -287,6 +292,7 @@ void AArch64ISel::lower_entry_parameters(const Function& mir_fn) {
 void AArch64ISel::lower_block(const BasicBlock& bb) {
     auto* lir_bb = lir_fn_->get_block_by_id(bb.id());
     if (!lir_bb) return;
+    clear_ea_caches();
 
     for (const auto* inst : bb) {
         if (!skipped_insts_.count(inst)) {
@@ -308,6 +314,9 @@ void AArch64ISel::lower_block(const BasicBlock& bb) {
                     }
                 }
             }
+        }
+        if (may_trigger_gc(*inst) || inst->opcode() == Opcode::guard) {
+            clear_ea_caches();
         }
     }
 }

@@ -1,8 +1,11 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/codegen/branch_threading.hpp>
+#include <brass/codegen/lir_flags.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <cassert>
 #include <algorithm>
+#include <bit>
 
 namespace brass::aarch64 {
 
@@ -130,6 +133,151 @@ MemAddress AArch64EmitContext::ensure_accessible_mem(const MemAddress& mem, GPR 
     return ptr(scratch, 0);
 }
 
+namespace {
+
+enum class FusedBranchKind : uint8_t {
+    None = 0,
+    Cbz,
+    Cbz32,
+    Cbnz,
+    Cbnz32,
+    Tbz,
+    Tbnz
+};
+
+struct FusedBranchInfo {
+    FusedBranchKind kind = FusedBranchKind::None;
+    GPR reg = GPR::None;
+    uint8_t bit = 0;
+};
+
+struct BranchFusionPlan {
+    std::vector<uint8_t> skip_inst;
+    std::vector<FusedBranchInfo> fused;
+};
+
+FusedBranchInfo invert_fused_branch(FusedBranchInfo info) noexcept {
+    switch (info.kind) {
+        case FusedBranchKind::Cbz:    info.kind = FusedBranchKind::Cbnz; break;
+        case FusedBranchKind::Cbnz:   info.kind = FusedBranchKind::Cbz; break;
+        case FusedBranchKind::Cbz32:  info.kind = FusedBranchKind::Cbnz32; break;
+        case FusedBranchKind::Cbnz32: info.kind = FusedBranchKind::Cbz32; break;
+        case FusedBranchKind::Tbz:    info.kind = FusedBranchKind::Tbnz; break;
+        case FusedBranchKind::Tbnz:   info.kind = FusedBranchKind::Tbz; break;
+        case FusedBranchKind::None:   break;
+    }
+    return info;
+}
+
+BranchFusionPlan plan_branch_fusions(const LirBlock& block) {
+    const size_t n = block.instructions.size();
+    BranchFusionPlan plan;
+    plan.skip_inst.assign(n, 0);
+    plan.fused.resize(n);
+
+    for (size_t j = 1; j < n; ++j) {
+        const LirInst& jcc = *block.instructions[j];
+        if (jcc.opcode != LirOpcode::Jcc || jcc.uses.empty() || !jcc.uses[0].is_label()) continue;
+
+        const brass::x64::Condition c = jcc.condition;
+        const bool is_eq_ne = (c == brass::x64::Condition::E || c == brass::x64::Condition::NE);
+        const bool is_sign = (c == brass::x64::Condition::L || c == brass::x64::Condition::GE ||
+                              c == brass::x64::Condition::S || c == brass::x64::Condition::NS);
+        if (!is_eq_ne && !is_sign) continue;
+
+        // No subsequent instruction in this block may read flags before overwriting them.
+        bool live_after = false;
+        for (size_t k = j + 1; k < n; ++k) {
+            const LirInst& after = *block.instructions[k];
+            if (lir_reads_flags(after, Arch::aarch64)) {
+                live_after = true;
+                break;
+            }
+            if (lir_flag_effect(after, Arch::aarch64) != FlagEffect::None) break;
+        }
+        if (live_after) continue;
+
+        size_t prod_idx = SIZE_MAX;
+        for (size_t k = j; k-- > 0;) {
+            const LirInst& cand = *block.instructions[k];
+            if (lir_reads_flags(cand, Arch::aarch64)) break;
+            const FlagEffect eff = lir_flag_effect(cand, Arch::aarch64);
+            if (eff == FlagEffect::Defines) {
+                prod_idx = k;
+                break;
+            }
+            if (eff == FlagEffect::Clobbers) break;
+        }
+        if (prod_idx == SIZE_MAX || plan.skip_inst[prod_idx]) continue;
+
+        const LirInst& prod = *block.instructions[prod_idx];
+        const bool is_test = (prod.opcode == LirOpcode::Test || prod.opcode == LirOpcode::Test32);
+        const bool is_cmp = (prod.opcode == LirOpcode::Cmp || prod.opcode == LirOpcode::Cmp32);
+        if ((!is_test && !is_cmp) || prod.uses.size() < 2) continue;
+        if (!prod.uses[0].is_preg() || !prod.uses[0].preg_val.is_gpr()) continue;
+
+        const GPR r = prod.uses[0].preg_val.as_aarch64_gpr();
+        const uint8_t rcode = static_cast<uint8_t>(reg_code(r));
+        if (r == GPR::None || r == GPR::SP || r == GPR::XZR || r == GPR::X16 || r == GPR::X17 || rcode >= 31) {
+            continue;
+        }
+
+        const bool is32 = (prod.opcode == LirOpcode::Test32 || prod.opcode == LirOpcode::Cmp32);
+        FusedBranchInfo info{};
+        info.reg = r;
+
+        const LirOperand& u1 = prod.uses[1];
+        if ((is_test && u1.is_preg() && u1.preg_val == prod.uses[0].preg_val) ||
+            (is_cmp && u1.is_imm_int() && u1.imm_int == 0)) {
+            if (c == brass::x64::Condition::E) {
+                info.kind = is32 ? FusedBranchKind::Cbz32 : FusedBranchKind::Cbz;
+            } else if (c == brass::x64::Condition::NE) {
+                info.kind = is32 ? FusedBranchKind::Cbnz32 : FusedBranchKind::Cbnz;
+            } else if (c == brass::x64::Condition::L || c == brass::x64::Condition::S) {
+                info.kind = FusedBranchKind::Tbnz;
+                info.bit = is32 ? 31 : 63;
+            } else {
+                info.kind = FusedBranchKind::Tbz;
+                info.bit = is32 ? 31 : 63;
+            }
+        } else if (is_test && u1.is_imm_int() && is_eq_ne) {
+            const uint64_t mask = is32 ? static_cast<uint64_t>(static_cast<uint32_t>(u1.imm_int))
+                                       : static_cast<uint64_t>(u1.imm_int);
+            if (mask == 0 || (mask & (mask - 1)) != 0) continue;
+            info.bit = static_cast<uint8_t>(std::countr_zero(mask));
+            info.kind = (c == brass::x64::Condition::E) ? FusedBranchKind::Tbz : FusedBranchKind::Tbnz;
+        } else {
+            continue;
+        }
+
+        // Verify `r` is neither written nor clobbered between `prod_idx` and `j`.
+        bool clobbered = false;
+        const uint32_t rbit = 1u << rcode;
+        for (size_t k = prod_idx + 1; k < j; ++k) {
+            const LirInst& m = *block.instructions[k];
+            if (m.is_call() || m.opcode == LirOpcode::ParallelCopy || m.opcode == LirOpcode::GuardExit ||
+                (m.clobbered_gprs & rbit)) {
+                clobbered = true;
+                break;
+            }
+            for (const auto& d : m.defs) {
+                if (d.is_preg() && d.preg_val.is_gpr() && d.preg_val.as_aarch64_gpr() == r) {
+                    clobbered = true;
+                    break;
+                }
+            }
+            if (clobbered) break;
+        }
+        if (clobbered) continue;
+
+        plan.skip_inst[prod_idx] = 1;
+        plan.fused[j] = info;
+    }
+    return plan;
+}
+
+} // namespace
+
 AArch64CompilationResult AArch64EmitContext::compile() {
     // Short branches whose label ends up out of reach are re-emitted in the
     // long form on the next pass (CodeBuffer::relax_requests). Every pass
@@ -177,10 +325,29 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
     zero_tagged_locals();
 
     // 4. Emit blocks
+    const BranchThreading threading(fn_);
+    threading_ = &threading;
+    auto emits_nothing = [&](size_t i) {
+        const auto& ins = fn_.blocks[i]->instructions;
+        if (threading.skipped(i) || ins.empty()) return true;
+        const ClosingBranches c = closing_branches(fn_, i);
+        return ins.size() == 1 && c.count == 1 && !c.conditional && i + 1 < fn_.blocks.size() &&
+               threading.target(c.other) == fn_.blocks[i + 1]->id;
+    };
+    bool prev_falls_through = true;
+
     for (size_t b_idx = 0; b_idx < fn_.blocks.size(); ++b_idx) {
         const auto& block = fn_.blocks[b_idx];
+        if (threading.skipped(b_idx)) {
+            buffer_.bind(block_labels_[block->id]);
+            continue;
+        }
         if (b_idx > 0) {
-            buffer_.align(16);
+            if (threading.loop_head(b_idx)) {
+                buffer_.align(16);
+            } else if (!prev_falls_through && !block->cold) {
+                buffer_.align(16);
+            }
         }
         buffer_.bind(block_labels_[block->id]);
         result.block_offsets[block->id] = buffer_.size();
@@ -194,34 +361,33 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
             }
         }
 
-        uint32_t next_block_id = (b_idx + 1 < fn_.blocks.size()) ? fn_.blocks[b_idx + 1]->id : UINT32_MAX;
-        size_t n_insts = block->instructions.size();
-
-        bool has_jcc_jmp = false;
-        bool has_trailing_jmp = false;
-
-        if (n_insts >= 2) {
-            const auto& second_last = *block->instructions[n_insts - 2];
-            const auto& last = *block->instructions[n_insts - 1];
-            if (second_last.opcode == LirOpcode::Jcc && last.opcode == LirOpcode::Jmp &&
-                !second_last.uses.empty() && second_last.uses[0].is_label() &&
-                !last.uses.empty() && last.uses[0].is_label()) {
-                has_jcc_jmp = true;
+        auto falls_to = [&](uint32_t target) {
+            for (size_t i = b_idx + 1; i < fn_.blocks.size(); ++i) {
+                if (fn_.blocks[i]->id == target) return true;
+                if (!emits_nothing(i)) return false;
             }
-        }
+            return false;
+        };
 
-        if (!has_jcc_jmp && n_insts >= 1) {
-            const auto& last = *block->instructions[n_insts - 1];
-            if (last.opcode == LirOpcode::Jmp && !last.uses.empty() && last.uses[0].is_label()) {
-                has_trailing_jmp = true;
+        auto emit_fused_branch = [&](const FusedBranchInfo& fb, Label target) {
+            switch (fb.kind) {
+                case FusedBranchKind::Cbz:    enc_.cbz(fb.reg, target); break;
+                case FusedBranchKind::Cbz32:  enc_.cbz32(fb.reg, target); break;
+                case FusedBranchKind::Cbnz:   enc_.cbnz(fb.reg, target); break;
+                case FusedBranchKind::Cbnz32: enc_.cbnz32(fb.reg, target); break;
+                case FusedBranchKind::Tbz:    enc_.tbz(fb.reg, fb.bit, target); break;
+                case FusedBranchKind::Tbnz:   enc_.tbnz(fb.reg, fb.bit, target); break;
+                case FusedBranchKind::None:   break;
             }
-        }
+        };
 
-        size_t limit = n_insts;
-        if (has_jcc_jmp) limit = n_insts - 2;
-        else if (has_trailing_jmp) limit = n_insts - 1;
+        const size_t n_insts = block->instructions.size();
+        const ClosingBranches closing = closing_branches(fn_, b_idx);
+        const size_t limit = n_insts - closing.count;
+        const BranchFusionPlan plan = plan_branch_fusions(*block);
 
         for (size_t i_idx = 0; i_idx < limit; ++i_idx) {
+            if (plan.skip_inst[i_idx]) continue;
             const auto& inst = *block->instructions[i_idx];
             size_t cur_offset = buffer_.size();
             DebugLoc loc = inst.loc;
@@ -231,38 +397,57 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
             if (loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(cur_offset), loc);
             }
+            if (inst.opcode == LirOpcode::Jcc && plan.fused[i_idx].kind != FusedBranchKind::None) {
+                const uint32_t target = threading.target(inst.uses[0].label_id);
+                emit_fused_branch(plan.fused[i_idx], block_labels_[target]);
+                continue;
+            }
             emit_instruction(inst, b_idx == 0, i_idx == 0);
         }
 
-        if (has_jcc_jmp) {
-            const auto& jcc = *block->instructions[n_insts - 2];
-            const auto& jmp = *block->instructions[n_insts - 1];
+        if (closing.conditional) {
+            const size_t jcc_idx = n_insts - closing.count;
+            const auto& jcc = *block->instructions[jcc_idx];
             if (jcc.loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jcc.loc);
             }
-            uint32_t true_target = jcc.uses[0].label_id;
-            uint32_t false_target = jmp.uses[0].label_id;
+            const uint32_t true_target = threading.target(closing.taken);
+            const uint32_t false_target = threading.target(closing.other);
+            const FusedBranchInfo fb = plan.fused[jcc_idx];
 
-            if (false_target == next_block_id) {
-                enc_.b(to_aarch64_cond(jcc.condition), block_labels_[true_target]);
-            } else if (true_target == next_block_id) {
-                enc_.b(to_aarch64_cond(invert(jcc.condition)), block_labels_[false_target]);
+            if (falls_to(false_target)) {
+                if (fb.kind != FusedBranchKind::None) emit_fused_branch(fb, block_labels_[true_target]);
+                else enc_.b(to_aarch64_cond(jcc.condition), block_labels_[true_target]);
+                prev_falls_through = true;
+            } else if (falls_to(true_target)) {
+                if (fb.kind != FusedBranchKind::None) emit_fused_branch(invert_fused_branch(fb), block_labels_[false_target]);
+                else enc_.b(to_aarch64_cond(invert(jcc.condition)), block_labels_[false_target]);
+                prev_falls_through = true;
             } else {
-                enc_.b(to_aarch64_cond(jcc.condition), block_labels_[true_target]);
+                if (fb.kind != FusedBranchKind::None) emit_fused_branch(fb, block_labels_[true_target]);
+                else enc_.b(to_aarch64_cond(jcc.condition), block_labels_[true_target]);
                 enc_.b(block_labels_[false_target]);
+                prev_falls_through = false;
             }
-        } else if (has_trailing_jmp) {
+        } else if (closing.count == 1) {
             const auto& jmp = *block->instructions[n_insts - 1];
             if (jmp.loc.is_valid()) {
                 result.debug_table.add_line_entry(static_cast<uint32_t>(buffer_.size()), jmp.loc);
             }
-            uint32_t target = jmp.uses[0].label_id;
-            if (target != next_block_id) {
+            const uint32_t target = threading.target(closing.other);
+            if (!falls_to(target)) {
                 enc_.b(block_labels_[target]);
+                prev_falls_through = false;
+            } else {
+                prev_falls_through = true;
             }
+        } else {
+            const LirOpcode last = n_insts > 0 ? block->instructions.back()->opcode : LirOpcode::Nop;
+            prev_falls_through = !(last == LirOpcode::Ret || last == LirOpcode::Trap || last == LirOpcode::GuardExit);
         }
     }
 
+    threading_ = nullptr;
     emit_constant_pool();
 
     result.code_buffer = std::move(buffer_);
@@ -340,12 +525,20 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Add32:
         case LirOpcode::Adds:
         case LirOpcode::Adds32:
+        case LirOpcode::AddShifted:
+        case LirOpcode::Add32Shifted:
         case LirOpcode::Sub:
         case LirOpcode::Sub32:
         case LirOpcode::Subs:
         case LirOpcode::Subs32:
+        case LirOpcode::SubShifted:
+        case LirOpcode::Sub32Shifted:
         case LirOpcode::Imul:
         case LirOpcode::Imul32:
+        case LirOpcode::Madd:
+        case LirOpcode::Madd32:
+        case LirOpcode::Msub:
+        case LirOpcode::Msub32:
         case LirOpcode::Smulh:
         case LirOpcode::Umulh:
         case LirOpcode::Idiv:
@@ -386,6 +579,9 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Test32:
         case LirOpcode::Setcc:
         case LirOpcode::Cmovcc:
+        case LirOpcode::Csinc:
+        case LirOpcode::Csneg:
+        case LirOpcode::Csinv:
             emit_alu_instruction(inst);
             break;
 

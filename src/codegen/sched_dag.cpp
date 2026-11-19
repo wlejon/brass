@@ -77,8 +77,12 @@ uint32_t get_instruction_latency(const LirInst& inst) {
 
         case LirOpcode::Add:
         case LirOpcode::Add32:
+        case LirOpcode::AddShifted:
+        case LirOpcode::Add32Shifted:
         case LirOpcode::Sub:
         case LirOpcode::Sub32:
+        case LirOpcode::SubShifted:
+        case LirOpcode::Sub32Shifted:
         case LirOpcode::And:
         case LirOpcode::And32:
         case LirOpcode::Or:
@@ -113,10 +117,17 @@ uint32_t get_instruction_latency(const LirInst& inst) {
             return has_mem_load ? 5 : 1;
 
         case LirOpcode::Cmovcc:
+        case LirOpcode::Csinc:
+        case LirOpcode::Csneg:
+        case LirOpcode::Csinv:
             return has_mem_load ? 5 : 2;
 
         case LirOpcode::Imul:
         case LirOpcode::Imul32:
+        case LirOpcode::Madd:
+        case LirOpcode::Madd32:
+        case LirOpcode::Msub:
+        case LirOpcode::Msub32:
         case LirOpcode::Smulh:
         case LirOpcode::Umulh:
             return has_mem_load ? 6 : 3;

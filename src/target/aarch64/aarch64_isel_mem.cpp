@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/mir/gc_refs.hpp>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -156,22 +157,25 @@ AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const
 
     if (index && index->is_instruction()) {
         const Instruction* def = index->defining_instruction();
-        if (def && def->opcode() == Opcode::add) {
+        if (def && def->opcode() == Opcode::add &&
+            (def->type() == Type::i64() || def->type() == Type::ptr())) {
             ImmIntInfo imm0 = get_imm_int_info(def->operand(0));
             ImmIntInfo imm1 = get_imm_int_info(def->operand(1));
-            int32_t sc = (scale == Scale::Eight ? 8 : (scale == Scale::Four ? 4 : (scale == Scale::Two ? 2 : 1)));
+            int64_t sc = (scale == Scale::Eight ? 8 : (scale == Scale::Four ? 4 : (scale == Scale::Two ? 2 : 1)));
             if (imm1.is_imm && imm1.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val * sc;
-                if (new_disp == 0) {
-                    fold.disp = 0;
+                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX &&
+                    is_legal_aarch64_imm_offset(new_disp, access_size)) {
+                    fold.disp = static_cast<int32_t>(new_disp);
                     fold.index_val = def->operand(0);
                     fold.folded_instructions.push_back(def);
                     if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
                 }
             } else if (imm0.is_imm && imm0.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val * sc;
-                if (new_disp == 0) {
-                    fold.disp = 0;
+                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX &&
+                    is_legal_aarch64_imm_offset(new_disp, access_size)) {
+                    fold.disp = static_cast<int32_t>(new_disp);
                     fold.index_val = def->operand(1);
                     fold.folded_instructions.push_back(def);
                     if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
@@ -182,21 +186,24 @@ AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const
 
     if (base && base->is_instruction()) {
         const Instruction* def = base->defining_instruction();
-        if (def && def->opcode() == Opcode::add) {
+        if (def && def->opcode() == Opcode::add &&
+            (def->type() == Type::i64() || def->type() == Type::ptr())) {
             ImmIntInfo imm0 = get_imm_int_info(def->operand(0));
             ImmIntInfo imm1 = get_imm_int_info(def->operand(1));
             if (imm1.is_imm && imm1.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val;
-                if (new_disp == 0) {
-                    fold.disp = 0;
+                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX &&
+                    is_legal_aarch64_imm_offset(new_disp, access_size)) {
+                    fold.disp = static_cast<int32_t>(new_disp);
                     fold.base_val = def->operand(0);
                     fold.folded_instructions.push_back(def);
                     if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
                 }
             } else if (imm0.is_imm && imm0.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val;
-                if (new_disp == 0) {
-                    fold.disp = 0;
+                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX &&
+                    is_legal_aarch64_imm_offset(new_disp, access_size)) {
+                    fold.disp = static_cast<int32_t>(new_disp);
                     fold.base_val = def->operand(1);
                     fold.folded_instructions.push_back(def);
                     if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
@@ -208,19 +215,42 @@ AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const
     return fold;
 }
 
+VReg AArch64ISel::get_or_emit_indexed_ea(VReg base, VReg idx, Scale scale, LirBlock& lir_bb) {
+    const IndexedEaKey key{base.id, idx.id, static_cast<uint8_t>(scale)};
+    if (auto it = indexed_ea_cache_.find(key); it != indexed_ea_cache_.end()) {
+        return it->second;
+    }
+    VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto lea = std::make_unique<LirInst>(LirOpcode::Lea);
+    lea->add_def(LirOperand::vreg(ea, 8));
+    lea->add_use(LirOperand::mem(base, idx, scale, 0, 8));
+    lir_bb.append_inst(std::move(lea));
+    indexed_ea_cache_.emplace(key, ea);
+    return ea;
+}
+
+VReg AArch64ISel::get_or_emit_base_disp(VReg base, int32_t disp, LirBlock& lir_bb) {
+    const BaseDispKey key{base.id, disp};
+    if (auto it = base_disp_cache_.find(key); it != base_disp_cache_.end()) {
+        return it->second;
+    }
+    VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
+    add_inst->add_def(LirOperand::vreg(ea, 8));
+    add_inst->add_use(LirOperand::vreg(base, 8));
+    add_inst->add_use(LirOperand::imm(disp, 8));
+    lir_bb.append_inst(std::move(add_inst));
+    base_disp_cache_.emplace(key, ea);
+    return ea;
+}
+
 LirOperand AArch64ISel::legalize_mem_operand(const MemFold& mf, uint8_t sz, LirBlock& lir_bb) {
     VReg base_vreg = get_vreg(mf.base_val);
     if (!mf.index_val) {
         if (is_legal_aarch64_imm_offset(mf.disp, sz)) {
             return LirOperand::mem(base_vreg, mf.disp, sz);
         }
-        VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
-        add_inst->add_def(LirOperand::vreg(ea, 8));
-        add_inst->add_use(LirOperand::vreg(base_vreg, 8));
-        add_inst->add_use(LirOperand::imm(mf.disp, 8));
-        lir_bb.append_inst(std::move(add_inst));
-        return LirOperand::mem(ea, 0, sz);
+        return LirOperand::mem(get_or_emit_base_disp(base_vreg, mf.disp, lir_bb), 0, sz);
     }
 
     VReg idx_vreg = get_vreg(mf.index_val);
@@ -228,41 +258,17 @@ LirOperand AArch64ISel::legalize_mem_operand(const MemFold& mf, uint8_t sz, LirB
         if (mf.disp == 0) {
             return LirOperand::mem(base_vreg, idx_vreg, mf.scale, 0, sz);
         }
-        VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
-        add_inst->add_def(LirOperand::vreg(ea, 8));
-        add_inst->add_use(LirOperand::vreg(base_vreg, 8));
-        add_inst->add_use(LirOperand::imm(mf.disp, 8));
-        lir_bb.append_inst(std::move(add_inst));
-        return LirOperand::mem(ea, idx_vreg, mf.scale, 0, sz);
+        if (is_legal_aarch64_imm_offset(mf.disp, sz)) {
+            return LirOperand::mem(get_or_emit_indexed_ea(base_vreg, idx_vreg, mf.scale, lir_bb), mf.disp, sz);
+        }
+        return LirOperand::mem(get_or_emit_base_disp(base_vreg, mf.disp, lir_bb), idx_vreg, mf.scale, 0, sz);
     }
 
-    uint8_t shift = scale_to_shift(mf.scale);
-    VReg scaled = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-    auto shl_inst = std::make_unique<LirInst>(LirOpcode::Shl);
-    shl_inst->add_def(LirOperand::vreg(scaled, 8));
-    shl_inst->add_use(LirOperand::vreg(idx_vreg, 8));
-    shl_inst->add_use(LirOperand::imm(shift, 1));
-    lir_bb.append_inst(std::move(shl_inst));
-
-    VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-    auto add_idx = std::make_unique<LirInst>(LirOpcode::Add);
-    add_idx->add_def(LirOperand::vreg(ea, 8));
-    add_idx->add_use(LirOperand::vreg(base_vreg, 8));
-    add_idx->add_use(LirOperand::vreg(scaled, 8));
-    lir_bb.append_inst(std::move(add_idx));
-
+    VReg ea = get_or_emit_indexed_ea(base_vreg, idx_vreg, mf.scale, lir_bb);
     if (is_legal_aarch64_imm_offset(mf.disp, sz)) {
         return LirOperand::mem(ea, mf.disp, sz);
     }
-
-    VReg ea2 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-    auto add_disp = std::make_unique<LirInst>(LirOpcode::Add);
-    add_disp->add_def(LirOperand::vreg(ea2, 8));
-    add_disp->add_use(LirOperand::vreg(ea, 8));
-    add_disp->add_use(LirOperand::imm(mf.disp, 8));
-    lir_bb.append_inst(std::move(add_disp));
-    return LirOperand::mem(ea2, 0, sz);
+    return LirOperand::mem(get_or_emit_base_disp(ea, mf.disp, lir_bb), 0, sz);
 }
 
 void AArch64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
@@ -397,6 +403,27 @@ void AArch64ISel::lower_alloca(const Instruction& inst, LirBlock& lir_bb) {
     lea_inst->add_use(LirOperand::local_slot(static_cast<int32_t>(aligned_cur), 8));
     lea_inst->mir_origin = &inst;
     lir_bb.append_inst(std::move(lea_inst));
+}
+
+void AArch64ISel::name_tagged_sources(const Function& mir_fn) {
+    for (const auto* bb : mir_fn.blocks()) {
+        std::unordered_set<const Value*> fresh(bb->params().begin(), bb->params().end());
+        for (const auto* inst : *bb) {
+            if (may_trigger_gc(*inst)) fresh.clear();
+            if (skipped_insts_.count(inst)) continue;
+            if (inst->opcode() == Opcode::bitcast_tagged_i64) {
+                const Value* src = inst->operand(0);
+                if (src && src->type() == Type::i64() && fresh.count(src) && !val_to_vreg_.count(src)) {
+                    val_to_vreg_[src] = lir_fn_->allocate_vreg(RegClass::GPR, 8, false, true);
+                }
+                if (auto it = val_to_vreg_.find(src); it != val_to_vreg_.end()) {
+                    val_to_vreg_[inst->result()] = it->second;
+                }
+                continue;
+            }
+            if (inst->produces_value()) fresh.insert(inst->result());
+        }
+    }
 }
 
 } // namespace brass::aarch64

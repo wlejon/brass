@@ -77,6 +77,39 @@ private:
     };
     std::unordered_map<int64_t, XmmConstant> xmm_constants_;
 
+    struct IndexedEaKey {
+        uint32_t base_id = 0;
+        uint32_t idx_id = 0;
+        uint8_t scale = 0;
+        bool operator==(const IndexedEaKey&) const = default;
+    };
+    struct IndexedEaHash {
+        size_t operator()(const IndexedEaKey& k) const noexcept {
+            return (static_cast<size_t>(k.base_id) * 1315423911u) ^
+                   (static_cast<size_t>(k.idx_id) * 2654435761u) ^ k.scale;
+        }
+    };
+    struct BaseDispKey {
+        uint32_t base_id = 0;
+        int32_t disp = 0;
+        bool operator==(const BaseDispKey&) const = default;
+    };
+    struct BaseDispHash {
+        size_t operator()(const BaseDispKey& k) const noexcept {
+            return (static_cast<size_t>(k.base_id) * 1315423911u) ^
+                   static_cast<size_t>(static_cast<uint32_t>(k.disp));
+        }
+    };
+    std::unordered_map<IndexedEaKey, codegen::VReg, IndexedEaHash> indexed_ea_cache_;
+    std::unordered_map<BaseDispKey, codegen::VReg, BaseDispHash> base_disp_cache_;
+    void clear_ea_caches() {
+        indexed_ea_cache_.clear();
+        base_disp_cache_.clear();
+    }
+    codegen::VReg get_or_emit_indexed_ea(codegen::VReg base, codegen::VReg idx, x64::Scale scale,
+                                         codegen::LirBlock& lir_bb);
+    codegen::VReg get_or_emit_base_disp(codegen::VReg base, int32_t disp, codegen::LirBlock& lir_bb);
+
     struct ImmIntInfo {
         bool is_imm = false;
         int64_t val = 0;
@@ -110,6 +143,7 @@ private:
     void find_nan_canon_stores(const Function& mir_fn, std::unordered_map<const Value*, uint32_t>& folded_uses);
     codegen::VReg xmm_constant(codegen::LirBlock& lir_bb, int64_t bits);
     bool lower_nan_canon_store(const Instruction& inst, const codegen::LirOperand& mem_op, codegen::LirBlock& lir_bb);
+    void name_tagged_sources(const Function& mir_fn);
 
     codegen::VReg get_or_alloc_vreg(const Value* val);
     codegen::VReg get_vreg(const Value* val) const;

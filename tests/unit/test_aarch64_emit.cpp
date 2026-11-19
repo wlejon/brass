@@ -509,9 +509,11 @@ bool any_word(const uint8_t* code, size_t size, uint32_t mask, uint32_t value) {
     return false;
 }
 
-// add xN, sp, #0 (`mov xN, sp`) and the shifted-register `cmp xzr, xM`
-// (subs xzr, xzr, xM): register 31 is XZR there, never SP.
+// add xN, sp, #0 (`mov xN, sp`), extended-register `cmp sp, xM, uxtx`
+// (0xEB2063FF), and shifted-register `cmp xzr, xM` (0xEB0003FF: register 31
+// would be XZR there, never SP).
 constexpr uint32_t kMovFromSpMask = 0xFFFFFFE0u, kMovFromSp = 0x910003E0u;
+constexpr uint32_t kCmpSpMask = 0xFFE0FFFFu, kCmpSp = 0xEB2063FFu;
 constexpr uint32_t kCmpXzrMask = 0xFFE0FFFFu, kCmpXzr = 0xEB0003FFu;
 
 } // namespace
@@ -523,8 +525,23 @@ TEST_CASE("AArch64 Emit - read_sp is copied out of SP, never allocated in regist
     ObjectFile obj = compile_module_to_object(mod, Target::aarch64_macos());
     const auto* text = obj.get_section(".text");
     REQUIRE(text != nullptr);
-    CHECK(any_word(text->data.data(), text->data.size(), kMovFromSpMask, kMovFromSp));
+    CHECK(any_word(text->data.data(), text->data.size(), kCmpSpMask, kCmpSp));
     CHECK(!any_word(text->data.data(), text->data.size(), kCmpXzrMask, kCmpXzr));
+
+    Module mod_add("sp_add");
+    Function* f_add = mod_add.create_function("sp_add", Type::i64(), {});
+    {
+        Builder b(mod_add);
+        b.set_function(f_add);
+        (void)b.append_block("entry");
+        b.build_ret(b.build_add(b.build_read_sp(), b.build_iconst_i64(1)));
+        f_add->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*f_add));
+    }
+    ObjectFile obj_add = compile_module_to_object(mod_add, Target::aarch64_macos());
+    const auto* text_add = obj_add.get_section(".text");
+    REQUIRE(text_add != nullptr);
+    CHECK(any_word(text_add->data.data(), text_add->data.size(), kMovFromSpMask, kMovFromSp));
 }
 
 // =============================================================================

@@ -64,6 +64,11 @@ FlagEffect x64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Cdq: case LirOpcode::Cqo:
         case LirOpcode::Not: case LirOpcode::Not32:
         case LirOpcode::Setcc: case LirOpcode::Cmovcc:
+        case LirOpcode::Csinc: case LirOpcode::Csneg: case LirOpcode::Csinv:
+        case LirOpcode::Madd: case LirOpcode::Madd32:
+        case LirOpcode::Msub: case LirOpcode::Msub32:
+        case LirOpcode::AddShifted: case LirOpcode::Add32Shifted:
+        case LirOpcode::SubShifted: case LirOpcode::Sub32Shifted:
         case LirOpcode::Movsd: case LirOpcode::Movss:
         case LirOpcode::Movq_gx: case LirOpcode::Movq_xg:
         case LirOpcode::Addsd: case LirOpcode::Addss:
@@ -167,8 +172,12 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         // add/sub/and/orr/eor/neg, mul/smulh/umulh, sdiv/udiv (the divide by
         // zero check is a cbz), lsl/lsr/asr, clz/rbit/cnt all leave it alone.
         case LirOpcode::Add: case LirOpcode::Add32:
+        case LirOpcode::AddShifted: case LirOpcode::Add32Shifted:
         case LirOpcode::Sub: case LirOpcode::Sub32:
+        case LirOpcode::SubShifted: case LirOpcode::Sub32Shifted:
         case LirOpcode::Imul: case LirOpcode::Imul32:
+        case LirOpcode::Madd: case LirOpcode::Madd32:
+        case LirOpcode::Msub: case LirOpcode::Msub32:
         case LirOpcode::Smulh: case LirOpcode::Umulh:
         case LirOpcode::Idiv: case LirOpcode::Idiv32:
         case LirOpcode::Div: case LirOpcode::Div32:
@@ -191,6 +200,7 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Cdq: case LirOpcode::Cqo:
         case LirOpcode::Not: case LirOpcode::Not32:
         case LirOpcode::Setcc: case LirOpcode::Cmovcc:
+        case LirOpcode::Csinc: case LirOpcode::Csneg: case LirOpcode::Csinv:
         case LirOpcode::Movsd: case LirOpcode::Movss:
         case LirOpcode::Movq_gx: case LirOpcode::Movq_xg:
         case LirOpcode::Addsd: case LirOpcode::Addss:
@@ -290,6 +300,9 @@ bool lir_reads_flags(const LirInst& inst, Arch arch) noexcept {
         case LirOpcode::Jcc:
         case LirOpcode::Setcc:
         case LirOpcode::Cmovcc:
+        case LirOpcode::Csinc:
+        case LirOpcode::Csneg:
+        case LirOpcode::Csinv:
             return true;
         default:
             return false;

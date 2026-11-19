@@ -761,7 +761,8 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
     for (uint32_t idx : unhandled) {
         const AllocPiece& p = pieces_[idx];
         const VReg v = p.vreg();
-        if (!v.is_gpr() || !p.base->spans_call) continue;
+        const bool allow_fpr = cc_.target().is_aarch64() && v.is_xmm() && v.size <= 8;
+        if ((!v.is_gpr() && !allow_fpr) || !p.base->spans_call) continue;
         uint32_t n = 0;
         for (const auto& sg : p.base->segments) {
             n += static_cast<uint32_t>(std::upper_bound(calls.begin(), calls.end(), sg.end) -
@@ -771,6 +772,7 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
         if (n >= kManyCalls) unsplittable_[v.id] = 1;
         // No register holds a GC reference across a call.
         if (v.is_gcref) continue;
+        if (allow_fpr && n == 0) continue;
         double w = 0;
         bool fixed = false;
         for (const UsePosition& u : p.base->use_positions) {
@@ -792,7 +794,8 @@ void LinearScanAllocator::settle_call_spanning(std::vector<uint32_t>& unhandled)
         const AllocPiece& p = pieces_[c.idx];
         uint32_t limits[32];
         reg_limits(p, limits);
-        for (PReg r : available_gprs_) {
+        const auto& pool = p.vreg().is_gpr() ? available_gprs_ : available_xmms_;
+        for (PReg r : pool) {
             if (!is_callee_saved(r) || limits[r.code] != kNever) continue;
             bool clash = false;
             for (uint32_t t : taken) {

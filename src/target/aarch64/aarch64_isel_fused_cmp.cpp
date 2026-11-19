@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/target/aarch64/aarch64_logical_imm.hpp>
 #include "aarch64_isel_conditions.hpp"
 #include <cstdlib>
 #include <unordered_map>
@@ -132,9 +133,15 @@ LirCond AArch64ISel::emit_fused_compare(const Instruction& cmp_inst, LirBlock& l
             const Value* b = and_inst->operand(1);
             const ImmIntInfo imm_b = get_imm_int_info(b);
             const ImmIntInfo imm_a = get_imm_int_info(a);
-            if (imm_b.is_imm && imm_b.fits_i32) {
+            auto test_imm_ok = [&](const ImmIntInfo& ii) {
+                if (!ii.is_imm) return false;
+                if (ii.fits_i32) return true;
+                uint32_t n = 0, immr = 0, imms = 0;
+                return sz == 8 && encode_logical_immediate(static_cast<uint64_t>(ii.val), true, n, immr, imms);
+            };
+            if (test_imm_ok(imm_b)) {
                 flags(test_op, LirOperand::vreg(get_vreg(a), sz), LirOperand::imm(imm_b.val, sz));
-            } else if (imm_a.is_imm && imm_a.fits_i32) {
+            } else if (test_imm_ok(imm_a)) {
                 flags(test_op, LirOperand::vreg(get_vreg(b), sz), LirOperand::imm(imm_a.val, sz));
             } else {
                 flags(test_op, LirOperand::vreg(get_vreg(a), sz), LirOperand::vreg(get_vreg(b), sz));

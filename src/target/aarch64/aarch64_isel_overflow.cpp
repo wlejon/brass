@@ -51,14 +51,9 @@ void AArch64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb
 
             auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
             setcc->condition = LirCond::NE;
-            setcc->add_def(LirOperand::vreg(dst, 1));
+            setcc->add_def(LirOperand::vreg(dst, dst_sz));
+            setcc->mir_origin = &inst;
             lir_bb.append_inst(std::move(setcc));
-
-            auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx->add_use(LirOperand::vreg(dst, 1));
-            movzx->mir_origin = &inst;
-            lir_bb.append_inst(std::move(movzx));
             return;
         } else {
             VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 8);
@@ -89,14 +84,9 @@ void AArch64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb
 
             auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
             setcc->condition = LirCond::NE;
-            setcc->add_def(LirOperand::vreg(dst, 1));
+            setcc->add_def(LirOperand::vreg(dst, dst_sz));
+            setcc->mir_origin = &inst;
             lir_bb.append_inst(std::move(setcc));
-
-            auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx->add_use(LirOperand::vreg(dst, 1));
-            movzx->mir_origin = &inst;
-            lir_bb.append_inst(std::move(movzx));
             return;
         }
     }
@@ -136,14 +126,9 @@ void AArch64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb
 
             auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
             setcc->condition = LirCond::NE;
-            setcc->add_def(LirOperand::vreg(dst, 1));
+            setcc->add_def(LirOperand::vreg(dst, dst_sz));
+            setcc->mir_origin = &inst;
             lir_bb.append_inst(std::move(setcc));
-
-            auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx->add_use(LirOperand::vreg(dst, 1));
-            movzx->mir_origin = &inst;
-            lir_bb.append_inst(std::move(movzx));
             return;
         } else {
             VReg high = lir_fn_->allocate_vreg(RegClass::GPR, 8);
@@ -160,14 +145,9 @@ void AArch64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb
 
             auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
             setcc->condition = LirCond::NE;
-            setcc->add_def(LirOperand::vreg(dst, 1));
+            setcc->add_def(LirOperand::vreg(dst, dst_sz));
+            setcc->mir_origin = &inst;
             lir_bb.append_inst(std::move(setcc));
-
-            auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-            movzx->add_def(LirOperand::vreg(dst, dst_sz));
-            movzx->add_use(LirOperand::vreg(dst, 1));
-            movzx->mir_origin = &inst;
-            lir_bb.append_inst(std::move(movzx));
             return;
         }
     }
@@ -205,14 +185,9 @@ void AArch64ISel::lower_overflow_check(const Instruction& inst, LirBlock& lir_bb
 
     auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
     setcc->condition = cond;
-    setcc->add_def(LirOperand::vreg(dst, 1));
+    setcc->add_def(LirOperand::vreg(dst, dst_sz));
+    setcc->mir_origin = &inst;
     lir_bb.append_inst(std::move(setcc));
-
-    auto movzx = std::make_unique<LirInst>(LirOpcode::Movzx8);
-    movzx->add_def(LirOperand::vreg(dst, dst_sz));
-    movzx->add_use(LirOperand::vreg(dst, 1));
-    movzx->mir_origin = &inst;
-    lir_bb.append_inst(std::move(movzx));
 }
 
 } // namespace brass::aarch64

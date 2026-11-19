@@ -19,6 +19,10 @@
 #include <brass/debug/debug_section.hpp>
 #include <brass/target/x64/x64_registers.hpp>
 
+namespace brass::codegen {
+class BranchThreading;
+}
+
 namespace brass::aarch64 {
 
 inline Condition to_aarch64_cond(brass::x64::Condition cond) noexcept {
@@ -74,6 +78,7 @@ private:
     std::unordered_map<int32_t, uint64_t> constant_slot_values_;
     std::unordered_map<uint64_t, aarch64::Label> pool_labels_;
     std::vector<uint64_t> pool_order_;
+    const codegen::BranchThreading* threading_ = nullptr;
 
     struct PendingExceptionScope {
         size_t call_start = 0;

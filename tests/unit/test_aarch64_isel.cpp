@@ -99,7 +99,7 @@ TEST_CASE("AArch64 ISEL - Division and Modulo Pure 3-Register (No Fixed Constrai
     CHECK(lir != nullptr);
 
     bool found_idiv = false, found_div = false;
-    bool found_mul_for_mod = false, found_sub_for_mod = false;
+    bool found_msub_for_mod = false;
 
     for (const auto& inst : lir->blocks[0]->instructions) {
         if (inst->opcode == LirOpcode::Idiv) {
@@ -122,18 +122,20 @@ TEST_CASE("AArch64 ISEL - Division and Modulo Pure 3-Register (No Fixed Constrai
                 CHECK(!constraint.has_fixed_preg);
             }
         }
-        if (inst->opcode == LirOpcode::Imul) {
-            found_mul_for_mod = true;
-        }
-        if (inst->opcode == LirOpcode::Sub) {
-            found_sub_for_mod = true;
+        if (inst->opcode == LirOpcode::Msub) {
+            found_msub_for_mod = true;
+            for (const auto& constraint : inst->def_constraints) {
+                CHECK(!constraint.has_fixed_preg);
+            }
+            for (const auto& constraint : inst->use_constraints) {
+                CHECK(!constraint.has_fixed_preg);
+            }
         }
     }
 
     CHECK(found_idiv);
     CHECK(found_div);
-    CHECK(found_mul_for_mod);
-    CHECK(found_sub_for_mod);
+    CHECK(found_msub_for_mod);
 }
 
 // 3. Shifts Without Fixed RCX Constraint
@@ -389,37 +391,38 @@ TEST_CASE("AArch64 ISEL - Memory Addressing Modes (Base, Indexed, Offset)") {
     CHECK(lir != nullptr);
 
     bool found_load_disp = false, found_store_disp = false;
-    bool found_load_idx = false, found_store_idx = false;
-    bool found_add_32 = false, found_add_40 = false;
+    bool found_load_disp32 = false, found_store_disp40 = false;
+    int lea_idx_count = 0;
     bool found_indexed_with_disp = false;
 
     for (const auto& inst : lir->blocks[0]->instructions) {
-        if (inst->opcode == LirOpcode::Add && inst->uses.size() >= 2 && inst->uses[1].is_imm_int()) {
-            if (inst->uses[1].imm_int == 32) found_add_32 = true;
-            if (inst->uses[1].imm_int == 40) found_add_40 = true;
+        if (inst->opcode == LirOpcode::Lea && !inst->uses.empty() && inst->uses[0].is_mem()) {
+            const auto& m = inst->uses[0].mem_val;
+            if (m.has_index() && m.scale == Scale::Eight && m.disp == 0) {
+                lea_idx_count++;
+            }
         }
         if (inst->opcode == LirOpcode::Mov) {
             if (!inst->uses.empty() && inst->uses[0].is_mem()) {
                 const auto& m = inst->uses[0].mem_val;
                 if (m.has_index() && m.disp != 0) found_indexed_with_disp = true;
                 if (m.disp == 16 && !m.has_index()) found_load_disp = true;
-                if (m.disp == 0 && m.has_index() && m.scale == Scale::Eight) found_load_idx = true;
+                if (m.disp == 32 && !m.has_index()) found_load_disp32 = true;
             }
             if (!inst->defs.empty() && inst->defs[0].is_mem()) {
                 const auto& m = inst->defs[0].mem_val;
                 if (m.has_index() && m.disp != 0) found_indexed_with_disp = true;
                 if (m.disp == 24 && !m.has_index()) found_store_disp = true;
-                if (m.disp == 0 && m.has_index() && m.scale == Scale::Eight) found_store_idx = true;
+                if (m.disp == 40 && !m.has_index()) found_store_disp40 = true;
             }
         }
     }
 
     CHECK(found_load_disp);
     CHECK(found_store_disp);
-    CHECK(found_add_32);
-    CHECK(found_add_40);
-    CHECK(found_load_idx);
-    CHECK(found_store_idx);
+    CHECK_EQ(lea_idx_count, 1);
+    CHECK(found_load_disp32);
+    CHECK(found_store_disp40);
     CHECK(!found_indexed_with_disp);
 }
 
@@ -707,6 +710,7 @@ TEST_CASE("AArch64 ISEL - True 3-Address Lowering Without Pre-Copies") {
                     ops_seen++;
                     break;
                 case LirOpcode::Cmovcc:
+                case LirOpcode::Csinv:
                     REQUIRE_EQ(inst->defs.size(), size_t(1));
                     REQUIRE_EQ(inst->uses.size(), size_t(2));
                     CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
@@ -716,7 +720,7 @@ TEST_CASE("AArch64 ISEL - True 3-Address Lowering Without Pre-Copies") {
                 default: break;
             }
         }
-        CHECK_EQ(ops_seen, 11);
+        CHECK_EQ(ops_seen, 10);
     }
 
     // Scalar FP 3-address and FMA 4-operand lowering
@@ -858,7 +862,7 @@ TEST_CASE("AArch64 ISEL - Legalized Memory Addressing Modes") {
         CHECK(saw_load);
     }
 
-    // Mismatched indexed scale: i8 load_indexed scale 2 -> Shl #1 + Add + Movzx8 [ea, #0]
+    // Mismatched indexed scale: i8 load_indexed scale 2 -> Lea [base + idx*2] + Movzx8 [ea, #0]
     {
         Function* fn = mod.create_function("idx_i8_s2", Type::i64(), {Type::ptr(), Type::i64()});
         Builder b(mod);
@@ -872,19 +876,21 @@ TEST_CASE("AArch64 ISEL - Legalized Memory Addressing Modes") {
 
         auto lir = AArch64ISel(tgt, cc).lower(*fn);
         REQUIRE(lir != nullptr);
-        bool saw_shl = false, saw_add = false, saw_zx = false;
+        bool saw_lea = false, saw_zx = false;
         for (const auto& inst : lir->blocks[0]->instructions) {
-            if (inst->opcode == LirOpcode::Shl && inst->uses.size() >= 2 &&
-                inst->uses[1].is_imm_int() && inst->uses[1].imm_int == 1) saw_shl = true;
-            if (inst->opcode == LirOpcode::Add && inst->uses.size() >= 2 && inst->uses[1].is_vreg()) saw_add = true;
+            if (inst->opcode == LirOpcode::Lea && !inst->uses.empty() && inst->uses[0].is_mem()) {
+                const auto& lm = inst->uses[0].mem_val;
+                if (lm.has_index() && lm.scale == x64::Scale::Two && lm.disp == 0) {
+                    saw_lea = true;
+                }
+            }
             if (inst->opcode == LirOpcode::Movzx8 && !inst->uses.empty() && inst->uses[0].is_mem()) {
                 CHECK(is_legal(inst->uses[0].mem_val, 1));
                 CHECK(!inst->uses[0].mem_val.has_index());
                 saw_zx = true;
             }
         }
-        CHECK(saw_shl);
-        CHECK(saw_add);
+        CHECK(saw_lea);
         CHECK(saw_zx);
     }
 }
