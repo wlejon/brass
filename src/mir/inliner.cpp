@@ -283,15 +283,21 @@ bool inline_into(Function& fn, Module& mod, const InlinerOptions& options, const
     bool any_changed = false;
     size_t baseline_size = get_function_instruction_count(fn);
     size_t current_size = baseline_size;
+    std::unordered_map<const Instruction*, size_t> site_depth;
+    auto depth_of = [&](const Instruction* inst) -> size_t {
+        const auto it = site_depth.find(inst);
+        return it != site_depth.end() ? it->second : 0;
+    };
 
-    for (size_t depth = 0; depth < options.max_inline_depth; ++depth) {
+    const size_t kMaxInlineRounds = std::max<size_t>(64, options.max_inline_depth * 16);
+    for (size_t round = 0; round < kMaxInlineRounds; ++round) {
         fn.rebuild_cfg_predecessors();
 
         // The call sites a callee body could be inlined at, found before
         // the dominator tree and loops that only weigh them are built: most
         // functions have none. The first round's were found by
         // inline_module, from the function as it is now.
-        const bool given = depth == 0 && first && first->ready;
+        const bool given = (round == 0) && first && first->ready;
         const std::vector<std::pair<Instruction*, Function*>> sites =
             given ? std::move(first->sites) : inline_sites(fn, mod);
         // Nor when every site is refused whatever loop it is in: then no
@@ -302,7 +308,7 @@ bool inline_into(Function& fn, Module& mod, const InlinerOptions& options, const
             site.instruction = inst;
             site.caller = &fn;
             site.callee = callee;
-            if (inline_gate(fn, site, *callee, cg, depth, baseline_size, current_size, options, sizes).verdict !=
+            if (inline_gate(fn, site, *callee, cg, depth_of(inst), baseline_size, current_size, options, sizes).verdict !=
                 InlineGate::No) {
                 any_possible = true;
                 break;
@@ -354,13 +360,25 @@ bool inline_into(Function& fn, Module& mod, const InlinerOptions& options, const
             dummy_site.caller = &fn;
             dummy_site.callee = cand.callee;
 
-            if (!decide_inline(fn, dummy_site, *cand.callee, cg, depth, cand.loop_depth, baseline_size, current_size,
-                               options, sizes)) {
+            const size_t parent_depth = depth_of(cand.call_inst);
+            if (!decide_inline(fn, dummy_site, *cand.callee, cg, parent_depth, cand.loop_depth, baseline_size,
+                               current_size, options, sizes)) {
                 continue;
             }
 
             InlineResult res = inline_call_site(fn, cand.call_inst, *cand.callee);
             if (res.success) {
+                site_depth.erase(cand.call_inst);
+                for (BasicBlock* ib : res.inlined_blocks) {
+                    if (!ib) continue;
+                    for (Instruction* ni : *ib) {
+                        if (!ni) continue;
+                        const Opcode op = ni->opcode();
+                        if (op == Opcode::call || op == Opcode::invoke || op == Opcode::patchable_call) {
+                            site_depth[ni] = parent_depth + 1;
+                        }
+                    }
+                }
                 inlined_any_in_round = true;
                 any_changed = true;
                 sizes.forget(fn);

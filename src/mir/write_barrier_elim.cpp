@@ -77,7 +77,7 @@ bool non_pointer_value(const Value* val, int depth, std::unordered_set<const Val
         case Opcode::clz: case Opcode::ctz: case Opcode::popcnt:
         case Opcode::sext_i64: case Opcode::zext_i64:
         case Opcode::fptosi_i64: case Opcode::fptosi_i64_f32:
-        case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i64_f64:
             // Counts, widened 32-bit values and converted floats are numbers
             // by construction; a boxed double is not a heap address.
             return true;

@@ -553,3 +553,106 @@ TEST_CASE("Inliner - Devirtualization of monomorphic patchable_call") {
     RuntimeValue jv = jit.invoke("devirt_caller", {RuntimeValue::from_i64(32)});
     CHECK_EQ(jv.as_i64(), 42);
 }
+
+TEST_CASE("Inliner - Multiple sibling calls beyond max_inline_depth and per-site depth cap") {
+    // Part 1: 6 sibling direct calls with default max_inline_depth = 4 must all inline.
+    {
+        Module mod("test_sibling_calls");
+        Function* leaf = mod.create_function("leaf_inc", Type::i64(), {Type::i64()});
+        {
+            Builder b(mod);
+            b.set_function(leaf);
+            BasicBlock* entry = b.append_block("entry");
+            Value* x = b.add_block_param(entry, Type::i64());
+            b.build_ret(b.build_add(x, b.build_iconst_i64(1)));
+            leaf->rebuild_cfg_predecessors();
+            REQUIRE(verify_function(*leaf));
+        }
+
+        Function* caller = mod.create_function("six_siblings", Type::i64(), {Type::i64()});
+        {
+            Builder b(mod);
+            b.set_function(caller);
+            BasicBlock* entry = b.append_block("entry");
+            Value* x = b.add_block_param(entry, Type::i64());
+            Value* acc = b.build_iconst_i64(0);
+            for (int i = 0; i < 6; ++i) {
+                Value* v = b.build_call("leaf_inc", Type::i64(), {x});
+                acc = b.build_add(acc, v);
+            }
+            b.build_ret(acc);
+            caller->rebuild_cfg_predecessors();
+            REQUIRE(verify_function(*caller));
+        }
+
+        InlinerOptions opts;
+        CHECK_EQ(opts.max_inline_depth, 4ULL);
+        CHECK(inline_function(*caller, mod, opts));
+        REQUIRE(verify_function(*caller));
+
+        size_t remaining_calls = 0;
+        for (BasicBlock* bb : caller->blocks()) {
+            for (Instruction* inst : *bb) {
+                if (inst->opcode() == Opcode::call) ++remaining_calls;
+            }
+        }
+        CHECK_EQ(remaining_calls, 0ULL);
+
+        Interpreter interp;
+        CHECK_EQ(interp.run(mod, "six_siblings", {RuntimeValue::from_i64(10)}).as_i64(), 66);
+    }
+
+    // Part 2: Nested call chain stops at per-site depth == max_inline_depth.
+    {
+        Module mod("test_nested_depth_cap");
+        auto make_hop = [&](const char* name, const char* next_name, int64_t addend) {
+            Function* f = mod.create_function(name, Type::i64(), {Type::i64()});
+            Builder b(mod);
+            b.set_function(f);
+            BasicBlock* entry = b.append_block("entry");
+            Value* x = b.add_block_param(entry, Type::i64());
+            Value* sum = b.build_add(x, b.build_iconst_i64(addend));
+            Value* res = next_name ? b.build_call(next_name, Type::i64(), {sum}) : sum;
+            b.build_ret(res);
+            f->rebuild_cfg_predecessors();
+            REQUIRE(verify_function(*f));
+            return f;
+        };
+        make_hop("hop6", nullptr, 6);
+        make_hop("hop5", "hop6", 5);
+        make_hop("hop4", "hop5", 4);
+        make_hop("hop3", "hop4", 3);
+        make_hop("hop2", "hop3", 2);
+        make_hop("hop1", "hop2", 1);
+
+        Function* root = mod.create_function("chain_root", Type::i64(), {Type::i64()});
+        {
+            Builder b(mod);
+            b.set_function(root);
+            BasicBlock* entry = b.append_block("entry");
+            Value* x = b.add_block_param(entry, Type::i64());
+            b.build_ret(b.build_call("hop1", Type::i64(), {x}));
+            root->rebuild_cfg_predecessors();
+            REQUIRE(verify_function(*root));
+        }
+
+        InlinerOptions opts;
+        opts.max_inline_depth = 4;
+        opts.max_caller_growth_factor = 10.0;
+        CHECK(inline_function(*root, mod, opts));
+        REQUIRE(verify_function(*root));
+
+        std::vector<std::string_view> remaining_callees;
+        for (BasicBlock* bb : root->blocks()) {
+            for (Instruction* inst : *bb) {
+                if (inst->opcode() == Opcode::call) remaining_callees.push_back(inst->symbol());
+            }
+        }
+        REQUIRE_EQ(remaining_callees.size(), 1ULL);
+        // depth 0 (hop1), 1 (hop2), 2 (hop3), 3 (hop4) inline; depth 4 (hop5) hits cap.
+        CHECK_EQ(remaining_callees[0], "hop5");
+
+        Interpreter interp;
+        CHECK_EQ(interp.run(mod, "chain_root", {RuntimeValue::from_i64(0)}).as_i64(), 21);
+    }
+}

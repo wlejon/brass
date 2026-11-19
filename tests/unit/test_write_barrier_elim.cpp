@@ -232,3 +232,31 @@ TEST_CASE("WBE - A GC point on one path keeps the join's barriers") {
     DiagnosticReporter diag;
     CHECK(verify_module(*mod, &diag));
 }
+
+TEST_CASE("WBE - Boxed f64 via bitcast_i64_f64 elimination") {
+    Module mod("test_wbe_bitcast_f64");
+    Builder b(mod);
+
+    Function* fn = mod.create_function("test_fn", Type::void_type(), {Type::gcref(), Type::f64()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* obj = b.add_block_param(entry, Type::gcref());
+    Value* num = b.add_block_param(entry, Type::f64());
+
+    Value* boxed = b.build_bitcast_i64_f64(num);
+    b.build_write_barrier(obj, boxed);
+    b.build_ret_void();
+
+    CHECK_EQ(count_write_barriers(*fn), 1ULL);
+
+    WriteBarrierElimination wbe;
+    bool changed = wbe.run_on_function(*fn);
+
+    CHECK(changed);
+    CHECK_EQ(count_write_barriers(*fn), 0ULL);
+    CHECK_EQ(wbe.stats().eliminated_non_pointer, 1U);
+    CHECK_EQ(wbe.stats().remaining_barriers, 0U);
+
+    DiagnosticReporter diag;
+    CHECK(verify_module(mod, &diag));
+}
