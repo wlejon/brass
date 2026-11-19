@@ -45,7 +45,12 @@ void AArch64EmitContext::emit_load_constant_gpr(GPR dst, uint64_t val, GPR addr_
 
 void AArch64EmitContext::emit_load_constant_fpr(FPR dst, uint64_t val, GPR addr_scratch) {
     if (val == 0) {
-        enc_.fmov_from_gpr(dst, GPR::XZR);
+        enc_.movi_zero(dst);
+        return;
+    }
+    uint8_t imm8 = 0;
+    if (AArch64Encoder::encode_fp64_imm8(val, imm8)) {
+        enc_.fmov_imm(dst, imm8);
         return;
     }
     if (const auto off = pinned_constant(val)) {
@@ -53,6 +58,19 @@ void AArch64EmitContext::emit_load_constant_fpr(FPR dst, uint64_t val, GPR addr_
         return;
     }
     enc_.ldr_literal(dst, get_or_create_pool_label(val), val);
+}
+
+void AArch64EmitContext::emit_load_constant_fpr32(FPR dst, uint32_t val) {
+    if (val == 0) {
+        enc_.movi_zero(dst);
+        return;
+    }
+    uint8_t imm8 = 0;
+    if (AArch64Encoder::encode_fp32_imm8(val, imm8)) {
+        enc_.fmov_imm_s(dst, imm8);
+        return;
+    }
+    enc_.ldr_literal_s(dst, get_or_create_pool_label(static_cast<uint64_t>(val)), val);
 }
 
 void AArch64EmitContext::begin_constant_pool() {

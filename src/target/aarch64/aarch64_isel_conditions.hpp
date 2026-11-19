@@ -6,6 +6,7 @@
 // integer compare and after an fcmp for every condition an ordered float
 // comparison is lowered to here (see emit_fused_compare).
 
+#include <brass/codegen/lir.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/target/x64/x64_operands.hpp>
 #include <utility>
@@ -61,6 +62,27 @@ constexpr bool zero_test_matches_compare(LirCond cond) noexcept {
         default:
             return true;
     }
+}
+
+constexpr LirCond ordered_float_cond(LirCond cond) noexcept {
+    if (cond == LirCond::A) return LirCond::G;
+    if (cond == LirCond::AE) return LirCond::GE;
+    return cond;
+}
+
+inline bool is_const_float_zero(const Value* v) noexcept {
+    if (!v || !v->is_instruction()) return false;
+    const Instruction* def = v->defining_instruction();
+    if (!def || def->opcode() != Opcode::fconst_f64) return false;
+    if (v->type() == Type::f32()) return static_cast<float>(def->imm_f64()) == 0.0f;
+    if (v->type() == Type::f64()) return def->imm_f64() == 0.0;
+    return false;
+}
+
+inline codegen::LirOperand make_imm_float(double val, uint8_t sz) {
+    codegen::LirOperand op = codegen::LirOperand::imm_f64(val);
+    op.size = sz;
+    return op;
 }
 
 } // namespace brass::aarch64

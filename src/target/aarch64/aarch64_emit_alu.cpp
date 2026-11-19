@@ -385,7 +385,9 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
             const auto& src2 = inst.uses.back();
             if (src2.is_preg()) {
-                enc_.eor(dst, src1, to_gpr(src2));
+                GPR s2 = to_gpr(src2);
+                if (dst == src1 && src1 == s2) enc_.mov(dst, GPR::XZR);
+                else enc_.eor(dst, src1, s2);
             } else if (src2.is_imm_int()) {
                 uint32_t n, immr, imms;
                 if (AArch64Encoder::encode_logical_immediate(static_cast<uint64_t>(src2.imm_int), true, n, immr, imms)) {
@@ -406,7 +408,9 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             GPR src1 = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
             const auto& src2 = inst.uses.back();
             if (src2.is_preg()) {
-                enc_.eor32(dst, src1, to_gpr(src2));
+                GPR s2 = to_gpr(src2);
+                if (dst == src1 && src1 == s2) enc_.mov32(dst, GPR::XZR);
+                else enc_.eor32(dst, src1, s2);
             } else if (src2.is_imm_int()) {
                 uint32_t n, immr, imms;
                 if (AArch64Encoder::encode_logical_immediate(static_cast<uint32_t>(src2.imm_int), false, n, immr, imms)) {

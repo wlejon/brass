@@ -136,12 +136,44 @@ void AArch64Encoder::fcsel_s(FPR dst, FPR src1, FPR src2, Condition cond) {
 }
 
 // Moves & Conversions
+bool AArch64Encoder::encode_fp64_imm8(uint64_t bits, uint8_t& out_imm8) noexcept {
+    const uint64_t sign = bits >> 63;
+    const int32_t exp = static_cast<int32_t>((bits >> 52) & 0x7FFu) - 1023;
+    const uint64_t frac = bits & ((1ULL << 52) - 1);
+    if (exp < -3 || exp > 4 || (frac & ((1ULL << 48) - 1)) != 0) return false;
+    const uint32_t enc_exp = static_cast<uint32_t>(exp + 3) ^ 4u;
+    out_imm8 = static_cast<uint8_t>((sign << 7) | ((enc_exp & 7u) << 4) | (frac >> 48));
+    return true;
+}
+
+bool AArch64Encoder::encode_fp32_imm8(uint32_t bits, uint8_t& out_imm8) noexcept {
+    const uint32_t sign = bits >> 31;
+    const int32_t exp = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127;
+    const uint32_t frac = bits & ((1u << 23) - 1);
+    if (exp < -3 || exp > 4 || (frac & ((1u << 19) - 1)) != 0) return false;
+    const uint32_t enc_exp = static_cast<uint32_t>(exp + 3) ^ 4u;
+    out_imm8 = static_cast<uint8_t>((sign << 7) | ((enc_exp & 7u) << 4) | (frac >> 19));
+    return true;
+}
+
 void AArch64Encoder::fmov(FPR dst, FPR src) {
     buffer_.emit_inst(0x1E604000u | (reg_code(src) << 5) | reg_code(dst));
 }
 
 void AArch64Encoder::fmov_s(FPR dst, FPR src) {
     buffer_.emit_inst(0x1E204000u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::fmov_imm(FPR dst, uint8_t imm8) {
+    buffer_.emit_inst(0x1E601000u | (static_cast<uint32_t>(imm8) << 13) | reg_code(dst));
+}
+
+void AArch64Encoder::fmov_imm_s(FPR dst, uint8_t imm8) {
+    buffer_.emit_inst(0x1E201000u | (static_cast<uint32_t>(imm8) << 13) | reg_code(dst));
+}
+
+void AArch64Encoder::movi_zero(FPR dst) {
+    buffer_.emit_inst(0x2F00E400u | reg_code(dst));
 }
 
 void AArch64Encoder::fmov_to_gpr(GPR dst, FPR src) {

@@ -49,6 +49,30 @@ void AArch64Encoder::ldr_literal(FPR dst, Label target, uint64_t fallback_imm) {
     }
 }
 
+void AArch64Encoder::ldr_literal_s(FPR dst, Label target, uint32_t fallback_imm) {
+    const uint32_t site = buffer_.next_short_branch_site();
+    if (buffer_.is_long_branch_site(site)) {
+        mov32(GPR::X16, fallback_imm);
+        fmov_from_gpr32(dst, GPR::X16);
+        return;
+    }
+    const size_t patch_off = buffer_.size();
+    if (buffer_.is_bound(target)) {
+        const int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
+        const int64_t word_disp = disp >> 2;
+        if (word_disp < -(1 << 18) || word_disp > ((1 << 18) - 1)) {
+            mov32(GPR::X16, fallback_imm);
+            fmov_from_gpr32(dst, GPR::X16);
+            return;
+        }
+        const uint32_t imm19 = static_cast<uint32_t>(word_disp) & 0x0007FFFFu;
+        buffer_.emit_inst(0x1C000000u | (imm19 << 5) | reg_code(dst));
+    } else {
+        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19, site);
+        buffer_.emit_inst(0x1C000000u | reg_code(dst));
+    }
+}
+
 void AArch64Encoder::load_symbol_u64(GPR dst, const std::string& symbol) {
     const uint32_t rd = reg_code(dst);
     buffer_.add_relocation(buffer_.size(), RelocationKind::Page21, symbol);

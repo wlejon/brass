@@ -104,6 +104,14 @@ LirCond AArch64ISel::emit_fused_compare(const Instruction& cmp_inst, LirBlock& l
             flags(ucomi, LirOperand::vreg(get_vreg(lhs), sz), LirOperand::vreg(get_vreg(rhs), sz));
             return cmp_op == Opcode::ne ? LirCond::P : LirCond::NP;
         }
+        if (is_const_float_zero(rhs)) {
+            flags(ucomi, LirOperand::vreg(get_vreg(lhs), sz), make_imm_float(0.0, sz));
+            return ordered_float_cond(float_c);
+        }
+        if (is_const_float_zero(lhs)) {
+            flags(ucomi, LirOperand::vreg(get_vreg(rhs), sz), make_imm_float(0.0, sz));
+            return ordered_float_cond(swap_relational_condition(float_c));
+        }
         // After fcmp an unordered result sets C and V, so HI / HS (x64 A /
         // AE) would be true for NaN. a > b is b < a (LO: false when
         // unordered), a >= b is b <= a (LS: likewise).

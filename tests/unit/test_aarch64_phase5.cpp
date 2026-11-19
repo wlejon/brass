@@ -3,9 +3,14 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/target/aarch64/aarch64_encoder.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 using namespace brass;
@@ -341,5 +346,301 @@ TEST_CASE("AArch64 Phase 5B - 64-bit ARMv8 logical immediates in And/Or/Xor") {
         CHECK_EQ(static_cast<uint64_t>(j_or(s)), u | kIntTag);
         CHECK_EQ(static_cast<uint64_t>(j_xor(s)), u ^ kSignBit);
         CHECK_EQ(static_cast<uint64_t>(j_non_log(s)), u & kNonLogical);
+    }
+}
+
+// 5C.1: Encoder bitwords verified against Apple clang (fmov #imm8, movi #0, ldr_literal_s, zero-cycle mov xzr)
+TEST_CASE("AArch64 Phase 5C - Encoder fmov #imm8, movi #0, ldr_literal_s, and zero-cycle Xor") {
+    CodeBuffer buf;
+    AArch64Encoder enc(buf);
+
+    uint8_t imm8 = 0;
+    REQUIRE(AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(1.0), imm8));
+    enc.fmov_imm(FPR::V0, imm8);
+    REQUIRE(AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(-1.0), imm8));
+    enc.fmov_imm(FPR::V3, imm8);
+    REQUIRE(AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(0.5), imm8));
+    enc.fmov_imm(FPR::V5, imm8);
+    REQUIRE(AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(0.125), imm8));
+    enc.fmov_imm(FPR::V7, imm8);
+    REQUIRE(AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(31.0), imm8));
+    enc.fmov_imm(FPR::V9, imm8);
+    REQUIRE(AArch64Encoder::encode_fp32_imm8(std::bit_cast<uint32_t>(1.0f), imm8));
+    enc.fmov_imm_s(FPR::V0, imm8);
+    REQUIRE(AArch64Encoder::encode_fp32_imm8(std::bit_cast<uint32_t>(-1.0f), imm8));
+    enc.fmov_imm_s(FPR::V3, imm8);
+
+    // Non-FP8 values (+0.0, -0.0, 0.0625, 32.0, NaN, pi) must be rejected
+    CHECK(!AArch64Encoder::encode_fp64_imm8(0ULL, imm8));
+    CHECK(!AArch64Encoder::encode_fp64_imm8(0x8000000000000000ULL, imm8));
+    CHECK(!AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(0.0625), imm8));
+    CHECK(!AArch64Encoder::encode_fp64_imm8(std::bit_cast<uint64_t>(32.0), imm8));
+    CHECK(!AArch64Encoder::encode_fp64_imm8(0x7FF8000000000000ULL, imm8));
+    CHECK(!AArch64Encoder::encode_fp32_imm8(0u, imm8));
+    CHECK(!AArch64Encoder::encode_fp32_imm8(0x80000000u, imm8));
+
+    enc.movi_zero(FPR::V0);
+    Label lit = buf.create_label();
+    enc.ldr_literal_s(FPR::V4, lit, 0x3F800000u);
+    buf.bind(lit);
+    buf.emit32(0x3F800000u);
+
+    auto words = extract_words(buf.bytes());
+    REQUIRE(words.size() == 10u);
+    CHECK_EQ(words[0], 0x1E6E1000u); // fmov d0, #1.0
+    CHECK_EQ(words[1], 0x1E7E1003u); // fmov d3, #-1.0
+    CHECK_EQ(words[2], 0x1E6C1005u); // fmov d5, #0.5
+    CHECK_EQ(words[3], 0x1E681007u); // fmov d7, #0.125
+    CHECK_EQ(words[4], 0x1E67F009u); // fmov d9, #31.0
+    CHECK_EQ(words[5], 0x1E2E1000u); // fmov s0, #1.0
+    CHECK_EQ(words[6], 0x1E3E1003u); // fmov s3, #-1.0
+    CHECK_EQ(words[7], 0x2F00E400u); // movi d0, #0
+    CHECK_EQ(words[8], 0x1C000024u); // ldr s4, +4
+
+    // Self-Xor / self-Xor32 emit mov xd, xzr / mov wd, wzr instead of eor
+    LirFunction fn;
+    fn.name = "p5c_zero_idiom";
+    fn.calling_conv = CallingConvention::apple_aapcs64();
+    LirBlock* bb = fn.create_block("entry");
+    auto x64_z = std::make_unique<LirInst>(LirOpcode::Xor);
+    x64_z->add_def(LirOperand::preg(PReg::aarch64_gpr(GPR::X0), 8));
+    x64_z->add_use(LirOperand::preg(PReg::aarch64_gpr(GPR::X0), 8));
+    x64_z->add_use(LirOperand::preg(PReg::aarch64_gpr(GPR::X0), 8));
+    bb->append_inst(std::move(x64_z));
+    auto x32_z = std::make_unique<LirInst>(LirOpcode::Xor32);
+    x32_z->add_def(LirOperand::preg(PReg::aarch64_gpr(GPR::X1), 4));
+    x32_z->add_use(LirOperand::preg(PReg::aarch64_gpr(GPR::X1), 4));
+    x32_z->add_use(LirOperand::preg(PReg::aarch64_gpr(GPR::X1), 4));
+    bb->append_inst(std::move(x32_z));
+    bb->append_inst(std::make_unique<LirInst>(LirOpcode::Ret));
+
+    AArch64EmitContext em(fn, Target::aarch64_macos());
+    auto res = em.compile();
+    auto zwords = extract_words(res.code_buffer.bytes());
+    bool saw_mov_x0_xzr = false;
+    bool saw_mov_w1_wzr = false;
+    for (uint32_t w : zwords) {
+        if (w == 0xAA1F03E0u) saw_mov_x0_xzr = true; // mov x0, xzr
+        if (w == 0x2A1F03E1u) saw_mov_w1_wzr = true; // mov w1, wzr
+        CHECK((w & 0xFFE0FC00u) != 0xCA000000u);     // no eor
+        CHECK((w & 0xFFE0FC00u) != 0x4A000000u);     // no eor32
+    }
+    CHECK(saw_mov_x0_xzr);
+    CHECK(saw_mov_w1_wzr);
+}
+
+// 5C.2: Native FP constants (+0.0, -0.0, #imm8, pool) and fcmp #0.0 with exact NaN/signed-zero semantics
+TEST_CASE("AArch64 Phase 5C - Native FP constants and fcmp #0.0 NaN/signed-zero semantics") {
+    auto mod = std::make_unique<Module>("p5c_fp");
+
+    auto make_f64_bits_fn = [&](const char* name, double val) {
+        Function* fn = mod->create_function(name, Type::i64(), {});
+        Builder b(*mod);
+        b.set_function(fn);
+        b.append_block("entry");
+        Value* c = b.build_fconst_f64(val);
+        b.build_ret(b.build_bitcast_i64_f64(c));
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        return fn;
+    };
+    auto make_f32_bits_fn = [&](const char* name, float val) {
+        Function* fn = mod->create_function(name, Type::i32(), {});
+        Builder b(*mod);
+        b.set_function(fn);
+        b.append_block("entry");
+        Value* c = b.build_fconst_f32(val);
+        b.build_ret(b.build_bitcast_i32_f32(c));
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        return fn;
+    };
+
+    Function* fn_p0 = make_f64_bits_fn("k_p0", 0.0);
+    Function* fn_n0 = make_f64_bits_fn("k_n0", -0.0);
+    Function* fn_imm8 = make_f64_bits_fn("k_half", -0.5);
+    Function* fn_pi = make_f64_bits_fn("k_pi", 3.141592653589793);
+    Function* fn_s_p0 = make_f32_bits_fn("k_s_p0", 0.0f);
+    Function* fn_s_n0 = make_f32_bits_fn("k_s_n0", -0.0f);
+    Function* fn_s_imm8 = make_f32_bits_fn("k_s_imm8", 1.5f);
+    Function* fn_s_pi = make_f32_bits_fn("k_s_pi", 3.1415927f);
+
+    // Build fcmp #0.0 test functions: fused select + br_if, both RHS 0.0 and LHS -0.0, f64 & f32
+    auto make_fcmp0_select = [&](const char* name, Opcode cmp_op, bool zero_lhs, double zero_val) {
+        Function* fn = mod->create_function(name, Type::i64(), {Type::f64()});
+        Builder b(*mod);
+        b.set_function(fn);
+        BasicBlock* bb = b.append_block("entry");
+        Value* x = b.add_block_param(bb, Type::f64());
+        Value* z = b.build_fconst_f64(zero_val);
+        Value* l = zero_lhs ? z : x;
+        Value* r = zero_lhs ? x : z;
+        Value* cond = nullptr;
+        switch (cmp_op) {
+            case Opcode::eq:  cond = b.build_eq(l, r); break;
+            case Opcode::ne:  cond = b.build_ne(l, r); break;
+            case Opcode::slt: cond = b.build_slt(l, r); break;
+            case Opcode::sle: cond = b.build_sle(l, r); break;
+            case Opcode::sgt: cond = b.build_sgt(l, r); break;
+            case Opcode::sge: cond = b.build_sge(l, r); break;
+            default: break;
+        }
+        b.build_ret(b.build_select(cond, b.build_iconst_i64(1), b.build_iconst_i64(0)));
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        return fn;
+    };
+
+    Function* fn_eq0 = make_fcmp0_select("cmp_eq_0", Opcode::eq, false, 0.0);
+    Function* fn_ne0 = make_fcmp0_select("cmp_ne_0", Opcode::ne, false, -0.0);
+    Function* fn_lt0 = make_fcmp0_select("cmp_lt_0", Opcode::slt, false, 0.0);
+    Function* fn_le0 = make_fcmp0_select("cmp_le_0", Opcode::sle, false, 0.0);
+    Function* fn_gt0 = make_fcmp0_select("cmp_gt_0", Opcode::sgt, false, 0.0);
+    Function* fn_ge0 = make_fcmp0_select("cmp_ge_0", Opcode::sge, false, 0.0);
+    Function* fn_0lt = make_fcmp0_select("cmp_0_lt", Opcode::slt, true, -0.0);
+    Function* fn_0le = make_fcmp0_select("cmp_0_le", Opcode::sle, true, 0.0);
+    Function* fn_0gt = make_fcmp0_select("cmp_0_gt", Opcode::sgt, true, 0.0);
+    Function* fn_0ge = make_fcmp0_select("cmp_0_ge", Opcode::sge, true, -0.0);
+
+    Function* fn_f32_lt0 = mod->create_function("f32_lt0", Type::i64(), {Type::f32()});
+    {
+        Builder b(*mod);
+        b.set_function(fn_f32_lt0);
+        BasicBlock* bb = b.append_block("entry");
+        Value* x = b.add_block_param(bb, Type::f32());
+        Value* c = b.build_slt(b.build_fconst_f32(-0.0f), x);
+        b.build_ret(b.build_zext_i64(c));
+        fn_f32_lt0->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn_f32_lt0));
+    }
+
+    // Check LIR: dead 0.0 constants in fcmp #0.0 are eliminated and zero cross-domain fmov d, x is emitted
+    AArch64ISel isel(Target::aarch64_macos(), CallingConvention::apple_aapcs64());
+    for (Function* cf : {fn_eq0, fn_ne0, fn_lt0, fn_le0, fn_gt0, fn_ge0,
+                          fn_0lt, fn_0le, fn_0gt, fn_0ge, fn_f32_lt0}) {
+        auto lir = isel.lower(*cf);
+        REQUIRE(lir != nullptr);
+        bool saw_ucomi_imm0 = false;
+        for (const auto& b : lir->blocks) {
+            for (const auto& inst : b->instructions) {
+                if ((inst->opcode == LirOpcode::Ucomisd || inst->opcode == LirOpcode::Ucomiss) &&
+                    inst->uses.size() == 2 && inst->uses[1].is_imm_float() && inst->uses[1].imm_float == 0.0) {
+                    saw_ucomi_imm0 = true;
+                }
+                CHECK(inst->opcode != LirOpcode::Movsd);
+                CHECK(inst->opcode != LirOpcode::Movss);
+                CHECK(inst->opcode != LirOpcode::Xorpd);
+                CHECK(inst->opcode != LirOpcode::Xorps);
+            }
+        }
+        CHECK(saw_ucomi_imm0);
+    }
+
+    // Verify k_p0 emits movi #0 (2f00e400 mask), k_half emits fmov #imm8, k_n0 & k_pi emit ldr_literal without fmov d, x
+    auto emit_words = [&](Function* f) {
+        auto lir = isel.lower(*f);
+        REQUIRE(lir != nullptr);
+        LivenessAnalysis liv(*lir);
+        liv.run();
+        LinearScanAllocator ra(*lir, liv, CallingConvention::apple_aapcs64());
+        ra.allocate();
+        AArch64EmitContext cem(*lir, Target::aarch64_macos());
+        return extract_words(cem.compile().code_buffer.bytes());
+    };
+    {
+        auto w_p0 = emit_words(fn_p0);
+        auto w_n0 = emit_words(fn_n0);
+        auto w_imm8 = emit_words(fn_imm8);
+        auto w_pi = emit_words(fn_pi);
+        bool p0_movi = false, imm8_fmov = false, n0_lit = false, pi_lit = false;
+        for (uint32_t w : w_p0) {
+            if ((w & ~0x1Fu) == 0x2F00E400u) p0_movi = true;
+        }
+        for (uint32_t w : w_imm8) {
+            if ((w & 0xFFE0FC00u) == 0x1E601000u) imm8_fmov = true;
+        }
+        for (uint32_t w : w_n0) {
+            CHECK((w & ~0x1Fu) != 0x2F00E400u); // -0.0 must NOT use movi #0
+            if ((w & 0xFF000000u) == 0x58000000u || (w & 0xFF000000u) == 0x5C000000u) n0_lit = true;
+        }
+        for (uint32_t w : w_pi) {
+            CHECK((w & 0xFFFFFC00u) != 0x9E670000u); // no fmov d, x cross-domain move
+            if ((w & 0xFF000000u) == 0x5C000000u) pi_lit = true;
+        }
+        CHECK(p0_movi);
+        CHECK(imm8_fmov);
+        CHECK(n0_lit);
+        CHECK(pi_lit);
+
+        auto w_s_p0 = emit_words(fn_s_p0);
+        auto w_s_n0 = emit_words(fn_s_n0);
+        auto w_s_imm8 = emit_words(fn_s_imm8);
+        auto w_s_pi = emit_words(fn_s_pi);
+        bool s_p0_movi = false, s_imm8_fmov = false, s_n0_lit = false, s_pi_lit = false;
+        for (uint32_t w : w_s_p0) {
+            if ((w & ~0x1Fu) == 0x2F00E400u) s_p0_movi = true;
+        }
+        for (uint32_t w : w_s_imm8) {
+            if ((w & 0xFFE0FC00u) == 0x1E201000u) s_imm8_fmov = true;
+        }
+        for (uint32_t w : w_s_n0) {
+            CHECK((w & ~0x1Fu) != 0x2F00E400u);
+            if ((w & 0xFF000000u) == 0x1C000000u) s_n0_lit = true;
+        }
+        for (uint32_t w : w_s_pi) {
+            CHECK((w & 0xFFFFFC00u) != 0x1E270000u); // no fmov s, w cross-domain move
+            if ((w & 0xFF000000u) == 0x1C000000u) s_pi_lit = true;
+        }
+        CHECK(s_p0_movi);
+        CHECK(s_imm8_fmov);
+        CHECK(s_n0_lit);
+        CHECK(s_pi_lit);
+    }
+
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(*mod));
+
+    CHECK_EQ(static_cast<uint64_t>(jit.get_function_ptr<int64_t (*)()>("k_p0")()), 0x0000000000000000ULL);
+    CHECK_EQ(static_cast<uint64_t>(jit.get_function_ptr<int64_t (*)()>("k_n0")()), 0x8000000000000000ULL);
+    CHECK_EQ(static_cast<uint64_t>(jit.get_function_ptr<int64_t (*)()>("k_half")()),
+             std::bit_cast<uint64_t>(-0.5));
+    CHECK_EQ(static_cast<uint64_t>(jit.get_function_ptr<int64_t (*)()>("k_pi")()),
+             std::bit_cast<uint64_t>(3.141592653589793));
+
+    CHECK_EQ(static_cast<uint32_t>(jit.get_function_ptr<int32_t (*)()>("k_s_p0")()), 0x00000000u);
+    CHECK_EQ(static_cast<uint32_t>(jit.get_function_ptr<int32_t (*)()>("k_s_n0")()), 0x80000000u);
+    CHECK_EQ(static_cast<uint32_t>(jit.get_function_ptr<int32_t (*)()>("k_s_imm8")()),
+             std::bit_cast<uint32_t>(1.5f));
+    CHECK_EQ(static_cast<uint32_t>(jit.get_function_ptr<int32_t (*)()>("k_s_pi")()),
+             std::bit_cast<uint32_t>(3.1415927f));
+
+    auto j_eq0 = jit.get_function_ptr<int64_t (*)(double)>("cmp_eq_0");
+    auto j_ne0 = jit.get_function_ptr<int64_t (*)(double)>("cmp_ne_0");
+    auto j_lt0 = jit.get_function_ptr<int64_t (*)(double)>("cmp_lt_0");
+    auto j_le0 = jit.get_function_ptr<int64_t (*)(double)>("cmp_le_0");
+    auto j_gt0 = jit.get_function_ptr<int64_t (*)(double)>("cmp_gt_0");
+    auto j_ge0 = jit.get_function_ptr<int64_t (*)(double)>("cmp_ge_0");
+    auto j_0lt = jit.get_function_ptr<int64_t (*)(double)>("cmp_0_lt");
+    auto j_0le = jit.get_function_ptr<int64_t (*)(double)>("cmp_0_le");
+    auto j_0gt = jit.get_function_ptr<int64_t (*)(double)>("cmp_0_gt");
+    auto j_0ge = jit.get_function_ptr<int64_t (*)(double)>("cmp_0_ge");
+    auto j_f32_0lt = jit.get_function_ptr<int64_t (*)(float)>("f32_lt0");
+
+    const std::array<double, 5> vals = {-2.5, -0.0, +0.0, 2.5, std::numeric_limits<double>::quiet_NaN()};
+    for (double v : vals) {
+        CHECK_EQ(j_eq0(v), int64_t(v == 0.0 ? 1 : 0));
+        CHECK_EQ(j_ne0(v), int64_t(v != 0.0 ? 1 : 0));
+        CHECK_EQ(j_lt0(v), int64_t(v < 0.0 ? 1 : 0));
+        CHECK_EQ(j_le0(v), int64_t(v <= 0.0 ? 1 : 0));
+        CHECK_EQ(j_gt0(v), int64_t(v > 0.0 ? 1 : 0));
+        CHECK_EQ(j_ge0(v), int64_t(v >= 0.0 ? 1 : 0));
+        CHECK_EQ(j_0lt(v), int64_t(0.0 < v ? 1 : 0));
+        CHECK_EQ(j_0le(v), int64_t(0.0 <= v ? 1 : 0));
+        CHECK_EQ(j_0gt(v), int64_t(0.0 > v ? 1 : 0));
+        CHECK_EQ(j_0ge(v), int64_t(0.0 >= v ? 1 : 0));
+    }
+    const std::array<float, 5> fvals = {-2.5f, -0.0f, +0.0f, 2.5f, std::numeric_limits<float>::quiet_NaN()};
+    for (float v : fvals) {
+        CHECK_EQ(j_f32_0lt(v), int64_t(0.0f < v ? 1 : 0));
     }
 }

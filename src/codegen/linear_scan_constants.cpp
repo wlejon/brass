@@ -1,5 +1,6 @@
 #include <brass/codegen/linear_scan.hpp>
 #include <algorithm>
+#include <cstring>
 #include <iterator>
 #include <unordered_map>
 #include <unordered_set>
@@ -48,11 +49,19 @@ bool reads_pool_operand(const LirInst& in) {
 }
 
 // A store of the constant into its slot, which the pool makes redundant:
-// `mov [slot], reg` or `mov [slot], imm`.
-bool is_slot_store(const LirInst& in, int32_t slot) {
-    return in.opcode == LirOpcode::Mov && in.defs.size() == 1 && in.uses.size() == 1 &&
-           in.defs[0].is_spill_slot() && in.defs[0].spill_slot == slot && in.defs[0].size == 8 &&
-           (in.uses[0].is_preg() || in.uses[0].is_imm_int());
+// `mov [slot], reg` or `mov [slot], imm` (or on AArch64, `movsd [slot], reg/imm_float`).
+bool is_slot_store(const LirInst& in, int32_t slot, bool is_a64) {
+    if (in.defs.size() != 1 || in.uses.size() != 1 ||
+        !in.defs[0].is_spill_slot() || in.defs[0].spill_slot != slot || in.defs[0].size != 8) {
+        return false;
+    }
+    if (in.opcode == LirOpcode::Mov) {
+        return in.uses[0].is_preg() || in.uses[0].is_imm_int();
+    }
+    if (is_a64 && in.opcode == LirOpcode::Movsd) {
+        return in.uses[0].is_preg() || in.uses[0].is_imm_float();
+    }
+    return false;
 }
 
 bool reads_pool_operand_aarch64(const LirInst& in, int32_t slot) {
@@ -81,6 +90,13 @@ void LinearScanAllocator::collect_constant_vregs() {
                 in.defs.size() == 1 && in.uses.size() == 1 && in.defs[0].is_vreg() && in.defs[0].size == 8 &&
                 in.defs[0].vreg_val.is_gpr() && !in.defs[0].vreg_val.is_gcref && in.uses[0].is_imm_int()) {
                 constant_vregs_[in.defs[0].vreg_val.id] = in.uses[0].imm_int;
+            }
+            if (cc_.target().is_aarch64() && in.opcode == LirOpcode::Movsd && !in.is_patchable &&
+                in.defs.size() == 1 && in.uses.size() == 1 && in.defs[0].is_vreg() && in.defs[0].size == 8 &&
+                in.defs[0].vreg_val.is_xmm() && in.uses[0].is_imm_float()) {
+                int64_t bits = 0;
+                std::memcpy(&bits, &in.uses[0].imm_float, sizeof(bits));
+                constant_vregs_[in.defs[0].vreg_val.id] = bits;
             }
         }
     }
@@ -116,16 +132,17 @@ void LinearScanAllocator::pool_constant_slots() {
         for (const auto& inst : block->instructions) {
             const LirInst& in = *inst;
             const bool pcopy = in.opcode == LirOpcode::ParallelCopy;
+            const bool is_a64 = cc_.target().is_aarch64();
             for (size_t k = 0; k < in.defs.size(); ++k) {
                 const LirOperand& d = in.defs[k];
                 if (!d.is_spill_slot() || !slots.count(d.spill_slot)) continue;
                 const bool ok = pcopy ? (d.size == 8 && k < in.uses.size() &&
                                          (in.uses[k].is_preg() || in.uses[k].is_imm_int() ||
+                                          (is_a64 && in.uses[k].is_imm_float()) ||
                                           (in.uses[k].is_spill_slot() && in.uses[k].spill_slot == d.spill_slot)))
-                                      : is_slot_store(in, d.spill_slot);
+                                      : is_slot_store(in, d.spill_slot, is_a64);
                 if (!ok) refused.insert(d.spill_slot);
             }
-            const bool is_a64 = cc_.target().is_aarch64();
             for (size_t k = 0; k < in.uses.size(); ++k) {
                 const LirOperand& u = in.uses[k];
                 if (!u.is_spill_slot() || !slots.count(u.spill_slot)) continue;
@@ -136,12 +153,13 @@ void LinearScanAllocator::pool_constant_slots() {
                     continue;
                 }
                 const bool ok_read = is_a64 ? reads_pool_operand_aarch64(in, u.spill_slot) : reads_pool_operand(in);
-                if (!ok_read && !is_slot_store(in, u.spill_slot)) refused.insert(u.spill_slot);
+                if (!ok_read && !is_slot_store(in, u.spill_slot, is_a64)) refused.insert(u.spill_slot);
             }
         }
     }
     for (int32_t s : refused) slots.erase(s);
     if (slots.empty()) return;
+    const bool is_a64 = cc_.target().is_aarch64();
     for (auto& block : fn_.blocks) {
         auto& ins = block->instructions;
         for (size_t i = 0; i < ins.size(); ++i) {
@@ -170,9 +188,12 @@ void LinearScanAllocator::pool_constant_slots() {
             // stores it from there; the scratch is read by nothing else.
             if (i > 0 && ins[i - 1] && def_scratch_stores_.count(&in) && in.uses[0].is_preg()) {
                 const LirInst& prev = *ins[i - 1];
-                if ((prev.opcode == LirOpcode::Movabs || prev.opcode == LirOpcode::Mov) && prev.defs.size() == 1 &&
-                    prev.defs[0].is_preg() && prev.defs[0].preg_val == in.uses[0].preg_val && prev.uses.size() == 1 &&
-                    prev.uses[0].is_imm_int()) {
+                const bool int_mat = (prev.opcode == LirOpcode::Movabs || prev.opcode == LirOpcode::Mov) &&
+                                     prev.uses.size() == 1 && prev.uses[0].is_imm_int();
+                const bool fp_mat = is_a64 && prev.opcode == LirOpcode::Movsd &&
+                                    prev.uses.size() == 1 && prev.uses[0].is_imm_float();
+                if ((int_mat || fp_mat) && prev.defs.size() == 1 &&
+                    prev.defs[0].is_preg() && prev.defs[0].preg_val == in.uses[0].preg_val) {
                     ins[i - 1].reset();
                 }
             }

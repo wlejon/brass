@@ -234,6 +234,12 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
         } else if (op.is_imm_int()) {
             return ctx.make_const(static_cast<uint64_t>(op.imm_int), width_bits);
         } else if (op.is_imm_float()) {
+            if (width_bits == 32) {
+                float f = static_cast<float>(op.imm_float);
+                uint32_t u32 = 0;
+                std::memcpy(&u32, &f, 4);
+                return ctx.make_const(u32, 32);
+            }
             uint64_t u = 0;
             std::memcpy(&u, &op.imm_float, 8);
             return ctx.make_const(u, width_bits);

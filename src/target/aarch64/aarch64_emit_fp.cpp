@@ -1,10 +1,23 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <cstring>
 
 namespace brass::aarch64 {
 
 using namespace brass::codegen;
 
 void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
+    auto load_imm_float = [&](FPR dst_f, double imm, bool is_single) {
+        if (is_single) {
+            float f = static_cast<float>(imm);
+            uint32_t bits32 = 0;
+            std::memcpy(&bits32, &f, 4);
+            emit_load_constant_fpr32(dst_f, bits32);
+        } else {
+            uint64_t bits64 = 0;
+            std::memcpy(&bits64, &imm, 8);
+            emit_load_constant_fpr(dst_f, bits64);
+        }
+    };
     switch (inst.opcode) {
         case LirOpcode::Movsd: {
             const auto& dst = inst.defs[0];
@@ -17,6 +30,8 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                 if (src.is_preg()) {
                     if (is_single) enc_.fmov_s(dst_f, src.preg_val.as_aarch64_fpr());
                     else enc_.fmov(dst_f, src.preg_val.as_aarch64_fpr());
+                } else if (src.is_imm_float()) {
+                    load_imm_float(dst_f, src.imm_float, is_single);
                 } else {
                     if (is_single) enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                     else if (src.is_spill_slot()) {
@@ -34,6 +49,10 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                 if (src.is_preg()) {
                     if (is_single) enc_.str_s(src.preg_val.as_aarch64_fpr(), dst_mem);
                     else enc_.str(src.preg_val.as_aarch64_fpr(), dst_mem);
+                } else if (src.is_imm_float()) {
+                    load_imm_float(FPR::V31, src.imm_float, is_single);
+                    if (is_single) enc_.str_s(FPR::V31, dst_mem);
+                    else enc_.str(FPR::V31, dst_mem);
                 } else {
                     if (is_single) {
                         enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
@@ -63,11 +82,15 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             if (dst.is_preg()) {
                 FPR dst_f = dst.preg_val.as_aarch64_fpr();
                 if (src.is_preg()) enc_.fmov_s(dst_f, src.preg_val.as_aarch64_fpr());
+                else if (src.is_imm_float()) load_imm_float(dst_f, src.imm_float, true);
                 else enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
             } else {
                 MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst, GPR::X17), GPR::X17, 4);
                 if (src.is_preg()) enc_.str_s(src.preg_val.as_aarch64_fpr(), dst_mem);
-                else {
+                else if (src.is_imm_float()) {
+                    load_imm_float(FPR::V31, src.imm_float, true);
+                    enc_.str_s(FPR::V31, dst_mem);
+                } else {
                     enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                     enc_.str_s(FPR::V31, dst_mem);
                 }
@@ -357,7 +380,13 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             FPR op0 = to_fpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
             if (op1.is_preg()) enc_.fcmp(op0, to_fpr(op1));
-            else {
+            else if (op1.is_imm_float()) {
+                if (op1.imm_float == 0.0) enc_.fcmp_zero(op0);
+                else {
+                    load_imm_float(FPR::V31, op1.imm_float, false);
+                    enc_.fcmp(op0, FPR::V31);
+                }
+            } else {
                 enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(op1)));
                 enc_.fcmp(op0, FPR::V31);
             }
@@ -368,7 +397,13 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             FPR op0 = to_fpr(inst.uses[0]);
             const auto& op1 = inst.uses[1];
             if (op1.is_preg()) enc_.fcmp_s(op0, to_fpr(op1));
-            else {
+            else if (op1.is_imm_float()) {
+                if (static_cast<float>(op1.imm_float) == 0.0f) enc_.fcmp_zero_s(op0);
+                else {
+                    load_imm_float(FPR::V31, op1.imm_float, true);
+                    enc_.fcmp_s(op0, FPR::V31);
+                }
+            } else {
                 enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(op1)));
                 enc_.fcmp_s(op0, FPR::V31);
             }

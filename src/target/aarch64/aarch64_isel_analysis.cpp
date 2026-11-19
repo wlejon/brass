@@ -207,6 +207,7 @@ bool AArch64ISel::is_elidable_materialization(const Instruction& inst) const {
     switch (inst.opcode()) {
         case Opcode::iconst_i32:
         case Opcode::iconst_i64:
+        case Opcode::fconst_f64:
             return true;
         case Opcode::add:
         case Opcode::sub:

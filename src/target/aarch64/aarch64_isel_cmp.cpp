@@ -23,18 +23,24 @@ void AArch64ISel::lower_comparison(
         uint8_t sz = op0.size;
         LirOpcode ucomi_op = (sz == 4) ? LirOpcode::Ucomiss : LirOpcode::Ucomisd;
 
-        auto ucomi = std::make_unique<LirInst>(ucomi_op);
-        ucomi->add_use(LirOperand::vreg(op0, sz));
-        ucomi->add_use(LirOperand::vreg(op1, sz));
-        lir_bb.append_inst(std::move(ucomi));
-
         // ARM64 fcmp NZCV: Less=1000, Equal=0110, Greater=0010, Unordered=0011.
         // EQ (Z), NE (!Z), CC/LO (!C), LS (!C|Z), GT (!Z & N==V), GE (N==V) all
         // produce the exact IEEE-754 ordered/unordered result in a single cset
         // (no extra parity-flag mask/combine or uxtb needed).
-        LirCond a64_fc = float_cond;
-        if (float_cond == LirCond::A) a64_fc = LirCond::G;
-        else if (float_cond == LirCond::AE) a64_fc = LirCond::GE;
+        LirCond a64_fc = ordered_float_cond(float_cond);
+        auto ucomi = std::make_unique<LirInst>(ucomi_op);
+        if (is_const_float_zero(op1_val)) {
+            ucomi->add_use(LirOperand::vreg(op0, sz));
+            ucomi->add_use(make_imm_float(0.0, sz));
+        } else if (is_const_float_zero(op0_val)) {
+            a64_fc = ordered_float_cond(swap_relational_condition(float_cond));
+            ucomi->add_use(LirOperand::vreg(op1, sz));
+            ucomi->add_use(make_imm_float(0.0, sz));
+        } else {
+            ucomi->add_use(LirOperand::vreg(op0, sz));
+            ucomi->add_use(LirOperand::vreg(op1, sz));
+        }
+        lir_bb.append_inst(std::move(ucomi));
 
         auto setcc = std::make_unique<LirInst>(LirOpcode::Setcc);
         setcc->condition = a64_fc;

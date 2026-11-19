@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include "aarch64_isel_conditions.hpp"
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/mir/gc_refs.hpp>
 #include <brass/mir/module.hpp>
@@ -448,53 +449,17 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             uint8_t sz = (inst.type() == Type::f32()) ? 4 : 8;
             if (sz == 4) {
                 float fval = static_cast<float>(inst.imm_f64());
-                uint32_t raw_bits = 0;
-                std::memcpy(&raw_bits, &fval, sizeof(float));
-                if (raw_bits == 0) {
-                    auto lir_inst = std::make_unique<LirInst>(LirOpcode::Xorps);
-                    lir_inst->add_def(LirOperand::vreg(dst, 4));
-                    lir_inst->add_use(LirOperand::vreg(dst, 4));
-                    lir_inst->add_use(LirOperand::vreg(dst, 4));
-                    lir_inst->mir_origin = &inst;
-                    lir_bb.append_inst(std::move(lir_inst));
-                } else {
-                    VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, 4);
-                    auto m32 = std::make_unique<LirInst>(LirOpcode::Mov32);
-                    m32->add_def(LirOperand::vreg(tmp, 4));
-                    m32->add_use(LirOperand::imm(static_cast<int64_t>(raw_bits), 4));
-                    lir_bb.append_inst(std::move(m32));
-
-                    auto md = std::make_unique<LirInst>(LirOpcode::Movd_xg);
-                    md->add_def(LirOperand::vreg(dst, 4));
-                    md->add_use(LirOperand::vreg(tmp, 4));
-                    md->mir_origin = &inst;
-                    lir_bb.append_inst(std::move(md));
-                }
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movss);
+                lir_inst->add_def(LirOperand::vreg(dst, 4));
+                lir_inst->add_use(make_imm_float(static_cast<double>(fval), 4));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
             } else {
-                double val = inst.imm_f64();
-                uint64_t raw_bits = 0;
-                std::memcpy(&raw_bits, &val, sizeof(double));
-                if (raw_bits == 0) {
-                    auto lir_inst = std::make_unique<LirInst>(LirOpcode::Xorpd);
-                    lir_inst->add_def(LirOperand::vreg(dst, 8));
-                    lir_inst->add_use(LirOperand::vreg(dst, 8));
-                    lir_inst->add_use(LirOperand::vreg(dst, 8));
-                    lir_inst->mir_origin = &inst;
-                    lir_bb.append_inst(std::move(lir_inst));
-                } else {
-                    VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-
-                    auto mabs = std::make_unique<LirInst>(LirOpcode::Movabs);
-                    mabs->add_def(LirOperand::vreg(tmp, 8));
-                    mabs->add_use(LirOperand::imm(static_cast<int64_t>(raw_bits), 8));
-                    lir_bb.append_inst(std::move(mabs));
-
-                    auto mq = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-                    mq->add_def(LirOperand::vreg(dst, 8));
-                    mq->add_use(LirOperand::vreg(tmp, 8));
-                    mq->mir_origin = &inst;
-                    lir_bb.append_inst(std::move(mq));
-                }
+                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsd);
+                lir_inst->add_def(LirOperand::vreg(dst, 8));
+                lir_inst->add_use(make_imm_float(inst.imm_f64(), 8));
+                lir_inst->mir_origin = &inst;
+                lir_bb.append_inst(std::move(lir_inst));
             }
             break;
         }

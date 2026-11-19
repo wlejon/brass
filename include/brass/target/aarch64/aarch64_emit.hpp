@@ -122,6 +122,7 @@ private:
     aarch64::Label get_or_create_pool_label(uint64_t value);
     void emit_load_constant_gpr(GPR dst, uint64_t val, GPR addr_scratch = GPR::X16);
     void emit_load_constant_fpr(FPR dst, uint64_t val, GPR addr_scratch = GPR::X16);
+    void emit_load_constant_fpr32(FPR dst, uint32_t val);
 };
 
 AArch64CompilationResult compile_lir_to_aarch64(const codegen::LirFunction& fn, const Target& target);

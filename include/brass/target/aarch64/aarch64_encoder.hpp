@@ -287,8 +287,13 @@ public:
     void fcmp_zero_s(FPR src);
 
     // Moves & Conversions
+    static bool encode_fp64_imm8(uint64_t bits, uint8_t& out_imm8) noexcept;
+    static bool encode_fp32_imm8(uint32_t bits, uint8_t& out_imm8) noexcept;
     void fmov(FPR dst, FPR src);
     void fmov_s(FPR dst, FPR src);
+    void fmov_imm(FPR dst, uint8_t imm8);
+    void fmov_imm_s(FPR dst, uint8_t imm8);
+    void movi_zero(FPR dst);
     void fmov_to_gpr(GPR dst, FPR src);
     void fmov_from_gpr(FPR dst, GPR src);
     void fmov_to_gpr32(GPR dst, FPR src);
@@ -313,6 +318,7 @@ public:
     void ldr_q(FPR dst, const MemAddress& mem);  // 128-bit Qd
     void ldr_literal(GPR dst, Label target, uint64_t fallback_imm);
     void ldr_literal(FPR dst, Label target, uint64_t fallback_imm);
+    void ldr_literal_s(FPR dst, Label target, uint32_t fallback_imm);
     void str(FPR src, const MemAddress& mem);    // 64-bit Dd
     void str_s(FPR src, const MemAddress& mem);  // 32-bit Sd
     void str_q(FPR src, const MemAddress& mem);  // 128-bit Qd
