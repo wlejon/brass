@@ -389,9 +389,10 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
         const ClosingBranches closing = closing_branches(fn_, b_idx);
         const size_t limit = n_insts - closing.count;
         const BranchFusionPlan plan = plan_branch_fusions(*block);
+        std::vector<uint8_t> paired_consumed(limit, 0);
 
         for (size_t i_idx = 0; i_idx < limit; ++i_idx) {
-            if (plan.skip_inst[i_idx]) continue;
+            if (plan.skip_inst[i_idx] || paired_consumed[i_idx]) continue;
             const auto& inst = *block->instructions[i_idx];
             size_t cur_offset = buffer_.size();
             DebugLoc loc = inst.loc;
@@ -404,6 +405,9 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
             if (inst.opcode == LirOpcode::Jcc && plan.fused[i_idx].kind != FusedBranchKind::None) {
                 const uint32_t target = threading.target(inst.uses[0].label_id);
                 emit_fused_branch(plan.fused[i_idx], block_labels_[target]);
+                continue;
+            }
+            if (try_emit_load_store_pair(*block, i_idx, limit, plan.skip_inst, paired_consumed)) {
                 continue;
             }
             emit_instruction(inst, b_idx == 0, i_idx == 0);

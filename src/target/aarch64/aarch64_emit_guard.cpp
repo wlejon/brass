@@ -109,9 +109,48 @@ void AArch64EmitContext::store_guard_state(const LirInst& inst, size_t slots_off
         return ptr(GPR::X17, 0);
     };
 
+    auto plain_gpr64_or_zero = [](const LirOperand& op) -> std::optional<GPR> {
+        if (op.is_preg() && op.preg_val.is_gpr() && op.size != 4) {
+            return op.preg_val.as_aarch64_gpr();
+        }
+        if (op.is_imm_int() && op.imm_int == 0) {
+            return GPR::XZR;
+        }
+        if (op.is_imm_float()) {
+            uint64_t bits = 0;
+            if (op.size == 4) {
+                const float f = static_cast<float>(op.imm_float);
+                uint32_t b32 = 0;
+                std::memcpy(&b32, &f, sizeof(b32));
+                bits = b32;
+            } else {
+                std::memcpy(&bits, &op.imm_float, sizeof(bits));
+            }
+            if (bits == 0) return GPR::XZR;
+        }
+        return std::nullopt;
+    };
+
     for (size_t i = 0; i < inst.uses.size(); ++i) {
         const auto& op = inst.uses[i];
         const size_t slot_off = slots_off + i * 8;
+
+        if (i + 1 < inst.uses.size() && slot_off <= 504 && (slot_off % 8 == 0)) {
+            const auto& op2 = inst.uses[i + 1];
+            const auto g0 = plain_gpr64_or_zero(op);
+            const auto g1 = plain_gpr64_or_zero(op2);
+            if (g0 && g1) {
+                enc_.stp(*g0, *g1, ptr(GPR::SP, static_cast<int64_t>(slot_off)));
+                ++i;
+                continue;
+            }
+            if (op.is_preg() && op.preg_val.is_xmm() && op2.is_preg() && op2.preg_val.is_xmm()) {
+                enc_.stp(op.preg_val.as_aarch64_fpr(), op2.preg_val.as_aarch64_fpr(),
+                         ptr(GPR::SP, static_cast<int64_t>(slot_off)));
+                ++i;
+                continue;
+            }
+        }
 
         if (op.is_preg() && op.preg_val.is_gpr()) {
             GPR src_gpr = op.preg_val.as_aarch64_gpr();

@@ -323,8 +323,12 @@ public:
     void str_s(FPR src, const MemAddress& mem);  // 32-bit Sd
     void str_q(FPR src, const MemAddress& mem);  // 128-bit Qd
 
-    void ldp(FPR dst1, FPR dst2, const MemAddress& mem); // Dd pair
-    void stp(FPR src1, FPR src2, const MemAddress& mem); // Dd pair
+    void ldp(FPR dst1, FPR dst2, const MemAddress& mem);   // Dd pair
+    void stp(FPR src1, FPR src2, const MemAddress& mem);   // Dd pair
+    void ldp_s(FPR dst1, FPR dst2, const MemAddress& mem); // Sd pair
+    void stp_s(FPR src1, FPR src2, const MemAddress& mem); // Sd pair
+    void ldp_q(FPR dst1, FPR dst2, const MemAddress& mem); // Qd pair
+    void stp_q(FPR src1, FPR src2, const MemAddress& mem); // Qd pair
 
     // 128-bit SIMD Vector (Float)
     void vec_fadd_4s(FPR dst, FPR src1, FPR src2);

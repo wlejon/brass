@@ -23,6 +23,7 @@ add_executable(brass_unit_tests
     unit/test_aarch64_phase3.cpp
     unit/test_aarch64_phase4.cpp
     unit/test_aarch64_phase5.cpp
+    unit/test_aarch64_phase5_de.cpp
     unit/test_aarch64_emit.cpp
     unit/test_aarch64_runtime.cpp
     unit/test_aarch64_objects.cpp

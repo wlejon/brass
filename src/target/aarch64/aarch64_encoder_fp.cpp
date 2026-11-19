@@ -411,4 +411,35 @@ void AArch64Encoder::stp(FPR src1, FPR src2, const MemAddress& mem) {
                       (imm7 << 15) | (reg_code(src2) << 10) | (reg_code(mem.base) << 5) | reg_code(src1));
 }
 
+static void emit_fp_pair(CodeBuffer& buf, bool is_load, uint32_t opc, int64_t scale,
+                         FPR r1, FPR r2, const MemAddress& mem, const char* err_tag) {
+    int64_t off = mem.offset;
+    if (off % scale != 0) throw std::runtime_error(std::string("AArch64Encoder: ") + err_tag + " offset unaligned");
+    int64_t simm7 = off / scale;
+    if (simm7 < -64 || simm7 > 63) {
+        throw std::runtime_error(std::string("AArch64Encoder: ") + err_tag + " offset out of range");
+    }
+    uint32_t imm7 = static_cast<uint32_t>(simm7) & 0x7Fu;
+    uint32_t mode = mem.is_post_indexed() ? 1u : (mem.is_pre_indexed() ? 3u : 2u);
+    uint32_t l = is_load ? 1u : 0u;
+    buf.emit_inst((opc << 30) | (5u << 27) | (1u << 26) | (mode << 23) | (l << 22) |
+                  (imm7 << 15) | (reg_code(r2) << 10) | (reg_code(mem.base) << 5) | reg_code(r1));
+}
+
+void AArch64Encoder::ldp_s(FPR dst1, FPR dst2, const MemAddress& mem) {
+    emit_fp_pair(buffer_, true, 0u, 4, dst1, dst2, mem, "FP LDP.S");
+}
+
+void AArch64Encoder::stp_s(FPR src1, FPR src2, const MemAddress& mem) {
+    emit_fp_pair(buffer_, false, 0u, 4, src1, src2, mem, "FP STP.S");
+}
+
+void AArch64Encoder::ldp_q(FPR dst1, FPR dst2, const MemAddress& mem) {
+    emit_fp_pair(buffer_, true, 2u, 16, dst1, dst2, mem, "FP LDP.Q");
+}
+
+void AArch64Encoder::stp_q(FPR src1, FPR src2, const MemAddress& mem) {
+    emit_fp_pair(buffer_, false, 2u, 16, src1, src2, mem, "FP STP.Q");
+}
+
 } // namespace brass::aarch64

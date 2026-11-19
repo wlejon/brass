@@ -98,6 +98,8 @@ private:
     FPR to_fpr(const codegen::LirOperand& op) const;
 
     void emit_instruction(const codegen::LirInst& inst, bool is_entry_block, bool is_first_inst);
+    bool try_emit_load_store_pair(const codegen::LirBlock& block, size_t start_idx, size_t limit,
+                                  const std::vector<uint8_t>& skip_inst, std::vector<uint8_t>& consumed);
     void emit_mov_instruction(const codegen::LirInst& inst);
     void emit_alu_instruction(const codegen::LirInst& inst);
     void emit_fp_instruction(const codegen::LirInst& inst);
