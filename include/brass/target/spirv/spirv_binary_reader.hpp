@@ -83,6 +83,8 @@ struct ComputeShaderAuditReport {
     bool barriers_uniform = false;
     bool shared_bounds_ok = false;
     bool div_sqrt_ok = false;
+    bool all_shared_proven = true;
+    bool all_div_sqrt_proven = true;
 
     std::array<uint32_t, 3> local_size = {1, 1, 1};
     uint32_t num_functions = 0;
@@ -100,6 +102,9 @@ struct ComputeShaderAuditReport {
         return parse_ok && structural_ok && dominance_ok &&
                barriers_uniform && shared_bounds_ok && div_sqrt_ok &&
                hazards.empty();
+    }
+    bool fully_proven() const noexcept {
+        return ok() && all_shared_proven && all_div_sqrt_proven;
     }
 };
 

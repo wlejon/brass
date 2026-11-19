@@ -317,6 +317,50 @@ TEST_CASE("Superopt - x64 LIR Peephole Superoptimizer with Solver Verification (
         CHECK(!run_x64_lir_superopt(blk, opts));
         CHECK_EQ(blk.instructions.size(), 1u);
     }
+
+    // 3. Soundness: Superopt preserves live div-by-zero / INT_MIN/-1 traps and skips patchable constants
+    {
+        Module mod("superopt_traps_patchable");
+        Builder b(mod);
+        Function* fn = mod.create_function("div_and_patch", Type::i32(), {Type::i32(), Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* x = b.add_block_param(entry, Type::i32());
+        Value* y = b.add_block_param(entry, Type::i32());
+        b.position_at_end(entry);
+        // Unchecked x / y: could trap if y == 0; y - y == 0 cannot collapse x / y
+        Value* pc = b.build_patchable_const_i32("k_mask", -1);
+        Value* masked = b.build_and(x, pc);
+        Value* div = b.build_sdiv(masked, y);
+        b.build_ret(div);
+        fn->rebuild_cfg_predecessors();
+
+        SuperoptStats stats;
+        SuperoptOptions opts;
+        opts.stats = &stats;
+        CHECK(!run_mir_superopt(*fn, mod, opts));
+        CHECK_EQ(stats.masks_elided, 0u);
+    }
+
+    // 4. Soundness: LIR superopt skips patchable MOV instructions
+    {
+        LirBlock blk(0, "lir_patchable");
+        auto m0 = std::make_unique<LirInst>(LirOpcode::Mov);
+        m0->is_patchable = true;
+        m0->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 8));
+        m0->add_use(LirOperand::imm(10, 8));
+        blk.append_inst(std::move(m0));
+
+        auto m1 = std::make_unique<LirInst>(LirOpcode::Mov);
+        m1->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 8));
+        m1->add_use(LirOperand::imm(20, 8));
+        blk.append_inst(std::move(m1));
+
+        SuperoptOptions opts;
+        opts.lir_check_flags = false;
+        CHECK(!run_x64_lir_superopt(blk, opts));
+        CHECK_EQ(blk.instructions.size(), 2u);
+    }
 }
 
 #ifdef BRASS_STANDALONE_TEST

@@ -675,6 +675,88 @@ TEST_CASE("GPU Prover - Tile-Interior Bounds Prover and Redundant Check Eliminat
     CHECK_EQ(brass_prove_tile_interior_bounds(0, 992, 64, 1024, err_buf, sizeof(err_buf)), 1);
 }
 
+TEST_CASE("GPU Prover - Soundness: Missing Buffer Spec -> Unknown, Shared Alignment & Loop Truncation") {
+    // 1. Missing GpuBufferSpec must return Unknown by default (check_global_bounds = true)
+    {
+        Module mod("gpu_missing_spec");
+        Function* fn = mod.create_function("missing_spec", Type::void_type(), {Type::ptr(), Type::ptr()});
+        KernelBuilder kb(mod, fn);
+        Builder& b = kb.builder();
+        BasicBlock* entry = b.append_block("entry");
+        Value* in_ptr = b.add_block_param(entry, Type::ptr());
+        Value* out_ptr = b.add_block_param(entry, Type::ptr());
+        b.position_at_end(entry);
+        Value* v = kb.load_i32_indexed(in_ptr, kb.tid_x());
+        kb.store_i32_indexed(out_ptr, kb.tid_x(), v);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        GpuProverOptions strict_opts;
+        strict_opts.local_size_x = 64;
+        strict_opts.grid_size_x = 1;
+        auto r_strict = verify_gpu_memory_safety(*fn, strict_opts);
+        CHECK_EQ(r_strict.status, EquivStatus::Unknown);
+        CHECK(!r_strict.is_safe());
+
+        GpuProverOptions unchecked_opts = strict_opts;
+        unchecked_opts.check_global_bounds = false;
+        auto r_optout = verify_gpu_memory_safety(*fn, unchecked_opts);
+        CHECK_EQ(r_optout.status, EquivStatus::ProvenEquivalent);
+        CHECK(r_optout.is_safe());
+    }
+
+    // 2. Misaligned raw byte offset into shared memory is caught
+    {
+        Module mod("gpu_shared_misalign");
+        Function* fn = mod.create_function("sh_misalign", Type::void_type(), {Type::ptr()});
+        KernelBuilder kb(mod, fn);
+        Builder& b = kb.builder();
+        BasicBlock* entry = b.append_block("entry");
+        Value* out_ptr = b.add_block_param(entry, Type::ptr());
+        b.position_at_end(entry);
+        Value* smem = kb.shared_alloc_i32(64);
+        Value* unaligned_val = b.build_call("ptx_shared_load_i32", Type::i32(), {smem, kb.const_i32(1)});
+        kb.store_i32(out_ptr, unaligned_val, 0);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        GpuProverOptions opts;
+        opts.buffers = {{0, 256, -1, 4, 16}};
+        auto res = verify_gpu_memory_safety(*fn, opts);
+        CHECK_EQ(res.status, EquivStatus::Counterexample);
+        CHECK(!res.violations.empty());
+        CHECK(res.violations[0].is_shared);
+        CHECK(res.violations[0].is_alignment);
+    }
+
+    // 3. Truncated GPU loop yields Unknown instead of falsely claiming ProvenEquivalent
+    {
+        Module mod("gpu_trunc_loop");
+        Function* fn = mod.create_function("trunc_gpu", Type::void_type(), {Type::i32()});
+        KernelBuilder kb(mod, fn);
+        Builder& b = kb.builder();
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hdr = b.append_block("hdr");
+        BasicBlock* body = b.append_block("body");
+        BasicBlock* exit = b.append_block("exit");
+        Value* n = b.add_block_param(entry, Type::i32());
+        Value* iv = b.add_block_param(hdr, Type::i32());
+        b.position_at_end(entry);
+        b.build_br(hdr, {kb.const_i32(0)});
+        b.position_at_end(hdr);
+        b.build_br_if(b.build_slt(iv, n), body, {}, exit, {});
+        b.position_at_end(body);
+        b.build_br(hdr, {b.build_add(iv, kb.const_i32(1))});
+        b.position_at_end(exit);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        GpuProverOptions opts;
+        opts.loop_unroll_bound = 2;
+        CHECK_EQ(verify_gpu_barrier_uniformity(*fn, opts).status, EquivStatus::Unknown);
+    }
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

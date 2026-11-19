@@ -502,7 +502,7 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             }
             break;
 
-        case BVOp::Mul:
+        case BVOp::Mul: {
             if (cb.op == BVOp::Const) {
                 if (cb.imm == 0) return make_const(0, w);
                 if (cb.imm == 1) return a;
@@ -515,17 +515,22 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             if (ca.op == BVOp::Mul && nodes_[ca.b].op == BVOp::Const && cb.op == BVOp::Const) {
                 return make_binary(BVOp::Mul, ca.a, make_const(nodes_[ca.b].imm * cb.imm, w), w);
             }
-            if (ca.op == BVOp::Add && nodes_[ca.b].op == BVOp::Const) {
+            auto is_simple_mul_factor = [](BVOp op_k) noexcept {
+                return op_k == BVOp::Const || op_k == BVOp::Var ||
+                       op_k == BVOp::ZExt || op_k == BVOp::SExt || op_k == BVOp::Extract;
+            };
+            if (is_simple_mul_factor(cb.op) && ca.op == BVOp::Add && nodes_[ca.b].op == BVOp::Const) {
                 BVNodeId t1 = make_binary(BVOp::Mul, ca.a, b, w);
                 BVNodeId t2 = make_binary(BVOp::Mul, b, ca.b, w);
                 return make_binary(BVOp::Add, t1, t2, w);
             }
-            if (cb.op == BVOp::Add && nodes_[cb.b].op == BVOp::Const) {
+            if (is_simple_mul_factor(ca.op) && cb.op == BVOp::Add && nodes_[cb.b].op == BVOp::Const) {
                 BVNodeId t1 = make_binary(BVOp::Mul, a, cb.a, w);
                 BVNodeId t2 = make_binary(BVOp::Mul, a, cb.b, w);
                 return make_binary(BVOp::Add, t1, t2, w);
             }
             break;
+        }
 
         case BVOp::And:
             if (a == b) return a;

@@ -126,7 +126,7 @@ GpuExecTrace execute_gpu_mir(
             Opcode op = inst->opcode();
             uint32_t rw = gpu_type_bv_width(inst->type());
             if (rw == 0) rw = 32;
-            BVNodeId res = 0;
+            BVNodeId res = UINT32_MAX;
 
             switch (op) {
             case Opcode::iconst_i32:
@@ -410,9 +410,14 @@ GpuExecTrace execute_gpu_mir(
                     uint32_t arr_idx = 0;
                     BVNodeId base_byte_off = 0, base_elem_idx = 0;
                     resolve_shared_address(ctx, ptr, trace.shared_allocs, arr_idx, base_byte_off, base_elem_idx);
+                    BVNodeId byte_off = base_byte_off;
                     BVNodeId elem_idx = base_elem_idx;
                     if (inst->operand_count() > 1 && inst->operand(1)) {
                         BVNodeId ex = get_v(inst->operand(1));
+                        BVNodeId ex_bytes = indexed
+                            ? gpu_mul_or_shl(ctx, 64, gpu_coerce_width(ctx, ex, 64, false), bv_const(ctx, 64, ebytes))
+                            : gpu_coerce_width(ctx, ex, 64, true);
+                        byte_off = gpu_add_addr64(ctx, base_byte_off, ex_bytes);
                         BVNodeId ex_idx = indexed
                             ? gpu_coerce_width(ctx, ex, 32, false)
                             : extract_shared_elem_index_32(ctx, ex, shift);
@@ -420,7 +425,7 @@ GpuExecTrace execute_gpu_mir(
                             ? ex_idx
                             : bv_bin(ctx, BVOp::Add, 32, base_elem_idx, ex_idx);
                     }
-                    record_shared_access(ctx, trace, cur.cond, false, arr_idx, elem_idx, ebytes);
+                    record_shared_access(ctx, trace, cur.cond, false, arr_idx, elem_idx, ebytes, byte_off);
                     BVNodeId caddr = make_shared_canonical_addr(ctx, arr_idx, elem_idx, ebytes);
                     res = env.read_mem(ctx, true, trace.shared_stores, caddr, ebytes);
                 } else if (sym.starts_with("ptx_shared_store_")) {
@@ -433,9 +438,14 @@ GpuExecTrace execute_gpu_mir(
                     uint32_t arr_idx = 0;
                     BVNodeId base_byte_off = 0, base_elem_idx = 0;
                     resolve_shared_address(ctx, ptr, trace.shared_allocs, arr_idx, base_byte_off, base_elem_idx);
+                    BVNodeId byte_off = base_byte_off;
                     BVNodeId elem_idx = base_elem_idx;
                     if (ex_op) {
                         BVNodeId ex = get_v(ex_op);
+                        BVNodeId ex_bytes = indexed
+                            ? gpu_mul_or_shl(ctx, 64, gpu_coerce_width(ctx, ex, 64, false), bv_const(ctx, 64, ebytes))
+                            : gpu_coerce_width(ctx, ex, 64, true);
+                        byte_off = gpu_add_addr64(ctx, base_byte_off, ex_bytes);
                         BVNodeId ex_idx = indexed
                             ? gpu_coerce_width(ctx, ex, 32, false)
                             : extract_shared_elem_index_32(ctx, ex, shift);
@@ -443,7 +453,7 @@ GpuExecTrace execute_gpu_mir(
                             ? ex_idx
                             : bv_bin(ctx, BVOp::Add, 32, base_elem_idx, ex_idx);
                     }
-                    record_shared_access(ctx, trace, cur.cond, true, arr_idx, elem_idx, ebytes);
+                    record_shared_access(ctx, trace, cur.cond, true, arr_idx, elem_idx, ebytes, byte_off);
                     BVNodeId caddr = make_shared_canonical_addr(ctx, arr_idx, elem_idx, ebytes);
                     BVNodeId sval = gpu_coerce_width(ctx, get_v(val_op), ebytes * 8);
                     trace.shared_stores.push_back({cur.cond, caddr, ebytes, sval});
@@ -490,8 +500,8 @@ GpuExecTrace execute_gpu_mir(
                         uint32_t arr_idx = 0;
                         BVNodeId boff = 0, eidx = 0;
                         resolve_shared_address(ctx, ptr, trace.shared_allocs, arr_idx, boff, eidx);
-                        record_shared_access(ctx, trace, cur.cond, false, arr_idx, eidx, nb);
-                        record_shared_access(ctx, trace, cur.cond, true, arr_idx, eidx, nb);
+                        record_shared_access(ctx, trace, cur.cond, false, arr_idx, eidx, nb, boff);
+                        record_shared_access(ctx, trace, cur.cond, true, arr_idx, eidx, nb, boff);
                         caddr = make_shared_canonical_addr(ctx, arr_idx, eidx, nb);
                     } else {
                         record_global_access(ctx, trace, env, cur.cond, false, caddr, nb);
@@ -629,10 +639,16 @@ GpuExecTrace execute_gpu_mir(
             case Opcode::unreachable:
                 trace.trapped = bv_bin(ctx, BVOp::Or, 1, trace.trapped, cur.cond);
                 break;
-            default:
+            case Opcode::keep_alive:
+            case Opcode::safepoint:
+            case Opcode::resume_point:
                 break;
+            default:
+                trace.supported = false;
+                trace.error_msg = "Unsupported MIR opcode in GPU tracer: " + std::string(opcode_name(op));
+                return trace;
             }
-            if (inst->result() && res != 0) {
+            if (inst->result() && res != UINT32_MAX) {
                 cur.vals[inst->result()->id()] = res;
             }
         }

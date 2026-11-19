@@ -42,11 +42,12 @@ void Function::retarget_guard_elim_witness(const Value* from, const Value* to) {
             continue;
         }
         c.witness_inst_or_val_id = 0;
-        if (c.reason == GuardElimCert::Reason::DominatedSameCond ||
-            c.reason == GuardElimCert::Reason::NonNegativeMask) {
-            c.reason = GuardElimCert::Reason::ImpliedRelational;
-        }
     }
+    std::erase_if(guard_elim_certs_, [](const GuardElimCert& c) {
+        return c.witness_inst_or_val_id == 0 &&
+               (c.reason == GuardElimCert::Reason::DominatedSameCond ||
+                c.reason == GuardElimCert::Reason::NonNegativeMask);
+    });
 }
 
 namespace {

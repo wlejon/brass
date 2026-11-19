@@ -199,8 +199,8 @@ struct EGraphBVEncoder {
         const Instruction* inst = v->defining_instruction();
         const Opcode op = inst->opcode();
         BVNodeId res = kInvalidBV;
-        if (op == Opcode::iconst_i32 || op == Opcode::patchable_const_i32) res = ctx.make_const(static_cast<uint32_t>(inst->imm_i32()), 32);
-        else if (op == Opcode::iconst_i64 || op == Opcode::patchable_const_i64) res = ctx.make_const(static_cast<uint64_t>(inst->imm_i64()), 64);
+        if (op == Opcode::iconst_i32) res = ctx.make_const(static_cast<uint32_t>(inst->imm_i32()), 32);
+        else if (op == Opcode::iconst_i64) res = ctx.make_const(static_cast<uint64_t>(inst->imm_i64()), 64);
         else {
             EOp eop = EOp::Var; bool sw = false;
             if (!map_inst_to_eop(inst, eop, sw)) return make_leaf();
@@ -372,8 +372,8 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
             if (vt != Type::i32() && vt != Type::i64()) return kInvalidEClass;
             if (v->is_instruction()) {
                 const Instruction* def = v->defining_instruction();
-                if (def && (def->opcode() == Opcode::iconst_i32 || def->opcode() == Opcode::patchable_const_i32)) return val_to_eclass[v] = eg.add_const(static_cast<uint32_t>(def->imm_i32()), 32);
-                if (def && (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::patchable_const_i64)) return val_to_eclass[v] = eg.add_const(static_cast<uint64_t>(def->imm_i64()), 64);
+                if (def && def->opcode() == Opcode::iconst_i32) return val_to_eclass[v] = eg.add_const(static_cast<uint32_t>(def->imm_i32()), 32);
+                if (def && def->opcode() == Opcode::iconst_i64) return val_to_eclass[v] = eg.add_const(static_cast<uint64_t>(def->imm_i64()), 64);
             }
             const EClassId cid = eg.add_var(v->id(), (vt == Type::i32()) ? 32u : 64u, v);
             val_to_eclass[v] = cid; var_map[v->id()] = v;
@@ -388,7 +388,7 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
             if (!res_v || (res_v->type() != Type::i32() && res_v->type() != Type::i64())) continue;
             const uint32_t w = (res_v->type() == Type::i32()) ? 32u : 64u;
             const Opcode oc = inst->opcode();
-            if (oc == Opcode::iconst_i32 || oc == Opcode::patchable_const_i32 || oc == Opcode::iconst_i64 || oc == Opcode::patchable_const_i64) {
+            if (oc == Opcode::iconst_i32 || oc == Opcode::iconst_i64) {
                 (void)get_or_add_leaf(res_v); continue;
             }
             EOp eop = EOp::Var; bool swap_ops = false;
@@ -466,7 +466,7 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
                 cur = next; continue;
             }
             const Opcode op = cur->opcode();
-            if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64 || op == Opcode::patchable_const_i32 || op == Opcode::patchable_const_i64) {
+            if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64) {
                 dominating_vals.insert(cur->result()); cur = next; continue;
             }
             Value* res_v = cur->result();
@@ -481,9 +481,33 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
                 const BVNodeId orig_bv = enc.encode(res_v, 0);
                 const BVNodeId cand_bv = encode_extracted_bv(ctx, enc, best_expr, var_map);
                 if (orig_bv != kInvalidBV && cand_bv != kInvalidBV && ctx.width(orig_bv) == ctx.width(cand_bv)) {
-                    const BVNodeId violated = ctx.make_binary(BVOp::And, build_path_cond(orig_bv, cand_bv), ctx.make_binary(BVOp::Ne, orig_bv, cand_bv, 1), 1);
+                    const BVNodeId pc = build_path_cond(orig_bv, cand_bv);
+                    bool trap_safe = true;
+                    if (op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod || op == Opcode::umod) {
+                        const uint32_t dw = ctx.width(orig_bv);
+                        const BVNodeId lhs_bv = enc.encode(cur->operand(0), 0);
+                        const BVNodeId rhs_bv = enc.encode(cur->operand(1), 0);
+                        if (lhs_bv == kInvalidBV || rhs_bv == kInvalidBV) {
+                            trap_safe = false;
+                        } else {
+                            BVNodeId trap_cond = ctx.make_binary(BVOp::Eq, rhs_bv, ctx.make_const(0, dw), 1);
+                            if (op == Opcode::sdiv || op == Opcode::smod) {
+                                const uint64_t smin = (dw == 32) ? 0x80000000ULL : 0x8000000000000000ULL;
+                                const uint64_t neg1 = (dw == 32) ? 0xFFFFFFFFULL : ~0ULL;
+                                BVNodeId ovf = ctx.make_binary(
+                                    BVOp::And,
+                                    ctx.make_binary(BVOp::Eq, lhs_bv, ctx.make_const(smin, dw), 1),
+                                    ctx.make_binary(BVOp::Eq, rhs_bv, ctx.make_const(neg1, dw), 1), 1);
+                                trap_cond = ctx.make_binary(BVOp::Or, trap_cond, ovf, 1);
+                            }
+                            const BVNodeId trap_viol = ctx.make_binary(BVOp::And, pc, trap_cond, 1);
+                            if (opts.stats) opts.stats->solver_queries++;
+                            trap_safe = (verify::solve_nonzero(ctx, trap_viol, limits.max_sat_conflicts).status == SolveOutcome::Unsat);
+                        }
+                    }
+                    const BVNodeId violated = ctx.make_binary(BVOp::And, pc, ctx.make_binary(BVOp::Ne, orig_bv, cand_bv, 1), 1);
                     if (opts.stats) opts.stats->solver_queries++;
-                    if (verify::solve_nonzero(ctx, violated, limits.max_sat_conflicts).status == SolveOutcome::Unsat) {
+                    if (trap_safe && verify::solve_nonzero(ctx, violated, limits.max_sat_conflicts).status == SolveOutcome::Unsat) {
                         verify::debug_verify_unsat_samples(ctx, violated);
                         Builder b(mod); b.set_function(&fn); b.position_before(cur);
                         if (Value* repl = materialize_extracted_mir(b, best_expr, cur, var_map, available_ssa)) {

@@ -439,7 +439,7 @@ TEST_CASE("SPIR-V prover - division and sqrt hazard detection") {
         CHECK(has_hazard(rep, HazardKind::DefiniteNegativeSqrt));
     }
 
-    // 3. POSITIVE: division guarded by FMax(x, 1e-5f) and OpSelect ternary
+    // 3. POSITIVE: division guarded by FMax(x, 1e-5f)
     {
         ComputeBuilder cb(64, 1, 1);
         Module& m = cb.m;
@@ -456,8 +456,33 @@ TEST_CASE("SPIR-V prover - division and sqrt hazard detection") {
         ComputeShaderAuditReport rep = audit_compute_shader_binary(write(m));
         CHECK(rep.ok());
         CHECK(rep.div_sqrt_ok);
+        CHECK(rep.all_div_sqrt_proven);
+        CHECK(rep.fully_proven());
         REQUIRE_EQ(rep.divisions.size(), 1u);
         CHECK(rep.divisions[0].proven_safe);
+    }
+
+    // 4. HONESTY: OpFAdd(x, x) where x can be 0 must NOT set proven_safe or all_div_sqrt_proven
+    {
+        ComputeBuilder cb(64, 1, 1);
+        Module& m = cb.m;
+        Block entry{m.new_id(), {}};
+        Id lid_x = cb.load_lid_x(entry);
+        Id xf = m.new_id();
+        entry.insts.push_back(Inst(spv::OpConvertUToF, cb.f32_t, xf).id(lid_x));
+        Id denom = m.new_id();
+        entry.insts.push_back(Inst(spv::OpFAdd, cb.f32_t, denom).id(xf).id(xf));
+        Id div1 = m.new_id();
+        entry.insts.push_back(Inst(spv::OpFDiv, cb.f32_t, div1).id(m.c_f32(1.0f)).id(denom));
+        entry.insts.push_back(Inst(spv::OpReturn));
+        cb.f().blocks.push_back(std::move(entry));
+
+        ComputeShaderAuditReport rep = audit_compute_shader_binary(write(m));
+        CHECK(rep.ok());
+        CHECK(!rep.all_div_sqrt_proven);
+        CHECK(!rep.fully_proven());
+        REQUIRE_EQ(rep.divisions.size(), 1u);
+        CHECK(!rep.divisions[0].proven_safe);
     }
 }
 

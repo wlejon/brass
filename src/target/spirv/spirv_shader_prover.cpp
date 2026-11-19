@@ -60,6 +60,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
         }
     }
     report.dominance_ok = report.barriers_uniform = report.shared_bounds_ok = report.div_sqrt_ok = true;
+    report.all_shared_proven = report.all_div_sqrt_proven = true;
 
     for (const Function& fn : mod.functions) {
         report.num_blocks += static_cast<uint32_t>(fn.blocks.size());
@@ -146,7 +147,19 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
             else if (bkind == kBuiltInSubgroupId) lid_comp[vid] = 5;
         }
 
-        for (int pass = 0; pass < 3; ++pass) {
+        bool taint_changed = true;
+        for (int pass = 0; pass < 64 && taint_changed; ++pass) {
+            taint_changed = false;
+            auto add_wg = [&](Id v) { if (wg_div.insert(v).second) taint_changed = true; };
+            auto add_sg = [&](Id v) { if (sg_div.insert(v).second) taint_changed = true; };
+            auto del_sg = [&](Id v) { if (sg_div.erase(v) > 0) taint_changed = true; };
+            auto set_lid = [&](Id v, int k) {
+                auto it = lid_comp.find(v);
+                if (it == lid_comp.end() || it->second != k) {
+                    lid_comp[v] = k;
+                    taint_changed = true;
+                }
+            };
             for (size_t bi = 0; bi < cfg.num_blocks; ++bi) {
                 if (!cfg.reachable[bi]) continue;
                 bool blk_wg_div = false;
@@ -166,7 +179,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                         if (bit != lid_comp.end() && bit->second == 10 && inst.operands.size() >= 2) {
                             auto cit = mc.int_consts.find(inst.operands[1].value);
                             if (cit != mc.int_consts.end() && cit->second < 3) {
-                                lid_comp[inst.result] = static_cast<int>(cit->second);
+                                set_lid(inst.result, static_cast<int>(cit->second));
                             }
                         }
                         auto pit = mc.var_pointee.find(base);
@@ -176,59 +189,59 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                                 uint64_t mkey = (static_cast<uint64_t>(pit->second) << 32) | cit->second;
                                 auto mbit = mc.member_builtins.find(mkey);
                                 if (mbit != mc.member_builtins.end()) {
-                                    if (is_wg_divergent_builtin(mbit->second)) wg_div.insert(inst.result);
-                                    if (is_sg_divergent_builtin(mbit->second)) sg_div.insert(inst.result);
+                                    if (is_wg_divergent_builtin(mbit->second)) add_wg(inst.result);
+                                    if (is_sg_divergent_builtin(mbit->second)) add_sg(inst.result);
                                 }
                             }
                         }
                         for (const Operand& o : inst.operands) {
-                            if (o.is_id() && wg_div.count(o.value)) wg_div.insert(inst.result);
-                            if (o.is_id() && sg_div.count(o.value)) sg_div.insert(inst.result);
+                            if (o.is_id() && wg_div.count(o.value)) add_wg(inst.result);
+                            if (o.is_id() && sg_div.count(o.value)) add_sg(inst.result);
                         }
                     } else if (inst.op == spv::OpLoad && !inst.operands.empty()) {
                         Id ptr = inst.operands[0].value;
                         auto bit = lid_comp.find(ptr);
-                        if (bit != lid_comp.end()) lid_comp[inst.result] = bit->second;
-                        if (wg_div.count(ptr)) wg_div.insert(inst.result);
-                        if (sg_div.count(ptr)) sg_div.insert(inst.result);
+                        if (bit != lid_comp.end()) set_lid(inst.result, bit->second);
+                        if (wg_div.count(ptr)) add_wg(inst.result);
+                        if (sg_div.count(ptr)) add_sg(inst.result);
                     } else if (inst.op == spv::OpStore && inst.operands.size() >= 2) {
                         Id ptr = inst.operands[0].value;
                         Id val = inst.operands[1].value;
                         auto scit = local_var_sc.find(ptr);
                         if (scit != local_var_sc.end() &&
                             (scit->second == spv::StorageClassFunction || scit->second == spv::StorageClassPrivate)) {
-                            if (wg_div.count(val) || blk_wg_div) wg_div.insert(ptr);
-                            if (sg_div.count(val) || blk_sg_div) sg_div.insert(ptr);
+                            if (wg_div.count(val) || blk_wg_div) add_wg(ptr);
+                            if (sg_div.count(val) || blk_sg_div) add_sg(ptr);
                         }
                     } else if (is_subgroup_uniformizing_op(inst)) {
-                        wg_div.insert(inst.result);
-                        sg_div.erase(inst.result);
+                        add_wg(inst.result);
+                        del_sg(inst.result);
                     } else if (inst.op == spv::OpPhi) {
                         for (size_t k = 0; k + 1 < inst.operands.size(); k += 2) {
                             Id val = inst.operands[k].value;
                             Id plab = inst.operands[k + 1].value;
-                            if (wg_div.count(val)) wg_div.insert(inst.result);
-                            if (sg_div.count(val)) sg_div.insert(inst.result);
+                            if (wg_div.count(val)) add_wg(inst.result);
+                            if (sg_div.count(val)) add_sg(inst.result);
                             auto pit = cfg.block_index.find(plab);
                             if (pit != cfg.block_index.end()) {
                                 for (const auto& [h, reg] : cfg.control_dep_region) {
                                     if (reg.count(pit->second) && !reg.count(bi)) {
                                         Id c = cfg.branch_cond[h];
-                                        if (wg_div.count(c)) wg_div.insert(inst.result);
-                                        if (sg_div.count(c)) sg_div.insert(inst.result);
+                                        if (wg_div.count(c)) add_wg(inst.result);
+                                        if (sg_div.count(c)) add_sg(inst.result);
                                     }
                                 }
                             }
                         }
                     } else if (inst.result != 0) {
                         for (const Operand& o : inst.operands) {
-                            if (o.is_id() && wg_div.count(o.value)) wg_div.insert(inst.result);
-                            if (o.is_id() && sg_div.count(o.value)) sg_div.insert(inst.result);
+                            if (o.is_id() && wg_div.count(o.value)) add_wg(inst.result);
+                            if (o.is_id() && sg_div.count(o.value)) add_sg(inst.result);
                         }
                         if (inst.op == spv::OpUDiv && inst.operands.size() >= 2) {
                             auto cit = mc.int_consts.find(inst.operands[1].value);
                             if (cit != mc.int_consts.end() && cit->second >= 32 && (cit->second % 32) == 0) {
-                                sg_div.erase(inst.result);
+                                del_sg(inst.result);
                             }
                         }
                     }
@@ -290,20 +303,67 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
             return sb;
         };
 
+        // Helpers for sound float/int positivity and non-negativity checks in Property 4.
+        auto is_non_neg_f = [&](auto& self, Id vid, int depth) -> bool {
+            if (depth > 8) return false;
+            auto fcit = mc.float_consts.find(vid);
+            if (fcit != mc.float_consts.end()) return fcit->second >= 0.0;
+            auto dit = def_inst.find(vid);
+            if (dit == def_inst.end() || !dit->second) return false;
+            const Inst& d = *dit->second;
+            if (d.op == spv::OpExtInst && d.operands.size() >= 3) {
+                uint32_t eop = d.operands[1].value;
+                if (eop == GLSLstd450FAbs || eop == GLSLstd450Sqrt ||
+                    eop == GLSLstd450Exp || eop == GLSLstd450Exp2 || eop == GLSLstd450Length) {
+                    return true;
+                }
+                if ((eop == GLSLstd450FMax || eop == GLSLstd450NMax) && d.operands.size() >= 4) {
+                    return self(self, d.operands[2].value, depth + 1) ||
+                           self(self, d.operands[3].value, depth + 1);
+                }
+                if ((eop == GLSLstd450FClamp || eop == GLSLstd450NClamp) && d.operands.size() >= 5) {
+                    return self(self, d.operands[3].value, depth + 1);
+                }
+            }
+            if (d.op == spv::OpFMul && d.operands.size() >= 2 &&
+                d.operands[0].value == d.operands[1].value) {
+                return true;
+            }
+            if (d.op == spv::OpFAdd && d.operands.size() >= 2) {
+                return self(self, d.operands[0].value, depth + 1) &&
+                       self(self, d.operands[1].value, depth + 1);
+            }
+            return false;
+        };
+        auto is_pos_f = [&](auto& self, Id vid, int depth) -> bool {
+            if (depth > 8) return false;
+            auto fcit = mc.float_consts.find(vid);
+            if (fcit != mc.float_consts.end()) return fcit->second > 0.0;
+            auto dit = def_inst.find(vid);
+            if (dit == def_inst.end() || !dit->second) return false;
+            const Inst& d = *dit->second;
+            if (d.op == spv::OpExtInst && d.operands.size() >= 3) {
+                uint32_t eop = d.operands[1].value;
+                if ((eop == GLSLstd450FMax || eop == GLSLstd450NMax) && d.operands.size() >= 4) {
+                    return self(self, d.operands[2].value, depth + 1) ||
+                           self(self, d.operands[3].value, depth + 1);
+                }
+                if ((eop == GLSLstd450FClamp || eop == GLSLstd450NClamp) && d.operands.size() >= 5) {
+                    return self(self, d.operands[3].value, depth + 1);
+                }
+            }
+            if (d.op == spv::OpFAdd && d.operands.size() >= 2) {
+                const Id a = d.operands[0].value, b = d.operands[1].value;
+                return (self(self, a, depth + 1) && is_non_neg_f(is_non_neg_f, b, depth + 1)) ||
+                       (self(self, b, depth + 1) && is_non_neg_f(is_non_neg_f, a, depth + 1));
+            }
+            return false;
+        };
+
         // 2, 3, 4: Inspect instructions in block `bi`.
         for (size_t bi = 0; bi < cfg.num_blocks; ++bi) {
             if (!cfg.reachable[bi]) continue;
             const Block& b = fn.blocks[bi];
-
-            std::unordered_set<Id> select_operands;
-            for (const Inst& inst : b.insts) {
-                if (inst.op == spv::OpSelect && inst.operands.size() >= 3) {
-                    select_operands.insert(inst.operands[1].value);
-                    select_operands.insert(inst.operands[2].value);
-                } else if (inst.op == spv::OpCompositeConstruct) {
-                    for (const Operand& o : inst.operands) select_operands.insert(o.value);
-                }
-            }
 
             for (const Inst& inst : b.insts) {
                 // Property 2: Barrier & Subgroup Legality
@@ -316,6 +376,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                                  scope == static_cast<uint64_t>(spv::ScopeDevice));
                     }
                     bool divergent = false;
+                    bool unknown_uniformity = false;
                     Id div_cond = 0;
                     for (const auto& [h, reg] : cfg.control_dep_region) {
                         if (!reg.count(bi)) continue;
@@ -337,17 +398,22 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                             auto can_false = verify::solve_nonzero(
                                 ctx, ctx.make_binary(verify::BVOp::And, pc_base,
                                                      ctx.make_unary(verify::BVOp::Not, cnode, 1), 1), 2000);
-                            if (can_true.status == verify::SolveOutcome::Sat &&
-                                can_false.status == verify::SolveOutcome::Sat) {
+                            if (can_true.status != verify::SolveOutcome::Unsat &&
+                                can_false.status != verify::SolveOutcome::Unsat) {
                                 divergent = true;
+                                unknown_uniformity = (can_true.status == verify::SolveOutcome::Unknown ||
+                                                      can_false.status == verify::SolveOutcome::Unknown);
                                 div_cond = c;
                                 break;
                             }
                         }
                     }
-                    std::string detail = divergent
-                        ? ("divergent control flow on condition %" + std::to_string(div_cond))
-                        : "uniform control flow";
+                    std::string detail = !divergent
+                        ? "uniform control flow"
+                        : (unknown_uniformity
+                               ? ("unproven uniformity (solver budget exhausted on condition %" +
+                                  std::to_string(div_cond) + ")")
+                               : ("divergent control flow on condition %" + std::to_string(div_cond)));
                     report.barriers.push_back(BarrierAuditEntry{fn.name, b.label, inst.op, is_wg, !divergent, detail});
                     if (divergent) {
                         report.barriers_uniform = false;
@@ -398,6 +464,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
 
                                 bool proven_ok = (res.status == verify::SolveOutcome::Unsat);
                                 bool static_oob = (res.status == verify::SolveOutcome::Sat && only_constrained_builtins);
+                                if (!proven_ok) report.all_shared_proven = false;
                                 std::string detail = proven_ok
                                     ? "proven in-bounds (< " + std::to_string(arr_len) + ") by BVSolver"
                                     : (static_oob ? "STATIC OOB (>= " + std::to_string(arr_len) + ")"
@@ -448,45 +515,37 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                     } else if (mc.int_consts.count(opd) && mc.int_consts[opd] != 0) {
                         safe = true;
                         reason = "non-zero integer constant";
-                    } else if (mc.float_consts.count(opd) && mc.float_consts[opd] != 0.0) {
+                    } else if (!is_sqrt && is_pos_f(is_pos_f, opd, 0)) {
+                        safe = true;
+                        reason = mc.float_consts.count(opd) ? "positive float constant" : "provably positive float expression";
+                    } else if (!is_sqrt && mc.float_consts.count(opd) && mc.float_consts[opd] != 0.0) {
                         safe = true;
                         reason = "non-zero float constant";
-                    } else if (select_operands.count(inst.result)) {
+                    } else if (is_sqrt && ext_op == GLSLstd450Sqrt && is_non_neg_f(is_non_neg_f, opd, 0)) {
                         safe = true;
-                        reason = "guarded by OpSelect ternary";
-                    } else {
+                        reason = mc.float_consts.count(opd) ? "non-negative float constant" : "provably non-negative float expression";
+                    } else if (is_sqrt && ext_op == GLSLstd450InverseSqrt && is_pos_f(is_pos_f, opd, 0)) {
+                        safe = true;
+                        reason = mc.float_consts.count(opd) ? "positive float constant" : "provably positive float expression";
+                    } else if (inst.op == spv::OpUDiv || inst.op == spv::OpSDiv) {
                         auto dit = def_inst.find(opd);
-                        if (dit != def_inst.end() && dit->second) {
-                            const Inst& dinst = *dit->second;
-                            if (dinst.op == spv::OpExtInst && dinst.operands.size() >= 3) {
-                                uint32_t deop = dinst.operands[1].value;
-                                if (deop == GLSLstd450FMax || deop == GLSLstd450UMax || deop == GLSLstd450SMax ||
-                                    deop == GLSLstd450FClamp || deop == GLSLstd450UClamp || deop == GLSLstd450SClamp) {
-                                    safe = true;
-                                    reason = "clamped via max/clamp";
-                                } else if (deop == GLSLstd450Exp || deop == GLSLstd450Exp2 ||
-                                           deop == GLSLstd450Length || deop == GLSLstd450Sqrt) {
-                                    safe = true;
-                                    reason = "positive intrinsic result";
-                                }
-                            } else if (dinst.op == spv::OpFAdd || dinst.op == spv::OpIAdd ||
-                                       dinst.op == spv::OpFMul || dinst.op == spv::OpDot ||
-                                       dinst.op == spv::OpSelect) {
+                        if (dit != def_inst.end() && dit->second && dit->second->op == spv::OpExtInst &&
+                            dit->second->operands.size() >= 4) {
+                            uint32_t deop = dit->second->operands[1].value;
+                            auto cpos = [&](Id cid) { return mc.int_consts.count(cid) && mc.int_consts[cid] > 0; };
+                            if ((deop == GLSLstd450UMax || deop == GLSLstd450SMax) &&
+                                (cpos(dit->second->operands[2].value) || cpos(dit->second->operands[3].value))) {
                                 safe = true;
-                                reason = "composite / epsilon-shifted expression";
-                            }
-                        }
-                        if (!safe) {
-                            for (const auto& [h, reg] : cfg.control_dep_region) {
-                                if (reg.count(bi)) {
-                                    safe = true;
-                                    reason = "guarded by enclosing branch";
-                                    break;
-                                }
+                                reason = "positive integer lower bound via max";
+                            } else if ((deop == GLSLstd450UClamp || deop == GLSLstd450SClamp) &&
+                                       dit->second->operands.size() >= 5 && cpos(dit->second->operands[3].value)) {
+                                safe = true;
+                                reason = "positive integer lower bound via clamp";
                             }
                         }
                     }
 
+                    if (!safe) report.all_div_sqrt_proven = false;
                     report.divisions.push_back(DivisionAuditEntry{
                         fn.name, b.label, inst.result, inst.op, ext_op, opd, safe, reason});
                 }

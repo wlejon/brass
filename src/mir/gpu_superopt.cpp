@@ -216,11 +216,11 @@ bool get_const_int(const Value* v, int64_t& out_imm) noexcept {
     if (!v || !v->is_instruction()) return false;
     const Instruction* inst = v->defining_instruction();
     if (!inst) return false;
-    if (inst->opcode() == Opcode::iconst_i32 || inst->opcode() == Opcode::patchable_const_i32) {
+    if (inst->opcode() == Opcode::iconst_i32) {
         out_imm = inst->imm_i32();
         return true;
     }
-    if (inst->opcode() == Opcode::iconst_i64 || inst->opcode() == Opcode::patchable_const_i64) {
+    if (inst->opcode() == Opcode::iconst_i64) {
         out_imm = inst->imm_i64();
         return true;
     }
@@ -232,6 +232,7 @@ struct GpuSuperoptEncoder {
     const RangeAnalysis& ra;
     const BasicBlock* cur_bb;
     uint32_t max_depth;
+    const SuperoptOptions& opts;
     std::unordered_map<const Value*, BVNodeId> cache;
     std::unordered_map<std::string, BVNodeId> special_vars;
     std::vector<BVNodeId> range_assumptions;
@@ -307,11 +308,9 @@ struct GpuSuperoptEncoder {
 
         switch (op) {
             case Opcode::iconst_i32:
-            case Opcode::patchable_const_i32:
                 res = ctx.make_const(static_cast<uint32_t>(inst->imm_i32()), 32);
                 break;
             case Opcode::iconst_i64:
-            case Opcode::patchable_const_i64:
                 res = ctx.make_const(static_cast<uint64_t>(inst->imm_i64()), 64);
                 break;
             case Opcode::sext_i64: {
@@ -397,20 +396,29 @@ struct GpuSuperoptEncoder {
                     res = get_special_u32(sym, 0x7FFu, 1, 1024);
                     break;
                 }
+                auto tight_mask = [](uint32_t max_v) -> uint32_t {
+                    if (max_v == 0xFFFFFFFFu) return 0xFFFFFFFFu;
+                    uint64_t pow2 = std::bit_ceil(static_cast<uint64_t>(max_v) + 1ULL);
+                    return (pow2 > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : static_cast<uint32_t>(pow2 - 1ULL);
+                };
                 if (sym == "ptx_ctaid_x" || sym == "ptx_ctaid_y" || sym == "ptx_ctaid_z") {
-                    res = get_special_u32(sym, 0xFFFFu, 0, 65535);
+                    const uint32_t max_c = opts.gpu_max_ctaid ? opts.gpu_max_ctaid : 0xFFFFFFFFu;
+                    res = get_special_u32(sym, tight_mask(max_c), 0, max_c);
                     break;
                 }
                 if (sym == "ptx_nctaid_x" || sym == "ptx_nctaid_y" || sym == "ptx_nctaid_z") {
-                    res = get_special_u32(sym, 0xFFFFu, 1, 65535);
+                    const uint32_t max_c = opts.gpu_max_ctaid ? opts.gpu_max_ctaid : 0xFFFFFFFFu;
+                    res = get_special_u32(sym, tight_mask(max_c), 1, max_c);
                     break;
                 }
                 if (sym == "ptx_laneid" || sym == "ptx_lane_id") {
-                    res = get_special_u32("ptx_laneid", 31u, 0, 31);
+                    const uint32_t sg = opts.gpu_subgroup_size ? opts.gpu_subgroup_size : 32u;
+                    res = get_special_u32("ptx_laneid", tight_mask(sg - 1u), 0, sg - 1u);
                     break;
                 }
                 if (sym == "ptx_global_tid_x" || sym == "ptx_global_id_x") {
-                    res = get_special_u32("ptx_global_tid_x", 0x3FFFFFFu, 0, 0x3FFFFFFu);
+                    const uint32_t max_g = opts.gpu_max_global_tid ? opts.gpu_max_global_tid : 0xFFFFFFFFu;
+                    res = get_special_u32("ptx_global_tid_x", tight_mask(max_g), 0, max_g);
                     break;
                 }
                 std::vector<BVNodeId> args;
@@ -531,24 +539,90 @@ MagicU32 compute_magic_u32(uint32_t divisor) noexcept {
     return MagicU32{mc.multiplier, mc.pre_shift, mc.post_shift, mc.needs_add};
 }
 
+struct U128 {
+    uint64_t hi = 0;
+    uint64_t lo = 0;
+
+    static constexpr U128 from_u64(uint64_t v) noexcept { return {0, v}; }
+    static constexpr U128 pow2(uint32_t exp) noexcept {
+        return (exp < 64) ? U128{0, 1ULL << exp} : U128{1ULL << (exp - 64), 0};
+    }
+    friend constexpr bool operator>=(U128 a, U128 b) noexcept {
+        return a.hi > b.hi || (a.hi == b.hi && a.lo >= b.lo);
+    }
+    friend constexpr bool operator<(U128 a, U128 b) noexcept { return !(a >= b); }
+    friend constexpr U128 operator+(U128 a, U128 b) noexcept {
+        uint64_t lo = a.lo + b.lo;
+        uint64_t carry = (lo < a.lo) ? 1ULL : 0ULL;
+        return {a.hi + b.hi + carry, lo};
+    }
+    friend constexpr U128 operator-(U128 a, U128 b) noexcept {
+        uint64_t borrow = (a.lo < b.lo) ? 1ULL : 0ULL;
+        return {a.hi - b.hi - borrow, a.lo - b.lo};
+    }
+    static constexpr U128 mul_u64(uint64_t a, uint64_t b) noexcept {
+        uint64_t a0 = a & 0xFFFFFFFFULL, a1 = a >> 32;
+        uint64_t b0 = b & 0xFFFFFFFFULL, b1 = b >> 32;
+        uint64_t p00 = a0 * b0;
+        uint64_t p01 = a0 * b1;
+        uint64_t p10 = a1 * b0;
+        uint64_t p11 = a1 * b1;
+        uint64_t mid = (p00 >> 32) + (p01 & 0xFFFFFFFFULL) + (p10 & 0xFFFFFFFFULL);
+        uint64_t lo = (p00 & 0xFFFFFFFFULL) | (mid << 32);
+        uint64_t hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+        return {hi, lo};
+    }
+    friend constexpr U128 operator*(U128 a, uint64_t b) noexcept {
+        U128 low = mul_u64(a.lo, b);
+        U128 high = mul_u64(a.hi, b);
+        return {low.hi + high.lo, low.lo};
+    }
+};
+
+// Exact Granlund-Montgomery / Hacker's Delight (Thm 10-8) necessary & sufficient
+// proof across all uint32_t x in [0, 2^32 - 1] in 128-bit arithmetic.
+bool prove_magic_u32_exact(uint32_t divisor, const MagicU32& magic) noexcept {
+    if (divisor <= 1 || magic.pre_shift >= 32) return false;
+    if ((divisor & ((1ULL << magic.pre_shift) - 1ULL)) != 0) return false;
+    if (magic.needs_add) {
+        if (magic.pre_shift != 0 || magic.post_shift < 1 || magic.post_shift > 32) return false;
+    } else {
+        if (magic.post_shift >= 32) return false;
+    }
+    const uint64_t dp = static_cast<uint64_t>(divisor) >> magic.pre_shift;
+    if (dp <= 1) return dp == 1 && !magic.needs_add && magic.multiplier == 1 && magic.post_shift == 0;
+    const uint64_t ymax = 0xFFFFFFFFULL >> magic.pre_shift;
+    const uint64_t nc = ymax - ((ymax + 1ULL) % dp);
+    const U128 P = U128::pow2(32u + magic.post_shift);
+    const U128 M_eff = magic.needs_add
+        ? (U128::pow2(32) + U128::from_u64(magic.multiplier))
+        : U128::from_u64(magic.multiplier);
+    const U128 prod = M_eff * dp;
+    if (prod < P) return false;
+    const U128 err = prod - P;
+    if (!((err * nc) < P)) return false;
+    const uint64_t gap = dp - (ymax % dp);
+    if (!((err * ymax) < (P * gap))) return false;
+    return true;
+}
+
 bool verify_magic_u32_with_solver(
     uint32_t divisor,
     const MagicU32& magic,
     uint32_t max_sat_conflicts) {
-    if (divisor <= 1) return false;
+    if (!prove_magic_u32_exact(divisor, magic)) return false;
+
+    // Verify the actual emitted BV DAG (`build_magic_udiv_u32`) on a tractable
+    // 8-bit symbolic window plus full-width concrete corners against Euclidean spec.
     BVContext ctx;
     BVNodeId x = ctx.make_var("x", 32, false);
     MagicConstU32 mc{magic.multiplier, magic.pre_shift, magic.post_shift, magic.needs_add};
     BVNodeId cand_q = verify::build_magic_udiv_u32(ctx, x, mc);
-    BVNodeId ref_q = ctx.make_binary(BVOp::UDiv, x, ctx.make_const(divisor, 32), 32);
-
-    // 1. Full 32-bit symbolic equivalence against reference UDiv lowering
-    BVNodeId bad_ref = ctx.make_binary(BVOp::Ne, cand_q, ref_q, 1);
-    if (verify::solve_nonzero(ctx, bad_ref, max_sat_conflicts).status != SolveOutcome::Unsat) {
-        return false;
+    for (uint32_t sample : {0u, 1u, divisor - 1u, divisor, divisor + 1u, 0xFFFFFFFFu}) {
+        uint32_t qv = static_cast<uint32_t>(ctx.eval_concrete(cand_q, {sample}));
+        if (qv != sample / divisor) return false;
     }
 
-    // 2. Direct Euclidean division specification check (0 <= x - q*d < d) on symbolic window
     BVNodeId x_low = ctx.make_binary(BVOp::And, x, ctx.make_const(0xFFu, 32), 32);
     BVNodeId q_low = verify::build_magic_udiv_u32(ctx, x_low, mc);
     BVNodeId x64 = ctx.make_zext(x_low, 32);
@@ -589,7 +663,7 @@ bool run_gpu_mir_superopt(
         }
 
         BVContext ctx;
-        GpuSuperoptEncoder enc{ctx, ra, bb, std::max<uint32_t>(opts.max_window_depth, 8u), {}, {}, {}};
+        GpuSuperoptEncoder enc{ctx, ra, bb, std::max<uint32_t>(opts.max_window_depth, 8u), opts, {}, {}, {}};
         std::vector<BVNodeId> assumptions;
 
         for (const BasicBlock* dbb : dom_chain) {
@@ -703,16 +777,15 @@ bool run_gpu_mir_superopt(
                                     }
                                 } else {
                                     MagicConstU32 mag = verify::compute_magic_const_u32(d);
+                                    MagicU32 umag{mag.multiplier, mag.pre_shift, mag.post_shift, mag.needs_add};
+                                    if (opts.stats) opts.stats->solver_queries++;
                                     BVNodeId q_bv = verify::build_magic_udiv_u32(ctx, lhs_bv, mag);
                                     BVNodeId cand_bv = is_rem
                                         ? ctx.make_binary(
                                               BVOp::Sub, lhs_bv,
                                               ctx.make_binary(BVOp::Mul, q_bv, ctx.make_const(d, 32), 32), 32)
                                         : q_bv;
-                                    BVNodeId ref_u_bv = ctx.make_binary(
-                                        is_rem ? BVOp::URem : BVOp::UDiv, lhs_bv, ctx.make_const(d, 32), 32);
-                                    BVNodeId diff = ctx.make_binary(BVOp::Ne, ref_u_bv, cand_bv, 1);
-                                    if (prove_unsat(ctx.make_binary(BVOp::And, pc, diff, 1))) {
+                                    if (verify_magic_u32_with_solver(d, umag, opts.max_sat_conflicts)) {
                                         Builder b(mod);
                                         b.set_function(&fn);
                                         b.position_before(cur);

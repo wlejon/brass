@@ -270,6 +270,171 @@ TEST_CASE("SMT Guard Elim - Inductive Loop IV Bounds, Implied Comparison & Branc
              verify::EquivStatus::ProvenEquivalent);
 }
 
+TEST_CASE("SMT Guard Elim - 2D Strided Overflow Not Bypassed by Unchecked Guard") {
+    Module mod("smt_2d_ovf_neg");
+    Builder b(mod);
+    Function* fn = mod.create_function("strided_2d_ovf", Type::i32(),
+                                       {Type::i32(), Type::i32(), Type::i32(), Type::i32(), Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* i = b.add_block_param(entry, Type::i32());
+    Value* j = b.add_block_param(entry, Type::i32());
+    Value* stride = b.add_block_param(entry, Type::i32());
+    Value* h = b.add_block_param(entry, Type::i32());
+    Value* len = b.add_block_param(entry, Type::i32());
+
+    b.position_at_end(entry);
+    Value* zero = b.build_iconst_i32(0);
+    b.build_guard(b.build_sge(i, zero), "deopt");
+    b.build_guard(b.build_slt(i, stride), "deopt");
+    b.build_guard(b.build_sge(j, zero), "deopt");
+    b.build_guard(b.build_slt(j, h), "deopt");
+    Value* sh = b.build_mul(stride, h);
+    b.build_guard(b.build_sle(sh, len), "deopt");
+    // Missing smul_overflow(stride, h) == 0: stride * h can wrap negative so idx < len is NOT guaranteed!
+    Value* idx = b.build_add(i, b.build_mul(stride, j));
+    b.build_guard(b.build_slt(idx, len), "deopt");
+    b.build_ret(idx);
+    fn->rebuild_cfg_predecessors();
+
+    SmtGuardElimStats stats;
+    SmtGuardElimOptions opts;
+    opts.stats = &stats;
+    run_smt_guard_elimination(*fn, mod, opts);
+    CHECK_EQ(stats.guards_proven_eliminated, 0u);
+}
+
+TEST_CASE("SMT Guard Elim - Real Loop IV Sound Positive and Overflow/Unsigned Negative") {
+    // 1. Positive: real signed slt loop with step 1 eliminates iv >= 0
+    {
+        Module mod("smt_real_loop_pos");
+        Builder b(mod);
+        Function* fn = mod.create_function("loop_pos", Type::i32(), {Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hdr = b.append_block("hdr");
+        BasicBlock* body = b.append_block("body");
+        BasicBlock* exit = b.append_block("exit");
+        Value* n = b.add_block_param(entry, Type::i32());
+        Value* iv = b.add_block_param(hdr, Type::i32());
+
+        b.position_at_end(entry);
+        Value* zero = b.build_iconst_i32(0);
+        b.build_br(hdr, {zero});
+
+        b.position_at_end(hdr);
+        b.build_br_if(b.build_slt(iv, n), body, {}, exit, {});
+
+        b.position_at_end(body);
+        b.build_guard(b.build_sge(iv, zero), "deopt");
+        Value* next = b.build_add(iv, b.build_iconst_i32(1));
+        b.build_br(hdr, {next});
+
+        b.position_at_end(exit);
+        b.build_ret(zero);
+        fn->rebuild_cfg_predecessors();
+
+        SmtGuardElimStats stats;
+        SmtGuardElimOptions opts;
+        opts.stats = &stats;
+        CHECK(run_smt_guard_elimination(*fn, mod, opts));
+        CHECK_EQ(stats.guards_proven_eliminated, 1u);
+    }
+    // 2. Negative: step 4 can signed-overflow past INT_MAX into negative values!
+    {
+        Module mod("smt_real_loop_step4_neg");
+        Builder b(mod);
+        Function* fn = mod.create_function("loop_step4", Type::i32(), {Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hdr = b.append_block("hdr");
+        BasicBlock* body = b.append_block("body");
+        BasicBlock* exit = b.append_block("exit");
+        Value* n = b.add_block_param(entry, Type::i32());
+        Value* iv = b.add_block_param(hdr, Type::i32());
+
+        b.position_at_end(entry);
+        Value* zero = b.build_iconst_i32(0);
+        b.build_br(hdr, {zero});
+
+        b.position_at_end(hdr);
+        b.build_br_if(b.build_slt(iv, n), body, {}, exit, {});
+
+        b.position_at_end(body);
+        b.build_guard(b.build_sge(iv, zero), "deopt");
+        Value* next = b.build_add(iv, b.build_iconst_i32(4));
+        b.build_br(hdr, {next});
+
+        b.position_at_end(exit);
+        b.build_ret(zero);
+        fn->rebuild_cfg_predecessors();
+
+        SmtGuardElimStats stats;
+        SmtGuardElimOptions opts;
+        opts.stats = &stats;
+        run_smt_guard_elimination(*fn, mod, opts);
+        CHECK_EQ(stats.guards_proven_eliminated, 0u);
+    }
+    // 3. Negative: unsigned ult loop with step 1 does NOT imply iv >=s 0 (iv can pass INT32_MAX)!
+    {
+        Module mod("smt_real_loop_ult_neg");
+        Builder b(mod);
+        Function* fn = mod.create_function("loop_ult", Type::i32(), {Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hdr = b.append_block("hdr");
+        BasicBlock* body = b.append_block("body");
+        BasicBlock* exit = b.append_block("exit");
+        Value* n = b.add_block_param(entry, Type::i32());
+        Value* iv = b.add_block_param(hdr, Type::i32());
+
+        b.position_at_end(entry);
+        Value* zero = b.build_iconst_i32(0);
+        b.build_br(hdr, {zero});
+
+        b.position_at_end(hdr);
+        b.build_br_if(b.build_ult(iv, n), body, {}, exit, {});
+
+        b.position_at_end(body);
+        b.build_guard(b.build_sge(iv, zero), "deopt");
+        Value* next = b.build_add(iv, b.build_iconst_i32(1));
+        b.build_br(hdr, {next});
+
+        b.position_at_end(exit);
+        b.build_ret(zero);
+        fn->rebuild_cfg_predecessors();
+
+        SmtGuardElimStats stats;
+        SmtGuardElimOptions opts;
+        opts.stats = &stats;
+        run_smt_guard_elimination(*fn, mod, opts);
+        CHECK_EQ(stats.guards_proven_eliminated, 0u);
+    }
+}
+
+TEST_CASE("SMT Guard Elim - patchable_const_i32 Treated Symbolic Not Constant") {
+    Module mod("smt_patchable_neg");
+    Builder b(mod);
+    Function* fn = mod.create_function("patchable_guard", Type::i32(), {Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* x = b.add_block_param(entry, Type::i32());
+
+    b.position_at_end(entry);
+    Value* pconst = b.build_patchable_const_i32("k_limit", 10);
+    b.build_guard(b.build_slt(x, pconst), "deopt");
+    // Must NOT treat pconst as fixed 10: runtime patching can raise k_limit!
+    b.build_guard(b.build_slt(x, b.build_iconst_i32(20)), "deopt");
+    b.build_ret(x);
+    fn->rebuild_cfg_predecessors();
+
+    SmtGuardElimStats stats;
+    SmtGuardElimOptions opts;
+    opts.stats = &stats;
+    run_smt_guard_elimination(*fn, mod, opts);
+    CHECK_EQ(stats.guards_proven_eliminated, 0u);
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

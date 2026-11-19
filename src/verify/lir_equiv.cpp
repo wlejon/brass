@@ -42,7 +42,6 @@ struct LirInitEnv {
         BVNodeId val;
     };
     std::vector<MemReadEntry> mem_reads;
-    uint32_t clobber_seq = 0;
 
     void init_defaults(BVContext& ctx) {
         for (uint8_t i = 0; i < 16; ++i) {
@@ -147,12 +146,18 @@ BVNodeId eval_condition(BVContext& ctx, const LirFlagsState& f, x64::Condition c
     }
 }
 
+BVNodeId compute_pf(BVContext& ctx, BVNodeId res) {
+    BVNodeId p = ctx.make_extract(res, 0, 0);
+    for (uint32_t b = 1; b < 8; ++b) p = ctx.make_binary(BVOp::Xor, p, ctx.make_extract(res, b, b), 1);
+    return ctx.make_unary(BVOp::Not, p, 1);
+}
+
 void set_add_flags(BVContext& ctx, LirFlagsState& f, BVNodeId a, BVNodeId b, BVNodeId res, uint32_t w) {
     f.zf = ctx.make_binary(BVOp::Eq, res, ctx.make_const(0, w), 1);
     f.sf = ctx.make_extract(res, w - 1, w - 1);
     f.of = ctx.make_binary(BVOp::SAddOvf, a, b, 1);
     f.cf = ctx.make_binary(BVOp::UAddOvf, a, b, 1);
-    f.pf = ctx.make_const(0, 1);
+    f.pf = compute_pf(ctx, res);
 }
 
 void set_sub_flags(BVContext& ctx, LirFlagsState& f, BVNodeId a, BVNodeId b, BVNodeId res, uint32_t w) {
@@ -160,7 +165,7 @@ void set_sub_flags(BVContext& ctx, LirFlagsState& f, BVNodeId a, BVNodeId b, BVN
     f.sf = ctx.make_extract(res, w - 1, w - 1);
     f.of = ctx.make_binary(BVOp::SSubOvf, a, b, 1);
     f.cf = ctx.make_binary(BVOp::USubOvf, a, b, 1);
-    f.pf = ctx.make_const(0, 1);
+    f.pf = compute_pf(ctx, res);
 }
 
 void set_logic_flags(BVContext& ctx, LirFlagsState& f, BVNodeId res, uint32_t w) {
@@ -168,11 +173,13 @@ void set_logic_flags(BVContext& ctx, LirFlagsState& f, BVNodeId res, uint32_t w)
     f.sf = ctx.make_extract(res, w - 1, w - 1);
     f.of = ctx.make_const(0, 1);
     f.cf = ctx.make_const(0, 1);
-    f.pf = ctx.make_const(0, 1);
+    f.pf = compute_pf(ctx, res);
 }
 
-LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv& env) {
+LirExecState execute_lir_block(
+    BVContext& ctx, const LirBlock& block, LirInitEnv& env, std::string_view side_prefix) {
     LirExecState st;
+    uint32_t clobber_seq = 0;
     for (int i = 0; i < 16; ++i) {
         st.gpr[i] = env.gpr_init[i];
         st.xmm_lo[i] = env.xmm_lo_init[i];
@@ -417,8 +424,9 @@ LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv
                 BVNodeId ovf = ctx.make_binary(BVOp::SMulOvf, a, b, 1);
                 st.flags.of = ovf;
                 st.flags.cf = ovf;
-                st.flags.zf = ctx.make_var("clob_zf_" + std::to_string(env.clobber_seq), 1, false);
-                st.flags.sf = ctx.make_var("clob_sf_" + std::to_string(env.clobber_seq++), 1, false);
+                st.flags.zf = ctx.make_var(std::string(side_prefix) + "clob_zf_" + std::to_string(clobber_seq), 1, false);
+                st.flags.sf = ctx.make_var(std::string(side_prefix) + "clob_sf_" + std::to_string(clobber_seq), 1, false);
+                st.flags.pf = ctx.make_var(std::string(side_prefix) + "clob_pf_" + std::to_string(clobber_seq++), 1, false);
                 break;
             }
 
@@ -482,8 +490,9 @@ LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv
                 BVNodeId new_sf = ctx.make_extract(res, w - 1, w - 1);
                 st.flags.zf = ctx.make_ite(nz, new_zf, st.flags.zf);
                 st.flags.sf = ctx.make_ite(nz, new_sf, st.flags.sf);
-                st.flags.of = ctx.make_var("clob_of_" + std::to_string(env.clobber_seq), 1, false);
-                st.flags.cf = ctx.make_var("clob_cf_" + std::to_string(env.clobber_seq++), 1, false);
+                st.flags.of = ctx.make_var(std::string(side_prefix) + "clob_of_" + std::to_string(clobber_seq), 1, false);
+                st.flags.cf = ctx.make_var(std::string(side_prefix) + "clob_cf_" + std::to_string(clobber_seq), 1, false);
+                st.flags.pf = ctx.make_var(std::string(side_prefix) + "clob_pf_" + std::to_string(clobber_seq++), 1, false);
                 break;
             }
 
@@ -608,17 +617,45 @@ LirExecState execute_lir_block(BVContext& ctx, const LirBlock& block, LirInitEnv
             case LirOpcode::Movq_gx:
             case LirOpcode::Movq_xg:
             case LirOpcode::Movd_gx:
-            case LirOpcode::Movd_xg:
-            case LirOpcode::Movaps:
-            case LirOpcode::Movups:
-            case LirOpcode::Vmovaps:
-            case LirOpcode::Vmovups: {
+            case LirOpcode::Movd_xg: {
                 if (inst.defs.empty() || inst.uses.empty()) break;
                 uint32_t w = (op == LirOpcode::Movss || op == LirOpcode::Movd_gx || op == LirOpcode::Movd_xg) ? 32 : 64;
                 BVNodeId v = read_op(inst.uses[0], w);
                 write_op(inst.defs[0], v, true);
                 break;
             }
+            case LirOpcode::Movaps:
+            case LirOpcode::Movups: {
+                if (inst.defs.empty() || inst.uses.empty()) break;
+                const auto &dst = inst.defs[0], &src = inst.uses[0];
+                BVNodeId lo = 0, hi = 0;
+                if (src.is_mem()) {
+                    BVNodeId addr = eval_mem_addr(src.mem_val);
+                    lo = read_mem_sized(addr, 8);
+                    hi = read_mem_sized(ctx.make_binary(BVOp::Add, addr, ctx.make_const(8, 64), 64), 8);
+                } else if (src.is_preg() && src.preg_val.is_xmm() && src.preg_val.code < 16) {
+                    lo = st.xmm_lo[src.preg_val.code];
+                    hi = st.xmm_hi[src.preg_val.code];
+                } else {
+                    st.supported = false; st.error_msg = "Unsupported operand in 128-bit XMM move"; return st;
+                }
+                if (dst.is_mem()) {
+                    BVNodeId addr = eval_mem_addr(dst.mem_val);
+                    st.mem_stores.push_back({addr, 8, lo});
+                    st.mem_stores.push_back({ctx.make_binary(BVOp::Add, addr, ctx.make_const(8, 64), 64), 8, hi});
+                } else if (dst.is_preg() && dst.preg_val.is_xmm() && dst.preg_val.code < 16) {
+                    st.xmm_lo[dst.preg_val.code] = lo;
+                    st.xmm_hi[dst.preg_val.code] = hi;
+                } else {
+                    st.supported = false; st.error_msg = "Unsupported dst in 128-bit XMM move"; return st;
+                }
+                break;
+            }
+            case LirOpcode::Vmovaps:
+            case LirOpcode::Vmovups:
+                st.supported = false;
+                st.error_msg = "256-bit Vmovaps/Vmovups not modeled in LIR equiv";
+                return st;
 
             case LirOpcode::Addsd:
             case LirOpcode::Addss:
@@ -772,13 +809,13 @@ LirEquivResult verify_x64_lir_block_equivalence(
     LirInitEnv env;
     env.init_defaults(ctx);
 
-    LirExecState st_b = execute_lir_block(ctx, before, env);
+    LirExecState st_b = execute_lir_block(ctx, before, env, "b_");
     if (!st_b.supported) {
         res.status = EquivStatus::Unsupported;
         res.diagnostic = st_b.error_msg;
         return res;
     }
-    LirExecState st_a = execute_lir_block(ctx, after, env);
+    LirExecState st_a = execute_lir_block(ctx, after, env, "a_");
     if (!st_a.supported) {
         res.status = EquivStatus::Unsupported;
         res.diagnostic = st_a.error_msg;
@@ -796,16 +833,13 @@ LirEquivResult verify_x64_lir_block_equivalence(
     for (uint8_t i = 0; i < 16; ++i) {
         if (live_out_gpr_mask & (1u << i)) {
             auto g = static_cast<x64::GPR>(i);
-            BVNodeId d = ctx.make_binary(BVOp::Ne, st_b.gpr[i], st_a.gpr[i], 1);
-            checks.push_back({std::string(x64::to_string(g, x64::OperandSize::Qword)), st_b.gpr[i], st_a.gpr[i], d});
+            checks.push_back({std::string(x64::to_string(g, x64::OperandSize::Qword)), st_b.gpr[i], st_a.gpr[i],
+                              ctx.make_binary(BVOp::Ne, st_b.gpr[i], st_a.gpr[i], 1)});
         }
-    }
-    for (uint8_t i = 0; i < 16; ++i) {
         if (live_out_xmm_mask & (1u << i)) {
-            auto x = static_cast<x64::XMM>(i);
-            std::string xn(x64::to_string(x));
-            BVNodeId d_lo = ctx.make_binary(BVOp::Ne, st_b.xmm_lo[i], st_a.xmm_lo[i], 1);
-            checks.push_back({xn + ".lo", st_b.xmm_lo[i], st_a.xmm_lo[i], d_lo});
+            std::string xn(x64::to_string(static_cast<x64::XMM>(i)));
+            checks.push_back({xn + ".lo", st_b.xmm_lo[i], st_a.xmm_lo[i], ctx.make_binary(BVOp::Ne, st_b.xmm_lo[i], st_a.xmm_lo[i], 1)});
+            checks.push_back({xn + ".hi", st_b.xmm_hi[i], st_a.xmm_hi[i], ctx.make_binary(BVOp::Ne, st_b.xmm_hi[i], st_a.xmm_hi[i], 1)});
         }
     }
 
@@ -854,6 +888,7 @@ LirEquivResult verify_x64_lir_block_equivalence(
         checks.push_back({"SF", st_b.flags.sf, st_a.flags.sf, ctx.make_binary(BVOp::Xor, st_b.flags.sf, st_a.flags.sf, 1)});
         checks.push_back({"OF", st_b.flags.of, st_a.flags.of, ctx.make_binary(BVOp::Xor, st_b.flags.of, st_a.flags.of, 1)});
         checks.push_back({"CF", st_b.flags.cf, st_a.flags.cf, ctx.make_binary(BVOp::Xor, st_b.flags.cf, st_a.flags.cf, 1)});
+        checks.push_back({"PF", st_b.flags.pf, st_a.flags.pf, ctx.make_binary(BVOp::Xor, st_b.flags.pf, st_a.flags.pf, 1)});
     }
 
     if (st_b.has_branch || st_a.has_branch || fallthrough_block_id != UINT32_MAX) {
@@ -922,7 +957,7 @@ LirEquivResult verify_x64_lir_function_equivalence(
         bool check_flags = are_x64_flags_live_out_of_block(before, i) || are_x64_flags_live_out_of_block(after, i);
         LirEquivResult blk_res = verify_x64_lir_block_equivalence(
             *before.blocks[i], *after.blocks[i], 0xFFFF, 0xFFFF, check_flags, fallthrough_id);
-        if (blk_res.status == EquivStatus::Counterexample || blk_res.status == EquivStatus::Unknown) return blk_res;
+        if (blk_res.status != EquivStatus::ProvenEquivalent) return blk_res;
     }
     return {EquivStatus::ProvenEquivalent, {}};
 }

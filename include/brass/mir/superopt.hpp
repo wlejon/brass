@@ -25,6 +25,9 @@ struct SuperoptOptions {
     uint64_t lir_live_out_gpr_mask = 0xFFFFULL;
     bool lir_check_flags = false;
     bool enable_gpu_superopt = false;
+    uint32_t gpu_max_ctaid = 65535;
+    uint32_t gpu_max_global_tid = 0x3FFFFFFu;
+    uint32_t gpu_subgroup_size = 32;
     bool enable_egraph = true;
     uint32_t egraph_max_enodes = 512;
     uint32_t egraph_max_iters = 4;

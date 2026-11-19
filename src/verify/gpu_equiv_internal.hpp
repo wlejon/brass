@@ -31,6 +31,7 @@ struct GpuSymAccess {
     BVNodeId guard = 0;
     bool is_shared = false;
     bool is_store = false;
+    bool addr_resolved = false;
     uint32_t region_index = UINT32_MAX;
     BVNodeId elem_index_32 = 0;
     BVNodeId byte_offset_64 = 0;
@@ -135,7 +136,8 @@ void record_shared_access(
     bool is_store,
     uint32_t array_idx,
     BVNodeId elem_idx_32,
-    uint32_t access_bytes);
+    uint32_t access_bytes,
+    BVNodeId raw_byte_off_64 = 0);
 
 void init_gpu_sym_env(
     BVContext& ctx,

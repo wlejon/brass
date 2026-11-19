@@ -65,11 +65,11 @@ bool get_const_int(const Value* val, int64_t& out_val) {
     if (!val || !val->is_instruction()) return false;
     const Instruction* def = val->defining_instruction();
     if (!def) return false;
-    if (def->opcode() == Opcode::iconst_i32 || def->opcode() == Opcode::patchable_const_i32) {
+    if (def->opcode() == Opcode::iconst_i32) {
         out_val = static_cast<int64_t>(def->imm_i32());
         return true;
     }
-    if (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::patchable_const_i64) {
+    if (def->opcode() == Opcode::iconst_i64) {
         out_val = def->imm_i64();
         return true;
     }
@@ -267,10 +267,8 @@ ValueRange RangeAnalysis::evaluate_instruction(
     Opcode op = inst->opcode();
     switch (op) {
         case Opcode::iconst_i32:
-        case Opcode::patchable_const_i32:
             return ValueRange::constant(inst->imm_i32());
         case Opcode::iconst_i64:
-        case Opcode::patchable_const_i64:
             return ValueRange::constant(inst->imm_i64());
 
         case Opcode::add: {

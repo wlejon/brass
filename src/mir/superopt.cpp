@@ -47,11 +47,11 @@ bool get_const_imm(const Value* v, int64_t& out_imm) noexcept {
     if (!v || !v->is_instruction()) return false;
     const Instruction* inst = v->defining_instruction();
     if (!inst) return false;
-    if (inst->opcode() == Opcode::iconst_i32 || inst->opcode() == Opcode::patchable_const_i32) {
+    if (inst->opcode() == Opcode::iconst_i32) {
         out_imm = inst->imm_i32();
         return true;
     }
-    if (inst->opcode() == Opcode::iconst_i64 || inst->opcode() == Opcode::patchable_const_i64) {
+    if (inst->opcode() == Opcode::iconst_i64) {
         out_imm = inst->imm_i64();
         return true;
     }
@@ -116,11 +116,9 @@ struct SuperoptEncoder {
 
         switch (op) {
             case Opcode::iconst_i32:
-            case Opcode::patchable_const_i32:
                 res = ctx.make_const(static_cast<uint32_t>(inst->imm_i32()), 32);
                 break;
             case Opcode::iconst_i64:
-            case Opcode::patchable_const_i64:
                 res = ctx.make_const(static_cast<uint64_t>(inst->imm_i64()), 64);
                 break;
             case Opcode::sext_i64: {
@@ -403,8 +401,7 @@ bool run_mir_superopt(
             }
 
             Opcode op = cur->opcode();
-            if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64 ||
-                op == Opcode::patchable_const_i32 || op == Opcode::patchable_const_i64) {
+            if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64) {
                 cur = next;
                 continue;
             }
@@ -478,26 +475,7 @@ bool run_mir_superopt(
             }
 
             // ---------------------------------------------------------------
-            // 3. Solver-Proven Constant Synthesis
-            // ---------------------------------------------------------------
-            if (ctx.nodes()[orig_bv].op == BVOp::Const) {
-                uint64_t c_imm = ctx.nodes()[orig_bv].imm;
-                if (check_equal(path_cond, orig_bv, ctx.make_const(c_imm, w))) {
-                    Builder b(mod);
-                    b.set_function(&fn);
-                    b.position_before(cur);
-                    if (Value* cv = build_typed_const(b, res_t, c_imm)) {
-                        replace_all_uses(fn, cur->result(), cv);
-                        if (opts.stats) opts.stats->constants_synthesized++;
-                        changed = true;
-                        cur = next;
-                        continue;
-                    }
-                }
-            }
-
-            // ---------------------------------------------------------------
-            // 4. Solver-Proven Single-Variable Identity / Window Collapse
+            // 3. Solver-Proven Single-Variable Identity / Window Collapse
             // ---------------------------------------------------------------
             bool has_inst_op = false;
             for (size_t oi = 0; oi < cur->operand_count(); ++oi) {
@@ -506,6 +484,29 @@ bool run_mir_superopt(
                     break;
                 }
             }
+            const bool is_div_mod = (op == Opcode::sdiv || op == Opcode::udiv ||
+                                     op == Opcode::smod || op == Opcode::umod);
+            auto div_trap_safe = [&](BVNodeId cond) -> bool {
+                if (!is_div_mod || cur->operand_count() < 2) return true;
+                BVNodeId a_bv = enc.encode(cur->operand(0));
+                BVNodeId b_bv = enc.encode(cur->operand(1));
+                if (a_bv == kInvalidBV || b_bv == kInvalidBV) return false;
+                BVNodeId trap_cond = ctx.make_binary(BVOp::Eq, b_bv, ctx.make_const(0, w), 1);
+                if (op == Opcode::sdiv || op == Opcode::smod) {
+                    const uint64_t smin = (w == 32) ? 0x80000000ULL : 0x8000000000000000ULL;
+                    const uint64_t neg1 = (w == 32) ? 0xFFFFFFFFULL : ~0ULL;
+                    BVNodeId ovf = ctx.make_binary(
+                        BVOp::And,
+                        ctx.make_binary(BVOp::Eq, a_bv, ctx.make_const(smin, w), 1),
+                        ctx.make_binary(BVOp::Eq, b_bv, ctx.make_const(neg1, w), 1), 1);
+                    trap_cond = ctx.make_binary(BVOp::Or, trap_cond, ovf, 1);
+                }
+                BVNodeId violated = ctx.make_binary(BVOp::And, cond, trap_cond, 1);
+                if (block_queries >= kMaxBlockQueries) return false;
+                ++block_queries;
+                if (opts.stats) opts.stats->solver_queries++;
+                return verify::solve_nonzero(ctx, violated, opts.max_sat_conflicts).status == SolveOutcome::Unsat;
+            };
             if (has_inst_op) {
                 std::vector<Value*> window_vals;
                 collect_window_values(cur->result(), 0, std::min<uint32_t>(opts.max_window_depth, 3u), window_vals);
@@ -519,7 +520,7 @@ bool run_mir_superopt(
                     if (is_direct_op && orig_bv != cand_bv && assumptions.empty()) {
                         continue;
                     }
-                    if (check_equal(path_cond, orig_bv, cand_bv)) {
+                    if (check_equal(path_cond, orig_bv, cand_bv) && div_trap_safe(path_cond)) {
                         replace_all_uses(fn, cur->result(), cand_v);
                         if (opts.stats) opts.stats->dags_synthesized++;
                         changed = true;
@@ -707,23 +708,8 @@ bool run_mir_superopt(
     if (changed) {
         remove_dead_pure_instructions(fn);
     }
-    bool is_gpu_fn = opts.enable_gpu_superopt;
-    if (!is_gpu_fn) {
-        for (const BasicBlock* bb : fn.blocks()) {
-            if (!bb) continue;
-            for (const Instruction* inst : *bb) {
-                if (inst && inst->opcode() == Opcode::call && inst->symbol().substr(0, 4) == "ptx_") {
-                    is_gpu_fn = true;
-                    break;
-                }
-            }
-            if (is_gpu_fn) break;
-        }
-    }
-    if (is_gpu_fn) {
-        SuperoptOptions gpu_opts = opts;
-        gpu_opts.enable_gpu_superopt = true;
-        changed |= run_gpu_mir_superopt(fn, mod, gpu_opts);
+    if (opts.enable_gpu_superopt) {
+        changed |= run_gpu_mir_superopt(fn, mod, opts);
     }
     return changed;
 }
@@ -804,7 +790,8 @@ bool run_x64_lir_superopt(
         for (size_t i = 0; i + 1 < block.instructions.size(); ++i) {
             const LirInst* i0 = block.instructions[i].get();
             const LirInst* i1 = block.instructions[i + 1].get();
-            if (!i0 || !i1 || !is_pure_alu_or_mov(i0->opcode) || !is_pure_alu_or_mov(i1->opcode)) continue;
+            if (!i0 || !i1 || i0->is_patchable || i1->is_patchable ||
+                !is_pure_alu_or_mov(i0->opcode) || !is_pure_alu_or_mov(i1->opcode)) continue;
             if (i0->defs.size() != 1 || i1->defs.size() != 1) continue;
             const LirOperand& d0 = i0->defs[0];
             const LirOperand& d1 = i1->defs[0];
@@ -853,7 +840,7 @@ bool run_x64_lir_superopt(
         // 2. Try single-instruction redundant instruction elision (`[i]` -> empty)
         for (size_t i = 0; i < block.instructions.size(); ++i) {
             const LirInst* inst = block.instructions[i].get();
-            if (!inst || !is_pure_alu_or_mov(inst->opcode) || inst->defs.size() != 1) continue;
+            if (!inst || inst->is_patchable || !is_pure_alu_or_mov(inst->opcode) || inst->defs.size() != 1) continue;
             const LirOperand& dst = inst->defs[0];
             if (!dst.is_preg()) continue;
 

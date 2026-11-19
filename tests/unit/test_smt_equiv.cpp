@@ -425,6 +425,165 @@ TEST_CASE("SMT Equiv - DiffFuzzer smt_verify_passes Integration") {
     CHECK(res.passed);
 }
 
+TEST_CASE("SMT Equiv - Soundness: Truncated Loops, INT_MIN/-1 Traps, TLS, Stateful Calls & XMM/PF") {
+    // 1. Truncated loop must return Unknown instead of falsely claiming ProvenEquivalent
+    {
+        Module mod("trunc_loop");
+        auto make_loop = [&](const char* name, int64_t final_add) -> Function* {
+            Builder b(mod);
+            Function* fn = mod.create_function(name, Type::i32(), {Type::i32()});
+            b.set_function(fn);
+            BasicBlock* entry = b.append_block("entry");
+            BasicBlock* hdr = b.append_block("hdr");
+            BasicBlock* body = b.append_block("body");
+            BasicBlock* exit = b.append_block("exit");
+            Value* n = b.add_block_param(entry, Type::i32());
+            Value* i = b.add_block_param(hdr, Type::i32());
+            b.position_at_end(entry);
+            b.build_br(hdr, {b.build_iconst_i32(0)});
+            b.position_at_end(hdr);
+            b.build_br_if(b.build_slt(i, n), body, {}, exit, {});
+            b.position_at_end(body);
+            // Non-linear step i*2 + 1 prevents simple inductive affine proof -> bounded unroll truncates
+            Value* next_i = b.build_add(b.build_mul(i, b.build_iconst_i32(2)), b.build_iconst_i32(1));
+            b.build_br(hdr, {next_i});
+            b.position_at_end(exit);
+            Value* past_bound = b.build_sge(i, b.build_iconst_i32(100));
+            Value* ret_val = b.build_select(
+                past_bound,
+                b.build_add(i, b.build_iconst_i32(static_cast<int32_t>(final_add))),
+                i);
+            b.build_ret(ret_val);
+            fn->rebuild_cfg_predecessors();
+            return fn;
+        };
+        Function* f1 = make_loop("f1", 0);
+        Function* f2 = make_loop("f2", 1);
+        EquivOptions opts;
+        opts.loop_unroll_bound = 2;
+        CHECK_EQ(verify_mir_equivalence(*f1, *f2, opts).status, EquivStatus::Unknown);
+    }
+
+    // 2. Signed division INT_MIN / -1 trap must prevent unsafe simplification
+    {
+        Module mod("sdiv_int_min");
+        Builder b(mod);
+        Function* before = mod.create_function("before", Type::i32(), {Type::i32()});
+        b.set_function(before);
+        BasicBlock* eb = b.append_block("entry");
+        Value* xb = b.add_block_param(eb, Type::i32());
+        b.position_at_end(eb);
+        b.build_ret(b.build_sdiv(xb, b.build_iconst_i32(-1)));
+        before->rebuild_cfg_predecessors();
+
+        Function* after = mod.create_function("after", Type::i32(), {Type::i32()});
+        b.set_function(after);
+        BasicBlock* ea = b.append_block("entry");
+        Value* xa = b.add_block_param(ea, Type::i32());
+        b.position_at_end(ea);
+        b.build_ret(b.build_neg(xa));
+        after->rebuild_cfg_predecessors();
+
+        CHECK_EQ(verify_mir_equivalence(*before, *after).status, EquivStatus::Counterexample);
+    }
+
+    // 3. Unknown / potentially stateful call yields Unsupported when assume_calls_pure == false
+    {
+        Module mod("call_unsup");
+        Builder b(mod);
+        auto make_f = [&](const char* name) -> Function* {
+            Function* fn = mod.create_function(name, Type::i32(), {Type::i32()});
+            b.set_function(fn);
+            BasicBlock* e = b.append_block("entry");
+            Value* x = b.add_block_param(e, Type::i32());
+            b.position_at_end(e);
+            b.build_ret(b.build_call("ext_side_effect", Type::i32(), {x}));
+            fn->rebuild_cfg_predecessors();
+            return fn;
+        };
+        Function* f1 = make_f("f1");
+        Function* f2 = make_f("f2");
+        CHECK_EQ(verify_mir_equivalence(*f1, *f2).status, EquivStatus::Unsupported);
+        EquivOptions pure_opts;
+        pure_opts.assume_calls_pure = true;
+        CHECK_EQ(verify_mir_equivalence(*f1, *f2, pure_opts).status, EquivStatus::ProvenEquivalent);
+    }
+
+    // 4. LIR equivalence: catches 128-bit XMM.hi mismatch, PF flag mismatch, and propagates Unsupported
+    {
+        using namespace brass::codegen;
+        LirBlock b1(0, "xmm_before");
+        auto m1 = std::make_unique<LirInst>(LirOpcode::Movaps);
+        m1->add_def(LirOperand::preg_xmm(x64::XMM::XMM0));
+        m1->add_use(LirOperand::preg_xmm(x64::XMM::XMM1));
+        b1.append_inst(std::move(m1));
+
+        LirBlock b2(0, "xmm_after_scalar_only");
+        auto m2 = std::make_unique<LirInst>(LirOpcode::Movsd);
+        m2->add_def(LirOperand::preg_xmm(x64::XMM::XMM0));
+        m2->add_use(LirOperand::preg_xmm(x64::XMM::XMM1));
+        b2.append_inst(std::move(m2));
+
+        CHECK_EQ(verify_x64_lir_block_equivalence(b1, b2, 0u, 1u, false).status, EquivStatus::Counterexample);
+
+        LirBlock b_ymm(0, "ymm");
+        auto vm = std::make_unique<LirInst>(LirOpcode::Vmovaps);
+        vm->add_def(LirOperand::preg_xmm(x64::XMM::XMM0));
+        vm->add_use(LirOperand::preg_xmm(x64::XMM::XMM1));
+        b_ymm.append_inst(std::move(vm));
+        CHECK_EQ(verify_x64_lir_block_equivalence(b_ymm, b_ymm, 0u, 1u, false).status, EquivStatus::Unsupported);
+
+        LirFunction fn_u;
+        fn_u.name = "fn_unsup";
+        LirBlock* ub = fn_u.create_block("entry");
+        ub->id = 0;
+        auto vm2 = std::make_unique<LirInst>(LirOpcode::Vmovaps);
+        vm2->add_def(LirOperand::preg_xmm(x64::XMM::XMM0));
+        vm2->add_use(LirOperand::preg_xmm(x64::XMM::XMM1));
+        ub->append_inst(std::move(vm2));
+        CHECK_EQ(verify_x64_lir_function_equivalence(fn_u, fn_u).status, EquivStatus::Unsupported);
+
+        LirBlock pf_before(0, "pf_b");
+        auto add_a = std::make_unique<LirInst>(LirOpcode::Add32);
+        add_a->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 4));
+        add_a->add_use(LirOperand::preg_gpr(x64::GPR::RDI, 4));
+        add_a->add_use(LirOperand::imm(3, 4));
+        pf_before.append_inst(std::move(add_a));
+
+        LirBlock pf_after(0, "pf_a");
+        auto add_b = std::make_unique<LirInst>(LirOpcode::Add32);
+        add_b->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 4));
+        add_b->add_use(LirOperand::preg_gpr(x64::GPR::RDI, 4));
+        add_b->add_use(LirOperand::imm(3, 4));
+        pf_after.append_inst(std::move(add_b));
+        // Setcc P depends on PF: check RAX is preserved if not check_flags, whereas check_flags catches wrong PF vs cleared PF
+        LirBlock pf_bad(0, "pf_bad");
+        auto mov_a = std::make_unique<LirInst>(LirOpcode::Mov32);
+        mov_a->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 4));
+        mov_a->add_use(LirOperand::preg_gpr(x64::GPR::RDI, 4));
+        pf_bad.append_inst(std::move(mov_a));
+        auto add0 = std::make_unique<LirInst>(LirOpcode::Add32);
+        add0->add_def(LirOperand::preg_gpr(x64::GPR::RAX, 4));
+        add0->add_use(LirOperand::preg_gpr(x64::GPR::RAX, 4));
+        add0->add_use(LirOperand::imm(3, 4));
+        pf_bad.append_inst(std::move(add0));
+        auto jp = std::make_unique<LirInst>(LirOpcode::Setcc);
+        jp->condition = x64::Condition::P;
+        jp->add_def(LirOperand::preg_gpr(x64::GPR::RCX, 1));
+        pf_bad.append_inst(std::move(jp));
+
+        LirBlock pf_bad_wrong(0, "pf_bad_wrong");
+        auto mov_c = std::make_unique<LirInst>(LirOpcode::Mov32);
+        mov_c->add_def(LirOperand::preg_gpr(x64::GPR::RCX, 4));
+        mov_c->add_use(LirOperand::imm(1, 4));
+        pf_bad_wrong.append_inst(std::move(mov_c));
+        CHECK_EQ(verify_x64_lir_block_equivalence(pf_bad, pf_bad_wrong, x64::reg_mask(x64::GPR::RCX), 0u, false).status,
+                 EquivStatus::Counterexample);
+        CHECK_EQ(verify_x64_lir_block_equivalence(pf_before, pf_after, x64::reg_mask(x64::GPR::RAX), 0u, true).status,
+                 EquivStatus::ProvenEquivalent);
+    }
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

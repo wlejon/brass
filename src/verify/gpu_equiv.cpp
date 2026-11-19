@@ -395,7 +395,7 @@ void record_global_access(
     acc.full_addr_64 = full_addr;
     acc.access_bytes = access_bytes;
     acc.required_align = required_align ? required_align : access_bytes;
-    resolve_global_address(ctx, full_addr, env, acc.region_index, acc.byte_offset_64);
+    acc.addr_resolved = resolve_global_address(ctx, full_addr, env, acc.region_index, acc.byte_offset_64);
     trace.accesses.push_back(acc);
 }
 
@@ -406,16 +406,19 @@ void record_shared_access(
     bool is_store,
     uint32_t array_idx,
     BVNodeId elem_idx_32,
-    uint32_t access_bytes) {
+    uint32_t access_bytes,
+    BVNodeId raw_byte_off_64) {
     GpuSymAccess acc;
     acc.guard = guard;
     acc.is_shared = true;
     acc.is_store = is_store;
+    acc.addr_resolved = true;
     acc.region_index = array_idx;
     acc.elem_index_32 = gpu_coerce_width(ctx, elem_idx_32, 32, false);
     uint32_t shift = shift_for_elem_bytes(access_bytes);
-    acc.byte_offset_64 = bv_bin(
-        ctx, BVOp::Shl, 64, bv_ext(ctx, true, 64, acc.elem_index_32), bv_const(ctx, 64, shift));
+    acc.byte_offset_64 = (raw_byte_off_64 != 0)
+        ? gpu_coerce_width(ctx, raw_byte_off_64, 64, true)
+        : bv_bin(ctx, BVOp::Shl, 64, bv_ext(ctx, true, 64, acc.elem_index_32), bv_const(ctx, 64, shift));
     acc.full_addr_64 = make_shared_canonical_addr(ctx, array_idx, acc.elem_index_32, access_bytes);
     acc.access_bytes = access_bytes;
     acc.required_align = access_bytes;
@@ -517,6 +520,21 @@ EquivResult compare_gpu_traces(
 
     SolveOutcome out = solve_nonzero(ctx, any_diff, opts.max_sat_conflicts);
     if (out.status == SolveOutcome::Unsat) {
+        BVNodeId both_done = bv_bin(ctx, BVOp::And, 1, trace_a.completed, trace_b.completed);
+        const bool always_done = (bv_node(ctx, both_done).op == BVOp::Const && bv_node(ctx, both_done).imm == 1);
+        if (!always_done) {
+            BVNodeId trunc = bv_bin(
+                ctx, BVOp::And, 1, env.coord_bounds,
+                bv_bin(ctx, BVOp::And, 1,
+                       bv_bin(ctx, BVOp::And, 1, trace_a.domain_assumption, trace_b.domain_assumption),
+                       bv_un(ctx, BVOp::Not, 1, both_done)));
+            if (solve_nonzero(ctx, trunc, opts.max_sat_conflicts).status != SolveOutcome::Unsat) {
+                std::string msg = "GPU equivalence truncated at loop_unroll_bound comparing " +
+                                  std::string(label_a) + " vs " + std::string(label_b);
+                if (err_out) *err_out = msg;
+                return EquivResult{EquivStatus::Unknown, {}, msg};
+            }
+        }
         return EquivResult{EquivStatus::ProvenEquivalent, {}, {}};
     }
     if (out.status == SolveOutcome::Unknown) {

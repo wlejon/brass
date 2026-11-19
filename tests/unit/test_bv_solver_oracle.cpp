@@ -545,4 +545,35 @@ TEST_CASE("BVSolver #153 - Bitvector Identity & Edge-Case Regression Corpus (wit
     }
     set_strict_solver_check(true);
     CHECK(strict_solver_check_enabled());
+
+    // Verify SMT2 export supports Clz/Ctz/Popcnt/*Ovf, multi-bit bad_cond, and uninterpreted fallback
+    {
+        BVContext ctx;
+        BVNodeId x = ctx.make_var("x", 8);
+        BVNodeId y = ctx.make_var("y", 8);
+        BVNodeId ovf = ctx.make_binary(BVOp::SMulOvf, x, y, 1);
+        BVNodeId clz = ctx.make_unary(BVOp::Clz, x, 8);
+        BVNodeId ctz = ctx.make_unary(BVOp::Ctz, x, 8);
+        BVNodeId pop = ctx.make_unary(BVOp::Popcnt, x, 8);
+        BVNodeId sum = ctx.make_binary(BVOp::Add, clz, ctx.make_binary(BVOp::Add, ctz, pop, 8), 8);
+        BVNodeId comb = ctx.make_ite(ovf, sum, x);
+        std::string smt2 = ctx.export_smt2(comb, "extended ops");
+        CHECK(smt2.find("sign_extend 8") != std::string::npos);
+        CHECK(smt2.find("bvadd") != std::string::npos);
+        CHECK(smt2.find("(distinct t") != std::string::npos);
+        CHECK(smt2.find("(_ bv0 8)") != std::string::npos);
+    }
+
+    // Verify Mul-over-Add does not explode exponentially on non-constant products
+    {
+        BVContext ctx;
+        BVNodeId acc = ctx.make_var("p0", 32);
+        for (int k = 1; k <= 12; ++k) {
+            BVNodeId v = ctx.make_var("p" + std::to_string(k), 32);
+            BVNodeId sum = ctx.make_binary(BVOp::Add, v, ctx.make_const(static_cast<uint64_t>(k), 32), 32);
+            acc = ctx.make_binary(BVOp::Mul, acc, sum, 32);
+        }
+        CHECK(ctx.nodes().size() < 200u);
+        (void)acc;
+    }
 }

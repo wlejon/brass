@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -331,57 +332,75 @@ public:
         while (!worklist_.empty()) {
             std::vector<EClassId> todo;
             todo.swap(worklist_);
+            std::unordered_set<EClassId> seen_leaders;
+            seen_leaders.reserve(todo.size());
             for (EClassId cid : todo) {
                 const EClassId leader = find(cid);
-                if (leader == kInvalidEClass) continue;
+                if (leader == kInvalidEClass || !seen_leaders.insert(leader).second) continue;
+
                 std::vector<std::pair<ENode, EClassId>> old_parents = std::move(classes_[leader].parents);
                 classes_[leader].parents.clear();
 
-                std::vector<std::pair<ENode, EClassId>> new_parents;
-                new_parents.reserve(old_parents.size());
-                for (const auto& [old_node, pid] : old_parents) {
+                std::unordered_map<ENode, EClassId, ENodeHasher> dedup_parents;
+                dedup_parents.reserve(old_parents.size());
+                for (const auto& [old_node, raw_pid] : old_parents) {
+                    EClassId canon_pid = find(raw_pid);
                     auto it_old = memo_.find(old_node);
-                    if (it_old != memo_.end() && find(it_old->second) == find(pid)) {
+                    if (it_old != memo_.end() && find(it_old->second) == canon_pid) {
                         memo_.erase(it_old);
                     }
                     const ENode new_node = canonicalize(old_node);
-                    EClassId canon_pid = find(pid);
-                    auto it = memo_.find(new_node);
-                    if (it != memo_.end()) {
-                        const EClassId existing_pid = find(it->second);
+                    auto it_memo = memo_.find(new_node);
+                    if (it_memo != memo_.end()) {
+                        const EClassId existing_pid = find(it_memo->second);
                         if (existing_pid != canon_pid) {
                             merge(existing_pid, canon_pid);
                             canon_pid = find(existing_pid);
                         }
-                        it->second = canon_pid;
-                    } else {
-                        memo_.emplace(new_node, canon_pid);
-                        new_parents.emplace_back(new_node, canon_pid);
                     }
+                    auto it_dp = dedup_parents.find(new_node);
+                    if (it_dp != dedup_parents.end()) {
+                        const EClassId dp_pid = find(it_dp->second);
+                        const EClassId cur_pid = find(canon_pid);
+                        if (dp_pid != cur_pid) {
+                            merge(dp_pid, cur_pid);
+                        }
+                        it_dp->second = find(dp_pid);
+                    } else {
+                        dedup_parents.emplace(new_node, find(canon_pid));
+                    }
+                    memo_[new_node] = find(canon_pid);
                 }
-                auto& dst_parents = classes_[find(leader)].parents;
-                dst_parents.insert(dst_parents.end(), new_parents.begin(), new_parents.end());
+                const EClassId cur_leader = find(leader);
+                auto& dst_parents = classes_[cur_leader].parents;
+                dst_parents.reserve(dst_parents.size() + dedup_parents.size());
+                for (const auto& [pn, ppid] : dedup_parents) {
+                    const EClassId canon_ppid = find(ppid);
+                    memo_[pn] = canon_ppid;
+                    dst_parents.emplace_back(pn, canon_ppid);
+                }
             }
         }
 
+        // After congruence closure reaches fixed point, canonicalize and deduplicate all nodes cleanly.
+        memo_.clear();
         for (size_t i = 0; i < classes_.size(); ++i) {
             if (parents_uf_[i] != static_cast<EClassId>(i)) continue;
-            auto& nodes = classes_[i].nodes;
-            for (ENode& n : nodes) {
-                n = canonicalize(n);
-                memo_[n] = static_cast<EClassId>(i);
-            }
+            const EClassId cid = static_cast<EClassId>(i);
+            auto& nodes = classes_[cid].nodes;
             size_t w_idx = 0;
             for (size_t r_idx = 0; r_idx < nodes.size(); ++r_idx) {
+                const ENode cn = canonicalize(nodes[r_idx]);
                 bool dup = false;
                 for (size_t j = 0; j < w_idx; ++j) {
-                    if (nodes[j] == nodes[r_idx]) {
+                    if (nodes[j] == cn) {
                         dup = true;
                         break;
                     }
                 }
                 if (!dup) {
-                    nodes[w_idx++] = nodes[r_idx];
+                    nodes[w_idx++] = cn;
+                    memo_[cn] = cid;
                 }
             }
             nodes.resize(w_idx);

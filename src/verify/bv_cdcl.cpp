@@ -269,10 +269,11 @@ struct BitBlaster {
                     auto mul_half = [&](uint32_t ja_off, uint32_t ja_len, uint32_t ib_lim) {
                         std::vector<Lit> acc(w, sat.false_lit());
                         for (uint32_t i = 0; i < ib_lim; ++i) {
-                            if (bb[i] == sat.false_lit()) continue;
+                            Lit bi = bit_at(bb, i);
+                            if (bi == sat.false_lit()) continue;
                             std::vector<Lit> partial(w, sat.false_lit());
                             for (uint32_t j = 0; j < ja_len && i + j < w; ++j)
-                                partial[i + j] = sat.mk_and(ba[ja_off + j], bb[i]);
+                                partial[i + j] = sat.mk_and(bit_at(ba, ja_off + j), bi);
                             std::vector<Lit> next_acc;
                             add_adder(acc, partial, sat.false_lit(), next_acc);
                             acc = std::move(next_acc);
@@ -282,7 +283,7 @@ struct BitBlaster {
                     bool has_hi = false;
                     if (w == 32) {
                         for (uint32_t j = 16; j < 32; ++j)
-                            if (ba[j] != sat.false_lit()) { has_hi = true; break; }
+                            if (bit_at(ba, j) != sat.false_lit()) { has_hi = true; break; }
                     }
                     if (!has_hi) {
                         out = mul_half(0, w, w);
@@ -321,7 +322,8 @@ struct BitBlaster {
                 case BVOp::Shl:
                 case BVOp::LShr:
                 case BVOp::AShr: {
-                    std::vector<Lit> cur = bits[n.a];
+                    std::vector<Lit> cur(w, sat.false_lit());
+                    for (uint32_t i = 0; i < w; ++i) cur[i] = bit_at(bits[n.a], i);
                     const auto& sh = bits[n.b];
                     uint32_t sh_mask = shift_mask(w);
                     for (uint32_t s = 0; s < 6 && s < sh.size(); ++s) {
@@ -330,7 +332,7 @@ struct BitBlaster {
                         Lit sel = sh[s];
                         if (sel == sat.false_lit()) continue;
                         std::vector<Lit> next(w);
-                        Lit fill = (n.op == BVOp::AShr) ? cur[w - 1] : sat.false_lit();
+                        Lit fill = (n.op == BVOp::AShr) ? bit_at(cur, w - 1) : sat.false_lit();
                         for (uint32_t i = 0; i < w; ++i) {
                             Lit shifted = sat.false_lit();
                             if (n.op == BVOp::Shl) {
@@ -447,8 +449,9 @@ struct BitBlaster {
                 case BVOp::SSubOvf: {
                     const auto& ba = bits[n.a];
                     const auto& bb = bits[n.b];
-                    std::vector<Lit> nb(ba.size());
-                    for (size_t i = 0; i < ba.size(); ++i) nb[i] = CDCLSolver::neg(bb[i]);
+                    const size_t aw = std::max(ba.size(), bb.size());
+                    std::vector<Lit> nb(aw);
+                    for (size_t i = 0; i < aw; ++i) nb[i] = CDCLSolver::neg(bit_at(bb, i));
                     std::vector<Lit> sum;
                     Lit cout = sat.false_lit();
                     Lit cin_msb = sat.false_lit();
@@ -460,20 +463,25 @@ struct BitBlaster {
                 case BVOp::SMulOvf: {
                     const auto& ba = bits[n.a];
                     const auto& bb = bits[n.b];
-                    const size_t aw = ba.size();
+                    const size_t aw = std::max<size_t>(1, std::max(ba.size(), bb.size()));
                     Lit sign_a = bit_at(ba, aw - 1);
                     Lit sign_b = bit_at(bb, aw - 1);
+                    std::vector<Lit> pa(aw), pb(aw);
+                    for (size_t i = 0; i < aw; ++i) {
+                        pa[i] = bit_at(ba, i);
+                        pb[i] = bit_at(bb, i);
+                    }
                     std::vector<Lit> abs_a, abs_b, u_prod;
-                    blast_cond_neg(ba, sign_a, abs_a);
-                    blast_cond_neg(bb, sign_b, abs_b);
+                    blast_cond_neg(pa, sign_a, abs_a);
+                    blast_cond_neg(pb, sign_b, abs_b);
                     Lit umul_ovf = sat.false_lit();
                     blast_umul(abs_a, abs_b, u_prod, &umul_ovf);
                     Lit same_sign = CDCLSolver::neg(sat.mk_xor(sign_a, sign_b));
                     Lit low_nz = sat.false_lit();
                     for (size_t i = 0; i + 1 < aw; ++i) {
-                        low_nz = sat.mk_or(low_nz, u_prod[i]);
+                        low_nz = sat.mk_or(low_nz, bit_at(u_prod, i));
                     }
-                    Lit msb_bad = sat.mk_and(u_prod[aw - 1], sat.mk_or(same_sign, low_nz));
+                    Lit msb_bad = sat.mk_and(bit_at(u_prod, aw - 1), sat.mk_or(same_sign, low_nz));
                     out[0] = sat.mk_or(umul_ovf, msb_bad);
                     break;
                 }
@@ -578,8 +586,9 @@ SolveOutcome solve_nonzero_impl(
             const auto& ba = blaster.bits[nodes[neq_eq_node].a];
             const auto& bb = blaster.bits[nodes[neq_eq_node].b];
             bool all_bits_unsat = true;
-            for (size_t bi = 0; bi < ba.size(); ++bi) {
-                CDCLSolver::Lit diff_i = blaster.sat.mk_xor(ba[bi], bb[bi]);
+            const size_t bw = std::max(ba.size(), bb.size());
+            for (size_t bi = 0; bi < bw; ++bi) {
+                CDCLSolver::Lit diff_i = blaster.sat.mk_xor(blaster.bit_at(ba, bi), blaster.bit_at(bb, bi));
                 SolveOutcome::Status bst = blaster.sat.solve_assuming(diff_i, max_sat_conflicts);
                 if (bst == SolveOutcome::Unsat) {
                     if (!blaster.sat.add_clause(CDCLSolver::neg(diff_i))) {

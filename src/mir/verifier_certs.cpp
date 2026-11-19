@@ -30,11 +30,11 @@ bool cert_const_int(const Value* val, int64_t& out) noexcept {
     if (!val || !val->is_instruction()) return false;
     const Instruction* def = val->defining_instruction();
     if (!def) return false;
-    if (def->opcode() == Opcode::iconst_i64 || def->opcode() == Opcode::patchable_const_i64) {
+    if (def->opcode() == Opcode::iconst_i64) {
         out = def->imm_i64();
         return true;
     }
-    if (def->opcode() == Opcode::iconst_i32 || def->opcode() == Opcode::patchable_const_i32) {
+    if (def->opcode() == Opcode::iconst_i32) {
         out = def->imm_i32();
         return true;
     }
@@ -279,7 +279,35 @@ void verify_guard_elim_certificates(
                 // nothing about a constant.
                 int64_t c_imm = -1;
                 const bool always_leaves = cert_const_int(w_val, c_imm) && c_imm == 0;
-                // Verify that some dominating block has a guard or conditional branch establishing a fact
+                auto guard_establishes = [](auto& self, const Value* cond, const Value* target, int depth) -> bool {
+                    if (!cond || !target || depth > 8) return false;
+                    if (cond == target) return true;
+                    const Instruction* def = cond->is_instruction() ? cond->defining_instruction() : nullptr;
+                    if (def && def->opcode() == Opcode::and_ && def->operand_count() == 2) {
+                        return self(self, def->operand(0), target, depth + 1) ||
+                               self(self, def->operand(1), target, depth + 1);
+                    }
+                    return false;
+                };
+                auto false_edge_establishes = [](auto& self, const Value* cond, const Value* target, int depth) -> bool {
+                    if (!cond || !target || depth > 8) return false;
+                    if (cond == target) return true;
+                    const Instruction* def = cond->is_instruction() ? cond->defining_instruction() : nullptr;
+                    if (def && def->opcode() == Opcode::or_ && def->operand_count() == 2) {
+                        return self(self, def->operand(0), target, depth + 1) ||
+                               self(self, def->operand(1), target, depth + 1);
+                    }
+                    return false;
+                };
+                auto edge_dominates = [&](const BasicBlock* from, const BasicBlock* target) -> bool {
+                    if (!from || !target || target == from || !dom.dominates(target, bb)) return false;
+                    for (const BasicBlock* pred : target->predecessors()) {
+                        if (pred != from && !dom.dominates(target, pred)) return false;
+                    }
+                    return true;
+                };
+
+                // Verify that some dominating block has a matching guard or dominating branch edge for w_val.
                 bool has_dom_guard_or_branch = false;
                 for (const BasicBlock* dbb : fn.blocks()) {
                     if (!dbb || !dom.dominates(dbb, bb)) continue;
@@ -287,14 +315,21 @@ void verify_guard_elim_certificates(
                         if (!inst) continue;
                         int64_t g_imm = -1;
                         if (inst->opcode() == Opcode::guard &&
-                            (inst->operand(0) == w_val ||
+                            (guard_establishes(guard_establishes, inst->operand(0), w_val, 0) ||
                              (always_leaves && cert_const_int(inst->operand(0), g_imm) && g_imm == 0))) {
                             has_dom_guard_or_branch = true;
                             break;
                         }
-                        if (inst->opcode() == Opcode::br_if && dbb != bb && !always_leaves) {
-                            has_dom_guard_or_branch = true;
-                            break;
+                        if (inst->opcode() == Opcode::br_if && dbb != bb && !always_leaves &&
+                            inst->true_target().block != inst->false_target().block) {
+                            const bool t_ok = edge_dominates(dbb, inst->true_target().block) &&
+                                              guard_establishes(guard_establishes, inst->operand(0), w_val, 0);
+                            const bool f_ok = edge_dominates(dbb, inst->false_target().block) &&
+                                              false_edge_establishes(false_edge_establishes, inst->operand(0), w_val, 0);
+                            if (t_ok || f_ok) {
+                                has_dom_guard_or_branch = true;
+                                break;
+                            }
                         }
                     }
                     if (has_dom_guard_or_branch) break;

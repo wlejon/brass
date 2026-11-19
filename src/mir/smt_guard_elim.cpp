@@ -95,11 +95,9 @@ struct SliceEncoder {
 
         switch (op) {
             case Opcode::iconst_i32:
-            case Opcode::patchable_const_i32:
                 res = ctx.make_const(static_cast<uint32_t>(inst->imm_i32()), 32);
                 break;
             case Opcode::iconst_i64:
-            case Opcode::patchable_const_i64:
                 res = ctx.make_const(static_cast<uint64_t>(inst->imm_i64()), 64);
                 break;
             case Opcode::sext_i64: {
@@ -293,18 +291,15 @@ bool try_prove_2d_strided_bound(
         return false;
     }
 
-    const Value* stride_val = nullptr;
     const Value* j_val = nullptr;
     BVNodeId stride_bv = kInvalidBV;
     BVNodeId j_bv = kInvalidBV;
 
     if (is_proven_true(ctx, path_cond, ctx.make_binary(BVOp::Slt, i_bv, m0_bv, 1), max_conflicts, stats)) {
-        stride_val = mul_inst->operand(0);
         j_val = mul_inst->operand(1);
         stride_bv = m0_bv;
         j_bv = m1_bv;
     } else if (is_proven_true(ctx, path_cond, ctx.make_binary(BVOp::Slt, i_bv, m1_bv, 1), max_conflicts, stats)) {
-        stride_val = mul_inst->operand(1);
         j_val = mul_inst->operand(0);
         stride_bv = m1_bv;
         j_bv = m0_bv;
@@ -340,26 +335,9 @@ bool try_prove_2d_strided_bound(
         }
         BVNodeId prod_sh = ctx.make_binary(BVOp::Mul, stride_bv, h_bv, w);
         BVNodeId ovf_sh = ctx.make_binary(BVOp::SMulOvf, stride_bv, h_bv, 1);
-        bool no_overflow = is_proven_true(ctx, path_cond, ctx.make_unary(BVOp::Not, ovf_sh, 1), max_conflicts, stats);
-        if (!no_overflow) {
-            // Also check if an explicit mul(stride, h) <=s rhs guard exists in dom_guard_conds with rhs > 0
-            for (const Value* gc : dom_guard_conds) {
-                if (!gc || !gc->is_instruction()) continue;
-                const Instruction* gd = gc->defining_instruction();
-                if (!gd || (gd->opcode() != Opcode::sle && gd->opcode() != Opcode::ule &&
-                            gd->opcode() != Opcode::slt && gd->opcode() != Opcode::ult)) continue;
-                const Value* gl = gd->operand(0);
-                if (gl && gl->is_instruction() && gl->defining_instruction()->opcode() == Opcode::mul) {
-                    const Instruction* gm = gl->defining_instruction();
-                    if ((gm->operand(0) == stride_val && gm->operand(1) == h_val) ||
-                        (gm->operand(0) == h_val && gm->operand(1) == stride_val)) {
-                        no_overflow = true;
-                        break;
-                    }
-                }
-            }
+        if (!is_proven_true(ctx, path_cond, ctx.make_unary(BVOp::Not, ovf_sh, 1), max_conflicts, stats)) {
+            continue;
         }
-        if (!no_overflow) continue;
 
         // Under 0 <= i < stride, 0 <= j < H, and no overflow on stride * H:
         //   0 <= i + stride * j < stride * H
@@ -452,43 +430,91 @@ void collect_loop_iv_assumptions(
             BVNodeId init_bv = enc.encode(init_v);
             if (iv_bv == kInvalidBV || init_bv == kInvalidBV || enc.ctx.width(iv_bv) != enc.ctx.width(init_bv)) continue;
 
-            // Check if the latch or header branches on iv < bound or next_v < bound
+            auto is_loop_invariant = [&](const Value* val) -> bool {
+                if (!val) return false;
+                if (val->is_instruction()) {
+                    const BasicBlock* def_bb = val->defining_instruction()
+                                                   ? val->defining_instruction()->parent()
+                                                   : nullptr;
+                    return def_bb && !loop->contains(def_bb);
+                }
+                for (const BasicBlock* lbb : loop->blocks()) {
+                    if (!lbb) continue;
+                    for (size_t k = 0; k < lbb->param_count(); ++k) {
+                        if (lbb->param(k) == val) return false;
+                    }
+                }
+                return true;
+            };
+
+            const uint32_t w = enc.ctx.width(iv_bv);
+            if (w != 32 && w != 64) continue;
+            const int64_t max_sint = (w == 32) ? static_cast<int64_t>(INT32_MAX) : INT64_MAX;
+            if (step_imm > max_sint) continue;
+
+            // Only emit signed monotonicity facts when a loop-invariant signed upper bound
+            // prevents step_imm from wrapping past INT_MAX.
             const Instruction* l_term = latch->terminator();
             const Instruction* h_term = hdr->terminator();
-            bool has_upper_bound = false;
-            auto check_term_bound = [&](const Instruction* term, const BasicBlock* in_loop_succ) {
-                if (!term || term->opcode() != Opcode::br_if) return;
-                const Value* c = term->operand(0);
-                if (!c || !c->is_instruction()) return;
-                const Instruction* cmp = c->defining_instruction();
-                if (!cmp) return;
-                bool on_true = (term->true_target().block == in_loop_succ);
-                Opcode cop = cmp->opcode();
-                if (on_true && (cop == Opcode::slt || cop == Opcode::sle || cop == Opcode::ult || cop == Opcode::ule)) {
-                    if (cmp->operand(0) == iv || cmp->operand(0) == next_v) {
-                        has_upper_bound = true;
-                        if (cmp->operand(0) == next_v && term == l_term) {
-                            // Bottom-tested loop: next_v < bound on latch; if init_v < bound is also guarded, iv < bound!
+
+            if (h_term && h_term->opcode() == Opcode::br_if) {
+                const BasicBlock* t_blk = h_term->true_target().block;
+                const BasicBlock* f_blk = h_term->false_target().block;
+                const Value* c = h_term->operand(0);
+                if (t_blk && f_blk && loop->contains(t_blk) && !loop->contains(f_blk) &&
+                    c && c->is_instruction()) {
+                    const Instruction* cmp = c->defining_instruction();
+                    if (cmp) {
+                        Opcode cop = cmp->opcode();
+                        if ((cop == Opcode::slt || cop == Opcode::sle) &&
+                            cmp->operand(0) == iv && is_loop_invariant(cmp->operand(1))) {
                             BVNodeId b_bv = enc.encode(cmp->operand(1));
-                            if (b_bv != kInvalidBV && enc.ctx.width(b_bv) == enc.ctx.width(iv_bv)) {
-                                BVOp bop = (cop == Opcode::slt) ? BVOp::Slt : (cop == Opcode::sle) ? BVOp::Sle
-                                         : (cop == Opcode::ult) ? BVOp::Ult : BVOp::Ule;
-                                BVNodeId init_ok = enc.ctx.make_binary(bop, init_bv, b_bv, 1);
-                                BVNodeId iv_ok = enc.ctx.make_binary(bop, iv_bv, b_bv, 1);
-                                assumptions.push_back(enc.ctx.make_ite(init_ok, iv_ok, enc.ctx.make_const(1, 1)));
+                            if (b_bv != kInvalidBV && enc.ctx.width(b_bv) == w) {
+                                const int64_t slack = (cop == Opcode::slt) ? (step_imm - 1) : step_imm;
+                                const int64_t max_safe_b = max_sint - slack;
+                                BVNodeId sge_fact = enc.ctx.make_binary(BVOp::Sge, iv_bv, init_bv, 1);
+                                if (max_safe_b == max_sint) {
+                                    assumptions.push_back(sge_fact);
+                                } else {
+                                    BVNodeId safe_b = enc.ctx.make_binary(
+                                        BVOp::Sle, b_bv, enc.ctx.make_const(static_cast<uint64_t>(max_safe_b), w), 1);
+                                    assumptions.push_back(enc.ctx.make_ite(safe_b, sge_fact, enc.ctx.make_const(1, 1)));
+                                }
                             }
                         }
                     }
                 }
-            };
-            check_term_bound(h_term, (h_term && h_term->opcode() == Opcode::br_if &&
-                                      loop->contains(h_term->true_target().block))
-                                     ? h_term->true_target().block
-                                     : (h_term && h_term->opcode() == Opcode::br_if ? h_term->false_target().block : nullptr));
-            check_term_bound(l_term, hdr);
+            }
 
-            if (has_upper_bound) {
-                assumptions.push_back(enc.ctx.make_binary(BVOp::Sge, iv_bv, init_bv, 1));
+            if (l_term && l_term->opcode() == Opcode::br_if) {
+                const BasicBlock* t_blk = l_term->true_target().block;
+                const BasicBlock* f_blk = l_term->false_target().block;
+                const Value* c = l_term->operand(0);
+                if (t_blk == hdr && f_blk && !loop->contains(f_blk) && c && c->is_instruction()) {
+                    const Instruction* cmp = c->defining_instruction();
+                    if (cmp) {
+                        Opcode cop = cmp->opcode();
+                        if ((cop == Opcode::slt || cop == Opcode::sle) &&
+                            cmp->operand(0) == next_v && is_loop_invariant(cmp->operand(1))) {
+                            BVNodeId b_bv = enc.encode(cmp->operand(1));
+                            if (b_bv != kInvalidBV && enc.ctx.width(b_bv) == w) {
+                                const int64_t slack = (cop == Opcode::slt) ? (step_imm - 1) : step_imm;
+                                const int64_t max_safe_b = max_sint - slack;
+                                BVOp bop = (cop == Opcode::slt) ? BVOp::Slt : BVOp::Sle;
+                                BVNodeId init_ok = enc.ctx.make_binary(bop, init_bv, b_bv, 1);
+                                if (max_safe_b < max_sint) {
+                                    BVNodeId safe_b = enc.ctx.make_binary(
+                                        BVOp::Sle, b_bv, enc.ctx.make_const(static_cast<uint64_t>(max_safe_b), w), 1);
+                                    init_ok = enc.ctx.make_binary(BVOp::And, init_ok, safe_b, 1);
+                                }
+                                BVNodeId iv_ok = enc.ctx.make_binary(bop, iv_bv, b_bv, 1);
+                                BVNodeId iv_ge_init = enc.ctx.make_binary(BVOp::Sge, iv_bv, init_bv, 1);
+                                BVNodeId both = enc.ctx.make_binary(BVOp::And, iv_ok, iv_ge_init, 1);
+                                assumptions.push_back(enc.ctx.make_ite(init_ok, both, enc.ctx.make_const(1, 1)));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

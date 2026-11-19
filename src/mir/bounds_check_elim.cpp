@@ -24,11 +24,11 @@ bool get_const_int(const Value* v, int64_t& out) {
     if (!v || !v->is_instruction()) return false;
     const Instruction* d = v->defining_instruction();
     if (!d) return false;
-    if (d->opcode() == Opcode::iconst_i32 || d->opcode() == Opcode::patchable_const_i32) {
+    if (d->opcode() == Opcode::iconst_i32) {
         out = static_cast<int64_t>(d->imm_i32());
         return true;
     }
-    if (d->opcode() == Opcode::iconst_i64 || d->opcode() == Opcode::patchable_const_i64) {
+    if (d->opcode() == Opcode::iconst_i64) {
         out = d->imm_i64();
         return true;
     }
@@ -472,7 +472,12 @@ private:
         return false;
     }
 
-    std::optional<bool> check_implied(Opcode check_op, const Value* raw_x, const Value* raw_y, const BasicBlock* bb) const {
+    std::optional<bool> check_implied(
+        Opcode check_op,
+        const Value* raw_x,
+        const Value* raw_y,
+        const BasicBlock* bb,
+        const Value** out_witness = nullptr) const {
         const Value* x = canonicalize(raw_x, bb);
         const Value* y = canonicalize(raw_y, bb);
         const bool x_non_neg = is_non_negative(raw_x, bb) || is_non_negative(x, bb);
@@ -490,6 +495,7 @@ private:
                 f.rhs = y;
             }
             if (auto outcome = implied_by(f, check_op, x, y, both_non_negative)) {
+                if (out_witness) *out_witness = it->witness;
                 return outcome;
             }
         }
@@ -517,8 +523,14 @@ private:
                     if (implied_by(f2, Opcode::ule, mid, y, mid_and_y_nn) == true) {
                         bool strict2 = (implied_by(f2, Opcode::ult, mid, y, mid_and_y_nn) == true);
                         uint8_t trans_accepts = (strict1 || strict2) ? kLess : (kLess | kEqual);
-                        if ((trans_accepts & ~check_pred->accepts) == 0) return true;
-                        if ((trans_accepts & check_pred->accepts) == 0) return false;
+                        if ((trans_accepts & ~check_pred->accepts) == 0) {
+                            if (out_witness) *out_witness = f1.witness;
+                            return true;
+                        }
+                        if ((trans_accepts & check_pred->accepts) == 0) {
+                            if (out_witness) *out_witness = f1.witness;
+                            return false;
+                        }
                     }
                 }
             }
@@ -546,8 +558,14 @@ private:
                         }
                         if (!signed_safe) continue;
                     }
-                    if ((kLess & ~check_pred->accepts) == 0) return true;
-                    if ((kLess & check_pred->accepts) == 0) return false;
+                    if ((kLess & ~check_pred->accepts) == 0) {
+                        if (out_witness) *out_witness = f.witness;
+                        return true;
+                    }
+                    if ((kLess & check_pred->accepts) == 0) {
+                        if (out_witness) *out_witness = f.witness;
+                        return false;
+                    }
                 }
             }
         }
@@ -606,7 +624,8 @@ private:
             if (facts_.empty()) continue;
             const Instruction* cmp = as_int_comparison(cur->result());
             if (!cmp) continue;
-            std::optional<bool> outcome = check_implied(cmp->opcode(), cmp->operand(0), cmp->operand(1), bb);
+            const Value* w = nullptr;
+            std::optional<bool> outcome = check_implied(cmp->opcode(), cmp->operand(0), cmp->operand(1), bb, &w);
             if (!outcome) continue;
             Builder b(mod_);
             b.set_function(&fn_);
@@ -614,9 +633,8 @@ private:
             Value* folded = b.build_iconst_i32(*outcome ? 1 : 0);
             if (*outcome) {
                 GuardElimCert cert;
-                cert.reason = GuardElimCert::Reason::DominatedSameCond;
+                cert.reason = w ? GuardElimCert::Reason::DominatedSameCond : GuardElimCert::Reason::ImpliedRelational;
                 cert.check_op = cmp->opcode();
-                const Value* w = facts_.back().witness;
                 cert.witness_inst_or_val_id = w ? w->id() : 0;
                 pending_certs_[folded] = cert;
             }
@@ -947,7 +965,7 @@ void reconcile_guard_elim_certs(Function& fn) {
                 c.witness_inst_or_val_id = 0;
                 if (c.reason == GuardElimCert::Reason::DominatedSameCond ||
                     c.reason == GuardElimCert::Reason::NonNegativeMask) {
-                    c.reason = GuardElimCert::Reason::ImpliedRelational;
+                    return true;
                 }
             }
             return false;

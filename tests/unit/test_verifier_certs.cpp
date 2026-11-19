@@ -344,6 +344,39 @@ TEST_CASE("Verifier Certs - a witness dead code elimination deletes leaves its c
     CHECK(verify_function(*fn, &diag));
 }
 
+TEST_CASE("Verifier Certs - Rejects DominatedSameCond for Unrelated br_if or Non-Dominating Branch Edge") {
+    Module mod("bad_br_if_cert");
+    Builder b(mod);
+    Function* fn = mod.create_function("bad_br_if", Type::i32(), {Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* left = b.append_block("left");
+    BasicBlock* right = b.append_block("right");
+    Value* x = b.add_block_param(entry, Type::i32());
+
+    b.position_at_end(entry);
+    Value* c_branch = b.build_slt(x, b.build_iconst_i32(0));
+    Value* c_unrelated = b.build_slt(x, b.build_iconst_i32(10));
+    b.build_br_if(c_branch, left, {}, right, {});
+
+    b.position_at_end(left);
+    b.build_ret(x);
+    b.position_at_end(right);
+    b.build_ret(x);
+    fn->rebuild_cfg_predecessors();
+
+    GuardElimCert bad_cert;
+    bad_cert.eliminated_resume_id = 11;
+    bad_cert.block_id = left->id();
+    bad_cert.reason = GuardElimCert::Reason::DominatedSameCond;
+    bad_cert.witness_inst_or_val_id = c_unrelated->id();
+    fn->add_guard_elim_cert(bad_cert);
+
+    DiagnosticReporter diag;
+    CHECK(!verify_function(*fn, &diag));
+    CHECK(diag.has_errors());
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

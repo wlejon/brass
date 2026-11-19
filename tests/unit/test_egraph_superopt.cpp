@@ -360,6 +360,27 @@ TEST_CASE("EGraph MIR Superopt - End-to-End Multi-Step Simplification & Solver V
         CHECK_EQ(verify::verify_mir_equivalence(*before_mod->get_function("mul_factor_shift"), *fn).status,
                  verify::EquivStatus::ProvenEquivalent);
     }
+
+    // 4. Multi-level cascading congruence rebuild preserves grandparent edges cleanly
+    {
+        EGraph eg;
+        const EClassId x = eg.add_var(1, 32);
+        const EClassId y = eg.add_var(2, 32);
+        const EClassId z = eg.add_var(3, 32);
+        const EClassId two = eg.add_const(2, 32);
+        const EClassId p1 = eg.add_node(ENode{EOp::Add, 32, x, y});
+        const EClassId p2 = eg.add_node(ENode{EOp::Add, 32, z, y});
+        const EClassId gp1 = eg.add_node(ENode{EOp::Mul, 32, p1, two});
+        const EClassId gp2 = eg.add_node(ENode{EOp::Mul, 32, p2, two});
+        const EClassId ggp1 = eg.add_node(ENode{EOp::Xor, 32, gp1, y});
+        const EClassId ggp2 = eg.add_node(ENode{EOp::Xor, 32, gp2, y});
+        CHECK(eg.find(ggp1) != eg.find(ggp2));
+        eg.merge(x, z);
+        eg.rebuild();
+        CHECK_EQ(eg.find(p1), eg.find(p2));
+        CHECK_EQ(eg.find(gp1), eg.find(gp2));
+        CHECK_EQ(eg.find(ggp1), eg.find(ggp2));
+    }
 }
 
 #ifdef BRASS_STANDALONE_TEST

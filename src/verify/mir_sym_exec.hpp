@@ -30,10 +30,12 @@ struct InitMemEnv {
     std::vector<ByteEntry> bytes;
     struct CallEntry { std::string sym; std::vector<BVNodeId> args; BVNodeId ret_val; };
     std::vector<CallEntry> calls;
+    std::unordered_map<std::string, BVNodeId> patchable_consts;
 
     BVNodeId read_init_byte(BVContext& ctx, BVNodeId byte_addr);
     BVNodeId eval_uninterpreted_call(BVContext& ctx, std::string_view sym,
                                      const std::vector<BVNodeId>& args, Type ret_type);
+    BVNodeId get_patchable_const(BVContext& ctx, std::string_view sym, uint32_t width);
 };
 
 struct SymCapturedEdge {

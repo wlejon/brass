@@ -51,6 +51,8 @@ public:
         xor_rhs_.push_back(kLitUndef);
         watches_.emplace_back();
         watches_.emplace_back();
+        heap_pos_.push_back(-1);
+        if (v > 0) heap_insert(v);
         return v;
     }
 
@@ -202,12 +204,29 @@ public:
         }
         uint32_t base_lvl = decision_level();
         uint32_t conflicts = 0;
+        uint32_t conflicts_since_restart = 0;
+        uint32_t restart_idx = 0;
+        auto luby = [](uint32_t idx) noexcept -> uint32_t {
+            uint32_t size = 1, seq = 0;
+            while (size < idx + 1) {
+                ++seq;
+                size = 2 * size + 1;
+            }
+            while (size - 1 != idx) {
+                size = (size - 1) >> 1;
+                --seq;
+                idx %= size;
+            }
+            return 1u << seq;
+        };
+        uint32_t next_restart = 64u * luby(0);
         std::vector<Lit> learnt;
 
         while (true) {
             uint32_t confl = propagate();
             if (confl != UINT32_MAX) {
                 ++conflicts;
+                ++conflicts_since_restart;
                 if (decision_level() == 0) {
                     ok_ = false;
                     return SolveOutcome::Unsat;
@@ -251,6 +270,12 @@ public:
                     backtrack(0);
                     return SolveOutcome::Unknown;
                 }
+                if (conflicts_since_restart >= next_restart && decision_level() > base_lvl) {
+                    backtrack(base_lvl);
+                    conflicts_since_restart = 0;
+                    ++restart_idx;
+                    next_restart = 64u * luby(restart_idx);
+                }
             } else {
                 uint32_t next_v = pick_branch_var();
                 if (next_v == UINT32_MAX) {
@@ -286,6 +311,7 @@ private:
         for (size_t i = trail_.size(); i > target; --i) {
             uint32_t v = var(trail_[i - 1]);
             assigns_[v] = -1;
+            heap_insert(v);
         }
         trail_.resize(target);
         trail_lim_.resize(lvl);
@@ -357,7 +383,7 @@ private:
                 Lit q = c[j];
                 uint32_t v = var(q);
                 if (!seen_[v] && level_[v] > 0) {
-                    activity_[v] += var_inc_;
+                    bump_var_activity(v);
                     seen_[v] = 1;
                     if (level_[v] >= cur_lvl) {
                         ++path_c;
@@ -394,16 +420,76 @@ private:
         }
     }
 
-    uint32_t pick_branch_var() const noexcept {
-        uint32_t best = UINT32_MAX;
-        double best_act = -1.0;
-        for (uint32_t v = 1; v < assigns_.size(); ++v) {
-            if (assigns_[v] < 0 && activity_[v] > best_act) {
-                best = v;
-                best_act = activity_[v];
+    void heap_swap(size_t i, size_t j) noexcept {
+        uint32_t a = heap_[i];
+        uint32_t b = heap_[j];
+        heap_[i] = b;
+        heap_[j] = a;
+        heap_pos_[b] = static_cast<int32_t>(i);
+        heap_pos_[a] = static_cast<int32_t>(j);
+    }
+
+    void heap_sift_up(size_t i) noexcept {
+        while (i > 0) {
+            size_t p = (i - 1) >> 1;
+            if (activity_[heap_[p]] < activity_[heap_[i]]) {
+                heap_swap(i, p);
+                i = p;
+            } else {
+                break;
             }
         }
-        return best;
+    }
+
+    void heap_sift_down(size_t i) noexcept {
+        const size_t n = heap_.size();
+        while (true) {
+            size_t l = (i << 1) + 1;
+            if (l >= n) break;
+            size_t r = l + 1;
+            size_t c = (r < n && activity_[heap_[l]] < activity_[heap_[r]]) ? r : l;
+            if (activity_[heap_[i]] < activity_[heap_[c]]) {
+                heap_swap(i, c);
+                i = c;
+            } else {
+                break;
+            }
+        }
+    }
+
+    void heap_insert(uint32_t v) {
+        if (v == 0 || v >= heap_pos_.size() || heap_pos_[v] >= 0) return;
+        size_t i = heap_.size();
+        heap_.push_back(v);
+        heap_pos_[v] = static_cast<int32_t>(i);
+        heap_sift_up(i);
+    }
+
+    void bump_var_activity(uint32_t v) noexcept {
+        activity_[v] += var_inc_;
+        if (activity_[v] > 1e100) {
+            for (double& a : activity_) a *= 1e-100;
+            var_inc_ *= 1e-100;
+        }
+        if (v < heap_pos_.size() && heap_pos_[v] >= 0) {
+            heap_sift_up(static_cast<size_t>(heap_pos_[v]));
+        }
+    }
+
+    uint32_t pick_branch_var() noexcept {
+        while (!heap_.empty()) {
+            uint32_t best = heap_[0];
+            uint32_t last = heap_.back();
+            heap_.pop_back();
+            heap_pos_[best] = -1;
+            if (!heap_.empty()) {
+                heap_[0] = last;
+                heap_pos_[last] = 0;
+                heap_sift_down(0);
+            }
+            if (assigns_[best] < 0) return best;
+        }
+        return UINT32_MAX;
     }
 
     bool ok_ = true;
@@ -415,6 +501,8 @@ private:
     std::vector<uint8_t> seen_;
     std::vector<double> activity_;
     std::vector<bool> phase_;
+    std::vector<uint32_t> heap_;
+    std::vector<int32_t> heap_pos_;
     std::vector<Lit> trail_;
     std::vector<uint32_t> trail_lim_;
     std::vector<Lit> xor_lhs_;

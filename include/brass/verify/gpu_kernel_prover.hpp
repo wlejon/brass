@@ -30,6 +30,7 @@ struct GpuProverOptions {
     uint32_t subgroup_size = 32;
     uint32_t loop_unroll_bound = 4;
     uint32_t max_sat_conflicts = 10000;
+    bool check_global_bounds = true;
     std::vector<GpuBufferSpec> buffers;
 };
 

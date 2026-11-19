@@ -471,12 +471,35 @@ std::string BVContext::export_smt2(BVNodeId bad_cond, std::string_view comment) 
     if (!comment.empty()) os << "; " << comment << "\n";
     os << "(set-logic QF_BV)\n";
     for (const auto& v : vars_) os << "(declare-fun " << v.name << " () (_ BitVec " << v.width << "))\n";
+    auto is_smt2_supported = [](BVOp op) noexcept {
+        switch (op) {
+            case BVOp::Const: case BVOp::Var: case BVOp::Extract: case BVOp::Concat:
+            case BVOp::ZExt: case BVOp::SExt: case BVOp::Not: case BVOp::Neg:
+            case BVOp::And: case BVOp::Or: case BVOp::Xor: case BVOp::Add: case BVOp::Sub:
+            case BVOp::Mul: case BVOp::UDiv: case BVOp::SDiv: case BVOp::URem: case BVOp::SRem:
+            case BVOp::Shl: case BVOp::LShr: case BVOp::AShr:
+            case BVOp::Eq: case BVOp::Ne: case BVOp::Ult: case BVOp::Ule:
+            case BVOp::Ugt: case BVOp::Uge: case BVOp::Slt: case BVOp::Sle:
+            case BVOp::Sgt: case BVOp::Sge: case BVOp::Ite:
+            case BVOp::Clz: case BVOp::Ctz: case BVOp::Popcnt:
+            case BVOp::SAddOvf: case BVOp::SSubOvf: case BVOp::SMulOvf:
+            case BVOp::UAddOvf: case BVOp::USubOvf: case BVOp::UMulOvf:
+                return true;
+            default:
+                return false;
+        }
+    };
+    for (size_t i = 0; i < nodes_.size(); ++i) {
+        if (!is_smt2_supported(nodes_[i].op)) {
+            os << "(declare-fun uninterp_t" << i << " () (_ BitVec " << nodes_[i].width << "))\n";
+        }
+    }
     for (size_t i = 0; i < nodes_.size(); ++i) {
         const BVNode& n = nodes_[i];
         os << "(define-fun t" << i << " () (_ BitVec " << n.width << ") ";
         auto r = [](BVNodeId id) { return "t" + std::to_string(id); };
         switch (n.op) {
-            case BVOp::Const:   os << "(_ bv" << n.imm << " " << n.width << ")"; break;
+            case BVOp::Const:   os << "(_ bv" << (n.imm & width_mask(n.width)) << " " << n.width << ")"; break;
             case BVOp::Var:     os << vars_[static_cast<size_t>(n.imm)].name; break;
             case BVOp::Extract: os << "((_ extract " << n.imm << " " << n.extra << ") " << r(n.a) << ")"; break;
             case BVOp::Concat:  os << "(concat " << r(n.a) << " " << r(n.b) << ")"; break;
@@ -519,12 +542,97 @@ std::string BVContext::export_smt2(BVNodeId bad_cond, std::string_view comment) 
             case BVOp::Sle: os << "(ite (bvsle " << r(n.a) << " " << r(n.b) << ") #b1 #b0)"; break;
             case BVOp::Sgt: os << "(ite (bvsgt " << r(n.a) << " " << r(n.b) << ") #b1 #b0)"; break;
             case BVOp::Sge: os << "(ite (bvsge " << r(n.a) << " " << r(n.b) << ") #b1 #b0)"; break;
-            case BVOp::Ite: os << "(ite (= " << r(n.a) << " #b1) " << r(n.b) << " " << r(n.c) << ")"; break;
-            default:        os << "(_ bv0 " << n.width << ")"; break;
+            case BVOp::Ite: {
+                const uint32_t cw = (n.a < nodes_.size()) ? nodes_[n.a].width : 1u;
+                if (cw == 1) os << "(ite (= " << r(n.a) << " #b1) " << r(n.b) << " " << r(n.c) << ")";
+                else os << "(ite (distinct " << r(n.a) << " (_ bv0 " << cw << ")) " << r(n.b) << " " << r(n.c) << ")";
+                break;
+            }
+            case BVOp::UAddOvf: {
+                const uint32_t aw = (n.a < nodes_.size()) ? nodes_[n.a].width : n.width;
+                os << "((_ extract " << aw << " " << aw << ") (bvadd ((_ zero_extend 1) " << r(n.a)
+                   << ") ((_ zero_extend 1) " << r(n.b) << ")))";
+                break;
+            }
+            case BVOp::USubOvf:
+                os << "(ite (bvult " << r(n.a) << " " << r(n.b) << ") #b1 #b0)";
+                break;
+            case BVOp::UMulOvf: {
+                const uint32_t aw = (n.a < nodes_.size()) ? nodes_[n.a].width : n.width;
+                os << "(ite (= ((_ extract " << (2 * aw - 1) << " " << aw << ") (bvmul ((_ zero_extend " << aw
+                   << ") " << r(n.a) << ") ((_ zero_extend " << aw << ") " << r(n.b) << "))) (_ bv0 " << aw
+                   << ")) #b0 #b1)";
+                break;
+            }
+            case BVOp::SAddOvf: {
+                const uint32_t aw = (n.a < nodes_.size()) ? nodes_[n.a].width : n.width;
+                const uint32_t msb = aw ? (aw - 1) : 0;
+                os << "(let ((sa ((_ extract " << msb << " " << msb << ") " << r(n.a)
+                   << ")) (sb ((_ extract " << msb << " " << msb << ") " << r(n.b)
+                   << ")) (sr ((_ extract " << msb << " " << msb << ") (bvadd " << r(n.a) << " " << r(n.b)
+                   << ")))) (bvand (bvxnor sa sb) (bvxor sa sr)))";
+                break;
+            }
+            case BVOp::SSubOvf: {
+                const uint32_t aw = (n.a < nodes_.size()) ? nodes_[n.a].width : n.width;
+                const uint32_t msb = aw ? (aw - 1) : 0;
+                os << "(let ((sa ((_ extract " << msb << " " << msb << ") " << r(n.a)
+                   << ")) (sb ((_ extract " << msb << " " << msb << ") " << r(n.b)
+                   << ")) (sr ((_ extract " << msb << " " << msb << ") (bvsub " << r(n.a) << " " << r(n.b)
+                   << ")))) (bvand (bvxor sa sb) (bvxor sa sr)))";
+                break;
+            }
+            case BVOp::SMulOvf: {
+                const uint32_t aw = (n.a < nodes_.size()) ? nodes_[n.a].width : n.width;
+                os << "(let ((p (bvmul ((_ sign_extend " << aw << ") " << r(n.a)
+                   << ") ((_ sign_extend " << aw << ") " << r(n.b) << ")))) (ite (distinct p ((_ sign_extend " << aw
+                   << ") ((_ extract " << (aw ? aw - 1 : 0) << " 0) p))) #b1 #b0))";
+                break;
+            }
+            case BVOp::Clz: {
+                for (uint32_t k = 0; k < n.width; ++k) {
+                    const uint32_t bit = n.width - 1 - k;
+                    os << "(ite (= ((_ extract " << bit << " " << bit << ") " << r(n.a) << ") #b1) (_ bv"
+                       << k << " " << n.width << ") ";
+                }
+                os << "(_ bv" << n.width << " " << n.width << ")";
+                for (uint32_t k = 0; k < n.width; ++k) os << ")";
+                break;
+            }
+            case BVOp::Ctz: {
+                for (uint32_t k = 0; k < n.width; ++k) {
+                    os << "(ite (= ((_ extract " << k << " " << k << ") " << r(n.a) << ") #b1) (_ bv"
+                       << k << " " << n.width << ") ";
+                }
+                os << "(_ bv" << n.width << " " << n.width << ")";
+                for (uint32_t k = 0; k < n.width; ++k) os << ")";
+                break;
+            }
+            case BVOp::Popcnt: {
+                if (n.width == 1) {
+                    os << r(n.a);
+                } else {
+                    for (uint32_t k = 0; k + 1 < n.width; ++k) os << "(bvadd ";
+                    for (uint32_t k = 0; k < n.width; ++k) {
+                        if (k > 0) os << " ";
+                        os << "((_ zero_extend " << (n.width - 1) << ") ((_ extract " << k << " " << k << ") "
+                           << r(n.a) << "))";
+                        if (k > 0) os << ")";
+                    }
+                }
+                break;
+            }
+            default:        os << "uninterp_t" << i; break;
         }
         os << ")\n";
     }
-    os << "(assert (= t" << bad_cond << " #b1))\n(check-sat)\n(get-model)\n";
+    const uint32_t bad_w = (bad_cond < nodes_.size()) ? nodes_[bad_cond].width : 1u;
+    if (bad_w == 1) {
+        os << "(assert (= t" << bad_cond << " #b1))\n";
+    } else {
+        os << "(assert (distinct t" << bad_cond << " (_ bv0 " << bad_w << ")))\n";
+    }
+    os << "(check-sat)\n";
     return os.str();
 }
 

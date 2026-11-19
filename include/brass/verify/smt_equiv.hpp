@@ -50,6 +50,7 @@ struct EquivOptions {
     uint32_t max_sat_conflicts = 10000;
     bool check_guards = true;
     bool check_memory = true;
+    bool assume_calls_pure = false;
 };
 
 struct EquivResult {

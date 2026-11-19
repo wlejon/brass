@@ -137,6 +137,8 @@ BuiltEquivQuery build_mir_equiv_query(
     BVNodeId t_ne = q.ctx.make_binary(BVOp::Xor, q.out_before.trapped, q.out_after.trapped, 1);
     q.trap_diff = q.ctx.make_binary(BVOp::And, no_guard_fail, t_ne, 1);
 
+    BVNodeId completed_diff = q.ctx.make_binary(BVOp::Xor, q.out_before.completed, q.out_after.completed, 1);
+
     BVNodeId both_returned = q.ctx.make_binary(
         BVOp::And, no_guard_fail,
         q.ctx.make_binary(BVOp::And, q.out_before.returned, q.out_after.returned, 1), 1);
@@ -168,14 +170,16 @@ BuiltEquivQuery build_mir_equiv_query(
             BVNodeId ma = read_byte_at(q.ctx, init_mem, q.out_after.stores, ba);
             BVNodeId m_ne = q.ctx.make_binary(BVOp::Ne, mb, ma, 1);
             q.mem_diff = q.ctx.make_binary(BVOp::Or, q.mem_diff,
-                                           q.ctx.make_binary(BVOp::And, both_returned, m_ne, 1), 1);
+                                           q.ctx.make_binary(BVOp::And, both_completed, m_ne, 1), 1);
         }
     }
 
     BVNodeId any_guard_or_deopt = q.ctx.make_binary(BVOp::Or, q.guard_diff, q.deopt_diff, 1);
+    BVNodeId any_ctrl_diff = q.ctx.make_binary(BVOp::Or, completed_diff,
+                                               q.ctx.make_binary(BVOp::Or, any_guard_or_deopt, q.trap_diff, 1), 1);
     q.mismatch = q.ctx.make_binary(
         BVOp::Or,
-        q.ctx.make_binary(BVOp::Or, any_guard_or_deopt, q.trap_diff, 1),
+        any_ctrl_diff,
         q.ctx.make_binary(BVOp::Or, q.ret_diff, q.mem_diff, 1), 1);
 
     if (!q.out_before.has_type_error && q.out_after.has_type_error) {
@@ -214,6 +218,15 @@ EquivResult verify_mir_equivalence(
 
     SolveOutcome solved = solve_nonzero(q.ctx, q.mismatch, opts.max_sat_conflicts);
     if (solved.status == SolveOutcome::Unsat) {
+        if (!b_always_done || !a_always_done) {
+            BVNodeId both_done = q.ctx.make_binary(BVOp::And, q.out_before.completed, q.out_after.completed, 1);
+            BVNodeId truncated = q.ctx.make_unary(BVOp::Not, both_done, 1);
+            if (solve_nonzero(q.ctx, truncated, opts.max_sat_conflicts).status != SolveOutcome::Unsat) {
+                res.status = EquivStatus::Unknown;
+                res.diagnostic = "Symbolic execution truncated at loop_unroll_bound";
+                return res;
+            }
+        }
         res.status = EquivStatus::ProvenEquivalent;
         return res;
     }
@@ -278,7 +291,10 @@ EquivResult verify_mir_module_equivalence(
         if (!fn_after || fn_after->blocks().empty()) continue;
         EquivResult r = verify_mir_equivalence(*fn_before, *fn_after, opts);
         if (r.status == EquivStatus::Counterexample) return r;
-        if (r.status == EquivStatus::Unknown && overall.status == EquivStatus::ProvenEquivalent) overall = r;
+        if ((r.status == EquivStatus::Unknown || r.status == EquivStatus::Unsupported) &&
+            overall.status == EquivStatus::ProvenEquivalent) {
+            overall = r;
+        }
     }
     return overall;
 }

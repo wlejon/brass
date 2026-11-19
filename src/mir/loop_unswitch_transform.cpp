@@ -25,11 +25,11 @@ bool get_const_int(const Value* v, int64_t& out) {
     if (!v || !v->is_instruction()) return false;
     const Instruction* d = v->defining_instruction();
     if (!d) return false;
-    if (d->opcode() == Opcode::iconst_i32 || d->opcode() == Opcode::patchable_const_i32) {
+    if (d->opcode() == Opcode::iconst_i32) {
         out = static_cast<int64_t>(d->imm_i32());
         return true;
     }
-    if (d->opcode() == Opcode::iconst_i64 || d->opcode() == Opcode::patchable_const_i64) {
+    if (d->opcode() == Opcode::iconst_i64) {
         out = d->imm_i64();
         return true;
     }

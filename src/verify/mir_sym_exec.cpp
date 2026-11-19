@@ -58,6 +58,15 @@ BVNodeId InitMemEnv::eval_uninterpreted_call(BVContext& ctx, std::string_view sy
     return v;
 }
 
+BVNodeId InitMemEnv::get_patchable_const(BVContext& ctx, std::string_view sym, uint32_t width) {
+    std::string key = std::string(sym) + ":" + std::to_string(width);
+    auto it = patchable_consts.find(key);
+    if (it != patchable_consts.end()) return it->second;
+    BVNodeId v = ctx.make_var("patch_" + std::string(sym), width, false);
+    patchable_consts.emplace(std::move(key), v);
+    return v;
+}
+
 BVNodeId read_byte_at(BVContext& ctx, InitMemEnv& init_mem,
                       const std::vector<SymStore>& stores, BVNodeId byte_addr) {
     BVNodeId val = init_mem.read_init_byte(ctx, byte_addr);
@@ -320,8 +329,8 @@ SymExecOutput symbolically_execute_mir_region(
                         }
                         break;
                     }
-                    case Opcode::patchable_const_i32: set_res(ctx.make_const(static_cast<uint32_t>(inst->imm_i32()), 32)); break;
-                    case Opcode::patchable_const_i64: set_res(ctx.make_const(static_cast<uint64_t>(inst->imm_i64()), 64)); break;
+                    case Opcode::patchable_const_i32: set_res(init_mem.get_patchable_const(ctx, inst->symbol(), 32)); break;
+                    case Opcode::patchable_const_i64: set_res(init_mem.get_patchable_const(ctx, inst->symbol(), 64)); break;
                     case Opcode::sext_i64:
                         if (!inst->operand(0) || inst->operand(0)->type() != Type::i32() || inst->type() != Type::i64())
                             out.has_type_error = true;
@@ -402,11 +411,20 @@ SymExecOutput symbolically_execute_mir_region(
                         if (t0.is_float()) {
                             set_res(ctx.make_binary(op == Opcode::sdiv ? BVOp::FDiv : BVOp::FSub, a, b, w));
                         } else {
-                            BVNodeId is_zero = ctx.make_binary(BVOp::Eq, b, ctx.make_const(0, w), 1);
-                            BVNodeId trap_now = ctx.make_binary(BVOp::And, cur_cond, is_zero, 1);
+                            BVNodeId trap_cond = ctx.make_binary(BVOp::Eq, b, ctx.make_const(0, w), 1);
+                            if (op == Opcode::sdiv || op == Opcode::smod) {
+                                uint64_t smin = (w == 32) ? 0x80000000ULL : 0x8000000000000000ULL;
+                                uint64_t neg1 = (w == 32) ? 0xFFFFFFFFULL : ~0ULL;
+                                BVNodeId ovf = ctx.make_binary(
+                                    BVOp::And,
+                                    ctx.make_binary(BVOp::Eq, a, ctx.make_const(smin, w), 1),
+                                    ctx.make_binary(BVOp::Eq, b, ctx.make_const(neg1, w), 1), 1);
+                                trap_cond = ctx.make_binary(BVOp::Or, trap_cond, ovf, 1);
+                            }
+                            BVNodeId trap_now = ctx.make_binary(BVOp::And, cur_cond, trap_cond, 1);
                             out.trapped = ctx.make_binary(BVOp::Or, out.trapped, trap_now, 1);
                             out.completed = ctx.make_binary(BVOp::Or, out.completed, trap_now, 1);
-                            cur_cond = ctx.make_binary(BVOp::And, cur_cond, ctx.make_unary(BVOp::Not, is_zero, 1), 1);
+                            cur_cond = ctx.make_binary(BVOp::And, cur_cond, ctx.make_unary(BVOp::Not, trap_cond, 1), 1);
                             BVOp iop = (op == Opcode::sdiv) ? BVOp::SDiv : (op == Opcode::udiv) ? BVOp::UDiv
                                      : (op == Opcode::smod) ? BVOp::SRem : BVOp::URem;
                             set_res(ctx.make_binary(iop, a, b, w));
@@ -534,7 +552,9 @@ SymExecOutput symbolically_execute_mir_region(
                         break;
                     }
                     case Opcode::pinned_tls_read:  set_res(tls_reg_val); break;
-                    case Opcode::pinned_tls_write: tls_reg_val = coerce_width(ctx, get_op(0), 64, false); break;
+                    case Opcode::pinned_tls_write:
+                        tls_reg_val = ctx.make_ite(cur_cond, coerce_width(ctx, get_op(0), 64, false), tls_reg_val);
+                        break;
                     case Opcode::read_sp:          set_res(sp_reg_val); break;
 
                     case Opcode::load:
@@ -599,10 +619,27 @@ SymExecOutput symbolically_execute_mir_region(
 
                     case Opcode::call:
                     case Opcode::patchable_call: {
+                        std::string_view sym = inst->symbol();
                         std::vector<BVNodeId> call_args;
                         for (size_t i = 0; i < inst->operand_count(); ++i) call_args.push_back(get_op(i));
-                        if (inst->result() && !inst->type().is_void())
-                            set_res(init_mem.eval_uninterpreted_call(ctx, inst->symbol(), call_args, inst->type()));
+                        BVNodeId gpu_v = try_eval_gpu_call_bv(ctx, sym, call_args);
+                        const bool is_ro_coord =
+                            (sym == "ptx_tid_x" || sym == "ptx_tid_y" || sym == "ptx_tid_z" ||
+                             sym == "ptx_ntid_x" || sym == "ptx_ntid_y" || sym == "ptx_ntid_z" ||
+                             sym == "ptx_ctaid_x" || sym == "ptx_ctaid_y" || sym == "ptx_ctaid_z" ||
+                             sym == "ptx_nctaid_x" || sym == "ptx_nctaid_y" || sym == "ptx_nctaid_z" ||
+                             sym == "ptx_laneid" || sym == "ptx_lane_id" ||
+                             sym == "ptx_global_tid_x" || sym == "ptx_global_id_x");
+                        if (gpu_v != UINT32_MAX || is_ro_coord || opts.assume_calls_pure) {
+                            if (inst->result() && !inst->type().is_void()) {
+                                set_res(init_mem.eval_uninterpreted_call(ctx, sym, call_args, inst->type()));
+                            }
+                        } else {
+                            out.supported = false;
+                            out.error_msg = "Unsupported potentially stateful call in MIR equivalence checker: " +
+                                            std::string(sym);
+                            return out;
+                        }
                         break;
                     }
 

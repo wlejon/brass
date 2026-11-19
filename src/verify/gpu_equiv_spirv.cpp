@@ -316,7 +316,7 @@ GpuExecTrace execute_gpu_spirv(
             }
             bool is_fl = false;
             uint32_t rw = inst.type ? spirv_type_width(mod, inst.type, &is_fl) : 32;
-            BVNodeId res = 0;
+            BVNodeId res = UINT32_MAX;
 
             switch (inst.op) {
             case spv::OpAccessChain:
@@ -665,7 +665,9 @@ GpuExecTrace execute_gpu_spirv(
                         break;
                     }
                     default:
-                        break;
+                        trace.supported = false;
+                        trace.error_msg = "Unsupported GLSL.std.450 ext inst in GPU SPIR-V tracer";
+                        return trace;
                     }
                 }
                 break;
@@ -732,10 +734,15 @@ GpuExecTrace execute_gpu_spirv(
             case spv::OpUnreachable:
                 trace.trapped = bv_bin(ctx, BVOp::Or, 1, trace.trapped, cur.cond);
                 break;
-            default:
+            case spv::OpNop:
+            case spv::OpFunctionEnd:
                 break;
+            default:
+                trace.supported = false;
+                trace.error_msg = "Unsupported SPIR-V opcode in GPU tracer: " + std::to_string(inst.op);
+                return trace;
             }
-            if (inst.result && res != 0) {
+            if (inst.result && res != UINT32_MAX) {
                 cur.vals[inst.result] = res;
             }
         }

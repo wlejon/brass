@@ -55,41 +55,58 @@ GpuMemorySafetyResult check_trace_memory_safety(
         }
 
         // 1. Check natural alignment if required_align > 1
-        if (acc.required_align > 1 && acc.byte_offset_64 != 0) {
-            uint64_t mask = static_cast<uint64_t>(acc.required_align - 1);
-            BVNodeId misalign = bv_bin(ctx, BVOp::Ne, 1,
-                bv_bin(ctx, BVOp::And, 64, acc.byte_offset_64, bv_const(ctx, 64, mask)),
-                bv_const(ctx, 64, 0));
-            BVNodeId bad_align = bv_bin(ctx, BVOp::And, 1, active, misalign);
-            SolveOutcome out = solve_nonzero(ctx, bad_align, opts.max_sat_conflicts);
-            if (out.status == SolveOutcome::Unsat) {
-                ++res.alignments_proven;
-            } else if (out.status == SolveOutcome::Sat) {
-                std::vector<uint64_t> nvals;
-                ctx.evaluate_all(out.model, nvals);
-                auto mv = [&](BVNodeId id) { return id < nvals.size() ? nvals[id] : 0ULL; };
-                GpuAccessViolation v;
-                v.is_shared = acc.is_shared;
-                v.is_alignment = true;
-                v.region_index = acc.region_index == UINT32_MAX ? 0 : acc.region_index;
-                v.tid_x = static_cast<uint32_t>(mv(env.tid[0]));
-                v.tid_y = static_cast<uint32_t>(mv(env.tid[1]));
-                v.tid_z = static_cast<uint32_t>(mv(env.tid[2]));
-                v.ctaid_x = static_cast<uint32_t>(mv(env.ctaid[0]));
-                v.ctaid_y = static_cast<uint32_t>(mv(env.ctaid[1]));
-                v.ctaid_z = static_cast<uint32_t>(mv(env.ctaid[2]));
-                v.offending_index_or_offset = static_cast<int64_t>(mv(acc.byte_offset_64));
-                v.bound_limit = acc.required_align;
-                std::ostringstream oss;
-                oss << "Misaligned " << (acc.is_shared ? "shared" : "global")
-                    << " access: byte_offset=" << v.offending_index_or_offset
-                    << " not aligned to " << acc.required_align << " bytes at tid=("
-                    << v.tid_x << "," << v.tid_y << "," << v.tid_z << ")";
-                v.description = oss.str();
-                res.violations.push_back(std::move(v));
-                res.status = EquivStatus::Counterexample;
-            } else if (res.status == EquivStatus::ProvenEquivalent) {
-                res.status = EquivStatus::Unknown;
+        if (acc.required_align > 1) {
+            if (!acc.is_shared && !acc.addr_resolved) {
+                if (opts.check_global_bounds && res.status == EquivStatus::ProvenEquivalent) {
+                    res.status = EquivStatus::Unknown;
+                    if (res.diagnostic.empty()) res.diagnostic = "Unresolved global pointer alignment";
+                }
+            } else {
+                const GpuBufferSpec* align_spec = acc.is_shared ? nullptr : find_buffer_spec(acc.region_index);
+                if (!acc.is_shared && opts.check_global_bounds && align_spec &&
+                    align_spec->base_alignment < acc.required_align) {
+                    if (res.status == EquivStatus::ProvenEquivalent) {
+                        res.status = EquivStatus::Unknown;
+                        if (res.diagnostic.empty()) res.diagnostic = "Buffer base alignment below access alignment";
+                    }
+                } else {
+                    BVNodeId off64 = acc.byte_offset_64 ? acc.byte_offset_64 : bv_const(ctx, 64, 0);
+                    uint64_t mask = static_cast<uint64_t>(acc.required_align - 1);
+                    BVNodeId misalign = bv_bin(ctx, BVOp::Ne, 1,
+                        bv_bin(ctx, BVOp::And, 64, off64, bv_const(ctx, 64, mask)),
+                        bv_const(ctx, 64, 0));
+                    BVNodeId bad_align = bv_bin(ctx, BVOp::And, 1, active, misalign);
+                    SolveOutcome out = solve_nonzero(ctx, bad_align, opts.max_sat_conflicts);
+                    if (out.status == SolveOutcome::Unsat) {
+                        ++res.alignments_proven;
+                    } else if (out.status == SolveOutcome::Sat) {
+                        std::vector<uint64_t> nvals;
+                        ctx.evaluate_all(out.model, nvals);
+                        auto mv = [&](BVNodeId id) { return id < nvals.size() ? nvals[id] : 0ULL; };
+                        GpuAccessViolation v;
+                        v.is_shared = acc.is_shared;
+                        v.is_alignment = true;
+                        v.region_index = acc.region_index == UINT32_MAX ? 0 : acc.region_index;
+                        v.tid_x = static_cast<uint32_t>(mv(env.tid[0]));
+                        v.tid_y = static_cast<uint32_t>(mv(env.tid[1]));
+                        v.tid_z = static_cast<uint32_t>(mv(env.tid[2]));
+                        v.ctaid_x = static_cast<uint32_t>(mv(env.ctaid[0]));
+                        v.ctaid_y = static_cast<uint32_t>(mv(env.ctaid[1]));
+                        v.ctaid_z = static_cast<uint32_t>(mv(env.ctaid[2]));
+                        v.offending_index_or_offset = static_cast<int64_t>(mv(off64));
+                        v.bound_limit = acc.required_align;
+                        std::ostringstream oss;
+                        oss << "Misaligned " << (acc.is_shared ? "shared" : "global")
+                            << " access: byte_offset=" << v.offending_index_or_offset
+                            << " not aligned to " << acc.required_align << " bytes at tid=("
+                            << v.tid_x << "," << v.tid_y << "," << v.tid_z << ")";
+                        v.description = oss.str();
+                        res.violations.push_back(std::move(v));
+                        res.status = EquivStatus::Counterexample;
+                    } else if (res.status == EquivStatus::ProvenEquivalent) {
+                        res.status = EquivStatus::Unknown;
+                    }
+                }
             }
         } else {
             ++res.alignments_proven;
@@ -130,6 +147,13 @@ GpuMemorySafetyResult check_trace_memory_safety(
                 res.status = EquivStatus::Unknown;
             }
         } else {
+            if (!acc.addr_resolved) {
+                if (opts.check_global_bounds && res.status == EquivStatus::ProvenEquivalent) {
+                    res.status = EquivStatus::Unknown;
+                    if (res.diagnostic.empty()) res.diagnostic = "Unresolved global pointer base in bounds check";
+                }
+                continue;
+            }
             const GpuBufferSpec* bspec = find_buffer_spec(acc.region_index);
             BVNodeId byte_off = acc.byte_offset_64 ? acc.byte_offset_64 : bv_const(ctx, 64, 0);
             BVNodeId neg_off = bv_bin(ctx, BVOp::Slt, 1, byte_off, bv_const(ctx, 64, 0));
@@ -156,7 +180,17 @@ GpuMemorySafetyResult check_trace_memory_safety(
             BVNodeId bad = bv_bin(ctx, BVOp::And, 1, active, oob);
             SolveOutcome out = solve_nonzero(ctx, bad, opts.max_sat_conflicts);
             if (out.status == SolveOutcome::Unsat) {
-                ++res.global_accesses_proven;
+                if (cap_node == 0 && opts.check_global_bounds) {
+                    if (res.status == EquivStatus::ProvenEquivalent) {
+                        res.status = EquivStatus::Unknown;
+                        if (res.diagnostic.empty()) {
+                            res.diagnostic = "Missing GpuBufferSpec capacity for parameter " +
+                                             std::to_string(acc.region_index);
+                        }
+                    }
+                } else {
+                    ++res.global_accesses_proven;
+                }
             } else if (out.status == SolveOutcome::Sat) {
                 std::vector<uint64_t> nvals;
                 ctx.evaluate_all(out.model, nvals);
@@ -185,6 +219,17 @@ GpuMemorySafetyResult check_trace_memory_safety(
             } else if (res.status == EquivStatus::ProvenEquivalent) {
                 res.status = EquivStatus::Unknown;
             }
+        }
+    }
+
+    if (res.status == EquivStatus::ProvenEquivalent &&
+        !(bv_node(ctx, trace.completed).op == BVOp::Const && bv_node(ctx, trace.completed).imm == 1)) {
+        BVNodeId trunc = bv_bin(ctx, BVOp::And, 1, env.coord_bounds,
+            bv_bin(ctx, BVOp::And, 1, trace.domain_assumption,
+                   bv_un(ctx, BVOp::Not, 1, trace.completed)));
+        if (solve_nonzero(ctx, trunc, opts.max_sat_conflicts).status != SolveOutcome::Unsat) {
+            res.status = EquivStatus::Unknown;
+            res.diagnostic = "GPU memory safety proof truncated at loop_unroll_bound";
         }
     }
 
@@ -319,6 +364,21 @@ BarrierUniformityResult check_traces_barrier_uniformity(
             res.status = EquivStatus::Counterexample;
         } else if (res.status == EquivStatus::ProvenEquivalent) {
             res.status = EquivStatus::Unknown;
+        }
+    }
+
+    if (res.status == EquivStatus::ProvenEquivalent) {
+        BVNodeId both_done = bv_bin(ctx, BVOp::And, 1, trace_a.completed, trace_b.completed);
+        if (!(bv_node(ctx, both_done).op == BVOp::Const && bv_node(ctx, both_done).imm == 1)) {
+            BVNodeId trunc = bv_bin(ctx, BVOp::And, 1,
+                bv_bin(ctx, BVOp::And, 1, env_a.coord_bounds, env_b.coord_bounds),
+                bv_bin(ctx, BVOp::And, 1,
+                       bv_bin(ctx, BVOp::And, 1, trace_a.domain_assumption, trace_b.domain_assumption),
+                       bv_un(ctx, BVOp::Not, 1, both_done)));
+            if (solve_nonzero(ctx, trunc, opts.max_sat_conflicts).status != SolveOutcome::Unsat) {
+                res.status = EquivStatus::Unknown;
+                res.diagnostic = "Barrier uniformity proof truncated at loop_unroll_bound";
+            }
         }
     }
 

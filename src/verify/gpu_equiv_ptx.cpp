@@ -284,7 +284,7 @@ GpuExecTrace execute_gpu_ptx(
             uint32_t iw = ptx_type_width(inst.type);
             uint32_t dw = (!inst.dsts.empty() && inst.dsts[0].is_reg())
                 ? ptx_reg_width(inst.dsts[0].reg_val) : iw;
-            BVNodeId res = 0;
+            BVNodeId res = UINT32_MAX;
 
             switch (inst.op) {
             case ptx::Opcode::mov:
@@ -304,7 +304,7 @@ GpuExecTrace execute_gpu_ptx(
                     uint32_t arr_idx = 0;
                     BVNodeId boff = 0, eidx = 0;
                     resolve_shared_address(ctx, addr, trace.shared_allocs, arr_idx, boff, eidx);
-                    record_shared_access(ctx, trace, eff_cond, false, arr_idx, eidx, nb);
+                    record_shared_access(ctx, trace, eff_cond, false, arr_idx, eidx, nb, boff);
                     BVNodeId caddr = make_shared_canonical_addr(ctx, arr_idx, eidx, nb);
                     BVNodeId raw = env.read_mem(ctx, true, trace.shared_stores, caddr, nb);
                     res = gpu_coerce_width(ctx, raw, dw, ptx::is_signed(inst.type));
@@ -327,7 +327,7 @@ GpuExecTrace execute_gpu_ptx(
                     uint32_t arr_idx = 0;
                     BVNodeId boff = 0, eidx = 0;
                     resolve_shared_address(ctx, addr, trace.shared_allocs, arr_idx, boff, eidx);
-                    record_shared_access(ctx, trace, eff_cond, true, arr_idx, eidx, nb);
+                    record_shared_access(ctx, trace, eff_cond, true, arr_idx, eidx, nb, boff);
                     BVNodeId caddr = make_shared_canonical_addr(ctx, arr_idx, eidx, nb);
                     trace.shared_stores.push_back({eff_cond, caddr, nb, val});
                 } else {
@@ -595,8 +595,8 @@ GpuExecTrace execute_gpu_ptx(
                     uint32_t arr_idx = 0;
                     BVNodeId boff = 0, eidx = 0;
                     resolve_shared_address(ctx, addr, trace.shared_allocs, arr_idx, boff, eidx);
-                    record_shared_access(ctx, trace, eff_cond, false, arr_idx, eidx, nb);
-                    record_shared_access(ctx, trace, eff_cond, true, arr_idx, eidx, nb);
+                    record_shared_access(ctx, trace, eff_cond, false, arr_idx, eidx, nb, boff);
+                    record_shared_access(ctx, trace, eff_cond, true, arr_idx, eidx, nb, boff);
                     caddr = make_shared_canonical_addr(ctx, arr_idx, eidx, nb);
                 } else {
                     record_global_access(ctx, trace, env, eff_cond, false, caddr, nb);
@@ -621,10 +621,12 @@ GpuExecTrace execute_gpu_ptx(
                 break;
             }
             default:
-                break;
+                trace.supported = false;
+                trace.error_msg = "Unsupported PTX opcode in GPU tracer: " + std::string(ptx::to_string(inst.op));
+                return trace;
             }
 
-            if (!inst.dsts.empty() && inst.dsts[0].is_reg() && res != 0) {
+            if (!inst.dsts.empty() && inst.dsts[0].is_reg() && res != UINT32_MAX) {
                 ptx::Reg dreg = inst.dsts[0].reg_val;
                 uint64_t k = ptx_reg_key(dreg);
                 res = gpu_coerce_width(ctx, res, ptx_reg_width(dreg));
