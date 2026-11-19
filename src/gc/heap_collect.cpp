@@ -50,6 +50,17 @@ constexpr uint8_t kPoisonByte = 0xDB;
 
 GcState& gc_state(Tracer& t) noexcept { return *static_cast<GcState*>(t.state()); }
 
+inline void copy_small_aligned(void* dst, const void* src, size_t bytes) noexcept {
+    if (bytes <= 128 &&
+        ((bytes | reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src)) & 7u) == 0) {
+        auto* d = static_cast<uint64_t*>(dst);
+        const auto* s = static_cast<const uint64_t*>(src);
+        for (size_t i = 0, n = bytes >> 3; i < n; ++i) d[i] = s[i];
+        return;
+    }
+    std::memcpy(dst, src, bytes);
+}
+
 // ---- the young generation's evacuation (minor, and a full's first phase) ----
 
 // `total` bytes of the to-space's fragments for a survivor copy, or 0 when
@@ -89,12 +100,12 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
         if (dest == 0) gc_fatal("the old generation's reservation is exhausted while promoting a young object");
         promoted = true;
     }
-    std::memcpy(reinterpret_cast<void*>(dest), h, total);
+    copy_small_aligned(reinterpret_cast<void*>(dest), h, total);
     if (memento && promoted) {
         AtomicRef<uint64_t>(*memento).fetch_add(1, std::memory_order_relaxed);
     } else if (memento) {
-        std::memcpy(reinterpret_cast<void*>(dest + total), reinterpret_cast<const void*>(object - kHeaderBytes + total),
-                    kMementoBytes);
+        copy_small_aligned(reinterpret_cast<void*>(dest + total),
+                           reinterpret_cast<const void*>(object - kHeaderBytes + total), kMementoBytes);
         s.set_young_start(dest + total + kHeaderBytes);
     }
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
@@ -127,46 +138,60 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     return moved;
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+void minor_evacuate_and_scan(Tracer& t, GcState& g, uint64_t* slot, uint64_t word, uintptr_t a) {
+    const uintptr_t now = evacuate_young(g, a);
+    *slot = (word & ~kAddressMask) | now;
+    // A copy made just now is scanned at once, before the next slot
+    // of the object that named it, instead of waiting on the grey
+    // stack: what an object names is copied right after it, depth
+    // first, so an object and the parts it was made with (an array's
+    // elements, a slot block, small objects in its fields) stay
+    // together, in the order a program walks them. Each object taken
+    // from the grey stack may copy kCopyBudget bytes so (its copies
+    // and theirs); past that, or deeper than kCopyDepth, copies wait
+    // on the grey stack. Roots and cards have no budget. The bound
+    // keeps the work a parallel copy cannot share (a scan in
+    // progress) about one object's parts.
+    const size_t total = kHeaderBytes + header_of(now)->size;
+    if (total <= g.copy_budget && g.copy_depth < kCopyDepth) {
+        const uintptr_t owner = t.owner();
+        const bool owner_old = t.owner_old();
+        g.copy_budget -= total;
+        ++g.copy_depth;
+        scan_object(t, now, g.heap.is_old(now));
+        --g.copy_depth;
+        t.set_owner(owner, owner_old);
+    } else {
+        g.gray.push_back(now);
+    }
+    if (t.owner_old() && g.heap.is_young(now)) g.s.remember_slot(t.owner(), slot);
+}
+
 void minor_visit(Tracer& t, uint64_t* slot, uint64_t word) {
     GcState& g = gc_state(t);
     if (!g.heap.is_reference_tag(word)) return;
     const uintptr_t a = static_cast<uintptr_t>(word & kAddressMask);
-    uintptr_t now = a;
     if (g.in_from(a)) {
         const ObjectHeader* h = header_of(a);
         if (h->forwarded()) {
-            now = *reinterpret_cast<const uintptr_t*>(a);
+            const uintptr_t now = *reinterpret_cast<const uintptr_t*>(a);
             *slot = (word & ~kAddressMask) | now;
-        } else if ((h->gc_bits & kGcPinned) == 0) {
-            now = evacuate_young(g, a);
-            *slot = (word & ~kAddressMask) | now;
-            // A copy made just now is scanned at once, before the next slot
-            // of the object that named it, instead of waiting on the grey
-            // stack: what an object names is copied right after it, depth
-            // first, so an object and the parts it was made with (an array's
-            // elements, a slot block, small objects in its fields) stay
-            // together, in the order a program walks them. Each object taken
-            // from the grey stack may copy kCopyBudget bytes so (its copies
-            // and theirs); past that, or deeper than kCopyDepth, copies wait
-            // on the grey stack. Roots and cards have no budget. The bound
-            // keeps the work a parallel copy cannot share (a scan in
-            // progress) about one object's parts.
-            const size_t total = kHeaderBytes + header_of(now)->size;
-            if (total <= g.copy_budget && g.copy_depth < kCopyDepth) {
-                const uintptr_t owner = t.owner();
-                const bool owner_old = t.owner_old();
-                g.copy_budget -= total;
-                ++g.copy_depth;
-                scan_object(t, now, g.heap.is_old(now));
-                --g.copy_depth;
-                t.set_owner(owner, owner_old);
-            } else {
-                g.gray.push_back(now);
-            }
+            if (t.owner_old() && g.heap.is_young(now)) g.s.remember_slot(t.owner(), slot);
+            return;
+        }
+        if ((h->gc_bits & kGcPinned) == 0) {
+            minor_evacuate_and_scan(t, g, slot, word, a);
+            return;
         }
         // Pinned by this evacuation (pin_stack_objects): it stays, and was
         // made grey when it was pinned.
-    } else if (g.shade && !g.heap.is_young(a)) {
+        if (t.owner_old() && g.heap.is_young(a)) g.s.remember_slot(t.owner(), slot);
+        return;
+    }
+    if (g.shade && !g.heap.is_young(a)) {
         // While a cycle is open the range is the heap, and an old object an
         // old one names is shaded: a dirty card's slot (an unbarriered store
         // into an object allocated in the cycle, or a bulk copy), which this
@@ -180,7 +205,7 @@ void minor_visit(Tracer& t, uint64_t* slot, uint64_t word) {
         if (t.owner_old()) shade(g.s, a);
         return;
     }
-    if (t.owner_old() && g.heap.is_young(now)) g.s.remember_slot(t.owner(), slot);
+    if (t.owner_old() && g.heap.is_young(a)) g.s.remember_slot(t.owner(), slot);
 }
 
 void drain(Tracer& t, GcState& g) {

@@ -105,6 +105,17 @@ constexpr unsigned kShareEvery = 32;    // objects scanned between looks at whet
 constexpr size_t kCardsAtOnce = 16;     // card work pieces a thread takes at once
 
 
+inline void copy_small_aligned(void* dst, const void* src, size_t bytes) noexcept {
+    if (bytes <= 128 &&
+        ((bytes | reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src)) & 7u) == 0) {
+        auto* d = static_cast<uint64_t*>(dst);
+        const auto* s = static_cast<const uint64_t*>(src);
+        for (size_t i = 0, n = bytes >> 3; i < n; ++i) d[i] = s[i];
+        return;
+    }
+    std::memcpy(dst, src, bytes);
+}
+
 inline void cpu_relax() noexcept {
 #if defined(_MSC_VER) && !defined(__clang__)
 #if defined(_M_ARM64)
@@ -449,13 +460,13 @@ uintptr_t copy(Worker& w, uintptr_t object, uint8_t bits) {
         dest = old_allocate(w, total);
         if (dest == 0) gc_fatal("the old generation's reservation is exhausted while promoting a young object");
     }
-    std::memcpy(reinterpret_cast<void*>(dest), h, total);
+    copy_small_aligned(reinterpret_cast<void*>(dest), h, total);
     if (memento && promoted) {
         AtomicRef<uint64_t>(*memento).fetch_add(1, std::memory_order_relaxed);
     } else if (memento) {
         // Behind the copy, in this thread's buffer like it.
-        std::memcpy(reinterpret_cast<void*>(dest + total), reinterpret_cast<const void*>(object - kHeaderBytes + total),
-                    kMementoBytes);
+        copy_small_aligned(reinterpret_cast<void*>(dest + total),
+                           reinterpret_cast<const void*>(object - kHeaderBytes + total), kMementoBytes);
         s.set_young_start(dest + total + kHeaderBytes);
     }
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
