@@ -140,8 +140,14 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                 else if (!whole_slot && (dst.size == 2 || src.size == 2)) dst_bytes = 2;
                 else if (!whole_slot && (dst.size == 4 || src.size == 4)) dst_bytes = 4;
             }
-            MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, dst_bytes);
-            GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
+            auto pick_pc_scratch = [](const MemAddress& m, GPR avoid = GPR::None) noexcept {
+                for (GPR cand : {GPR::X16, GPR::X17, GPR::X15}) {
+                    if (cand != avoid && cand != m.base && cand != m.index) return cand;
+                }
+                return GPR::X16;
+            };
+            MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst, GPR::X17), GPR::X17, dst_bytes);
+            GPR data_scratch = pick_pc_scratch(dst_mem);
             if (src.is_preg()) {
                 if (src.preg_val.is_gpr()) {
                     if (whole_slot) enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
@@ -174,8 +180,7 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     enc_.str(data_scratch, dst_mem);
                 }
             } else {
-                GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
-                if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
+                GPR src_scratch = pick_pc_scratch(dst_mem, data_scratch);
                 int src_bytes = 8;
                 if (dst.size == 16 || src.size == 16) src_bytes = 16;
                 else if (dst.size == 1 || src.size == 1) src_bytes = 1;
@@ -188,7 +193,7 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                         return;
                     }
                 }
-                MemAddress src_mem = ensure_accessible_mem(to_mem_address(src), src_scratch, src_bytes);
+                MemAddress src_mem = ensure_accessible_mem(to_mem_address(src, src_scratch), src_scratch, src_bytes);
                 if (dst.size == 16 || src.size == 16) {
                     enc_.ldr_q(FPR::V31, src_mem);
                     enc_.str_q(FPR::V31, dst_mem);

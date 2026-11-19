@@ -556,9 +556,10 @@ public:
     bool is_patchable = false;
     std::string patch_symbol;
     std::string callee_symbol;
-    // Call: the word the call goes through (`call [rip + entry_cell]`), from
-    // the MIR call's entry cell; callee_symbol still names what is called
-    // for everything that asks about the callee.
+    // Call: local/same-image word the call goes through (`call [rip + entry_cell]`
+    // on x64, `adrp+ldr` Page21+LdSt64Lo12 on AArch64), from the MIR call's
+    // entry cell; must stay within ±4 GB of the code section. `callee_symbol`
+    // still names what is called for everything that asks about the callee.
     std::string entry_cell;
     std::vector<VReg> live_gcrefs;
     bool is_invoke = false;

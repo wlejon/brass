@@ -5,6 +5,17 @@ namespace brass::aarch64 {
 
 using namespace brass::codegen;
 
+namespace {
+
+GPR pick_mov_scratch(const MemAddress& m, GPR avoid = GPR::None) noexcept {
+    for (GPR cand : {GPR::X16, GPR::X17, GPR::X15, GPR::X14}) {
+        if (cand != avoid && cand != m.base && cand != m.index) return cand;
+    }
+    return GPR::X16;
+}
+
+} // namespace
+
 void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Mov: {
@@ -46,8 +57,8 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     else if (dst.size == 2 || src.size == 2) store_bytes = 2;
                     else if (dst.size == 4 || src.size == 4) store_bytes = 4;
                 }
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, store_bytes);
-                GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst, GPR::X17), GPR::X17, store_bytes);
+                GPR data_scratch = pick_mov_scratch(dst_mem);
                 if (src.is_preg()) {
                     if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
@@ -73,16 +84,15 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                         enc_.str(data_scratch, dst_mem);
                     }
                 } else {
-                    GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
-                    if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
+                    GPR src_scratch = pick_mov_scratch(dst_mem, data_scratch);
                     if (src.is_spill_slot() && src.size == 8) {
                         if (const auto val = constant_slot_value(src.spill_slot)) {
                             emit_load_constant_gpr(data_scratch, *val, src_scratch);
                         } else {
-                            enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 8));
+                            enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src, src_scratch), src_scratch, 8));
                         }
                     } else {
-                        enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 8));
+                        enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src, src_scratch), src_scratch, 8));
                     }
                     if (dst.size == 1 || src.size == 1) enc_.strb(data_scratch, dst_mem);
                     else if (dst.size == 2 || src.size == 2) enc_.strh(data_scratch, dst_mem);
@@ -139,8 +149,8 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     if (dst.size == 1 || src.size == 1) store_bytes = 1;
                     else if (dst.size == 2 || src.size == 2) store_bytes = 2;
                 }
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, store_bytes);
-                GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst, GPR::X17), GPR::X17, store_bytes);
+                GPR data_scratch = pick_mov_scratch(dst_mem);
                 if (src.is_preg()) {
                     if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
@@ -162,11 +172,10 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                         enc_.str32(data_scratch, dst_mem);
                     }
                 } else {
-                    GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
-                    if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
-                    if (src.size == 1) enc_.ldrb(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 1));
-                    else if (src.size == 2) enc_.ldrh(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 2));
-                    else enc_.ldr32(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 4));
+                    GPR src_scratch = pick_mov_scratch(dst_mem, data_scratch);
+                    if (src.size == 1) enc_.ldrb(data_scratch, ensure_accessible_mem(to_mem_address(src, src_scratch), src_scratch, 1));
+                    else if (src.size == 2) enc_.ldrh(data_scratch, ensure_accessible_mem(to_mem_address(src, src_scratch), src_scratch, 2));
+                    else enc_.ldr32(data_scratch, ensure_accessible_mem(to_mem_address(src, src_scratch), src_scratch, 4));
                     if (dst.size == 1) enc_.strb(data_scratch, dst_mem);
                     else if (dst.size == 2) enc_.strh(data_scratch, dst_mem);
                     else enc_.str32(data_scratch, dst_mem);

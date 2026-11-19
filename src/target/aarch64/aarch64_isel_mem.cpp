@@ -26,15 +26,6 @@ bool is_legal_aarch64_reg_scale(Scale scale, uint8_t sz) noexcept {
     return false;
 }
 
-uint8_t scale_to_shift(Scale scale) noexcept {
-    switch (scale) {
-        case Scale::Two: return 1;
-        case Scale::Four: return 2;
-        case Scale::Eight: return 3;
-        default: return 0;
-    }
-}
-
 } // namespace
 
 // As on x64 (x64_isel_mem.cpp fold_two_register_sum): a register + register

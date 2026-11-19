@@ -88,7 +88,7 @@ private:
     std::vector<PendingExceptionScope> pending_exception_scopes_;
 
     AArch64CompilationResult compile_pass(const std::vector<uint32_t>& long_branch_sites);
-    MemAddress to_mem_address(const codegen::LirOperand& op);
+    MemAddress to_mem_address(const codegen::LirOperand& op, GPR addr_scratch = GPR::X16);
     // `mem` as an address the access can encode, through `scratch` when its
     // offset is out of the access's reach. `size_bytes` is the access's size;
     // 0 (a site that does not say, or one address shared by accesses of

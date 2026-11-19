@@ -70,6 +70,15 @@ void AArch64ISel::lower_binary_alu(
             return ii.val > 0 && (static_cast<uint64_t>(ii.val) & static_cast<uint64_t>(ii.val - 1)) == 0;
         };
         if (is_cheap_const(m0) || is_cheap_const(m1)) return nullptr;
+        bool saw_d = false;
+        for (const Instruction* cur : *inst.parent()) {
+            if (cur == &inst) break;
+            if (!saw_d) {
+                if (cur == d) saw_d = true;
+                continue;
+            }
+            if (cur->is_call() || cur->opcode() == Opcode::safepoint) return nullptr;
+        }
         return d;
     };
 

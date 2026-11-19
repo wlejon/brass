@@ -255,11 +255,11 @@ bool PeepholeOptimizer::eliminate_load_after_store(LirBlock& block) {
 
         const LirOperand& store_loc = store_inst.defs[0];
         PReg store_src_reg = store_inst.uses[0].preg_val;
-        // A spilled definition is stored from the def scratch (XMM15 /
-        // R14 / V27 / X14), which the next fabs, memory-to-memory move or
-        // spilled def reuses without a LIR def: forwarding it to a later
-        // reload read a fabs mask instead of a 0.5 constant (Linux x64
-        // fuzz seeds 1103, 2195).
+        // A spilled definition is stored from a rewrite scratch (XMM14/XMM15 /
+        // R10/R11/R14/R15 on x64; V26..V29 / X12..X15 on AArch64), which the next
+        // fabs, memory-to-memory move or spilled def reuses without a LIR def:
+        // forwarding it to a later reload read a fabs mask instead of a 0.5
+        // constant (Linux x64 fuzz seeds 1103, 2195).
         if (is_reserved_scratch(store_src_reg)) continue;
 
         size_t scanned = 0;
@@ -458,7 +458,7 @@ bool PeepholeOptimizer::bitcast_through_slots(LirBlock& block) {
             if (k == 0) continue;
             LirInst& b = *block.instructions[k - 1];
             if (b.opcode != LirOpcode::Movq_gx || is_protected(b) || b.defs.size() != 1 || !b.defs[0].is_preg() ||
-                b.defs[0].preg_val != r || b.uses.size() != 1 || !b.uses[0].is_preg()) {
+                b.defs[0].preg_val != r || b.uses.size() != 1 || !b.uses[0].is_preg() || b.uses[0].size != 8) {
                 continue;
             }
             if (!reg_dead_from(block, i + 1, r)) continue;

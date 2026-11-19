@@ -30,7 +30,7 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                     }
                 }
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, is_single ? 4 : 8);
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst, GPR::X17), GPR::X17, is_single ? 4 : 8);
                 if (src.is_preg()) {
                     if (is_single) enc_.str_s(src.preg_val.as_aarch64_fpr(), dst_mem);
                     else enc_.str(src.preg_val.as_aarch64_fpr(), dst_mem);
@@ -65,7 +65,7 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                 if (src.is_preg()) enc_.fmov_s(dst_f, src.preg_val.as_aarch64_fpr());
                 else enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, 4);
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst, GPR::X17), GPR::X17, 4);
                 if (src.is_preg()) enc_.str_s(src.preg_val.as_aarch64_fpr(), dst_mem);
                 else {
                     enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
