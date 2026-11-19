@@ -8,30 +8,33 @@ namespace brass::aarch64 {
 using namespace brass::codegen;
 using x64::Scale;
 
-bool AArch64ISel::can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const {
-    if (!load_inst || !user_inst) return false;
-    if (load_inst->opcode() != Opcode::load && load_inst->opcode() != Opcode::load_indexed) {
-        return false;
-    }
-    const Value* res = load_inst->result();
-    if (!res) return false;
-    // As on x64: an i8 / i16 load is never fused into a wider operation.
-    if (res->type() == Type::i8() || res->type() == Type::i16()) return false;
-    auto it = use_count_.find(res);
-    if (it == use_count_.end() || it->second != 1) {
-        return false;
-    }
-    if (load_inst->parent() != user_inst->parent()) {
-        return false;
-    }
-    for (const Instruction* cur = load_inst->next(); cur != nullptr && cur != user_inst; cur = cur->next()) {
-        if (cur->opcode() == Opcode::store || cur->opcode() == Opcode::store_indexed ||
-            cur->is_call() || cur->opcode() == Opcode::safepoint || cur->opcode() == Opcode::guard) {
-            return false;
-        }
-    }
-    return true;
+namespace {
+
+bool is_legal_aarch64_imm_offset(int64_t disp, uint8_t sz) noexcept {
+    if (disp >= -256 && disp <= 255) return true;
+    return sz > 0 && disp >= 0 && (disp % sz == 0) && (disp / sz <= 4095);
 }
+
+bool is_legal_aarch64_reg_scale(Scale scale, uint8_t sz) noexcept {
+    switch (scale) {
+        case Scale::One: return true;
+        case Scale::Two: return sz == 2;
+        case Scale::Four: return sz == 4;
+        case Scale::Eight: return sz == 8;
+    }
+    return false;
+}
+
+uint8_t scale_to_shift(Scale scale) noexcept {
+    switch (scale) {
+        case Scale::Two: return 1;
+        case Scale::Four: return 2;
+        case Scale::Eight: return 3;
+        default: return 0;
+    }
+}
+
+} // namespace
 
 // As on x64 (x64_isel_mem.cpp fold_two_register_sum): a register + register
 // sum from another block that is a value of its own anyway stays one, rather
@@ -41,7 +44,8 @@ bool AArch64ISel::fold_two_register_sum(const Instruction* sum, const Value* ptr
     return !user_bb || sum->parent() == user_bb || address_only_.count(ptr) != 0;
 }
 
-AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const {
+AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset, uint8_t access_size,
+                                                const BasicBlock* user_bb) const {
     MemFold fold;
     fold.base_val = ptr;
     fold.disp = offset;
@@ -57,13 +61,14 @@ AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset
 
     if (imm1.is_imm && imm1.fits_i32) {
         int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val;
-        if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
+        if (new_disp >= INT32_MIN && new_disp <= INT32_MAX &&
+            is_legal_aarch64_imm_offset(new_disp, access_size)) {
             fold.disp = static_cast<int32_t>(new_disp);
             fold.base_val = op0;
             fold.folded_instructions.push_back(def);
             if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
 
-            if (op0 && op0->is_instruction()) {
+            if (fold.disp == 0 && op0 && op0->is_instruction()) {
                 const Instruction* def0 = op0->defining_instruction();
                 if (def0 && def0->opcode() == Opcode::add && def0->parent() == def->parent() &&
                     fold_two_register_sum(def0, ptr, user_bb)) {
@@ -77,13 +82,16 @@ AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset
                             if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl) {
                                 ImmIntInfo s_imm = get_imm_int_info(s_def->operand(1));
                                 if (s_imm.is_imm && s_imm.val >= 1 && s_imm.val <= 3) {
-                                    fold.base_val = a0;
-                                    fold.index_val = s_def->operand(0);
-                                    fold.scale = x64::scale_from_int(1 << s_imm.val);
-                                    fold.folded_instructions.push_back(def0);
-                                    fold.folded_instructions.push_back(s_def);
-                                    if (s_imm.def_inst) fold.folded_instructions.push_back(s_imm.def_inst);
-                                    return fold;
+                                    Scale sc = x64::scale_from_int(1 << s_imm.val);
+                                    if (is_legal_aarch64_reg_scale(sc, access_size)) {
+                                        fold.base_val = a0;
+                                        fold.index_val = s_def->operand(0);
+                                        fold.scale = sc;
+                                        fold.folded_instructions.push_back(def0);
+                                        fold.folded_instructions.push_back(s_def);
+                                        if (s_imm.def_inst) fold.folded_instructions.push_back(s_imm.def_inst);
+                                        return fold;
+                                    }
                                 }
                             }
                         }
@@ -99,26 +107,30 @@ AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset
         }
     } else if (imm0.is_imm && imm0.fits_i32) {
         int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val;
-        if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
+        if (new_disp >= INT32_MIN && new_disp <= INT32_MAX &&
+            is_legal_aarch64_imm_offset(new_disp, access_size)) {
             fold.disp = static_cast<int32_t>(new_disp);
             fold.base_val = op1;
             fold.folded_instructions.push_back(def);
             if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
             return fold;
         }
-    } else if (fold_two_register_sum(def, ptr, user_bb)) {
+    } else if (offset == 0 && !imm0.is_imm && !imm1.is_imm && fold_two_register_sum(def, ptr, user_bb)) {
         if (op1 && op1->is_instruction()) {
             const Instruction* s_def = op1->defining_instruction();
             if (s_def && s_def->parent() == def->parent() && s_def->opcode() == Opcode::shl) {
                 ImmIntInfo s_imm = get_imm_int_info(s_def->operand(1));
                 if (s_imm.is_imm && s_imm.val >= 1 && s_imm.val <= 3) {
-                    fold.base_val = op0;
-                    fold.index_val = s_def->operand(0);
-                    fold.scale = x64::scale_from_int(1 << s_imm.val);
-                    fold.folded_instructions.push_back(def);
-                    fold.folded_instructions.push_back(s_def);
-                    if (s_imm.def_inst) fold.folded_instructions.push_back(s_imm.def_inst);
-                    return fold;
+                    Scale sc = x64::scale_from_int(1 << s_imm.val);
+                    if (is_legal_aarch64_reg_scale(sc, access_size)) {
+                        fold.base_val = op0;
+                        fold.index_val = s_def->operand(0);
+                        fold.scale = sc;
+                        fold.folded_instructions.push_back(def);
+                        fold.folded_instructions.push_back(s_def);
+                        if (s_imm.def_inst) fold.folded_instructions.push_back(s_imm.def_inst);
+                        return fold;
+                    }
                 }
             }
         }
@@ -130,12 +142,17 @@ AArch64ISel::MemFold AArch64ISel::match_address(const Value* ptr, int32_t offset
     return fold;
 }
 
-AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const Value* index, Scale scale, int32_t offset) const {
+AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const Value* index, Scale scale,
+                                                        int32_t offset, uint8_t access_size) const {
     MemFold fold;
     fold.base_val = base;
     fold.index_val = index;
     fold.scale = scale;
     fold.disp = offset;
+
+    if (!is_legal_aarch64_reg_scale(scale, access_size)) {
+        return fold;
+    }
 
     if (index && index->is_instruction()) {
         const Instruction* def = index->defining_instruction();
@@ -145,16 +162,16 @@ AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const
             int32_t sc = (scale == Scale::Eight ? 8 : (scale == Scale::Four ? 4 : (scale == Scale::Two ? 2 : 1)));
             if (imm1.is_imm && imm1.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val * sc;
-                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
-                    fold.disp = static_cast<int32_t>(new_disp);
+                if (new_disp == 0) {
+                    fold.disp = 0;
                     fold.index_val = def->operand(0);
                     fold.folded_instructions.push_back(def);
                     if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
                 }
             } else if (imm0.is_imm && imm0.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val * sc;
-                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
-                    fold.disp = static_cast<int32_t>(new_disp);
+                if (new_disp == 0) {
+                    fold.disp = 0;
                     fold.index_val = def->operand(1);
                     fold.folded_instructions.push_back(def);
                     if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
@@ -170,16 +187,16 @@ AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const
             ImmIntInfo imm1 = get_imm_int_info(def->operand(1));
             if (imm1.is_imm && imm1.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm1.val;
-                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
-                    fold.disp = static_cast<int32_t>(new_disp);
+                if (new_disp == 0) {
+                    fold.disp = 0;
                     fold.base_val = def->operand(0);
                     fold.folded_instructions.push_back(def);
                     if (imm1.def_inst) fold.folded_instructions.push_back(imm1.def_inst);
                 }
             } else if (imm0.is_imm && imm0.fits_i32) {
                 int64_t new_disp = static_cast<int64_t>(fold.disp) + imm0.val;
-                if (new_disp >= INT32_MIN && new_disp <= INT32_MAX) {
-                    fold.disp = static_cast<int32_t>(new_disp);
+                if (new_disp == 0) {
+                    fold.disp = 0;
                     fold.base_val = def->operand(1);
                     fold.folded_instructions.push_back(def);
                     if (imm0.def_inst) fold.folded_instructions.push_back(imm0.def_inst);
@@ -191,40 +208,68 @@ AArch64ISel::MemFold AArch64ISel::match_indexed_address(const Value* base, const
     return fold;
 }
 
-LirOperand AArch64ISel::get_load_mem_operand(const Instruction* load_inst) const {
-    if (!load_inst) return LirOperand{};
-    uint8_t sz = static_cast<uint8_t>(load_inst->type().size_in_bytes());
-    if (sz == 0) sz = 8;
-    if (load_inst->opcode() == Opcode::load) {
-        MemFold mf = match_address(load_inst->operand(0), load_inst->offset(), load_inst->parent());
-        VReg base = get_vreg(mf.base_val);
-        if (mf.index_val) {
-            return LirOperand::mem(base, get_vreg(mf.index_val), mf.scale, mf.disp, sz);
+LirOperand AArch64ISel::legalize_mem_operand(const MemFold& mf, uint8_t sz, LirBlock& lir_bb) {
+    VReg base_vreg = get_vreg(mf.base_val);
+    if (!mf.index_val) {
+        if (is_legal_aarch64_imm_offset(mf.disp, sz)) {
+            return LirOperand::mem(base_vreg, mf.disp, sz);
         }
-        return LirOperand::mem(base, mf.disp, sz);
-    } else if (load_inst->opcode() == Opcode::load_indexed) {
-        MemFold mf = match_indexed_address(load_inst->operand(0), load_inst->operand(1), x64::scale_from_int(load_inst->scale()), load_inst->offset());
-        VReg base = get_vreg(mf.base_val);
-        if (mf.index_val) {
-            return LirOperand::mem(base, get_vreg(mf.index_val), mf.scale, mf.disp, sz);
-        }
-        return LirOperand::mem(base, mf.disp, sz);
+        VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
+        add_inst->add_def(LirOperand::vreg(ea, 8));
+        add_inst->add_use(LirOperand::vreg(base_vreg, 8));
+        add_inst->add_use(LirOperand::imm(mf.disp, 8));
+        lir_bb.append_inst(std::move(add_inst));
+        return LirOperand::mem(ea, 0, sz);
     }
-    return LirOperand{};
+
+    VReg idx_vreg = get_vreg(mf.index_val);
+    if (is_legal_aarch64_reg_scale(mf.scale, sz)) {
+        if (mf.disp == 0) {
+            return LirOperand::mem(base_vreg, idx_vreg, mf.scale, 0, sz);
+        }
+        VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto add_inst = std::make_unique<LirInst>(LirOpcode::Add);
+        add_inst->add_def(LirOperand::vreg(ea, 8));
+        add_inst->add_use(LirOperand::vreg(base_vreg, 8));
+        add_inst->add_use(LirOperand::imm(mf.disp, 8));
+        lir_bb.append_inst(std::move(add_inst));
+        return LirOperand::mem(ea, idx_vreg, mf.scale, 0, sz);
+    }
+
+    uint8_t shift = scale_to_shift(mf.scale);
+    VReg scaled = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto shl_inst = std::make_unique<LirInst>(LirOpcode::Shl);
+    shl_inst->add_def(LirOperand::vreg(scaled, 8));
+    shl_inst->add_use(LirOperand::vreg(idx_vreg, 8));
+    shl_inst->add_use(LirOperand::imm(shift, 1));
+    lir_bb.append_inst(std::move(shl_inst));
+
+    VReg ea = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto add_idx = std::make_unique<LirInst>(LirOpcode::Add);
+    add_idx->add_def(LirOperand::vreg(ea, 8));
+    add_idx->add_use(LirOperand::vreg(base_vreg, 8));
+    add_idx->add_use(LirOperand::vreg(scaled, 8));
+    lir_bb.append_inst(std::move(add_idx));
+
+    if (is_legal_aarch64_imm_offset(mf.disp, sz)) {
+        return LirOperand::mem(ea, mf.disp, sz);
+    }
+
+    VReg ea2 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto add_disp = std::make_unique<LirInst>(LirOpcode::Add);
+    add_disp->add_def(LirOperand::vreg(ea2, 8));
+    add_disp->add_use(LirOperand::vreg(ea, 8));
+    add_disp->add_use(LirOperand::imm(mf.disp, 8));
+    lir_bb.append_inst(std::move(add_disp));
+    return LirOperand::mem(ea2, 0, sz);
 }
 
 void AArch64ISel::lower_load(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     uint8_t sz = dst.size;
-    MemFold mf = match_address(inst.operand(0), inst.offset(), inst.parent());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    MemFold mf = match_address(inst.operand(0), inst.offset(), sz, inst.parent());
+    LirOperand mem_op = legalize_mem_operand(mf, sz, lir_bb);
 
     LirOpcode op;
     if (dst.is_xmm()) {
@@ -248,15 +293,8 @@ void AArch64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
     ImmIntInfo imm_src = get_imm_int_info(src_val);
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
-    MemFold mf = match_address(inst.operand(0), inst.offset(), inst.parent());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    MemFold mf = match_address(inst.operand(0), inst.offset(), sz, inst.parent());
+    LirOperand mem_op = legalize_mem_operand(mf, sz, lir_bb);
 
     bool is_xmm = src_val->type().is_float() || src_val->type().is_vector();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {
@@ -285,15 +323,9 @@ void AArch64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
 void AArch64ISel::lower_load_indexed(const Instruction& inst, LirBlock& lir_bb) {
     VReg dst = get_vreg(inst.result());
     uint8_t sz = dst.size;
-    MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), x64::scale_from_int(inst.scale()), inst.offset());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), x64::scale_from_int(inst.scale()),
+                                       inst.offset(), sz);
+    LirOperand mem_op = legalize_mem_operand(mf, sz, lir_bb);
 
     LirOpcode op;
     if (dst.is_xmm()) {
@@ -317,15 +349,9 @@ void AArch64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb)
     ImmIntInfo imm_src = get_imm_int_info(src_val);
     uint8_t sz = static_cast<uint8_t>(src_val->type().size_in_bytes());
     if (sz == 0) sz = 8;
-    MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), x64::scale_from_int(inst.scale()), inst.offset());
-    VReg base_vreg = get_vreg(mf.base_val);
-    LirOperand mem_op;
-    if (mf.index_val) {
-        VReg idx_vreg = get_vreg(mf.index_val);
-        mem_op = LirOperand::mem(base_vreg, idx_vreg, mf.scale, mf.disp, sz);
-    } else {
-        mem_op = LirOperand::mem(base_vreg, mf.disp, sz);
-    }
+    MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), x64::scale_from_int(inst.scale()),
+                                       inst.offset(), sz);
+    LirOperand mem_op = legalize_mem_operand(mf, sz, lir_bb);
 
     bool is_xmm = src_val->type().is_float() || src_val->type().is_vector();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {

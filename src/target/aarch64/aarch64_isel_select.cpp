@@ -58,11 +58,13 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     VReg target_reg = dst;
     VReg g_false{};
     VReg g_true{};
+    VReg false_vreg{};
 
     if (is_float) {
         g_false = lir_fn_->allocate_vreg(RegClass::GPR, 8);
         g_true = lir_fn_->allocate_vreg(RegClass::GPR, 8);
         target_reg = g_false;
+        false_vreg = g_false;
 
         VReg f_vreg = get_vreg(false_val);
         auto mq_f = std::make_unique<LirInst>(LirOpcode::Movq_gx);
@@ -78,31 +80,27 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     } else {
         ImmIntInfo false_imm = get_imm_int_info(false_val);
         if (false_imm.is_imm) {
+            VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, sz);
             if (false_imm.val == 0) {
                 auto xor_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Xor32 : LirOpcode::Xor);
-                xor_inst->add_def(LirOperand::vreg(dst, sz));
-                xor_inst->add_use(LirOperand::vreg(dst, sz));
-                xor_inst->add_use(LirOperand::vreg(dst, sz));
+                xor_inst->add_def(LirOperand::vreg(tmp, sz));
+                xor_inst->add_use(LirOperand::vreg(tmp, sz));
+                xor_inst->add_use(LirOperand::vreg(tmp, sz));
                 lir_bb.append_inst(std::move(xor_inst));
             } else if (sz == 4 || (false_imm.val >= INT32_MIN && false_imm.val <= INT32_MAX)) {
                 auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                mov_inst->add_def(LirOperand::vreg(dst, sz));
+                mov_inst->add_def(LirOperand::vreg(tmp, sz));
                 mov_inst->add_use(LirOperand::imm(false_imm.val, sz));
                 lir_bb.append_inst(std::move(mov_inst));
             } else {
                 auto movabs_inst = std::make_unique<LirInst>(LirOpcode::Movabs);
-                movabs_inst->add_def(LirOperand::vreg(dst, 8));
+                movabs_inst->add_def(LirOperand::vreg(tmp, 8));
                 movabs_inst->add_use(LirOperand::imm(false_imm.val, 8));
                 lir_bb.append_inst(std::move(movabs_inst));
             }
+            false_vreg = tmp;
         } else {
-            VReg f_vreg = get_vreg(false_val);
-            if (dst != f_vreg) {
-                auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-                mov_inst->add_def(LirOperand::vreg(dst, sz));
-                mov_inst->add_use(LirOperand::vreg(f_vreg, sz));
-                lir_bb.append_inst(std::move(mov_inst));
-            }
+            false_vreg = get_vreg(false_val);
         }
     }
 
@@ -158,7 +156,7 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
     cmov->condition = select_cond;
     cmov->add_def(LirOperand::vreg(target_reg, op_sz));
-    cmov->add_use(LirOperand::vreg(target_reg, op_sz));
+    cmov->add_use(LirOperand::vreg(false_vreg, op_sz));
     cmov->add_use(LirOperand::vreg(src_vreg, op_sz));
     cmov->mir_origin = &inst;
     lir_bb.append_inst(std::move(cmov));

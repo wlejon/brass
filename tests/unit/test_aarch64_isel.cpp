@@ -6,6 +6,8 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/codegen/live_range.hpp>
+#include <brass/codegen/linear_scan.hpp>
 
 using namespace brass;
 using namespace brass::codegen;
@@ -388,26 +390,37 @@ TEST_CASE("AArch64 ISEL - Memory Addressing Modes (Base, Indexed, Offset)") {
 
     bool found_load_disp = false, found_store_disp = false;
     bool found_load_idx = false, found_store_idx = false;
+    bool found_add_32 = false, found_add_40 = false;
+    bool found_indexed_with_disp = false;
 
     for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Add && inst->uses.size() >= 2 && inst->uses[1].is_imm_int()) {
+            if (inst->uses[1].imm_int == 32) found_add_32 = true;
+            if (inst->uses[1].imm_int == 40) found_add_40 = true;
+        }
         if (inst->opcode == LirOpcode::Mov) {
             if (!inst->uses.empty() && inst->uses[0].is_mem()) {
                 const auto& m = inst->uses[0].mem_val;
+                if (m.has_index() && m.disp != 0) found_indexed_with_disp = true;
                 if (m.disp == 16 && !m.has_index()) found_load_disp = true;
-                if (m.disp == 32 && m.has_index() && m.scale == Scale::Eight) found_load_idx = true;
+                if (m.disp == 0 && m.has_index() && m.scale == Scale::Eight) found_load_idx = true;
             }
             if (!inst->defs.empty() && inst->defs[0].is_mem()) {
                 const auto& m = inst->defs[0].mem_val;
+                if (m.has_index() && m.disp != 0) found_indexed_with_disp = true;
                 if (m.disp == 24 && !m.has_index()) found_store_disp = true;
-                if (m.disp == 40 && m.has_index() && m.scale == Scale::Eight) found_store_idx = true;
+                if (m.disp == 0 && m.has_index() && m.scale == Scale::Eight) found_store_idx = true;
             }
         }
     }
 
     CHECK(found_load_disp);
     CHECK(found_store_disp);
+    CHECK(found_add_32);
+    CHECK(found_add_40);
     CHECK(found_load_idx);
     CHECK(found_store_idx);
+    CHECK(!found_indexed_with_disp);
 }
 
 // 8. Select Lowering to Cmovcc
@@ -633,4 +646,329 @@ TEST_CASE("AArch64 ISEL - Stack Alloca Lowering") {
     }
     CHECK(found_lea);
 }
+
+// 13. True 3-Address Lowering (ALU, FP, Shifts, Not, FMA, GPR Select)
+TEST_CASE("AArch64 ISEL - True 3-Address Lowering Without Pre-Copies") {
+    Module mod;
+    Target tgt = Target::aarch64_macos();
+    CallingConvention cc = CallingConvention::apple_aapcs64();
+
+    // Integer 3-address ALU, shifts, not, and GPR select
+    {
+        Function* fn = mod.create_function(
+            "int_3addr", Type::i64(), {Type::i64(), Type::i64(), Type::i64(), Type::i64()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* x = b.add_block_param(entry, Type::i64());
+        Value* y = b.add_block_param(entry, Type::i64());
+        Value* amt = b.add_block_param(entry, Type::i64());
+        Value* c = b.add_block_param(entry, Type::i64());
+
+        Value* v = b.build_add(x, y);
+        v = b.build_sub(v, y);
+        v = b.build_mul(v, x);
+        v = b.build_and(v, y);
+        v = b.build_or(v, x);
+        v = b.build_xor(v, y);
+        v = b.build_shl(v, amt);
+        v = b.build_lshr(v, amt);
+        v = b.build_ashr(v, amt);
+        v = b.build_not(v);
+        Value* cond = b.build_ne(c, b.build_iconst_i64(0));
+        b.build_ret(b.build_select(cond, v, y));
+
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        auto lir = AArch64ISel(tgt, cc).lower(*fn);
+        REQUIRE(lir != nullptr);
+
+        int ops_seen = 0;
+        for (const auto& inst : lir->blocks[0]->instructions) {
+            if ((inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Mov32) &&
+                !inst->defs.empty() && !inst->uses.empty() &&
+                inst->defs[0].is_vreg() && inst->uses[0].is_vreg()) {
+                CHECK(false);
+            }
+            switch (inst->opcode) {
+                case LirOpcode::Add: case LirOpcode::Sub: case LirOpcode::Imul:
+                case LirOpcode::And: case LirOpcode::Or: case LirOpcode::Xor:
+                case LirOpcode::Shl: case LirOpcode::Shr: case LirOpcode::Sar:
+                    REQUIRE_EQ(inst->defs.size(), size_t(1));
+                    REQUIRE_EQ(inst->uses.size(), size_t(2));
+                    CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+                    CHECK(inst->defs[0].vreg_val != inst->uses[1].vreg_val);
+                    ops_seen++;
+                    break;
+                case LirOpcode::Not:
+                    REQUIRE_EQ(inst->defs.size(), size_t(1));
+                    REQUIRE_EQ(inst->uses.size(), size_t(1));
+                    CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+                    ops_seen++;
+                    break;
+                case LirOpcode::Cmovcc:
+                    REQUIRE_EQ(inst->defs.size(), size_t(1));
+                    REQUIRE_EQ(inst->uses.size(), size_t(2));
+                    CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+                    CHECK(inst->defs[0].vreg_val != inst->uses[1].vreg_val);
+                    ops_seen++;
+                    break;
+                default: break;
+            }
+        }
+        CHECK_EQ(ops_seen, 11);
+    }
+
+    // Scalar FP 3-address and FMA 4-operand lowering
+    {
+        Function* fn = mod.create_function("fp_3addr", Type::f64(), {Type::f64(), Type::f64(), Type::f64()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* x = b.add_block_param(entry, Type::f64());
+        Value* y = b.add_block_param(entry, Type::f64());
+        Value* z = b.add_block_param(entry, Type::f64());
+
+        Value* v = b.build_fadd(x, y);
+        v = b.build_sub(v, z);
+        v = b.build_mul(v, x);
+        v = b.build_sdiv(v, y);
+        b.build_ret(b.build_fma_f64(v, y, z));
+
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        auto lir = AArch64ISel(tgt, cc).lower(*fn);
+        REQUIRE(lir != nullptr);
+
+        int fp_seen = 0;
+        for (const auto& inst : lir->blocks[0]->instructions) {
+            if ((inst->opcode == LirOpcode::Movsd || inst->opcode == LirOpcode::Movss) &&
+                !inst->defs.empty() && !inst->uses.empty() &&
+                inst->defs[0].is_vreg() && inst->uses[0].is_vreg()) {
+                CHECK(false);
+            }
+            if (inst->opcode == LirOpcode::Addsd || inst->opcode == LirOpcode::Subsd ||
+                inst->opcode == LirOpcode::Mulsd || inst->opcode == LirOpcode::Divsd) {
+                REQUIRE_EQ(inst->uses.size(), size_t(2));
+                CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+                fp_seen++;
+            } else if (inst->opcode == LirOpcode::Vfmadd213sd) {
+                REQUIRE_EQ(inst->uses.size(), size_t(3));
+                CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+                fp_seen++;
+            }
+        }
+        CHECK_EQ(fp_seen, 5);
+    }
+}
+
+// 14. No Load Fusion into ALU, FP, or Cmp
+TEST_CASE("AArch64 ISEL - No Load Fusion Into ALU FP Or Cmp") {
+    Module mod;
+    Function* fn = mod.create_function(
+        "no_load_fusion", Type::i64(), {Type::ptr(), Type::ptr(), Type::i64(), Type::f64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* ip = b.add_block_param(entry, Type::ptr());
+    Value* fp = b.add_block_param(entry, Type::ptr());
+    Value* x = b.add_block_param(entry, Type::i64());
+    Value* fx = b.add_block_param(entry, Type::f64());
+
+    Value* li1 = b.build_load(Type::i64(), ip, 8);
+    Value* li2 = b.build_load(Type::i64(), ip, 16);
+    Value* lf1 = b.build_load(Type::f64(), fp, 24);
+    Value* lf2 = b.build_load(Type::f64(), fp, 32);
+    Value* lf3 = b.build_load(Type::f64(), fp, 40);
+
+    Value* a = b.build_add(x, li1);
+    Value* ic = b.build_slt(a, li2);
+    Value* fa = b.build_fadd(fx, lf1);
+    Value* fs = b.build_sqrt_f64(lf2);
+    Value* fc = b.build_slt(fa, lf3);
+    b.build_store(Type::f64(), fp, 48, b.build_select(fc, fs, fa));
+    b.build_ret(b.build_select(ic, a, x));
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    auto lir = AArch64ISel(Target::aarch64_macos(), CallingConvention::apple_aapcs64()).lower(*fn);
+    REQUIRE(lir != nullptr);
+
+    int gpr_loads = 0, fpr_loads = 0, ops_checked = 0;
+    for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Mov && !inst->uses.empty() && inst->uses[0].is_mem()) gpr_loads++;
+        if (inst->opcode == LirOpcode::Movsd && !inst->uses.empty() && inst->uses[0].is_mem()) fpr_loads++;
+        if (inst->opcode == LirOpcode::Add || inst->opcode == LirOpcode::Addsd ||
+            inst->opcode == LirOpcode::Sqrtsd || inst->opcode == LirOpcode::Cmp ||
+            inst->opcode == LirOpcode::Ucomisd) {
+            for (const auto& u : inst->uses) CHECK(!u.is_mem());
+            ops_checked++;
+        }
+    }
+    CHECK_EQ(gpr_loads, 2);
+    CHECK_EQ(fpr_loads, 3);
+    CHECK_EQ(ops_checked, 5);
+}
+
+// 15. Legalized AArch64 Addressing Modes
+TEST_CASE("AArch64 ISEL - Legalized Memory Addressing Modes") {
+    auto is_legal = [](const LirMem& m, uint8_t sz) -> bool {
+        if (m.index_vreg.is_valid() || m.index_preg.is_valid()) {
+            if (m.disp != 0) return false;
+            return m.scale == Scale::One ||
+                   (m.scale == Scale::Two && sz == 2) ||
+                   (m.scale == Scale::Four && sz == 4) ||
+                   (m.scale == Scale::Eight && sz == 8);
+        }
+        if (m.disp >= -256 && m.disp <= 255) return true;
+        return sz > 0 && m.disp >= 0 && (m.disp % sz == 0) && (m.disp / sz <= 4095);
+    };
+
+    Module mod;
+    Target tgt = Target::aarch64_macos();
+    CallingConvention cc = CallingConvention::apple_aapcs64();
+
+    // Direct loads with +264 (legal), +260 (unaligned >255), +50000 (out of range)
+    for (int32_t disp : {264, 260, 50000}) {
+        Function* fn = mod.create_function("ld_" + std::to_string(disp), Type::i64(), {Type::ptr()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* base = b.add_block_param(entry, Type::ptr());
+        b.build_ret(b.build_load(Type::i64(), base, disp));
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+
+        auto lir = AArch64ISel(tgt, cc).lower(*fn);
+        REQUIRE(lir != nullptr);
+        bool saw_add = false, saw_load = false;
+        for (const auto& inst : lir->blocks[0]->instructions) {
+            if (inst->opcode == LirOpcode::Add && inst->uses.size() >= 2 &&
+                inst->uses[1].is_imm_int() && inst->uses[1].imm_int == disp) {
+                saw_add = true;
+            }
+            if (inst->opcode == LirOpcode::Mov && !inst->uses.empty() && inst->uses[0].is_mem()) {
+                const auto& m = inst->uses[0].mem_val;
+                CHECK(is_legal(m, 8));
+                CHECK_EQ(m.disp, disp == 264 ? 264 : 0);
+                saw_load = true;
+            }
+        }
+        CHECK_EQ(saw_add, disp != 264);
+        CHECK(saw_load);
+    }
+
+    // Mismatched indexed scale: i8 load_indexed scale 2 -> Shl #1 + Add + Movzx8 [ea, #0]
+    {
+        Function* fn = mod.create_function("idx_i8_s2", Type::i64(), {Type::ptr(), Type::i64()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* base = b.add_block_param(entry, Type::ptr());
+        Value* idx = b.add_block_param(entry, Type::i64());
+        b.build_ret(b.build_zext_i64(b.build_load_indexed(Type::i8(), base, idx, 2)));
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+
+        auto lir = AArch64ISel(tgt, cc).lower(*fn);
+        REQUIRE(lir != nullptr);
+        bool saw_shl = false, saw_add = false, saw_zx = false;
+        for (const auto& inst : lir->blocks[0]->instructions) {
+            if (inst->opcode == LirOpcode::Shl && inst->uses.size() >= 2 &&
+                inst->uses[1].is_imm_int() && inst->uses[1].imm_int == 1) saw_shl = true;
+            if (inst->opcode == LirOpcode::Add && inst->uses.size() >= 2 && inst->uses[1].is_vreg()) saw_add = true;
+            if (inst->opcode == LirOpcode::Movzx8 && !inst->uses.empty() && inst->uses[0].is_mem()) {
+                CHECK(is_legal(inst->uses[0].mem_val, 1));
+                CHECK(!inst->uses[0].mem_val.has_index());
+                saw_zx = true;
+            }
+        }
+        CHECK(saw_shl);
+        CHECK(saw_add);
+        CHECK(saw_zx);
+    }
+}
+
+// 16. Post-RA Self-Copy Elimination on AArch64
+TEST_CASE("AArch64 RA - Post-RA Self-Copy Elimination Preserves Mov32") {
+    Module mod;
+    Target tgt = Target::aarch64_macos();
+    CallingConvention cc = CallingConvention::apple_aapcs64();
+
+    // Loop with block arguments exercises ParallelCopy/Mov self-copy cleanup
+    Function* fn = mod.create_function("loop_self_copy", Type::i64(), {Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* n = b.add_block_param(entry, Type::i64());
+    BasicBlock* loop = b.append_block("loop");
+    Value* iv = b.add_block_param(loop, Type::i64());
+    Value* acc = b.add_block_param(loop, Type::i64());
+    BasicBlock* exit_bb = b.append_block("exit");
+    Value* out = b.add_block_param(exit_bb, Type::i64());
+
+    b.position_at_end(entry);
+    Value* zero = b.build_iconst_i64(0);
+    b.build_br(loop, {zero, zero});
+    b.position_at_end(loop);
+    Value* acc_next = b.build_add(acc, iv);
+    Value* iv_next = b.build_add(iv, b.build_iconst_i64(1));
+    b.build_br_if(b.build_slt(iv_next, n), loop, {iv_next, acc_next}, exit_bb, {acc_next});
+    b.position_at_end(exit_bb);
+    b.build_ret(out);
+
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    auto lir = AArch64ISel(tgt, cc).lower(*fn);
+    REQUIRE(lir != nullptr);
+    lir->sort_blocks_rpo();
+    LivenessAnalysis liveness(*lir);
+    liveness.run();
+    LinearScanAllocator regalloc(*lir, liveness, cc);
+    regalloc.allocate();
+
+    for (const auto& bb : lir->blocks) {
+        for (const auto& inst : bb->instructions) {
+            if ((inst->opcode == LirOpcode::Mov || inst->opcode == LirOpcode::Movsd ||
+                 inst->opcode == LirOpcode::Movss) &&
+                inst->defs.size() == 1 && inst->uses.size() == 1 &&
+                inst->defs[0].is_preg() && inst->uses[0].is_preg()) {
+                CHECK(inst->defs[0].preg_val != inst->uses[0].preg_val);
+            }
+            if (inst->opcode == LirOpcode::ParallelCopy) {
+                CHECK(!inst->defs.empty());
+                for (size_t i = 0; i < inst->defs.size() && i < inst->uses.size(); ++i) {
+                    if (inst->defs[i].is_preg() && inst->uses[i].is_preg()) {
+                        CHECK(inst->defs[i].preg_val != inst->uses[i].preg_val);
+                    }
+                }
+            }
+        }
+    }
+
+    // Explicit Mov32 self-copy (trunc.i32 -> zext.i64 coalesced to same GPR) is preserved by RA
+    Function* fn2 = mod.create_function("keep_mov32_self", Type::i64(), {Type::i64()});
+    Builder b2(mod);
+    b2.set_function(fn2);
+    BasicBlock* e2 = b2.append_block("entry");
+    Value* p2 = b2.add_block_param(e2, Type::i64());
+    b2.build_ret(b2.build_zext_i64(b2.build_trunc_i32(p2)));
+    fn2->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn2));
+
+    auto lir2 = AArch64ISel(tgt, cc).lower(*fn2);
+    REQUIRE(lir2 != nullptr);
+    lir2->sort_blocks_rpo();
+    LivenessAnalysis live2(*lir2);
+    live2.run();
+    LinearScanAllocator ra2(*lir2, live2, cc);
+    ra2.allocate();
+
+    bool found_mov32 = false;
+    for (const auto& inst : lir2->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Mov32) found_mov32 = true;
+    }
+    CHECK(found_mov32);
+}
+
 

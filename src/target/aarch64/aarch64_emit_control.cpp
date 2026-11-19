@@ -68,7 +68,7 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
                     else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
                     else if (dst.size == 4 || src.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
-                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
+                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
                 }
             } else {
                 FPR dst_fpr = dst.preg_val.as_aarch64_fpr();
@@ -77,23 +77,44 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     else enc_.fmov_from_gpr(dst_fpr, src.preg_val.as_aarch64_gpr());
                 } else if (dst.size == 16 || src.size == 16) {
                     if (src.is_preg()) enc_.vec_orr(dst_fpr, src.preg_val.as_aarch64_fpr(), src.preg_val.as_aarch64_fpr());
-                    else enc_.ldr_q(dst_fpr, ensure_accessible_mem(to_mem_address(src)));
+                    else enc_.ldr_q(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 16));
                 } else if (dst.size == 4 || src.size == 4) {
                     if (src.is_preg()) enc_.fmov_s(dst_fpr, src.preg_val.as_aarch64_fpr());
-                    else enc_.ldr_s(dst_fpr, ensure_accessible_mem(to_mem_address(src)));
+                    else enc_.ldr_s(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                 } else {
                     if (src.is_preg()) enc_.fmov(dst_fpr, src.preg_val.as_aarch64_fpr());
-                    else enc_.ldr(dst_fpr, ensure_accessible_mem(to_mem_address(src)));
+                    else enc_.ldr(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
                 }
             }
         } else {
-            MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
-            GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
             // A spill slot holds a narrow GPR value zero-extended to all 8
             // bytes (linear_scan_rewrite's write-back stores the whole
             // register): its reloads may be 64-bit, e.g. as an address
             // index, so a 1/2/4-byte store would leave a stale upper half.
             const bool whole_slot = dst.is_spill_slot();
+            int dst_bytes = 8;
+            if (src.is_preg()) {
+                if (src.preg_val.is_gpr()) {
+                    if (whole_slot) dst_bytes = 8;
+                    else if (dst.size == 1 || src.size == 1) dst_bytes = 1;
+                    else if (dst.size == 2 || src.size == 2) dst_bytes = 2;
+                    else if (dst.size == 4 || src.size == 4) dst_bytes = 4;
+                } else {
+                    if (dst.size == 16 || src.size == 16) dst_bytes = 16;
+                    else if (dst.size == 4 || src.size == 4) dst_bytes = 4;
+                }
+            } else if (src.is_imm_int()) {
+                if (!whole_slot && (dst.size == 1 || dst.size == 2 || dst.size == 4)) {
+                    dst_bytes = dst.size;
+                }
+            } else {
+                if (dst.size == 16 || src.size == 16) dst_bytes = 16;
+                else if (!whole_slot && (dst.size == 1 || src.size == 1)) dst_bytes = 1;
+                else if (!whole_slot && (dst.size == 2 || src.size == 2)) dst_bytes = 2;
+                else if (!whole_slot && (dst.size == 4 || src.size == 4)) dst_bytes = 4;
+            }
+            MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, dst_bytes);
+            GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
             if (src.is_preg()) {
                 if (src.preg_val.is_gpr()) {
                     if (whole_slot) enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
@@ -128,7 +149,12 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
             } else {
                 GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
                 if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
-                MemAddress src_mem = ensure_accessible_mem(to_mem_address(src), src_scratch);
+                int src_bytes = 8;
+                if (dst.size == 16 || src.size == 16) src_bytes = 16;
+                else if (dst.size == 1 || src.size == 1) src_bytes = 1;
+                else if (dst.size == 2 || src.size == 2) src_bytes = 2;
+                else if (dst.size == 4 || src.size == 4) src_bytes = 4;
+                MemAddress src_mem = ensure_accessible_mem(to_mem_address(src), src_scratch, src_bytes);
                 if (dst.size == 16 || src.size == 16) {
                     enc_.ldr_q(FPR::V31, src_mem);
                     enc_.str_q(FPR::V31, dst_mem);

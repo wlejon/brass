@@ -903,17 +903,10 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
             VReg b = get_vreg(inst.operand(1));
             VReg c = get_vreg(inst.operand(2));
 
-            if (dst != a) {
-                auto mov = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Movss : LirOpcode::Movsd);
-                mov->add_def(LirOperand::vreg(dst, sz));
-                mov->add_use(LirOperand::vreg(a, sz));
-                lir_bb.append_inst(std::move(mov));
-            }
-
             LirOpcode fma_op = (sz == 4) ? LirOpcode::Vfmadd213ss : LirOpcode::Vfmadd213sd;
             auto fma = std::make_unique<LirInst>(fma_op);
             fma->add_def(LirOperand::vreg(dst, sz));
-            fma->add_use(LirOperand::vreg(dst, sz));
+            fma->add_use(LirOperand::vreg(a, sz));
             fma->add_use(LirOperand::vreg(b, sz));
             fma->add_use(LirOperand::vreg(c, sz));
             fma->mir_origin = &inst;

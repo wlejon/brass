@@ -640,12 +640,13 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
 
         case LirOpcode::Cmovcc: {
             GPR dst = to_gpr(inst.defs[0]);
+            GPR false_src = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
             GPR src = to_gpr(inst.uses.back());
             Condition cond = to_aarch64_cond(inst.condition);
             if (inst.defs[0].size == 4) {
-                enc_.csel32(dst, src, dst, cond);
+                enc_.csel32(dst, src, false_src, cond);
             } else {
-                enc_.csel(dst, src, dst, cond);
+                enc_.csel(dst, src, false_src, cond);
             }
             break;
         }

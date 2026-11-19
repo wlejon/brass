@@ -76,11 +76,11 @@ private:
     // `user_bb` is the block of the memory operation: a register + register sum
     // that is also a value of its own is folded into its address only there
     // (x64 the same; x64_isel_mem.cpp).
-    MemFold match_address(const Value* ptr, int32_t offset, const BasicBlock* user_bb) const;
+    MemFold match_address(const Value* ptr, int32_t offset, uint8_t access_size, const BasicBlock* user_bb) const;
     bool fold_two_register_sum(const Instruction* sum, const Value* ptr, const BasicBlock* user_bb) const;
-    MemFold match_indexed_address(const Value* base, const Value* index, x64::Scale scale, int32_t offset) const;
-    bool can_fuse_load(const Instruction* load_inst, const Instruction* user_inst) const;
-    codegen::LirOperand get_load_mem_operand(const Instruction* load_inst) const;
+    MemFold match_indexed_address(const Value* base, const Value* index, x64::Scale scale, int32_t offset,
+                                  uint8_t access_size) const;
+    codegen::LirOperand legalize_mem_operand(const MemFold& mf, uint8_t sz, codegen::LirBlock& lir_bb);
     bool is_value_dead_after(const Function& mir_fn, const BasicBlock& bb, const Instruction* inst, const Value* val) const;
     void analyze_function(const Function& mir_fn);
     bool is_elidable_materialization(const Instruction& inst) const;

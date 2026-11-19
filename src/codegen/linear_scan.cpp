@@ -804,11 +804,12 @@ void LinearScanAllocator::allocate() {
                                        brass::x64::reg_mask(brass::x64::XMM::XMM15);
     }
 
-    // A copy the allocator gave one register at both ends is gone: the x64
-    // emitter writes nothing for these, and one left between a latch's
-    // `jcc` out of the loop and its `jmp` back (the block arguments' copy)
-    // kept the emitter from folding the two into one branch.
-    if (cc_.target().is_x64()) {
+    // A copy the allocator gave one register at both ends is gone: the emitter
+    // writes nothing for these, and one left between a latch's `jcc` out of
+    // the loop and its `jmp` back (the block arguments' copy) kept the emitter
+    // from folding the two into one branch. Mov32 is kept on AArch64 (and x64)
+    // because writing the 32-bit register zero-extends into bits [63:32].
+    {
         auto same = [](const LirOperand& d, const LirOperand& s) {
             return d.is_preg() && s.is_preg() && d.preg_val == s.preg_val;
         };
@@ -843,6 +844,8 @@ void LinearScanAllocator::allocate() {
                 return i.defs.size() == 1 && i.uses.size() == 1 && same(i.defs[0], i.uses[0]);
             }), ins.end());
         }
+    }
+    if (cc_.target().is_x64()) {
         pool_constant_slots();
         trim_unused_scratch_saves(fn_, allocated_callee_gprs, allocated_callee_xmms,
                                   cc_.kind() == CallingConvKind::Win64);

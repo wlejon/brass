@@ -18,20 +18,20 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                     if (is_single) enc_.fmov_s(dst_f, src.preg_val.as_aarch64_fpr());
                     else enc_.fmov(dst_f, src.preg_val.as_aarch64_fpr());
                 } else {
-                    if (is_single) enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src)));
-                    else enc_.ldr(dst_f, ensure_accessible_mem(to_mem_address(src)));
+                    if (is_single) enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
+                    else enc_.ldr(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
                 }
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, is_single ? 4 : 8);
                 if (src.is_preg()) {
                     if (is_single) enc_.str_s(src.preg_val.as_aarch64_fpr(), dst_mem);
                     else enc_.str(src.preg_val.as_aarch64_fpr(), dst_mem);
                 } else {
                     if (is_single) {
-                        enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                        enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                         enc_.str_s(FPR::V31, dst_mem);
                     } else {
-                        enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                        enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
                         enc_.str(FPR::V31, dst_mem);
                     }
                 }
@@ -47,12 +47,12 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             if (dst.is_preg()) {
                 FPR dst_f = dst.preg_val.as_aarch64_fpr();
                 if (src.is_preg()) enc_.fmov_s(dst_f, src.preg_val.as_aarch64_fpr());
-                else enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src)));
+                else enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, 4);
                 if (src.is_preg()) enc_.str_s(src.preg_val.as_aarch64_fpr(), dst_mem);
                 else {
-                    enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                    enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                     enc_.str_s(FPR::V31, dst_mem);
                 }
             }

@@ -639,14 +639,9 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));
             uint8_t sz = dst.size;
-            auto mov_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_inst->add_def(LirOperand::vreg(dst, sz));
-            mov_inst->add_use(LirOperand::vreg(src, sz));
-            lir_bb.append_inst(std::move(mov_inst));
-
             auto not_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Not32 : LirOpcode::Not);
             not_inst->add_def(LirOperand::vreg(dst, sz));
-            not_inst->add_use(LirOperand::vreg(dst, sz));
+            not_inst->add_use(LirOperand::vreg(src, sz));
             not_inst->mir_origin = &inst;
             lir_bb.append_inst(std::move(not_inst));
             break;

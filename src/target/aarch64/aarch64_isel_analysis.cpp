@@ -157,18 +157,34 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
         }
     };
 
+    auto access_size = [](const Value* v) -> uint8_t {
+        if (!v) return 8;
+        uint8_t sz = static_cast<uint8_t>(v->type().size_in_bytes());
+        return sz == 0 ? 8 : sz;
+    };
+
     for (const auto* bb : mir_fn.blocks()) {
         for (const auto* inst : *bb) {
             if (skipped_insts_.count(inst)) continue;
             switch (inst->opcode()) {
                 case Opcode::load:
+                    count_direct(match_address(inst->operand(0), inst->offset(), access_size(inst->result()), bb),
+                                 {inst->operand(0)});
+                    break;
                 case Opcode::store:
-                    count_direct(match_address(inst->operand(0), inst->offset(), bb), {inst->operand(0)});
+                    count_direct(match_address(inst->operand(0), inst->offset(), access_size(inst->operand(1)), bb),
+                                 {inst->operand(0)});
                     break;
                 case Opcode::load_indexed:
+                    count_direct(match_indexed_address(inst->operand(0), inst->operand(1),
+                                                       x64::scale_from_int(inst->scale()), inst->offset(),
+                                                       access_size(inst->result())),
+                                 {inst->operand(0), inst->operand(1)});
+                    break;
                 case Opcode::store_indexed:
                     count_direct(match_indexed_address(inst->operand(0), inst->operand(1),
-                                                       x64::scale_from_int(inst->scale()), inst->offset()),
+                                                       x64::scale_from_int(inst->scale()), inst->offset(),
+                                                       access_size(inst->operand(2))),
                                  {inst->operand(0), inst->operand(1)});
                     break;
                 default:
@@ -194,14 +210,6 @@ bool AArch64ISel::is_elidable_materialization(const Instruction& inst) const {
         case Opcode::shl:
             // Pure integer arithmetic an address may have folded.
             return !inst.type().is_float() && !inst.type().is_vector();
-        case Opcode::load:
-        case Opcode::load_indexed: {
-            // A load whose only consumer read it through a folded memory
-            // operand. A load with no consumer at all stays: it may be there
-            // for its fault.
-            auto it = use_count_.find(inst.result());
-            return it != use_count_.end() && it->second == 1;
-        }
         default:
             return false;
     }

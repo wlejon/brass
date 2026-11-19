@@ -17,12 +17,12 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (dst.is_preg()) {
                 FPR dst_f = dst.preg_val.as_aarch64_fpr();
                 if (src.is_preg()) enc_.vec_orr(dst_f, src.preg_val.as_aarch64_fpr(), src.preg_val.as_aarch64_fpr());
-                else enc_.ldr_q(dst_f, ensure_accessible_mem(to_mem_address(src)));
+                else enc_.ldr_q(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 16));
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, 16);
                 if (src.is_preg()) enc_.str_q(src.preg_val.as_aarch64_fpr(), dst_mem);
                 else {
-                    enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                    enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 16));
                     enc_.str_q(FPR::V31, dst_mem);
                 }
             }

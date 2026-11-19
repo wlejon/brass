@@ -25,11 +25,7 @@ void AArch64ISel::lower_comparison(
 
         auto ucomi = std::make_unique<LirInst>(ucomi_op);
         ucomi->add_use(LirOperand::vreg(op0, sz));
-        if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
-            ucomi->add_use(get_load_mem_operand(op1_val->defining_instruction()));
-        } else {
-            ucomi->add_use(LirOperand::vreg(op1, sz));
-        }
+        ucomi->add_use(LirOperand::vreg(op1, sz));
         lir_bb.append_inst(std::move(ucomi));
 
         if (float_cond == LirCond::E) {
@@ -159,12 +155,6 @@ void AArch64ISel::lower_comparison(
             auto cmp_inst = std::make_unique<LirInst>(cmp_lir_op);
             cmp_inst->add_use(LirOperand::vreg(op1, sz));
             cmp_inst->add_use(LirOperand::imm(imm0.val, sz));
-            lir_bb.append_inst(std::move(cmp_inst));
-        } else if (op1_val && op1_val->is_instruction() && can_fuse_load(op1_val->defining_instruction(), &inst)) {
-            LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;
-            auto cmp_inst = std::make_unique<LirInst>(cmp_lir_op);
-            cmp_inst->add_use(LirOperand::vreg(op0, sz));
-            cmp_inst->add_use(get_load_mem_operand(op1_val->defining_instruction()));
             lir_bb.append_inst(std::move(cmp_inst));
         } else {
             LirOpcode cmp_lir_op = (sz == 4) ? LirOpcode::Cmp32 : LirOpcode::Cmp;

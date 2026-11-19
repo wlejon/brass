@@ -24,10 +24,20 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
                     else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
                     else if (dst.size == 4 || src.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
-                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src)));
+                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
                 }
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17);
+                int store_bytes = 8;
+                if (src.is_imm_int()) {
+                    if (dst.size == 1) store_bytes = 1;
+                    else if (dst.size == 2) store_bytes = 2;
+                    else if (dst.size == 4) store_bytes = 4;
+                } else {
+                    if (dst.size == 1 || src.size == 1) store_bytes = 1;
+                    else if (dst.size == 2 || src.size == 2) store_bytes = 2;
+                    else if (dst.size == 4 || src.size == 4) store_bytes = 4;
+                }
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, store_bytes);
                 GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
                 if (src.is_preg()) {
                     if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);
@@ -51,7 +61,7 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                 } else {
                     GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
                     if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
-                    enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch));
+                    enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 8));
                     if (dst.size == 1 || src.size == 1) enc_.strb(data_scratch, dst_mem);
                     else if (dst.size == 2 || src.size == 2) enc_.strh(data_scratch, dst_mem);
                     else if (dst.size == 4 || src.size == 4) enc_.str32(data_scratch, dst_mem);
@@ -99,7 +109,15 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     else enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                 }
             } else {
-                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, 4);
+                int store_bytes = 4;
+                if (src.is_imm_int()) {
+                    if (dst.size == 1) store_bytes = 1;
+                    else if (dst.size == 2) store_bytes = 2;
+                } else {
+                    if (dst.size == 1 || src.size == 1) store_bytes = 1;
+                    else if (dst.size == 2 || src.size == 2) store_bytes = 2;
+                }
+                MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, store_bytes);
                 GPR data_scratch = (dst_mem.base == GPR::X16 || dst_mem.index == GPR::X16) ? GPR::X15 : GPR::X16;
                 if (src.is_preg()) {
                     if (dst.size == 1 || src.size == 1) enc_.strb(src.preg_val.as_aarch64_gpr(), dst_mem);

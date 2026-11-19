@@ -13,11 +13,7 @@ void AArch64ISel::lower_fp_instruction(const Instruction& inst, LirBlock& lir_bb
 
         auto lir_inst = std::make_unique<LirInst>(op);
         lir_inst->add_def(LirOperand::vreg(dst, dst_sz));
-        if (src_val && src_val->is_instruction() && can_fuse_load(src_val->defining_instruction(), &inst)) {
-            lir_inst->add_use(get_load_mem_operand(src_val->defining_instruction()));
-        } else {
-            lir_inst->add_use(LirOperand::vreg(src, src_sz));
-        }
+        lir_inst->add_use(LirOperand::vreg(src, src_sz));
         lir_inst->mir_origin = &inst;
         lir_bb.append_inst(std::move(lir_inst));
     };
