@@ -4,6 +4,14 @@ namespace brass::aarch64 {
 
 using namespace brass::codegen;
 
+namespace {
+
+bool is_single_add_sub_imm(uint64_t u) noexcept {
+    return u <= 4095u || ((u & 0xFFFu) == 0 && (u >> 12) <= 4095u);
+}
+
+} // namespace
+
 void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
     switch (inst.opcode) {
         case LirOpcode::Add: {
@@ -13,12 +21,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.add(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.add(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.sub(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint64_t u64 = static_cast<uint64_t>(src2.imm_int);
+                const uint64_t n64 = 0ULL - u64;
+                if (src2.imm_int >= 0 && u64 <= 0xFFFFFFu) {
+                    enc_.add(dst, src1, static_cast<uint32_t>(u64));
+                } else if (src2.imm_int < 0 && n64 <= 0xFFFFFFu) {
+                    enc_.sub(dst, src1, static_cast<uint32_t>(n64));
                 } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.mov(GPR::X16, u64);
                     enc_.add(dst, src1, GPR::X16);
                 }
             } else {
@@ -35,12 +45,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.add32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.add32(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.sub32(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint32_t u32 = static_cast<uint32_t>(src2.imm_int);
+                const uint32_t n32 = 0u - u32;
+                if (u32 <= 0xFFFFFFu) {
+                    enc_.add32(dst, src1, u32);
+                } else if (n32 <= 0xFFFFFFu) {
+                    enc_.sub32(dst, src1, n32);
                 } else {
-                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.mov32(GPR::X16, u32);
                     enc_.add32(dst, src1, GPR::X16);
                 }
             } else {
@@ -57,12 +69,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.sub(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.sub(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.add(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint64_t u64 = static_cast<uint64_t>(src2.imm_int);
+                const uint64_t n64 = 0ULL - u64;
+                if (src2.imm_int >= 0 && u64 <= 0xFFFFFFu) {
+                    enc_.sub(dst, src1, static_cast<uint32_t>(u64));
+                } else if (src2.imm_int < 0 && n64 <= 0xFFFFFFu) {
+                    enc_.add(dst, src1, static_cast<uint32_t>(n64));
                 } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.mov(GPR::X16, u64);
                     enc_.sub(dst, src1, GPR::X16);
                 }
             } else {
@@ -79,12 +93,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.sub32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.sub32(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.add32(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint32_t u32 = static_cast<uint32_t>(src2.imm_int);
+                const uint32_t n32 = 0u - u32;
+                if (u32 <= 0xFFFFFFu) {
+                    enc_.sub32(dst, src1, u32);
+                } else if (n32 <= 0xFFFFFFu) {
+                    enc_.add32(dst, src1, n32);
                 } else {
-                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.mov32(GPR::X16, u32);
                     enc_.sub32(dst, src1, GPR::X16);
                 }
             } else {
@@ -121,12 +137,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.adds(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.adds(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.subs(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint64_t u64 = static_cast<uint64_t>(src2.imm_int);
+                const uint64_t n64 = 0ULL - u64;
+                if (src2.imm_int >= 0 && is_single_add_sub_imm(u64)) {
+                    enc_.adds(dst, src1, static_cast<uint32_t>(u64));
+                } else if (src2.imm_int < 0 && is_single_add_sub_imm(n64)) {
+                    enc_.subs(dst, src1, static_cast<uint32_t>(n64));
                 } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.mov(GPR::X16, u64);
                     enc_.adds(dst, src1, GPR::X16);
                 }
             } else {
@@ -143,12 +161,15 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.adds32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.adds32(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.subs32(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint32_t u32 = static_cast<uint32_t>(src2.imm_int);
+                const uint32_t n32 = 0u - u32;
+                const int32_t s32 = static_cast<int32_t>(u32);
+                if (s32 >= 0 && is_single_add_sub_imm(u32)) {
+                    enc_.adds32(dst, src1, u32);
+                } else if (s32 < 0 && is_single_add_sub_imm(n32)) {
+                    enc_.subs32(dst, src1, n32);
                 } else {
-                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.mov32(GPR::X16, u32);
                     enc_.adds32(dst, src1, GPR::X16);
                 }
             } else {
@@ -165,12 +186,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.subs(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.subs(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.adds(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint64_t u64 = static_cast<uint64_t>(src2.imm_int);
+                const uint64_t n64 = 0ULL - u64;
+                if (src2.imm_int >= 0 && is_single_add_sub_imm(u64)) {
+                    enc_.subs(dst, src1, static_cast<uint32_t>(u64));
+                } else if (src2.imm_int < 0 && is_single_add_sub_imm(n64)) {
+                    enc_.adds(dst, src1, static_cast<uint32_t>(n64));
                 } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(src2.imm_int));
+                    enc_.mov(GPR::X16, u64);
                     enc_.subs(dst, src1, GPR::X16);
                 }
             } else {
@@ -187,12 +210,15 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (src2.is_preg()) {
                 enc_.subs32(dst, src1, to_gpr(src2));
             } else if (src2.is_imm_int()) {
-                if (src2.imm_int >= 0 && src2.imm_int <= 4095) {
-                    enc_.subs32(dst, src1, static_cast<uint32_t>(src2.imm_int));
-                } else if (src2.imm_int < 0 && -src2.imm_int <= 4095) {
-                    enc_.adds32(dst, src1, static_cast<uint32_t>(-src2.imm_int));
+                const uint32_t u32 = static_cast<uint32_t>(src2.imm_int);
+                const uint32_t n32 = 0u - u32;
+                const int32_t s32 = static_cast<int32_t>(u32);
+                if (s32 >= 0 && is_single_add_sub_imm(u32)) {
+                    enc_.subs32(dst, src1, u32);
+                } else if (s32 < 0 && is_single_add_sub_imm(n32)) {
+                    enc_.adds32(dst, src1, n32);
                 } else {
-                    enc_.mov32(GPR::X16, static_cast<uint32_t>(src2.imm_int));
+                    enc_.mov32(GPR::X16, u32);
                     enc_.subs32(dst, src1, GPR::X16);
                 }
             } else {
@@ -582,12 +608,14 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (op1.is_preg()) {
                 enc_.cmp(op0, to_gpr(op1));
             } else if (op1.is_imm_int()) {
-                if (op1.imm_int >= 0 && op1.imm_int <= 4095) {
-                    enc_.cmp(op0, static_cast<uint32_t>(op1.imm_int));
-                } else if (op1.imm_int < 0 && -op1.imm_int <= 4095) {
-                    enc_.cmn(op0, static_cast<uint32_t>(-op1.imm_int));
+                const uint64_t u64 = static_cast<uint64_t>(op1.imm_int);
+                const uint64_t n64 = 0ULL - u64;
+                if (op1.imm_int >= 0 && is_single_add_sub_imm(u64)) {
+                    enc_.cmp(op0, static_cast<uint32_t>(u64));
+                } else if (op1.imm_int < 0 && is_single_add_sub_imm(n64)) {
+                    enc_.cmn(op0, static_cast<uint32_t>(n64));
                 } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(op1.imm_int));
+                    enc_.mov(GPR::X16, u64);
                     enc_.cmp(op0, GPR::X16);
                 }
             } else {
@@ -603,12 +631,15 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             if (op1.is_preg()) {
                 enc_.cmp32(op0, to_gpr(op1));
             } else if (op1.is_imm_int()) {
-                if (op1.imm_int >= 0 && op1.imm_int <= 4095) {
-                    enc_.cmp32(op0, static_cast<uint32_t>(op1.imm_int));
-                } else if (op1.imm_int < 0 && -op1.imm_int <= 4095) {
-                    enc_.cmn32(op0, static_cast<uint32_t>(-op1.imm_int));
+                const uint32_t u32 = static_cast<uint32_t>(op1.imm_int);
+                const uint32_t n32 = 0u - u32;
+                const int32_t s32 = static_cast<int32_t>(u32);
+                if (s32 >= 0 && is_single_add_sub_imm(u32)) {
+                    enc_.cmp32(op0, u32);
+                } else if (s32 < 0 && is_single_add_sub_imm(n32)) {
+                    enc_.cmn32(op0, n32);
                 } else {
-                    enc_.mov32(GPR::X16, static_cast<uint32_t>(op1.imm_int));
+                    enc_.mov32(GPR::X16, u32);
                     enc_.cmp32(op0, GPR::X16);
                 }
             } else {

@@ -375,12 +375,14 @@ void AArch64EmitContext::zero_tagged_locals() {
                 if (chunk_base == GPR::None || (cur - chunk_off) < -512 || (cur - chunk_off) > 504 ||
                     ((cur - chunk_off) % 8 != 0)) {
                     chunk_off = cur;
-                    if (chunk_off >= 0 && chunk_off <= 4095) {
-                        enc_.add(GPR::X16, GPR::FP, static_cast<uint32_t>(chunk_off));
-                    } else if (chunk_off < 0 && -chunk_off <= 4095) {
-                        enc_.sub(GPR::X16, GPR::FP, static_cast<uint32_t>(-chunk_off));
+                    const uint64_t uoff = static_cast<uint64_t>(chunk_off);
+                    const uint64_t noff = 0ULL - uoff;
+                    if (chunk_off >= 0 && uoff <= 0xFFFFFFu) {
+                        enc_.add(GPR::X16, GPR::FP, static_cast<uint32_t>(uoff));
+                    } else if (chunk_off < 0 && noff <= 0xFFFFFFu) {
+                        enc_.sub(GPR::X16, GPR::FP, static_cast<uint32_t>(noff));
                     } else {
-                        enc_.mov(GPR::X16, static_cast<uint64_t>(chunk_off));
+                        enc_.mov(GPR::X16, uoff);
                         enc_.add(GPR::X16, GPR::FP, GPR::X16);
                     }
                     chunk_base = GPR::X16;
@@ -470,22 +472,29 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
         case LirOpcode::Lea: {
             GPR dst = to_gpr(inst.defs[0]);
             const auto& op = inst.uses[0];
+            auto emit_add_disp = [&](GPR out, GPR base, int64_t disp) {
+                if (disp == 0) {
+                    if (out != base) enc_.mov(out, base);
+                    return;
+                }
+                const uint64_t u = static_cast<uint64_t>(disp);
+                const uint64_t neg = 0ULL - u;
+                if (disp >= 0 && u <= 0xFFFFFFu) {
+                    enc_.add(out, base, static_cast<uint32_t>(u));
+                } else if (disp < 0 && neg <= 0xFFFFFFu) {
+                    enc_.sub(out, base, static_cast<uint32_t>(neg));
+                } else {
+                    GPR tmp = (base == GPR::X16) ? GPR::X17 : GPR::X16;
+                    enc_.mov(tmp, u);
+                    enc_.add(out, base, tmp);
+                }
+            };
             if (op.is_spill_slot()) {
                 MemAddress addr = AArch64FrameLayout::spill_slot_address(op.spill_slot, fn_.frame);
-                if (addr.offset >= 0 && addr.offset <= 4095) {
-                    enc_.add(dst, GPR::FP, static_cast<uint32_t>(addr.offset));
-                } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(addr.offset));
-                    enc_.add(dst, GPR::FP, GPR::X16);
-                }
+                emit_add_disp(dst, GPR::FP, addr.offset);
             } else if (op.is_local_slot()) {
                 MemAddress addr = AArch64FrameLayout::local_frame_address(op.local_offset, fn_.frame);
-                if (addr.offset >= 0 && addr.offset <= 4095) {
-                    enc_.add(dst, GPR::FP, static_cast<uint32_t>(addr.offset));
-                } else {
-                    enc_.mov(GPR::X16, static_cast<uint64_t>(addr.offset));
-                    enc_.add(dst, GPR::FP, GPR::X16);
-                }
+                emit_add_disp(dst, GPR::FP, addr.offset);
             } else if (op.is_mem()) {
                 const auto& m = op.mem_val;
                 GPR base = m.base_preg.is_valid() ? m.base_preg.as_aarch64_gpr() : GPR::None;
@@ -502,34 +511,14 @@ void AArch64EmitContext::emit_control_instruction(const LirInst& inst) {
                         enc_.add(dst, base, index);
                     }
                     if (m.disp != 0) {
-                        if (m.disp >= 0 && m.disp <= 4095) enc_.add(dst, dst, static_cast<uint32_t>(m.disp));
-                        else if (m.disp < 0 && -m.disp <= 4095) enc_.sub(dst, dst, static_cast<uint32_t>(-m.disp));
-                        else {
-                            enc_.mov(GPR::X16, static_cast<uint64_t>(m.disp));
-                            enc_.add(dst, dst, GPR::X16);
-                        }
+                        emit_add_disp(dst, dst, m.disp);
                     }
                 } else if (base != GPR::None) {
-                    if (m.disp >= 0 && m.disp <= 4095) enc_.add(dst, base, static_cast<uint32_t>(m.disp));
-                    else if (m.disp < 0 && -m.disp <= 4095) enc_.sub(dst, base, static_cast<uint32_t>(-m.disp));
-                    else {
-                        enc_.mov(GPR::X16, static_cast<uint64_t>(m.disp));
-                        enc_.add(dst, base, GPR::X16);
-                    }
+                    emit_add_disp(dst, base, m.disp);
                 } else if (index != GPR::None) {
-                    if (m.disp >= 0 && m.disp <= 4095) enc_.add(dst, index, static_cast<uint32_t>(m.disp));
-                    else if (m.disp < 0 && -m.disp <= 4095) enc_.sub(dst, index, static_cast<uint32_t>(-m.disp));
-                    else {
-                        enc_.mov(GPR::X16, static_cast<uint64_t>(m.disp));
-                        enc_.add(dst, index, GPR::X16);
-                    }
+                    emit_add_disp(dst, index, m.disp);
                 } else {
-                    if (m.disp >= 0 && m.disp <= 4095) enc_.add(dst, GPR::FP, static_cast<uint32_t>(m.disp));
-                    else if (m.disp < 0 && -m.disp <= 4095) enc_.sub(dst, GPR::FP, static_cast<uint32_t>(-m.disp));
-                    else {
-                        enc_.mov(GPR::X16, static_cast<uint64_t>(m.disp));
-                        enc_.add(dst, GPR::FP, GPR::X16);
-                    }
+                    emit_add_disp(dst, GPR::FP, m.disp);
                 }
             }
             break;

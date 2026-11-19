@@ -201,6 +201,40 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
             skipped_insts_.insert(val->defining_instruction());
         }
     }
+
+    auto can_fuse_ext_load = [&](const Instruction& ext) -> const Instruction* {
+        if (ext.opcode() != Opcode::sext_i64 && ext.opcode() != Opcode::zext_i64) return nullptr;
+        const Value* src_val = ext.operand(0);
+        if (!src_val || !src_val->is_instruction()) return nullptr;
+        auto uc_it = use_count_.find(src_val);
+        if (uc_it == use_count_.end() || uc_it->second != 1) return nullptr;
+        const Instruction* ld = src_val->defining_instruction();
+        if (!ld || ld->parent() != ext.parent()) return nullptr;
+        if (ld->opcode() != Opcode::load && ld->opcode() != Opcode::load_indexed) return nullptr;
+        const Type src_ty = src_val->type();
+        if (src_ty != Type::i8() && src_ty != Type::i16() && src_ty != Type::i32()) return nullptr;
+        if (skipped_insts_.count(ld)) return nullptr;
+
+        const Instruction* cur = ld->next();
+        for (; cur && cur != &ext; cur = cur->next()) {
+            if (cur->has_side_effects()) return nullptr;
+            const Opcode op = cur->opcode();
+            if (op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod || op == Opcode::umod ||
+                op == Opcode::vdiv || op == Opcode::load || op == Opcode::load_indexed ||
+                op == Opcode::vload) {
+                return nullptr;
+            }
+        }
+        return cur == &ext ? ld : nullptr;
+    };
+
+    for (const auto* bb : mir_fn.blocks()) {
+        for (const auto* inst : *bb) {
+            if (const Instruction* ld = can_fuse_ext_load(*inst)) {
+                skipped_insts_.insert(ld);
+            }
+        }
+    }
 }
 
 bool AArch64ISel::is_elidable_materialization(const Instruction& inst) const {

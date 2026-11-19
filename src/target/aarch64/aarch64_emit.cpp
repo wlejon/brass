@@ -73,13 +73,15 @@ MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op, GPR addr_scr
                 GPR s = pick_disp_scratch(addr_scratch);
                 enc_.lsl(s, index, shift);
                 enc_.add(s, base, s);
-                if (m.disp >= 0 && m.disp <= 4095) {
-                    if (m.disp != 0) enc_.add(s, s, static_cast<uint32_t>(m.disp));
-                } else if (m.disp < 0 && -m.disp <= 4095) {
-                    enc_.sub(s, s, static_cast<uint32_t>(-m.disp));
+                const uint64_t udisp = static_cast<uint64_t>(static_cast<int64_t>(m.disp));
+                const uint64_t ndisp = 0ULL - udisp;
+                if (m.disp >= 0 && udisp <= 0xFFFFFFu) {
+                    if (m.disp != 0) enc_.add(s, s, static_cast<uint32_t>(udisp));
+                } else if (m.disp < 0 && ndisp <= 0xFFFFFFu) {
+                    enc_.sub(s, s, static_cast<uint32_t>(ndisp));
                 } else {
                     GPR other = s == GPR::X16 ? GPR::X17 : GPR::X16;
-                    enc_.mov(other, static_cast<uint64_t>(m.disp));
+                    enc_.mov(other, udisp);
                     enc_.add(s, s, other);
                 }
                 return ptr(s, 0);
@@ -87,12 +89,14 @@ MemAddress AArch64EmitContext::to_mem_address(const LirOperand& op, GPR addr_scr
 
             if (m.disp != 0) {
                 GPR disp_scratch = pick_disp_scratch(addr_scratch);
-                if (m.disp >= 0 && m.disp <= 4095) {
-                    enc_.add(disp_scratch, base, static_cast<uint32_t>(m.disp));
-                } else if (m.disp < 0 && -m.disp <= 4095) {
-                    enc_.sub(disp_scratch, base, static_cast<uint32_t>(-m.disp));
+                const uint64_t udisp = static_cast<uint64_t>(static_cast<int64_t>(m.disp));
+                const uint64_t ndisp = 0ULL - udisp;
+                if (m.disp >= 0 && udisp <= 0xFFFFFFu) {
+                    enc_.add(disp_scratch, base, static_cast<uint32_t>(udisp));
+                } else if (m.disp < 0 && ndisp <= 0xFFFFFFu) {
+                    enc_.sub(disp_scratch, base, static_cast<uint32_t>(ndisp));
                 } else {
-                    enc_.mov(disp_scratch, static_cast<uint64_t>(m.disp));
+                    enc_.mov(disp_scratch, udisp);
                     enc_.add(disp_scratch, base, disp_scratch);
                 }
                 return MemAddress::base_index(disp_scratch, index, ExtendType::UXTX, shift);
@@ -126,14 +130,46 @@ MemAddress AArch64EmitContext::ensure_accessible_mem(const MemAddress& mem, GPR 
     if (size_bytes <= 0 && off >= 0 && off % 16 == 0 && off <= 4095) {
         return mem;
     }
-    if (off >= 0 && off <= 4095) {
-        enc_.add(scratch, mem.base, static_cast<uint32_t>(off));
-    } else if (off < 0 && -off <= 4095) {
-        enc_.sub(scratch, mem.base, static_cast<uint32_t>(-off));
-    } else {
-        enc_.mov(scratch, static_cast<uint64_t>(off));
-        enc_.add(scratch, mem.base, scratch);
+    const uint64_t uoff = static_cast<uint64_t>(off);
+    const uint64_t noff = 0ULL - uoff;
+    if (off >= 0 && uoff <= 4095u) {
+        enc_.add(scratch, mem.base, static_cast<uint32_t>(uoff));
+        return ptr(scratch, 0);
     }
+    if (off < 0 && noff <= 4095u) {
+        enc_.sub(scratch, mem.base, static_cast<uint32_t>(noff));
+        return ptr(scratch, 0);
+    }
+
+    // 1-instruction shifted 12-bit page base + folded [scratch, #rem]
+    if (off >= -0x00FFF000LL && off <= 0x00FFFFFFLL) {
+        const int64_t base_off = off & ~int64_t(0xFFF);
+        const int64_t rem = off - base_off; // guaranteed 0 <= rem <= 4095
+        const bool rem_ok = (rem <= 255) ||
+                            (size_bytes > 0 && (rem % size_bytes == 0) && (rem / size_bytes <= 4095)) ||
+                            (size_bytes <= 0 && (rem % 16 == 0) && rem <= 4095);
+        if (rem_ok) {
+            if (base_off > 0 && (static_cast<uint64_t>(base_off) >> 12) <= 4095u) {
+                enc_.add(scratch, mem.base, static_cast<uint32_t>(base_off));
+                return ptr(scratch, rem);
+            }
+            if (base_off < 0 && ((0ULL - static_cast<uint64_t>(base_off)) >> 12) <= 4095u) {
+                enc_.sub(scratch, mem.base, static_cast<uint32_t>(0ULL - static_cast<uint64_t>(base_off)));
+                return ptr(scratch, rem);
+            }
+        }
+        if (off >= 0 && uoff <= 0xFFFFFFu) {
+            enc_.add(scratch, mem.base, static_cast<uint32_t>(uoff));
+            return ptr(scratch, 0);
+        }
+        if (off < 0 && noff <= 0xFFFFFFu) {
+            enc_.sub(scratch, mem.base, static_cast<uint32_t>(noff));
+            return ptr(scratch, 0);
+        }
+    }
+
+    enc_.mov(scratch, uoff);
+    enc_.add(scratch, mem.base, scratch);
     return ptr(scratch, 0);
 }
 

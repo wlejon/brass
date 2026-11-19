@@ -464,53 +464,40 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             break;
         }
 
-        case Opcode::sext_i64: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            if (inst.operand(0)->type() == Type::i8()) {
-                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsx8);
-                lir_inst->add_def(LirOperand::vreg(dst, 8));
-                lir_inst->add_use(LirOperand::vreg(src, 1));
-                lir_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(lir_inst));
-            } else if (inst.operand(0)->type() == Type::i16()) {
-                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsx16);
-                lir_inst->add_def(LirOperand::vreg(dst, 8));
-                lir_inst->add_use(LirOperand::vreg(src, 2));
-                lir_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(lir_inst));
-            } else {
-                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movsxd);
-                lir_inst->add_def(LirOperand::vreg(dst, 8));
-                lir_inst->add_use(LirOperand::vreg(src, 4));
-                lir_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(lir_inst));
-            }
-            break;
-        }
-
+        case Opcode::sext_i64:
         case Opcode::zext_i64: {
+            const bool is_signed = (inst.opcode() == Opcode::sext_i64);
             VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            if (inst.operand(0)->type() == Type::i8()) {
-                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movzx8);
-                lir_inst->add_def(LirOperand::vreg(dst, 4));
-                lir_inst->add_use(LirOperand::vreg(src, 1));
-                lir_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(lir_inst));
-            } else if (inst.operand(0)->type() == Type::i16()) {
-                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Movzx16);
-                lir_inst->add_def(LirOperand::vreg(dst, 4));
-                lir_inst->add_use(LirOperand::vreg(src, 2));
-                lir_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(lir_inst));
+            const Value* src_val = inst.operand(0);
+            const Instruction* ld = (src_val && src_val->is_instruction()) ? src_val->defining_instruction() : nullptr;
+            const Type src_ty = src_val->type();
+            const uint8_t sz = (src_ty == Type::i8()) ? 1 : (src_ty == Type::i16() ? 2 : 4);
+
+            LirOperand src_op;
+            if (ld && skipped_insts_.count(ld) &&
+                (ld->opcode() == Opcode::load || ld->opcode() == Opcode::load_indexed)) {
+                MemFold mf = (ld->opcode() == Opcode::load)
+                                 ? match_address(ld->operand(0), ld->offset(), sz, ld->parent())
+                                 : match_indexed_address(ld->operand(0), ld->operand(1),
+                                                         x64::scale_from_int(ld->scale()), ld->offset(), sz);
+                src_op = legalize_mem_operand(mf, sz, lir_bb);
             } else {
-                auto lir_inst = std::make_unique<LirInst>(LirOpcode::Mov32);
-                lir_inst->add_def(LirOperand::vreg(dst, 4));
-                lir_inst->add_use(LirOperand::vreg(src, 4));
-                lir_inst->mir_origin = &inst;
-                lir_bb.append_inst(std::move(lir_inst));
+                src_op = LirOperand::vreg(get_vreg(src_val), sz);
             }
+
+            LirOpcode op = LirOpcode::Mov;
+            uint8_t def_sz = 8;
+            if (is_signed) {
+                op = (sz == 1) ? LirOpcode::Movsx8 : (sz == 2 ? LirOpcode::Movsx16 : LirOpcode::Movsxd);
+            } else {
+                op = (sz == 1) ? LirOpcode::Movzx8 : (sz == 2 ? LirOpcode::Movzx16 : LirOpcode::Mov32);
+                if (sz == 4) def_sz = 4;
+            }
+            auto lir_inst = std::make_unique<LirInst>(op);
+            lir_inst->add_def(LirOperand::vreg(dst, def_sz));
+            lir_inst->add_use(std::move(src_op));
+            lir_inst->mir_origin = &inst;
+            lir_bb.append_inst(std::move(lir_inst));
             break;
         }
 
