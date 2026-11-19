@@ -528,7 +528,7 @@ void LinearScanAllocator::rewrite_instructions() {
             // an immediate, where the general path made it in a scratch
             // register and stored that (and, for the zero idiom, reloaded
             // the slot first as the idiom's operand).
-            if (const auto k = is_aarch64 ? std::nullopt : slot_constant(*inst)) {
+            if (const auto k = slot_constant(*inst)) {
                 auto store = std::make_unique<LirInst>(LirOpcode::Mov);
                 store->add_def(LirOperand::slot(inst->defs[0].spill_slot, 8));
                 store->add_use(LirOperand::imm(*k, 8));

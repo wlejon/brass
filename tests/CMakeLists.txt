@@ -19,6 +19,7 @@ add_executable(brass_unit_tests
     unit/test_aarch64_encoder.cpp
     unit/test_aarch64_frame.cpp
     unit/test_aarch64_isel.cpp
+    unit/test_aarch64_phase2.cpp
     unit/test_aarch64_emit.cpp
     unit/test_aarch64_runtime.cpp
     unit/test_aarch64_objects.cpp

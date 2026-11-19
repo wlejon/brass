@@ -165,6 +165,7 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
     // 1. Compute frame layout
     frame_ = fn_.frame;
     AArch64FrameLayout::compute_layout(frame_, fn_.calling_conv);
+    begin_constant_pool();
 
     // 2. Create labels for all blocks
     for (const auto& block : fn_.blocks) {
@@ -261,6 +262,8 @@ AArch64CompilationResult AArch64EmitContext::compile_pass(const std::vector<uint
             }
         }
     }
+
+    emit_constant_pool();
 
     result.code_buffer = std::move(buffer_);
     result.safepoints = std::move(safepoints_);

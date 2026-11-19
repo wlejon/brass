@@ -409,7 +409,6 @@ bool PeepholeOptimizer::reg_dead_from(const LirBlock& block, size_t from, PReg r
 // both, when r is not read afterwards. In Matrix4.multiplyMatrices' fast
 // path each of the 32 elements came through a GPR this way. x64 only.
 bool PeepholeOptimizer::bitcast_through_slots(LirBlock& block) {
-    if (fn_.calling_conv.target().is_aarch64()) return false;
     bool changed = false;
     const size_t n = block.instructions.size();
     auto is_slot_mov = [](const LirInst& m) {
@@ -428,7 +427,8 @@ bool PeepholeOptimizer::bitcast_through_slots(LirBlock& block) {
                 if (!block.instructions[j]) continue;
                 LirInst& b = *block.instructions[j];
                 if (b.opcode == LirOpcode::Movq_xg && b.uses.size() == 1 && b.uses[0].is_preg() &&
-                    b.uses[0].preg_val == r && b.defs.size() == 1 && b.defs[0].is_preg() && !is_protected(b)) {
+                    b.uses[0].preg_val == r && b.defs.size() == 1 && b.defs[0].is_preg() &&
+                    b.defs[0].size == 8 && !is_protected(b)) {
                     if (!reg_dead_from(block, j + 1, r)) break;
                     b.opcode = LirOpcode::Movsd;
                     b.uses[0] = LirOperand::slot(slot, 8);

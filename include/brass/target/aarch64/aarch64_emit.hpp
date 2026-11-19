@@ -8,6 +8,7 @@
 #include <brass/gc/stack_map.hpp>
 #include <vector>
 #include <unordered_map>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 
@@ -70,6 +71,9 @@ private:
     std::vector<StackMapRecord> stack_map_records_;
     std::unordered_map<uint32_t, aarch64::Label> block_labels_;
     std::vector<runtime::PatchSite> patch_sites_;
+    std::unordered_map<int32_t, uint64_t> constant_slot_values_;
+    std::unordered_map<uint64_t, aarch64::Label> pool_labels_;
+    std::vector<uint64_t> pool_order_;
 
     struct PendingExceptionScope {
         size_t call_start = 0;
@@ -105,6 +109,14 @@ private:
     void store_guard_state(const codegen::LirInst& inst, size_t slots_off);
     void open_guard_exit_area(size_t bytes);
     void move_sp_for_guard_exit(bool allocate, size_t bytes);
+
+    void begin_constant_pool();
+    void emit_constant_pool();
+    std::optional<int32_t> pinned_constant(uint64_t value) const;
+    std::optional<uint64_t> constant_slot_value(int32_t slot) const;
+    aarch64::Label get_or_create_pool_label(uint64_t value);
+    void emit_load_constant_gpr(GPR dst, uint64_t val, GPR addr_scratch = GPR::X16);
+    void emit_load_constant_fpr(FPR dst, uint64_t val, GPR addr_scratch = GPR::X16);
 };
 
 AArch64CompilationResult compile_lir_to_aarch64(const codegen::LirFunction& fn, const Target& target);

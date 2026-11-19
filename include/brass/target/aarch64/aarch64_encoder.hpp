@@ -176,6 +176,7 @@ public:
     void movn32(GPR dst, uint16_t imm, uint8_t hw_shift = 0);
 
     // Full 64-bit/32-bit constant materialization
+    static bool single_inst_mov_imm(uint64_t imm) noexcept;
     void mov(GPR dst, uint64_t imm);
     void mov32(GPR dst, uint32_t imm);
 
@@ -185,6 +186,8 @@ public:
 
     void csel(GPR dst, GPR src1, GPR src2, Condition cond);
     void csel32(GPR dst, GPR src1, GPR src2, Condition cond);
+    void fcsel(FPR dst, FPR src1, FPR src2, Condition cond);
+    void fcsel_s(FPR dst, FPR src1, FPR src2, Condition cond);
     void csinc(GPR dst, GPR src1, GPR src2, Condition cond);
     void csinc32(GPR dst, GPR src1, GPR src2, Condition cond);
     void csinv(GPR dst, GPR src1, GPR src2, Condition cond);
@@ -303,6 +306,8 @@ public:
     void ldr(FPR dst, const MemAddress& mem);    // 64-bit Dd
     void ldr_s(FPR dst, const MemAddress& mem);  // 32-bit Sd
     void ldr_q(FPR dst, const MemAddress& mem);  // 128-bit Qd
+    void ldr_literal(GPR dst, Label target, uint64_t fallback_imm);
+    void ldr_literal(FPR dst, Label target, uint64_t fallback_imm);
     void str(FPR src, const MemAddress& mem);    // 64-bit Dd
     void str_s(FPR src, const MemAddress& mem);  // 32-bit Sd
     void str_q(FPR src, const MemAddress& mem);  // 128-bit Qd

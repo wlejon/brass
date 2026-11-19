@@ -845,8 +845,8 @@ void LinearScanAllocator::allocate() {
             }), ins.end());
         }
     }
+    pool_constant_slots();
     if (cc_.target().is_x64()) {
-        pool_constant_slots();
         trim_unused_scratch_saves(fn_, allocated_callee_gprs, allocated_callee_xmms,
                                   cc_.kind() == CallingConvKind::Win64);
     }

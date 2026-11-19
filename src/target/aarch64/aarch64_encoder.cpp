@@ -440,6 +440,20 @@ void AArch64Encoder::movn32(GPR dst, uint16_t imm, uint8_t hw_shift) {
                       (static_cast<uint32_t>(imm) << 5) | reg_code(dst));
 }
 
+bool AArch64Encoder::single_inst_mov_imm(uint64_t imm) noexcept {
+    if (imm == 0) return true;
+    int nz = 0;
+    int nff = 0;
+    for (int i = 0; i < 4; ++i) {
+        const uint16_t chunk = static_cast<uint16_t>((imm >> (i * 16)) & 0xFFFFu);
+        if (chunk != 0) ++nz;
+        if (chunk != 0xFFFFu) ++nff;
+    }
+    if (nz <= 1 || nff <= 1) return true;
+    uint32_t n = 0, immr = 0, imms = 0;
+    return encode_logical_immediate(imm, true, n, immr, imms);
+}
+
 void AArch64Encoder::mov(GPR dst, uint64_t imm) {
     if (imm == 0) {
         mov(dst, GPR::XZR);
@@ -453,17 +467,65 @@ void AArch64Encoder::mov(GPR dst, uint64_t imm) {
         static_cast<uint16_t>((imm >> 48) & 0xFFFFu),
     };
 
-    bool first = true;
-    for (uint8_t i = 0; i < 4; ++i) {
-        if (first && chunks[i] != 0) {
-            movz(dst, chunks[i], i);
-            first = false;
-        } else if (!first && chunks[i] != 0) {
-            movk(dst, chunks[i], i);
+    int nz = 0;
+    int nff = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (chunks[i] != 0) ++nz;
+        if (chunks[i] != 0xFFFFu) ++nff;
+    }
+
+    if (nff == 0) {
+        movn(dst, 0, 0);
+        return;
+    }
+    if (nz == 1 || nff == 1) {
+        if (nff == 1 && nz > 1) {
+            for (uint8_t i = 0; i < 4; ++i) {
+                if (chunks[i] != 0xFFFFu) {
+                    movn(dst, static_cast<uint16_t>(~chunks[i]), i);
+                    return;
+                }
+            }
+        }
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (chunks[i] != 0) {
+                movz(dst, chunks[i], i);
+                return;
+            }
         }
     }
-    if (first) {
-        movz(dst, 0, 0);
+
+    if (dst != GPR::SP) {
+        uint32_t n = 0, immr = 0, imms = 0;
+        if (encode_logical_immediate(imm, true, n, immr, imms)) {
+            orr_imm(dst, GPR::XZR, imm);
+            return;
+        }
+    }
+
+    if (nff < nz) {
+        bool first = true;
+        for (uint8_t i = 0; i < 4; ++i) {
+            if (chunks[i] == 0xFFFFu) continue;
+            if (first) {
+                movn(dst, static_cast<uint16_t>(~chunks[i]), i);
+                first = false;
+            } else {
+                movk(dst, chunks[i], i);
+            }
+        }
+        return;
+    }
+
+    bool first = true;
+    for (uint8_t i = 0; i < 4; ++i) {
+        if (chunks[i] == 0) continue;
+        if (first) {
+            movz(dst, chunks[i], i);
+            first = false;
+        } else {
+            movk(dst, chunks[i], i);
+        }
     }
 }
 
@@ -883,6 +945,52 @@ void AArch64Encoder::adr(GPR dst, Label target) {
     } else {
         buffer_.emit_inst(0x10000000u | reg_code(dst));
         buffer_.record_label_fixup(target, patch_off, FixupKind::Adr21);
+    }
+}
+
+void AArch64Encoder::ldr_literal(GPR dst, Label target, uint64_t fallback_imm) {
+    const uint32_t site = buffer_.next_short_branch_site();
+    if (buffer_.is_long_branch_site(site)) {
+        mov(dst, fallback_imm);
+        return;
+    }
+    const size_t patch_off = buffer_.size();
+    if (buffer_.is_bound(target)) {
+        const int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
+        const int64_t word_disp = disp >> 2;
+        if (word_disp < -(1 << 18) || word_disp > ((1 << 18) - 1)) {
+            mov(dst, fallback_imm);
+            return;
+        }
+        const uint32_t imm19 = static_cast<uint32_t>(word_disp) & 0x0007FFFFu;
+        buffer_.emit_inst(0x58000000u | (imm19 << 5) | reg_code(dst));
+    } else {
+        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19, site);
+        buffer_.emit_inst(0x58000000u | reg_code(dst));
+    }
+}
+
+void AArch64Encoder::ldr_literal(FPR dst, Label target, uint64_t fallback_imm) {
+    const uint32_t site = buffer_.next_short_branch_site();
+    if (buffer_.is_long_branch_site(site)) {
+        mov(GPR::X16, fallback_imm);
+        fmov_from_gpr(dst, GPR::X16);
+        return;
+    }
+    const size_t patch_off = buffer_.size();
+    if (buffer_.is_bound(target)) {
+        const int64_t disp = static_cast<int64_t>(buffer_.label_offset(target)) - static_cast<int64_t>(patch_off);
+        const int64_t word_disp = disp >> 2;
+        if (word_disp < -(1 << 18) || word_disp > ((1 << 18) - 1)) {
+            mov(GPR::X16, fallback_imm);
+            fmov_from_gpr(dst, GPR::X16);
+            return;
+        }
+        const uint32_t imm19 = static_cast<uint32_t>(word_disp) & 0x0007FFFFu;
+        buffer_.emit_inst(0x5C000000u | (imm19 << 5) | reg_code(dst));
+    } else {
+        buffer_.record_label_fixup(target, patch_off, FixupKind::CondBranch19, site);
+        buffer_.emit_inst(0x5C000000u | reg_code(dst));
     }
 }
 

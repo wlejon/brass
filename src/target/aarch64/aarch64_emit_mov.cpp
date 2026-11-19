@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/target/aarch64/aarch64_isel.hpp>
 
 namespace brass::aarch64 {
 
@@ -24,7 +25,15 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
                     else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
                     else if (dst.size == 4 || src.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
-                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    else if (src.is_spill_slot() && dst.size == 8 && src.size == 8) {
+                        if (const auto val = constant_slot_value(src.spill_slot)) {
+                            emit_load_constant_gpr(dst_gpr, *val);
+                        } else {
+                            enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                        }
+                    } else {
+                        enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    }
                 }
             } else {
                 int store_bytes = 8;
@@ -45,7 +54,12 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     else if (dst.size == 4 || src.size == 4) enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else enc_.str(src.preg_val.as_aarch64_gpr(), dst_mem);
                 } else if (src.is_imm_int()) {
-                    if (dst.size == 1) {
+                    if (src.imm_int == 0) {
+                        if (dst.size == 1) enc_.strb(GPR::XZR, dst_mem);
+                        else if (dst.size == 2) enc_.strh(GPR::XZR, dst_mem);
+                        else if (dst.size == 4) enc_.str32(GPR::XZR, dst_mem);
+                        else enc_.str(GPR::XZR, dst_mem);
+                    } else if (dst.size == 1) {
                         enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xff));
                         enc_.strb(data_scratch, dst_mem);
                     } else if (dst.size == 2) {
@@ -61,7 +75,15 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                 } else {
                     GPR src_scratch = (dst_mem.base == GPR::X17 || dst_mem.index == GPR::X17) ? GPR::X15 : GPR::X17;
                     if (src_scratch == data_scratch) src_scratch = (data_scratch == GPR::X16) ? GPR::X15 : GPR::X16;
-                    enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 8));
+                    if (src.is_spill_slot() && src.size == 8) {
+                        if (const auto val = constant_slot_value(src.spill_slot)) {
+                            emit_load_constant_gpr(data_scratch, *val, src_scratch);
+                        } else {
+                            enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 8));
+                        }
+                    } else {
+                        enc_.ldr(data_scratch, ensure_accessible_mem(to_mem_address(src), src_scratch, 8));
+                    }
                     if (dst.size == 1 || src.size == 1) enc_.strb(data_scratch, dst_mem);
                     else if (dst.size == 2 || src.size == 2) enc_.strh(data_scratch, dst_mem);
                     else if (dst.size == 4 || src.size == 4) enc_.str32(data_scratch, dst_mem);
@@ -124,14 +146,19 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     else if (dst.size == 2 || src.size == 2) enc_.strh(src.preg_val.as_aarch64_gpr(), dst_mem);
                     else enc_.str32(src.preg_val.as_aarch64_gpr(), dst_mem);
                 } else if (src.is_imm_int()) {
-                    if (dst.size == 1) {
-                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xff));
+                    const uint32_t imm32 = static_cast<uint32_t>(src.imm_int);
+                    if (imm32 == 0) {
+                        if (dst.size == 1) enc_.strb(GPR::XZR, dst_mem);
+                        else if (dst.size == 2) enc_.strh(GPR::XZR, dst_mem);
+                        else enc_.str32(GPR::XZR, dst_mem);
+                    } else if (dst.size == 1) {
+                        enc_.mov32(data_scratch, imm32 & 0xffu);
                         enc_.strb(data_scratch, dst_mem);
                     } else if (dst.size == 2) {
-                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int & 0xffff));
+                        enc_.mov32(data_scratch, imm32 & 0xffffu);
                         enc_.strh(data_scratch, dst_mem);
                     } else {
-                        enc_.mov32(data_scratch, static_cast<uint32_t>(src.imm_int));
+                        enc_.mov32(data_scratch, imm32);
                         enc_.str32(data_scratch, dst_mem);
                     }
                 } else {
@@ -175,7 +202,14 @@ void AArch64EmitContext::emit_mov_instruction(const LirInst& inst) {
                     inst.uses[0].imm_int
                 );
             } else {
-                enc_.mov(dst_gpr, static_cast<uint64_t>(inst.uses[0].imm_int));
+                const uint64_t v = static_cast<uint64_t>(inst.uses[0].imm_int);
+                if (!AArch64Encoder::single_inst_mov_imm(v)) {
+                    if (const auto off = pinned_constant(v)) {
+                        enc_.ldr(dst_gpr, ensure_accessible_mem(ptr(kPinnedTlsGpr, *off), GPR::X16, 8));
+                        break;
+                    }
+                }
+                enc_.mov(dst_gpr, v);
             }
             break;
         }

@@ -69,6 +69,11 @@ void AArch64ISel::find_remat_compares(const Function& mir_fn) {
     }
 }
 
+bool AArch64ISel::is_self_nan_test(const Instruction& cmp) noexcept {
+    return (cmp.opcode() == Opcode::eq || cmp.opcode() == Opcode::ne) && cmp.operand_count() == 2 &&
+           cmp.operand(0) && cmp.operand(0) == cmp.operand(1) && cmp.operand(0)->type().is_float();
+}
+
 bool AArch64ISel::fused_into(const Instruction* cmp, const Instruction& user) const {
     if (!cmp || !is_comparison(cmp->opcode()) || !skipped_insts_.count(cmp)) return false;
     return cmp->parent() == user.parent() || remat_cmps_.count(cmp) != 0;
@@ -94,6 +99,10 @@ LirCond AArch64ISel::emit_fused_compare(const Instruction& cmp_inst, LirBlock& l
     if (lhs->type().is_float()) {
         const uint8_t sz = static_cast<uint8_t>(lhs->type().size_in_bytes());
         const LirOpcode ucomi = sz == 4 ? LirOpcode::Ucomiss : LirOpcode::Ucomisd;
+        if (is_self_nan_test(cmp_inst)) {
+            flags(ucomi, LirOperand::vreg(get_vreg(lhs), sz), LirOperand::vreg(get_vreg(rhs), sz));
+            return cmp_op == Opcode::ne ? LirCond::P : LirCond::NP;
+        }
         // After fcmp an unordered result sets C and V, so HI / HS (x64 A /
         // AE) would be true for NaN. a > b is b < a (LO: false when
         // unordered), a >= b is b <= a (LS: likewise).

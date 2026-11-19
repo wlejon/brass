@@ -295,6 +295,7 @@ void AArch64ISel::lower_store(const Instruction& inst, LirBlock& lir_bb) {
     if (sz == 0) sz = 8;
     MemFold mf = match_address(inst.operand(0), inst.offset(), sz, inst.parent());
     LirOperand mem_op = legalize_mem_operand(mf, sz, lir_bb);
+    if (lower_nan_canon_store(inst, mem_op, lir_bb)) return;
 
     bool is_xmm = src_val->type().is_float() || src_val->type().is_vector();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {
@@ -352,6 +353,7 @@ void AArch64ISel::lower_store_indexed(const Instruction& inst, LirBlock& lir_bb)
     MemFold mf = match_indexed_address(inst.operand(0), inst.operand(1), x64::scale_from_int(inst.scale()),
                                        inst.offset(), sz);
     LirOperand mem_op = legalize_mem_operand(mf, sz, lir_bb);
+    if (lower_nan_canon_store(inst, mem_op, lir_bb)) return;
 
     bool is_xmm = src_val->type().is_float() || src_val->type().is_vector();
     if (!is_xmm && imm_src.is_imm && imm_src.fits_i32) {

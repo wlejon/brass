@@ -10,6 +10,9 @@ namespace brass::aarch64 {
 
 using namespace brass::codegen;
 
+// aarch64_isel_pinned_constants.cpp
+void fold_pinned_constants(LirFunction& fn);
+
 AArch64ISel::AArch64ISel()
     : target_(Target::aarch64_linux()), cc_(CallingConvention::for_target(Target::aarch64_linux())) {}
 
@@ -26,10 +29,18 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     val_to_vreg_.clear();
     val_to_vreg_pair_.clear();
     elidable_insts_.clear();
+    guard_state_folds_.clear();
+    nan_canon_stores_.clear();
+    xmm_constants_.clear();
 
     lir_fn_->name = std::string(mir_fn.name());
     lir_fn_->return_type = mir_fn.return_type();
     lir_fn_->calling_conv = cc_;
+    if (mir_fn.parent()) {
+        for (const Module::PinnedConstant& c : mir_fn.parent()->pinned_constants()) {
+            lir_fn_->pinned_constants.emplace_back(c.value, c.tls_offset);
+        }
+    }
     if (mir_fn.parent() && mir_fn.parent()->pinned_tls_register()) {
         lir_fn_->reserved_gprs |= reg_mask(kPinnedTlsGpr);
     }
@@ -122,6 +133,7 @@ std::unique_ptr<LirFunction> AArch64ISel::lower(const Function& mir_fn) {
     }
 
     eliminate_dead_materializations();
+    fold_pinned_constants(*lir_fn_);
     return lir;
 }
 

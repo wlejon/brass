@@ -145,6 +145,8 @@ void AArch64ISel::analyze_function(const Function& mir_fn) {
     // own operands count: an instruction folded one level further down is
     // still read by the (lowered or not) instruction between them.
     std::unordered_map<const Value*, uint32_t> folded_uses;
+    find_nan_canon_stores(mir_fn, folded_uses);
+    find_guard_state_folds(mir_fn, folded_uses);
     auto count_direct = [&](const MemFold& mf, std::initializer_list<const Value*> operands) {
         for (const Value* op : operands) {
             if (!op) continue;

@@ -46,7 +46,10 @@ ExitStubArgPlan plan_exit_stub_args(const LirInst& inst, bool apple) {
             loc.reg = used++;
             continue;
         }
-        uint32_t sz = inst.uses[i].size;
+        uint32_t sz = (i < inst.state_convs.size() &&
+                       static_cast<GuardStateConv>(inst.state_convs[i]) != GuardStateConv::None)
+                          ? 8u
+                          : inst.uses[i].size;
         if (sz != 1 && sz != 2 && sz != 4) sz = 8;
         const uint32_t align = apple ? sz : 8;
         stack = (stack + align - 1) & ~(align - 1);
@@ -119,8 +122,15 @@ void AArch64EmitContext::store_guard_state(const LirInst& inst, size_t slots_off
             enc_.str(src_gpr, sp_mem(slot_off));
         } else if (op.is_preg() && op.preg_val.is_xmm()) {
             enc_.str(op.preg_val.as_aarch64_fpr(), sp_mem(slot_off));
-        } else if (op.is_spill_slot() || op.is_mem() || op.is_local_slot()) {
-            enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(op), GPR::X16));
+        } else if (op.is_spill_slot()) {
+            if (const auto val = constant_slot_value(op.spill_slot)) {
+                emit_load_constant_gpr(GPR::X16, *val);
+            } else {
+                enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(op), GPR::X16, 8));
+            }
+            enc_.str(GPR::X16, sp_mem(slot_off));
+        } else if (op.is_mem() || op.is_local_slot()) {
+            enc_.ldr(GPR::X16, ensure_accessible_mem(to_mem_address(op), GPR::X16, 8));
             enc_.str(GPR::X16, sp_mem(slot_off));
         } else if (op.is_imm_int()) {
             enc_.mov(GPR::X16, static_cast<uint64_t>(op.imm_int));
@@ -140,6 +150,35 @@ void AArch64EmitContext::store_guard_state(const LirInst& inst, size_t slots_off
         } else {
             throw_unsupported("aarch64 emit (guard exit)",
                               std::string("state value operand of kind ") + std::string(to_string(op.kind)));
+        }
+    }
+
+    // Exit-only state conversions (`aarch64_isel_guard_state.cpp`): applied in-place
+    // after all uses are stored. X0/X16/V30/V31 are free (sp_mem may use X17).
+    for (size_t i = 0; i < inst.state_convs.size(); ++i) {
+        const size_t slot_off = slots_off + i * 8;
+        switch (static_cast<GuardStateConv>(inst.state_convs[i])) {
+            case GuardStateConv::None:
+                break;
+            case GuardStateConv::CanonF64Bits:
+                enc_.ldr(FPR::V30, sp_mem(slot_off));
+                enc_.fcmp(FPR::V30, FPR::V30);
+                emit_load_constant_fpr(FPR::V31, static_cast<uint64_t>(inst.state_conv_imms[i]));
+                enc_.fcsel(FPR::V30, FPR::V31, FPR::V30, Condition::VS);
+                enc_.str(FPR::V30, sp_mem(slot_off));
+                break;
+            case GuardStateConv::I32ToF64Bits:
+                enc_.ldr(GPR::X16, sp_mem(slot_off));
+                enc_.scvtf_d32(FPR::V30, GPR::X16);
+                enc_.str(FPR::V30, sp_mem(slot_off));
+                break;
+            case GuardStateConv::BoolTag:
+                enc_.ldr(GPR::X0, sp_mem(slot_off));
+                enc_.and_imm(GPR::X0, GPR::X0, 1u);
+                emit_load_constant_gpr(GPR::X16, static_cast<uint64_t>(inst.state_conv_imms[i]));
+                enc_.orr(GPR::X0, GPR::X0, GPR::X16);
+                enc_.str(GPR::X0, sp_mem(slot_off));
+                break;
         }
     }
 }

@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/runtime/deopt.hpp>
 #include <algorithm>
 #include <cassert>
@@ -63,12 +64,29 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     if (dst.size == 1) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int & 0xff));
                     else if (dst.size == 2) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int & 0xffff));
                     else if (dst.size == 4) enc_.mov32(dst_gpr, static_cast<uint32_t>(src.imm_int));
-                    else enc_.mov(dst_gpr, static_cast<uint64_t>(src.imm_int));
+                    else {
+                        const uint64_t v = static_cast<uint64_t>(src.imm_int);
+                        if (!AArch64Encoder::single_inst_mov_imm(v)) {
+                            if (const auto off = pinned_constant(v)) {
+                                enc_.ldr(dst_gpr, ensure_accessible_mem(ptr(kPinnedTlsGpr, *off), GPR::X16, 8));
+                                return;
+                            }
+                        }
+                        enc_.mov(dst_gpr, v);
+                    }
                 } else {
                     if (dst.size == 1 || src.size == 1) enc_.ldrb(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 1));
                     else if (dst.size == 2 || src.size == 2) enc_.ldrh(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 2));
                     else if (dst.size == 4 || src.size == 4) enc_.ldr32(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
-                    else enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    else if (src.is_spill_slot() && dst.size == 8 && src.size == 8) {
+                        if (const auto val = constant_slot_value(src.spill_slot)) {
+                            emit_load_constant_gpr(dst_gpr, *val);
+                        } else {
+                            enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                        }
+                    } else {
+                        enc_.ldr(dst_gpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    }
                 }
             } else {
                 FPR dst_fpr = dst.preg_val.as_aarch64_fpr();
@@ -83,7 +101,15 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                     else enc_.ldr_s(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                 } else {
                     if (src.is_preg()) enc_.fmov(dst_fpr, src.preg_val.as_aarch64_fpr());
-                    else enc_.ldr(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    else if (src.is_spill_slot() && dst.size == 8 && src.size == 8) {
+                        if (const auto val = constant_slot_value(src.spill_slot)) {
+                            emit_load_constant_fpr(dst_fpr, *val);
+                        } else {
+                            enc_.ldr(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                        }
+                    } else {
+                        enc_.ldr(dst_fpr, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    }
                 }
             }
         } else {
@@ -154,6 +180,13 @@ void AArch64EmitContext::emit_parallel_copy(const LirInst& inst) {
                 else if (dst.size == 1 || src.size == 1) src_bytes = 1;
                 else if (dst.size == 2 || src.size == 2) src_bytes = 2;
                 else if (dst.size == 4 || src.size == 4) src_bytes = 4;
+                if (src.is_spill_slot() && dst.size == 8 && src.size == 8) {
+                    if (const auto val = constant_slot_value(src.spill_slot)) {
+                        emit_load_constant_gpr(data_scratch, *val, src_scratch);
+                        enc_.str(data_scratch, dst_mem);
+                        return;
+                    }
+                }
                 MemAddress src_mem = ensure_accessible_mem(to_mem_address(src), src_scratch, src_bytes);
                 if (dst.size == 16 || src.size == 16) {
                     enc_.ldr_q(FPR::V31, src_mem);

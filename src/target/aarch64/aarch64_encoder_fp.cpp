@@ -125,6 +125,16 @@ void AArch64Encoder::fcmp_zero_s(FPR src) {
     buffer_.emit_inst(0x1E202008u | (reg_code(src) << 5));
 }
 
+void AArch64Encoder::fcsel(FPR dst, FPR src1, FPR src2, Condition cond) {
+    buffer_.emit_inst(0x1E600C00u | (reg_code(src2) << 16) |
+                      (static_cast<uint32_t>(cond) << 12) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::fcsel_s(FPR dst, FPR src1, FPR src2, Condition cond) {
+    buffer_.emit_inst(0x1E200C00u | (reg_code(src2) << 16) |
+                      (static_cast<uint32_t>(cond) << 12) | (reg_code(src1) << 5) | reg_code(dst));
+}
+
 // Moves & Conversions
 void AArch64Encoder::fmov(FPR dst, FPR src) {
     buffer_.emit_inst(0x1E604000u | (reg_code(src) << 5) | reg_code(dst));

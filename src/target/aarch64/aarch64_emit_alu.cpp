@@ -639,10 +639,21 @@ void AArch64EmitContext::emit_alu_instruction(const LirInst& inst) {
             break;
 
         case LirOpcode::Cmovcc: {
+            Condition cond = to_aarch64_cond(inst.condition);
+            if (inst.defs[0].is_preg() && inst.defs[0].preg_val.is_xmm()) {
+                FPR dst = to_fpr(inst.defs[0]);
+                FPR false_src = (inst.uses.size() >= 2) ? to_fpr(inst.uses[0]) : dst;
+                FPR src = to_fpr(inst.uses.back());
+                if (inst.defs[0].size == 4) {
+                    enc_.fcsel_s(dst, src, false_src, cond);
+                } else {
+                    enc_.fcsel(dst, src, false_src, cond);
+                }
+                break;
+            }
             GPR dst = to_gpr(inst.defs[0]);
             GPR false_src = (inst.uses.size() >= 2) ? to_gpr(inst.uses[0]) : dst;
             GPR src = to_gpr(inst.uses.back());
-            Condition cond = to_aarch64_cond(inst.condition);
             if (inst.defs[0].size == 4) {
                 enc_.csel32(dst, src, false_src, cond);
             } else {

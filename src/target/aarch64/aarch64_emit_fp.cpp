@@ -19,7 +19,15 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                     else enc_.fmov(dst_f, src.preg_val.as_aarch64_fpr());
                 } else {
                     if (is_single) enc_.ldr_s(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
-                    else enc_.ldr(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    else if (src.is_spill_slot()) {
+                        if (const auto val = constant_slot_value(src.spill_slot)) {
+                            emit_load_constant_fpr(dst_f, *val);
+                        } else {
+                            enc_.ldr(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                        }
+                    } else {
+                        enc_.ldr(dst_f, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                    }
                 }
             } else {
                 MemAddress dst_mem = ensure_accessible_mem(to_mem_address(dst), GPR::X17, is_single ? 4 : 8);
@@ -31,7 +39,15 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
                         enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 4));
                         enc_.str_s(FPR::V31, dst_mem);
                     } else {
-                        enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                        if (src.is_spill_slot()) {
+                            if (const auto val = constant_slot_value(src.spill_slot)) {
+                                emit_load_constant_fpr(FPR::V31, *val);
+                            } else {
+                                enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                            }
+                        } else {
+                            enc_.ldr(FPR::V31, ensure_accessible_mem(to_mem_address(src), GPR::X16, 8));
+                        }
                         enc_.str(FPR::V31, dst_mem);
                     }
                 }

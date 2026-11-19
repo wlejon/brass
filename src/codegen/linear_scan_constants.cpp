@@ -55,11 +55,21 @@ bool is_slot_store(const LirInst& in, int32_t slot) {
            (in.uses[0].is_preg() || in.uses[0].is_imm_int());
 }
 
+bool reads_pool_operand_aarch64(const LirInst& in, int32_t slot) {
+    if (in.opcode == LirOpcode::GuardExit) return true;
+    if (in.opcode == LirOpcode::Mov || in.opcode == LirOpcode::Movsd) {
+        return in.defs.size() == 1 && in.uses.size() == 1 &&
+               in.uses[0].is_spill_slot() && in.uses[0].spill_slot == slot &&
+               in.uses[0].size == 8 && in.defs[0].size == 8;
+    }
+    return false;
+}
+
 } // namespace
 
 void LinearScanAllocator::collect_constant_vregs() {
     constant_vregs_.clear();
-    if (!cc_.target().is_x64()) return;
+    if (!cc_.target().is_x64() && !cc_.target().is_aarch64()) return;
     std::unordered_map<uint32_t, uint32_t> defs;
     for (const auto& block : fn_.blocks) {
         for (const auto& inst : block->instructions) {
@@ -115,9 +125,18 @@ void LinearScanAllocator::pool_constant_slots() {
                                       : is_slot_store(in, d.spill_slot);
                 if (!ok) refused.insert(d.spill_slot);
             }
-            for (const auto& u : in.uses) {
+            const bool is_a64 = cc_.target().is_aarch64();
+            for (size_t k = 0; k < in.uses.size(); ++k) {
+                const LirOperand& u = in.uses[k];
                 if (!u.is_spill_slot() || !slots.count(u.spill_slot)) continue;
-                if (!pcopy && !reads_pool_operand(in) && !is_slot_store(in, u.spill_slot)) refused.insert(u.spill_slot);
+                if (pcopy) {
+                    if (is_a64 && (k >= in.defs.size() || u.size != 8 || in.defs[k].size != 8)) {
+                        refused.insert(u.spill_slot);
+                    }
+                    continue;
+                }
+                const bool ok_read = is_a64 ? reads_pool_operand_aarch64(in, u.spill_slot) : reads_pool_operand(in);
+                if (!ok_read && !is_slot_store(in, u.spill_slot)) refused.insert(u.spill_slot);
             }
         }
     }

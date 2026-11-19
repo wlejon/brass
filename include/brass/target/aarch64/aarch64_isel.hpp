@@ -57,6 +57,26 @@ private:
     // what it defines (see eliminate_dead_materializations).
     std::unordered_set<const codegen::LirInst*> elidable_insts_;
 
+    struct GuardStateFold {
+        const Value* src = nullptr;
+        codegen::GuardStateConv conv = codegen::GuardStateConv::None;
+        int64_t imm = 0;
+    };
+    std::unordered_map<const Value*, GuardStateFold> guard_state_folds_;
+
+    struct NanCanonStore {
+        const Value* f = nullptr;
+        int64_t canon = 0;
+    };
+    std::unordered_map<const Instruction*, NanCanonStore> nan_canon_stores_;
+
+    struct XmmConstant {
+        codegen::LirBlock* block = nullptr;
+        size_t end = 0;
+        codegen::VReg vreg;
+    };
+    std::unordered_map<int64_t, XmmConstant> xmm_constants_;
+
     struct ImmIntInfo {
         bool is_imm = false;
         int64_t val = 0;
@@ -85,6 +105,11 @@ private:
     void analyze_function(const Function& mir_fn);
     bool is_elidable_materialization(const Instruction& inst) const;
     void eliminate_dead_materializations();
+    static bool is_self_nan_test(const Instruction& cmp) noexcept;
+    void find_guard_state_folds(const Function& mir_fn, std::unordered_map<const Value*, uint32_t>& folded_uses);
+    void find_nan_canon_stores(const Function& mir_fn, std::unordered_map<const Value*, uint32_t>& folded_uses);
+    codegen::VReg xmm_constant(codegen::LirBlock& lir_bb, int64_t bits);
+    bool lower_nan_canon_store(const Instruction& inst, const codegen::LirOperand& mem_op, codegen::LirBlock& lir_bb);
 
     codegen::VReg get_or_alloc_vreg(const Value* val);
     codegen::VReg get_vreg(const Value* val) const;

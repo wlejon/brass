@@ -56,27 +56,12 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     if (sz == 0) sz = 8;
 
     VReg target_reg = dst;
-    VReg g_false{};
-    VReg g_true{};
     VReg false_vreg{};
+    VReg src_vreg{};
 
     if (is_float) {
-        g_false = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        g_true = lir_fn_->allocate_vreg(RegClass::GPR, 8);
-        target_reg = g_false;
-        false_vreg = g_false;
-
-        VReg f_vreg = get_vreg(false_val);
-        auto mq_f = std::make_unique<LirInst>(LirOpcode::Movq_gx);
-        mq_f->add_def(LirOperand::vreg(g_false, 8));
-        mq_f->add_use(LirOperand::vreg(f_vreg, 8));
-        lir_bb.append_inst(std::move(mq_f));
-
-        VReg t_vreg = get_vreg(true_val);
-        auto mq_t = std::make_unique<LirInst>(LirOpcode::Movq_gx);
-        mq_t->add_def(LirOperand::vreg(g_true, 8));
-        mq_t->add_use(LirOperand::vreg(t_vreg, 8));
-        lir_bb.append_inst(std::move(mq_t));
+        false_vreg = get_vreg(false_val);
+        src_vreg = get_vreg(true_val);
     } else {
         ImmIntInfo false_imm = get_imm_int_info(false_val);
         if (false_imm.is_imm) {
@@ -102,12 +87,7 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
         } else {
             false_vreg = get_vreg(false_val);
         }
-    }
 
-    VReg src_vreg{};
-    if (is_float) {
-        src_vreg = g_true;
-    } else {
         ImmIntInfo true_imm = get_imm_int_info(true_val);
         if (true_imm.is_imm) {
             VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, sz);
@@ -152,21 +132,13 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
         select_cond = LirCond::NE;
     }
 
-    uint8_t op_sz = is_float ? 8 : sz;
     auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
     cmov->condition = select_cond;
-    cmov->add_def(LirOperand::vreg(target_reg, op_sz));
-    cmov->add_use(LirOperand::vreg(false_vreg, op_sz));
-    cmov->add_use(LirOperand::vreg(src_vreg, op_sz));
+    cmov->add_def(LirOperand::vreg(target_reg, sz));
+    cmov->add_use(LirOperand::vreg(false_vreg, sz));
+    cmov->add_use(LirOperand::vreg(src_vreg, sz));
     cmov->mir_origin = &inst;
     lir_bb.append_inst(std::move(cmov));
-
-    if (is_float) {
-        auto mq_res = std::make_unique<LirInst>(LirOpcode::Movq_xg);
-        mq_res->add_def(LirOperand::vreg(dst, 8));
-        mq_res->add_use(LirOperand::vreg(g_false, 8));
-        lir_bb.append_inst(std::move(mq_res));
-    }
 }
 
 } // namespace brass::aarch64
