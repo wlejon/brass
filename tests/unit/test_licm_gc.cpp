@@ -6,13 +6,17 @@
 // GVN's merge of tagged reads (gvn_gc_free.hpp) treats a polled loop's
 // header as the GC point its poll will be.
 #include "test_framework.hpp"
+#include <brass/codegen/jit_exec.hpp>
+#include <brass/mir/builder.hpp>
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/interrupt_poll.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/parser.hpp>
 #include <brass/mir/scalar_opt.hpp>
 #include <brass/mir/verifier.hpp>
+#include <brass/runtime/host_symbols.hpp>
 
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -433,4 +437,159 @@ done:
     Function* fn = mod->get_function("f");
     CHECK(hoist_loop_invariants(*fn));
     verify_ok(*fn);
+}
+
+TEST_CASE("LICM - non_trapping_load view_data chain hoists past invariant-load bounds check") {
+    // Models Bronze TypedArray lowering: %len is read in entry before the loop,
+    // the loop checks %i < %len, and view_data's three header loads carry
+    // non_trapping_load so the entire pointer-chasing chain hoists to entry.
+    auto build_case = [](bool with_inloop_type_check) {
+        auto mod = std::make_unique<Module>("non_trapping_view");
+        mod->set_pinned_tls_register(true);
+        mod->set_interrupt_poll(8, "handler");
+        mod->add_external_symbol("handler");
+        Builder b(*mod);
+        Function* h = mod->create_function("handler", Type::void_type(), {});
+        {
+            b.set_function(h);
+            b.append_block("entry");
+            b.build_ret_void();
+        }
+        Function* fn = mod->create_function("fill", Type::i64(), {Type::tagged()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* head = b.create_block("head");
+        BasicBlock* body = b.create_block("body");
+        BasicBlock* bail = b.create_block("bail");
+        BasicBlock* done = b.create_block("done");
+        fn->append_block(head);
+        fn->append_block(body);
+        fn->append_block(bail);
+        fn->append_block(done);
+
+        Value* ta = b.add_block_param(entry, Type::tagged());
+        Value* mask = b.build_iconst_i64(0x0000FFFFFFFFFFFFLL);
+        Value* ta_ptr = b.build_and(b.build_bitcast_i64_tagged(ta), mask);
+        Value* len = b.build_zext_i64(b.build_load(Type::i32(), ta_ptr, 68));
+        Value* zero = b.build_iconst_i64(0);
+        b.build_br(head, {zero});
+
+        b.position_at_end(head);
+        Value* iv = b.add_block_param(head, Type::i64());
+        Value* cond = b.build_ult(iv, len);
+        b.build_br_if(cond, body, {}, done, {iv});
+
+        b.position_at_end(body);
+        if (with_inloop_type_check) {
+            Value* inloop_bits = b.build_and(b.build_bitcast_i64_tagged(ta), mask);
+            Value* kind = b.build_load(Type::i32(), inloop_bits, 32);
+            Value* ok = b.build_eq(kind, b.build_iconst_i32(1));
+            BasicBlock* after_check = b.create_block("after_check");
+            fn->append_block(after_check);
+            b.build_br_if(ok, after_check, bail);
+            b.position_at_end(after_check);
+        }
+        Value* loop_ta_ptr = b.build_and(b.build_bitcast_i64_tagged(ta), mask);
+        Value* buf_raw = b.build_load(Type::i64(), loop_ta_ptr, 56);
+        buf_raw->defining_instruction()->set_alias_class(1);
+        buf_raw->defining_instruction()->set_non_trapping_load(true);
+        Value* buf = b.build_and(buf_raw, mask);
+
+        Value* ext = b.build_load(Type::i64(), buf, 72);
+        ext->defining_instruction()->set_alias_class(1);
+        ext->defining_instruction()->set_non_trapping_load(true);
+
+        Value* inline_ptr = b.build_add(buf, b.build_iconst_i64(80));
+        Value* data_base = b.build_select(b.build_ne(ext, zero), ext, inline_ptr);
+
+        Value* byte_off = b.build_load(Type::i32(), loop_ta_ptr, 64);
+        byte_off->defining_instruction()->set_alias_class(1);
+        byte_off->defining_instruction()->set_non_trapping_load(true);
+
+        Value* data = b.build_add(data_base, b.build_zext_i64(byte_off));
+        Instruction* st = b.build_store_indexed(Type::i32(), data, iv, 4, 0, b.build_trunc_i32(iv));
+        st->set_alias_class(2);
+        Value* next = b.build_add(iv, b.build_iconst_i64(1));
+        b.build_br(head, {next});
+
+        b.position_at_end(bail);
+        b.build_ret(b.build_iconst_i64(-1));
+
+        b.position_at_end(done);
+        Value* retv = b.add_block_param(done, Type::i64());
+        b.build_ret(retv);
+
+        fn->rebuild_cfg_predecessors();
+        verify_ok(*fn);
+        return mod;
+    };
+
+    // Case 1: Only invariant-load bounds test in loop -> all view_data loads,
+    // select, and byteOffset add hoist to entry, and interrupt_poll works.
+    {
+        auto mod = build_case(/*with_inloop_type_check=*/false);
+        Function* fn = mod->get_function("fill");
+        CHECK(hoist_loop_invariants(*fn));
+        verify_ok(*fn);
+        CHECK_EQ(count_in(*fn, Opcode::load, "body"), size_t{0});
+        CHECK_EQ(count_in(*fn, Opcode::select, "body"), size_t{0});
+        CHECK_EQ(count_in(*fn, Opcode::load, "entry"), size_t{4});
+        CHECK_EQ(count_in(*fn, Opcode::select, "entry"), size_t{1});
+
+        REQUIRE(needs_interrupt_polls(*fn));
+        CHECK(insert_interrupt_polls(*fn) >= size_t{1});
+        verify_ok(*fn);
+
+        // Execute JIT-compiled fill against mock TypedArray + ArrayBuffer structs.
+        struct MockBuf {
+            uint8_t pad[72];
+            uint64_t ext_ptr;
+            uint32_t data[16];
+        } buf{};
+        buf.ext_ptr = 0;  // use inline data at offset 80
+        struct MockTA {
+            uint8_t pad0[32];
+            uint32_t kind;
+            uint8_t pad1[20];
+            uint64_t buffer;
+            uint32_t byte_offset;
+            uint32_t length;
+        } ta{};
+        ta.kind = 1;
+        ta.buffer = (0xFFF1ULL << 48) | reinterpret_cast<uintptr_t>(&buf);
+        ta.byte_offset = 8;  // start at buf.data[2]
+        ta.length = 6;
+
+        uint64_t tls_block[4] = {0, 0x0FFFFFFFFFFFFFFFULL, 0, 0};
+        struct HostProvider final : runtime::HostSymbolProvider {
+            void* tls;
+            explicit HostProvider(void* p) : tls(p) {}
+            void* pinned_tls_block() override { return tls; }
+        } provider(tls_block);
+        runtime::HostSymbolProvider* prev_host = runtime::host_symbol_provider();
+        runtime::set_host_symbol_provider(&provider);
+        struct RestoreHost {
+            runtime::HostSymbolProvider* prev;
+            ~RestoreHost() { runtime::set_host_symbol_provider(prev); }
+        } restore_host{prev_host};
+        codegen::JitExecutionEngine jit;
+        jit.register_external_symbol("handler", reinterpret_cast<void*>(+[]() {}));
+        REQUIRE(jit.compile_and_load(*mod));
+        const uint64_t ta_tagged = (0xFFF1ULL << 48) | reinterpret_cast<uintptr_t>(&ta);
+        RuntimeValue rv = jit.invoke("fill", {RuntimeValue::from_tagged(ta_tagged)});
+        CHECK_EQ(rv.as_i64(), 6);
+        for (uint32_t i = 0; i < 6; ++i) {
+            CHECK_EQ(buf.data[2 + i], i);
+        }
+    }
+
+    // Case 2: An in-loop type check before view_data still blocks hoisting.
+    {
+        auto mod = build_case(/*with_inloop_type_check=*/true);
+        Function* fn = mod->get_function("fill");
+        hoist_loop_invariants(*fn);
+        verify_ok(*fn);
+        CHECK_EQ(count_in(*fn, Opcode::load, "after_check"), size_t{3});
+        CHECK_EQ(count_in(*fn, Opcode::select, "after_check"), size_t{1});
+    }
 }

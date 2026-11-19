@@ -92,7 +92,8 @@ private:
     // block parameters, wherever defined); false when the walk is too long.
     // `past_roots`: whether the walk goes on through what a root was itself
     // computed from (a test's does, an address's does not).
-    bool roots_of(const Value* v, std::vector<const Value*>& roots, bool past_roots) const;
+    bool roots_of(const Value* v, std::vector<const Value*>& roots, bool past_roots,
+                  bool stop_at_invariant_loads = false) const;
     bool tested_before(const Instruction* load);
     // An in-loop address computed from invariant tagged values by pure
     // instructions (no load, nothing hoisted, on the way), and its copy in
@@ -124,6 +125,8 @@ private:
     std::vector<const Instruction*> tests_;
     std::unordered_map<const Instruction*, std::vector<const Value*>> test_roots_;
     std::unordered_set<const Instruction*> test_overflow_;
+    std::unordered_map<const Instruction*, std::vector<const Value*>> test_roots_inloop_;
+    std::unordered_set<const Instruction*> test_overflow_inloop_;
     std::unordered_map<const BasicBlock*, std::unordered_set<const BasicBlock*>> before_;
 
     std::unordered_map<const Value*, bool> chain_;
@@ -172,7 +175,8 @@ bool Licm::clobbered(const Instruction* inst, bool is_load) {
     return sensitive_(inst->result()) && !gc_points_.empty();
 }
 
-bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots, bool past_roots) const {
+bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots, bool past_roots,
+                    bool stop_at_invariant_loads) const {
     std::vector<const Value*> work{v};
     std::unordered_set<const Value*> seen;
     while (!work.empty()) {
@@ -196,6 +200,10 @@ bool Licm::roots_of(const Value* v, std::vector<const Value*>& roots, bool past_
         if (!cur->is_instruction()) continue;
         const Instruction* def = cur->defining_instruction();
         if (!def) continue;
+        if (stop_at_invariant_loads && def->opcode() == Opcode::load &&
+            (!def->parent() || !loop_.contains(def->parent()) || def->parent() == preheader_)) {
+            continue;
+        }
         if (def->opcode() == Opcode::bitcast_i64_tagged) {
             roots.push_back(def->operand(0));
             if (!past_roots) {
@@ -236,16 +244,21 @@ bool Licm::tested_before(const Instruction* load) {
     }
     if (mine.empty()) return false;
     std::sort(mine.begin(), mine.end());
+    const bool non_trapping = load->non_trapping_load();
+    auto& cache = non_trapping ? test_roots_inloop_ : test_roots_;
+    auto& overflow = non_trapping ? test_overflow_inloop_ : test_overflow_;
     auto depends = [&](const Instruction* test) {
-        auto it = test_roots_.find(test);
-        if (it == test_roots_.end()) {
+        auto it = cache.find(test);
+        if (it == cache.end()) {
             std::vector<const Value*> roots;
             bool ok = true;
-            for (const Value* op : test->operands()) ok = ok && roots_of(op, roots, /*past_roots=*/true);
-            if (!ok) test_overflow_.insert(test);
-            it = test_roots_.emplace(test, std::move(roots)).first;
+            for (const Value* op : test->operands()) {
+                ok = ok && roots_of(op, roots, /*past_roots=*/true, non_trapping);
+            }
+            if (!ok) overflow.insert(test);
+            it = cache.emplace(test, std::move(roots)).first;
         }
-        if (test_overflow_.count(test)) return true;
+        if (overflow.count(test)) return true;
         for (const Value* r : it->second) {
             if (std::binary_search(mine.begin(), mine.end(), r)) return true;
         }
@@ -401,6 +414,10 @@ bool Licm::try_hoist(BasicBlock* bb, Instruction* cur, bool behind_tests) {
     preheader_->insert_before(cur, ph_term);
     // What it made invariant may complete a chain found broken before.
     chain_.clear();
+    if (is_load) {
+        test_roots_inloop_.clear();
+        test_overflow_inloop_.clear();
+    }
     return true;
 }
 
@@ -513,6 +530,8 @@ bool Licm::peel_header_guard() {
     tests_.erase(std::remove(tests_.begin(), tests_.end(), target), tests_.end());
     test_roots_.erase(target);
     test_overflow_.erase(target);
+    test_roots_inloop_.erase(target);
+    test_overflow_inloop_.erase(target);
     peeled_.erase(target);
     header->remove_instruction(target);
     return true;

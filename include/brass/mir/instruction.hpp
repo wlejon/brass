@@ -156,10 +156,17 @@ public:
     bool fresh_in_twin() const noexcept { return fresh_in_twin_; }
     void set_fresh_in_twin(bool fresh = true) noexcept { fresh_in_twin_ = fresh; }
 
+    // A load (e.g. a runtime object's verified internal header field) that
+    // may safely be hoisted past in-loop bounds checks whose bound came from an
+    // already-invariant load on the same object, provided no in-loop test of
+    // the object's own identity/kind remains before it.
+    bool non_trapping_load() const noexcept { return non_trapping_load_; }
+    void set_non_trapping_load(bool non_trapping = true) noexcept { non_trapping_load_ = non_trapping; }
+
     // The plain attributes a copy of `src` keeps: immediates, scale, offset,
-    // memory type, alias class, inline hint, fresh-in-twin (not symbols,
-    // which live in a module's pool, nor the debug location or a barrier
-    // certificate).
+    // memory type, alias class, inline hint, fresh-in-twin, non-trapping-load
+    // (not symbols, which live in a module's pool, nor the debug location or a
+    // barrier certificate).
     void copy_attributes_from(const Instruction& src) noexcept {
         imm_i64_ = src.imm_i64_;
         imm_f64_ = src.imm_f64_;
@@ -169,6 +176,7 @@ public:
         alias_class_ = src.alias_class_;
         inline_hint_ = src.inline_hint_;
         fresh_in_twin_ = src.fresh_in_twin_;
+        non_trapping_load_ = src.non_trapping_load_;
     }
 
     std::string_view symbol() const noexcept { return symbol_; }
@@ -262,6 +270,7 @@ private:
     uint8_t alias_class_ = 0;
     bool inline_hint_ = false;
     bool fresh_in_twin_ = false;
+    bool non_trapping_load_ = false;
     BarrierCertKind barrier_cert_ = BarrierCertKind::None;
     Type memory_type_ = Type::void_type();
 
