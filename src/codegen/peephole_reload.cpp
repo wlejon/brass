@@ -27,8 +27,8 @@
 //                  is XMM15
 //           XMM15  memory-to-memory moves (Movsd, Movss, Movups, Vmovups, a
 //                  ParallelCopy's memory moves), and Fabs's mask
-//   AArch64 X12, X13  none (X14 / X15 / X16 / X17 are the emitters'; untracked)
-//           V26, V28  none (V27 / V29 / V30 / V31 untracked)
+//   AArch64 X14, X12       none (X14 permanent rewrite scratch, X12 3rd rewrite scratch; X15/X16/X17 untracked)
+//           V28, V29, V26  none (V28/V29 permanent rewrite scratches, V26 3rd rewrite scratch; V27/V30/V31 untracked)
 // A call, safepoint, guard exit, parallel copy, write barrier or trap ends
 // every tracked value, as does an instruction that may enter mid-block
 // (resume_id) or that stores relative to the frame or stack pointer other
@@ -134,9 +134,9 @@ bool PeepholeOptimizer::reuse_scratch_reloads() {
     const bool a64 = fn_.calling_conv.target().is_aarch64();
     std::array<Held, 5> held;
     if (a64) {
-        held = {Held{PReg::aarch64_gpr(aarch64::GPR::X12)}, Held{PReg::aarch64_gpr(aarch64::GPR::X13)},
-                Held{PReg::aarch64_fpr(aarch64::FPR::V26)}, Held{PReg::aarch64_fpr(aarch64::FPR::V28)},
-                Held{PReg{}}};
+        held = {Held{PReg::aarch64_gpr(aarch64::GPR::X14)}, Held{PReg::aarch64_gpr(aarch64::GPR::X12)},
+                Held{PReg::aarch64_fpr(aarch64::FPR::V28)}, Held{PReg::aarch64_fpr(aarch64::FPR::V29)},
+                Held{PReg::aarch64_fpr(aarch64::FPR::V26)}};
     } else {
         held = {Held{PReg::gpr(x64::GPR::R10)}, Held{PReg::gpr(x64::GPR::R11)}, Held{PReg::gpr(x64::GPR::R15)},
                 Held{PReg::xmm(x64::XMM::XMM14)}, Held{PReg::xmm(x64::XMM::XMM15)}};

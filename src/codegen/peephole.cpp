@@ -111,8 +111,9 @@ bool PeepholeOptimizer::defines_register(const LirInst& inst, PReg reg) noexcept
 bool PeepholeOptimizer::is_reserved_scratch(PReg reg) const noexcept {
     if (!reg.is_valid()) return false;
     if (fn_.calling_conv.target().is_aarch64()) {
-        // X12, X13, X15 use scratches, X14 def scratch, X16/X17 emitter;
-        // V26, V28, V29 use, V27 def, V30/V31 emitter.
+        // X14, X15 permanent rewrite scratches, X12, X13 3rd/4th allocatable
+        // scratches, X16/X17 emitter; V28, V29 permanent rewrite scratches,
+        // V26, V27 3rd/4th allocatable scratches, V30/V31 emitter.
         return reg.is_gpr() ? (reg.code >= 12 && reg.code <= 17) : (reg.code >= 26 && reg.code <= 31);
     }
     // R10, R11, R15, R14 and XMM14, XMM15, XMM13, XMM12 are the rewriter's

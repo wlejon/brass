@@ -22,8 +22,9 @@ void LinearScanAllocator::init_register_pools() {
     if (cc_.target().is_aarch64()) {
         using namespace brass::aarch64;
         available_gprs_.clear();
-        // Caller-saved: X0..X11 (excluding X12, X13, X15 as use scratches, X14 as def_scratch, X16, X17 as emitter scratches, and X18 on Darwin/Windows)
-        for (int i = 0; i <= 11; ++i) {
+        // Caller-saved: X0..X13 (X12, X13 double as 3rd/4th on-demand rewrite scratches;
+        // X14, X15 are permanent rewrite scratches; X16, X17 are emitter scratches; X18 reserved on Darwin/Windows)
+        for (int i = 0; i <= 13; ++i) {
             available_gprs_.push_back(PReg::aarch64_gpr(static_cast<GPR>(i)));
         }
         if (!cc_.target().is_macos() && !cc_.target().is_windows()) {
@@ -36,11 +37,12 @@ void LinearScanAllocator::init_register_pools() {
         }
 
         available_xmms_.clear();
-        // Caller-saved: V0..V7, V16..V25 (excluding V26, V28, V29 as use scratches, V27 as def_scratch, V30, V31 as emitter scratches)
+        // Caller-saved: V0..V7, V16..V27 (V26, V27 double as 3rd/4th on-demand rewrite scratches;
+        // V28, V29 are permanent rewrite scratches; V30, V31 are emitter scratches)
         for (int i = 0; i <= 7; ++i) {
             available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
         }
-        for (int i = 16; i <= 25; ++i) {
+        for (int i = 16; i <= 27; ++i) {
             available_xmms_.push_back(PReg::aarch64_fpr(static_cast<FPR>(i)));
         }
         // Callee-saved: V8..V15
