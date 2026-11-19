@@ -251,3 +251,95 @@ TEST_CASE("AArch64 Phase 5A - No madd fusion across call and peephole bitcast si
     CHECK_EQ(run_bitcast(4), size_t(0));
     CHECK_EQ(run_bitcast(8), size_t(1));
 }
+
+// 5B: 64-bit ARMv8 logical immediates fold directly into And/Or/Xor without Movabs
+TEST_CASE("AArch64 Phase 5B - 64-bit ARMv8 logical immediates in And/Or/Xor") {
+    constexpr uint64_t kPayloadMask = 0x0000FFFFFFFFFFFFULL;
+    constexpr uint64_t kTagMask = 0xFFFF000000000000ULL;
+    constexpr uint64_t kIntTag = 0xFFFC000000000000ULL;
+    constexpr uint64_t kSignBit = 0x8000000000000000ULL;
+    constexpr uint64_t kNonLogical = 0x123456789ABCDEF0ULL;
+
+    auto mod = std::make_unique<Module>("p5b_logical");
+    auto make_mask_fn = [&](const char* name, Opcode op, uint64_t mask, bool lhs_const) -> Function* {
+        Function* fn = mod->create_function(name, Type::i64(), {Type::i64()});
+        Builder b(*mod);
+        b.set_function(fn);
+        BasicBlock* bb = b.append_block("entry");
+        Value* x = b.add_block_param(bb, Type::i64());
+        Value* k = b.build_iconst_i64(static_cast<int64_t>(mask));
+        Value* lhs = lhs_const ? k : x;
+        Value* rhs = lhs_const ? x : k;
+        Value* res = (op == Opcode::and_) ? b.build_and(lhs, rhs)
+                   : (op == Opcode::or_)  ? b.build_or(lhs, rhs)
+                                          : b.build_xor(lhs, rhs);
+        b.build_ret(res);
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+        return fn;
+    };
+
+    Function* fn_and = make_mask_fn("and_payload", Opcode::and_, kPayloadMask, false);
+    Function* fn_and_lhs = make_mask_fn("and_tag_lhs", Opcode::and_, kTagMask, true);
+    Function* fn_or = make_mask_fn("or_tag", Opcode::or_, kIntTag, false);
+    Function* fn_xor = make_mask_fn("xor_sign", Opcode::xor_, kSignBit, false);
+    Function* fn_non_log = make_mask_fn("and_non_log", Opcode::and_, kNonLogical, false);
+
+    AArch64ISel isel(Target::aarch64_macos(), CallingConvention::apple_aapcs64());
+    auto count_movabs = [](const LirFunction& lir) {
+        size_t n = 0;
+        for (const auto& b : lir.blocks) {
+            for (const auto& inst : b->instructions) {
+                if (inst && inst->opcode == LirOpcode::Movabs) ++n;
+            }
+        }
+        return n;
+    };
+    auto has_bitwise_imm = [](const LirFunction& lir, LirOpcode op, int64_t imm) {
+        for (const auto& b : lir.blocks) {
+            for (const auto& inst : b->instructions) {
+                if (inst && inst->opcode == op && inst->uses.size() >= 2 &&
+                    inst->uses.back().is_imm_int() && inst->uses.back().imm_int == imm) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    auto lir_and = isel.lower(*fn_and);
+    auto lir_and_lhs = isel.lower(*fn_and_lhs);
+    auto lir_or = isel.lower(*fn_or);
+    auto lir_xor = isel.lower(*fn_xor);
+    auto lir_non_log = isel.lower(*fn_non_log);
+
+    CHECK_EQ(count_movabs(*lir_and), size_t(0));
+    CHECK_EQ(count_movabs(*lir_and_lhs), size_t(0));
+    CHECK_EQ(count_movabs(*lir_or), size_t(0));
+    CHECK_EQ(count_movabs(*lir_xor), size_t(0));
+    CHECK(has_bitwise_imm(*lir_and, LirOpcode::And, static_cast<int64_t>(kPayloadMask)));
+    CHECK(has_bitwise_imm(*lir_and_lhs, LirOpcode::And, static_cast<int64_t>(kTagMask)));
+    CHECK(has_bitwise_imm(*lir_or, LirOpcode::Or, static_cast<int64_t>(kIntTag)));
+    CHECK(has_bitwise_imm(*lir_xor, LirOpcode::Xor, static_cast<int64_t>(kSignBit)));
+    CHECK_EQ(count_movabs(*lir_non_log), size_t(1));
+
+    JitExecutionEngine jit;
+    REQUIRE(jit.compile_and_load(*mod));
+    using Fn = int64_t (*)(int64_t);
+    auto j_and = jit.get_function_ptr<Fn>("and_payload");
+    auto j_and_lhs = jit.get_function_ptr<Fn>("and_tag_lhs");
+    auto j_or = jit.get_function_ptr<Fn>("or_tag");
+    auto j_xor = jit.get_function_ptr<Fn>("xor_sign");
+    auto j_non_log = jit.get_function_ptr<Fn>("and_non_log");
+    REQUIRE(j_and && j_and_lhs && j_or && j_xor && j_non_log);
+
+    const uint64_t inputs[] = {0ULL, ~0ULL, 0xFFF8123456789ABCULL, 0x8000000000000001ULL, 0x0000DEAD1234BEEFULL};
+    for (uint64_t u : inputs) {
+        int64_t s = static_cast<int64_t>(u);
+        CHECK_EQ(static_cast<uint64_t>(j_and(s)), u & kPayloadMask);
+        CHECK_EQ(static_cast<uint64_t>(j_and_lhs(s)), kTagMask & u);
+        CHECK_EQ(static_cast<uint64_t>(j_or(s)), u | kIntTag);
+        CHECK_EQ(static_cast<uint64_t>(j_xor(s)), u ^ kSignBit);
+        CHECK_EQ(static_cast<uint64_t>(j_non_log(s)), u & kNonLogical);
+    }
+}

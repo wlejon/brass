@@ -1,4 +1,5 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/target/aarch64/aarch64_logical_imm.hpp>
 #include <brass/target/aarch64/aarch64_operands.hpp>
 #include <brass/codegen/div_magic.hpp>
 #include <bit>
@@ -305,9 +306,15 @@ void AArch64ISel::lower_binary_alu(
     }
 
     // Bitwise: and, or, xor
-    if (imm1.is_imm && imm1.fits_i32) {
+    auto logical_imm_ok = [&](const ImmIntInfo& ii) {
+        if (!ii.is_imm) return false;
+        if (ii.fits_i32) return true;
+        uint32_t n = 0, immr = 0, imms = 0;
+        return sz == 8 && encode_logical_immediate(static_cast<uint64_t>(ii.val), true, n, immr, imms);
+    };
+    if (logical_imm_ok(imm1)) {
         emit_3addr_alu(src0, LirOperand::imm(imm1.val, sz));
-    } else if (imm0.is_imm && imm0.fits_i32) {
+    } else if (logical_imm_ok(imm0)) {
         emit_3addr_alu(src1, LirOperand::imm(imm0.val, sz));
     } else {
         emit_3addr_alu(src0, LirOperand::vreg(src1, sz));
