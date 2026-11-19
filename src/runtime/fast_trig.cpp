@@ -55,11 +55,13 @@ inline double abs_f64(double x) noexcept { return from_bits(to_bits(x) & ~kSignM
 inline double qnan() noexcept { return from_bits(kCanonicalNaNBits); }
 
 // Signs and selections applied by the bits, not by a branch on the data. On
-// x86-64 with GCC or Clang, baseline SSE2 lacks a scalar FP blend or cmov, so
-// a C++ ternary on doubles compiles to a conditional jump; xorpd/andpd stay on
-// the XMM registers the doubles are already in, without zeroing upper lanes or
-// round-tripping through general registers.
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+// x86-64, baseline SSE2 lacks a scalar FP blend or cmov, so a C++ ternary on
+// doubles compiles to a conditional jump; GCC uses %v/%d0 inline asm for
+// xorpd/andpd on the XMM registers the doubles are already in, without zeroing
+// upper lanes or round-tripping through general registers, while Clang rejects
+// those GCC-internal print modifiers and lowers bit_cast bitwise ops directly
+// to SSE2/VEX instructions.
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__)
 inline double bit_xor(double a, double m) noexcept {
     asm("%vxorpd %1, %d0" : "+x"(a) : "x"(m));
     return a;
@@ -68,6 +70,13 @@ inline double bit_and(double a, double m) noexcept {
     asm("%vandpd %1, %d0" : "+x"(a) : "x"(m));
     return a;
 }
+inline double select_f64(uint32_t choose_b, double a, double b) noexcept {
+    const double m = from_bits(0ULL - static_cast<uint64_t>(choose_b));
+    return bit_xor(a, bit_and(bit_xor(a, b), m));
+}
+#elif defined(__clang__) && defined(__x86_64__)
+inline double bit_xor(double a, double m) noexcept { return from_bits(to_bits(a) ^ to_bits(m)); }
+inline double bit_and(double a, double m) noexcept { return from_bits(to_bits(a) & to_bits(m)); }
 inline double select_f64(uint32_t choose_b, double a, double b) noexcept {
     const double m = from_bits(0ULL - static_cast<uint64_t>(choose_b));
     return bit_xor(a, bit_and(bit_xor(a, b), m));
