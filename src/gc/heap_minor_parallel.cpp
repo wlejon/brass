@@ -503,7 +503,7 @@ uintptr_t copy(Worker& w, uintptr_t object, uint8_t bits) {
     *reinterpret_cast<uintptr_t*>(object) = moved;
     AtomicRef<uint8_t>(h->gc_bits)
         .store(static_cast<uint8_t>((bits & ~kGcBusy) | kGcForwarded), std::memory_order_release);
-    w.stack.push_back(moved);
+    if (layout_descriptor(nh->layout).kind != LayoutKind::Leaf) w.stack.push_back(moved);
     return moved;
 }
 

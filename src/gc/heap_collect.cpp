@@ -51,8 +51,7 @@ constexpr uint8_t kPoisonByte = 0xDB;
 GcState& gc_state(Tracer& t) noexcept { return *static_cast<GcState*>(t.state()); }
 
 inline void copy_small_aligned(void* dst, const void* src, size_t bytes) noexcept {
-    if (bytes <= 128 &&
-        ((bytes | reinterpret_cast<uintptr_t>(dst) | reinterpret_cast<uintptr_t>(src)) & 7u) == 0) {
+    if (bytes <= 128) [[likely]] {
         auto* d = static_cast<uint64_t*>(dst);
         const auto* s = static_cast<const uint64_t*>(src);
         for (size_t i = 0, n = bytes >> 3; i < n; ++i) d[i] = s[i];
@@ -89,8 +88,10 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
     const size_t total = kHeaderBytes + h->size;
     const unsigned age = std::min<unsigned>(h->age() + 1u, 7u);
     const bool young_enough = age < g.tenure_age;
-    uint64_t* const memento =
-        g.memento_layout == kNoMemento ? nullptr : memento_counter(s, g.memento_layout, object, total);
+    uint64_t* memento = nullptr;
+    if (g.memento_layout != kNoMemento) [[unlikely]] {
+        memento = memento_counter(s, g.memento_layout, object, total);
+    }
     const size_t room = memento ? total + kMementoBytes : total;
     uintptr_t dest = young_enough ? to_space_allocate(g, room) : 0;
     bool promoted = false;
@@ -101,12 +102,14 @@ uintptr_t evacuate_young(GcState& g, uintptr_t object) {
         promoted = true;
     }
     copy_small_aligned(reinterpret_cast<void*>(dest), h, total);
-    if (memento && promoted) {
-        AtomicRef<uint64_t>(*memento).fetch_add(1, std::memory_order_relaxed);
-    } else if (memento) {
-        copy_small_aligned(reinterpret_cast<void*>(dest + total),
-                           reinterpret_cast<const void*>(object - kHeaderBytes + total), kMementoBytes);
-        s.set_young_start(dest + total + kHeaderBytes);
+    if (memento) [[unlikely]] {
+        if (promoted) {
+            AtomicRef<uint64_t>(*memento).fetch_add(1, std::memory_order_relaxed);
+        } else {
+            copy_small_aligned(reinterpret_cast<void*>(dest + total),
+                               reinterpret_cast<const void*>(object - kHeaderBytes + total), kMementoBytes);
+            s.set_young_start(dest + total + kHeaderBytes);
+        }
     }
     auto* nh = reinterpret_cast<ObjectHeader*>(dest);
     uint8_t bits = static_cast<uint8_t>(h->gc_bits & ~(kGcForwarded | kGcAgeMask | kGcResident));
@@ -144,28 +147,31 @@ __attribute__((noinline))
 void minor_evacuate_and_scan(Tracer& t, GcState& g, uint64_t* slot, uint64_t word, uintptr_t a) {
     const uintptr_t now = evacuate_young(g, a);
     *slot = (word & ~kAddressMask) | now;
-    // A copy made just now is scanned at once, before the next slot
-    // of the object that named it, instead of waiting on the grey
-    // stack: what an object names is copied right after it, depth
-    // first, so an object and the parts it was made with (an array's
-    // elements, a slot block, small objects in its fields) stay
-    // together, in the order a program walks them. Each object taken
-    // from the grey stack may copy kCopyBudget bytes so (its copies
-    // and theirs); past that, or deeper than kCopyDepth, copies wait
-    // on the grey stack. Roots and cards have no budget. The bound
-    // keeps the work a parallel copy cannot share (a scan in
-    // progress) about one object's parts.
-    const size_t total = kHeaderBytes + header_of(now)->size;
-    if (total <= g.copy_budget && g.copy_depth < kCopyDepth) {
-        const uintptr_t owner = t.owner();
-        const bool owner_old = t.owner_old();
-        g.copy_budget -= total;
-        ++g.copy_depth;
-        scan_object(t, now, g.heap.is_old(now));
-        --g.copy_depth;
-        t.set_owner(owner, owner_old);
-    } else {
-        g.gray.push_back(now);
+    const ObjectHeader* nh = header_of(now);
+    if (layout_descriptor(nh->layout).kind != LayoutKind::Leaf) {
+        // A copy made just now is scanned at once, before the next slot
+        // of the object that named it, instead of waiting on the grey
+        // stack: what an object names is copied right after it, depth
+        // first, so an object and the parts it was made with (an array's
+        // elements, a slot block, small objects in its fields) stay
+        // together, in the order a program walks them. Each object taken
+        // from the grey stack may copy kCopyBudget bytes so (its copies
+        // and theirs); past that, or deeper than kCopyDepth, copies wait
+        // on the grey stack. Roots and cards have no budget. The bound
+        // keeps the work a parallel copy cannot share (a scan in
+        // progress) about one object's parts.
+        const size_t total = kHeaderBytes + nh->size;
+        if (total <= g.copy_budget && g.copy_depth < kCopyDepth) {
+            const uintptr_t owner = t.owner();
+            const bool owner_old = t.owner_old();
+            g.copy_budget -= total;
+            ++g.copy_depth;
+            scan_object(t, now, g.heap.is_old(now));
+            --g.copy_depth;
+            t.set_owner(owner, owner_old);
+        } else {
+            g.gray.push_back(now);
+        }
     }
     if (t.owner_old() && g.heap.is_young(now)) g.s.remember_slot(t.owner(), slot);
 }

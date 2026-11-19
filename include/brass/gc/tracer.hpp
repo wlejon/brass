@@ -15,6 +15,7 @@
 // reference tag: such a slot must not be visited (the host's trace function
 // decides from its own value representation).
 
+#include <bit>
 #include <brass/gc/object.hpp>
 #include <cstdint>
 
@@ -70,6 +71,21 @@ public:
         for (uint64_t* const end = slots + count; slots != end; ++slots) {
             const uint64_t word = *slots;
             if (static_cast<uintptr_t>(word & kAddressMask) - lo < span) [[unlikely]] visit_slow_(*this, slots, word);
+        }
+    }
+
+    // visit() of each slot `base[i]` whose bit `i` is set in `mask`,
+    // keeping the active range in registers across the mask.
+    void visit_mask(uint64_t* base, uint64_t mask) noexcept {
+        const uintptr_t lo = range_lo_;
+        const uintptr_t span = range_span_;
+        while (mask != 0) {
+            const unsigned i = static_cast<unsigned>(std::countr_zero(mask));
+            mask &= mask - 1;
+            const uint64_t word = base[i];
+            if (static_cast<uintptr_t>(word & kAddressMask) - lo < span) [[unlikely]] {
+                visit_slow_(*this, base + i, word);
+            }
         }
     }
 
