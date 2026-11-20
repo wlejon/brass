@@ -105,7 +105,7 @@ enum class Opcode : uint8_t {
     setp, selp,
     bra, ret, call, trap, exit,
     shfl, bar, atom,
-    rsqrt, sqrt, sin, cos, ex2, lg2, rcp,
+    rsqrt, sqrt, sin, cos, ex2, lg2, rcp, tanh,
     activemask, vote
 };
 

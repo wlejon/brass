@@ -189,7 +189,13 @@ public:
         return out;
     }
 
+    uint32_t last_conflicts() const noexcept { return last_conflicts_; }
+
     SolveOutcome::Status solve_assuming(Lit assumption, uint32_t max_conflicts) {
+        props_ = 0;
+        last_conflicts_ = 0;
+        const uint64_t max_props = std::max<uint64_t>(
+            500000ULL, static_cast<uint64_t>(max_conflicts) * 2000ULL);
         if (!ok_) return SolveOutcome::Unsat;
         backtrack(0);
         if (propagate() != UINT32_MAX) {
@@ -266,7 +272,8 @@ public:
                     }
                     base_lvl = decision_level();
                 }
-                if (conflicts >= max_conflicts) {
+                if (conflicts >= max_conflicts || props_ >= max_props) {
+                    last_conflicts_ = conflicts;
                     backtrack(0);
                     return SolveOutcome::Unknown;
                 }
@@ -277,8 +284,14 @@ public:
                     next_restart = 64u * luby(restart_idx);
                 }
             } else {
+                if (props_ >= max_props) {
+                    last_conflicts_ = conflicts;
+                    backtrack(0);
+                    return SolveOutcome::Unknown;
+                }
                 uint32_t next_v = pick_branch_var();
                 if (next_v == UINT32_MAX) {
+                    last_conflicts_ = conflicts;
                     return SolveOutcome::Sat;
                 }
                 trail_lim_.push_back(static_cast<uint32_t>(trail_.size()));
@@ -320,6 +333,7 @@ private:
 
     uint32_t propagate() {
         while (qhead_ < trail_.size()) {
+            ++props_;
             Lit p = trail_[qhead_++];
             auto& ws = watches_[p];
             size_t i = 0;
@@ -509,6 +523,8 @@ private:
     std::vector<Lit> xor_rhs_;
     std::unordered_map<uint64_t, Lit> gate_cache_;
     uint32_t qhead_ = 0;
+    uint32_t last_conflicts_ = 0;
+    uint64_t props_ = 0;
     double var_inc_ = 1.0;
 };
 

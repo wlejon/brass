@@ -168,6 +168,63 @@ size_t propagate_copies(Function& fn) {
     return removed;
 }
 
+bool is_acc_alu(Opcode op) noexcept {
+    switch (op) {
+        case Opcode::add: case Opcode::sub: case Opcode::mul:
+        case Opcode::mad: case Opcode::fma:
+        case Opcode::min: case Opcode::max:
+        case Opcode::and_: case Opcode::or_: case Opcode::xor_:
+        case Opcode::shl: case Opcode::shr:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Coalesce linear arithmetic accumulator chains (`r0 = fma(..., acc); ...;
+// acc = fma(..., r_{k-1})`) in-place into `acc` when `acc` is not read by
+// `K` or anything strictly between `J` and `K` (and no branch exits in between).
+size_t coalesce_accumulators(Function& fn) {
+    RegCounts counts(fn);
+    size_t coalesced = 0;
+    for (auto& block : fn.blocks) {
+        Block& bb = *block;
+        for (size_t i = bb.insts.size(); i-- > 0;) {
+            Inst& K = bb.insts[i];
+            if (K.has_guard || K.dsts.size() != 1 || !K.dsts[0].is_reg() || !is_acc_alu(K.op)) {
+                continue;
+            }
+            Reg d = K.dsts[0].reg_val;
+            if (!d.valid() || counts.def(d) < 2) continue;
+            bool k_reads_d = false;
+            for_each_use(K, [&](Reg r) { if (r == d) k_reads_d = true; });
+            if (k_reads_d) continue;
+
+            Reg candidate{};
+            for_each_use(K, [&](Reg r) {
+                if (!candidate.valid() && r.valid() && r != d && r.cls == d.cls &&
+                    counts.def(r) == 1 && counts.use(r) == 1) {
+                    candidate = r;
+                }
+            });
+            if (!candidate.valid()) continue;
+
+            if (Inst* J = coalescable_def(bb, i, d, candidate)) {
+                if (is_acc_alu(J->op)) {
+                    J->dsts[0] = Operand::reg(d);
+                    for_each_use(K, [&](Reg& r) { if (r == candidate) r = d; });
+                    counts.def(candidate) = 0;
+                    counts.use(candidate) = 0;
+                    ++counts.def(d);
+                    ++counts.use(d);
+                    ++coalesced;
+                }
+            }
+        }
+    }
+    return coalesced;
+}
+
 // ---------------------------------------------------------------------------
 // 2. Dead instruction elimination
 // ---------------------------------------------------------------------------
@@ -339,10 +396,11 @@ CleanupStats cleanup(Function& fn) {
     stats.branches_removed += simplify_branches(fn);
     for (;;) {
         size_t copies = propagate_copies(fn);
+        size_t acc = coalesce_accumulators(fn);
         size_t dead = eliminate_dead_instructions(fn);
-        stats.copies_removed += copies;
+        stats.copies_removed += copies + acc;
         stats.dead_removed += dead;
-        if (copies == 0 && dead == 0) break;
+        if (copies == 0 && acc == 0 && dead == 0) break;
     }
     renumber_registers(fn);
     stats.insts_after = instruction_count(fn);

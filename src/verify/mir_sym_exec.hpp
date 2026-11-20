@@ -39,11 +39,15 @@ struct InitMemEnv {
     BVNodeId get_patchable_const(BVContext& ctx, std::string_view sym, uint32_t width);
 };
 
+using SymVecMap = std::unordered_map<const Value*, std::vector<BVNodeId>>;
+
 struct SymCapturedEdge {
     const BasicBlock* target = nullptr;
     BVNodeId cond = 0;
     std::vector<BVNodeId> args;
+    std::vector<std::vector<BVNodeId>> vec_args;
     std::unordered_map<const Value*, BVNodeId> vals;
+    SymVecMap vec_vals;
 };
 
 struct SymExecRegionConfig {
@@ -52,6 +56,8 @@ struct SymExecRegionConfig {
     std::unordered_set<const BasicBlock*> capture_blocks;
     bool capture_on_first_visit = false;
     std::unordered_map<const Value*, BVNodeId> initial_vals;
+    SymVecMap initial_vec_vals;
+    std::vector<std::vector<BVNodeId>> param_vec_vars;
 };
 
 struct SymExecOutput {
@@ -64,10 +70,21 @@ struct SymExecOutput {
     BVNodeId trapped = 0;
     BVNodeId returned = 0;
     BVNodeId ret_val = 0;
+    std::vector<BVNodeId> ret_vec;
     std::vector<SymStore> stores;
     std::vector<SymGuardExit> guard_exits;
     std::vector<SymCapturedEdge> captured_edges;
 };
+
+bool symbolically_execute_vec_inst(
+    BVContext& ctx,
+    InitMemEnv& init_mem,
+    SymExecOutput& out,
+    BVNodeId cur_cond,
+    const Instruction* inst,
+    std::unordered_map<const Value*, BVNodeId>& vals,
+    SymVecMap& vec_vals,
+    const std::unordered_set<uint64_t>& alloca_bases);
 
 BVNodeId read_byte_at(BVContext& ctx, InitMemEnv& init_mem,
                       const std::vector<SymStore>& stores, BVNodeId byte_addr);

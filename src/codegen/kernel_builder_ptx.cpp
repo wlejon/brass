@@ -174,6 +174,13 @@ Value* KernelBuilder::step_f32(Value* edge, Value* x) {
 
 Value* KernelBuilder::f16_to_f32(Value* bits) { return b_.build_call("ptx_f16_to_f32", Type::f32(), {bits}); }
 Value* KernelBuilder::f32_to_f16(Value* x)    { return b_.build_call("ptx_f32_to_f16", Type::i32(), {x}); }
+Value* KernelBuilder::bf16_to_f32(Value* bits) {
+    return b_.build_bitcast_f32_i32(b_.build_shl(bits, b_.build_iconst_i32(16)));
+}
+Value* KernelBuilder::f32_to_bf16(Value* x)   { return b_.build_call("ptx_f32_to_bf16", Type::i32(), {x}); }
+Value* KernelBuilder::mul_hi_u32(Value* a, Value* b) {
+    return b_.build_call("ptx_mul_hi_u32", Type::i32(), {a, b});
+}
 Value* KernelBuilder::u32_to_f32(Value* x)    { return b_.build_call("ptx_u32_to_f32", Type::f32(), {x}); }
 Value* KernelBuilder::i32_to_f32(Value* x)    { return b_.build_call("ptx_i32_to_f32", Type::f32(), {x}); }
 Value* KernelBuilder::f32_to_u32(Value* x)    { return b_.build_call("ptx_f32_to_u32", Type::i32(), {x}); }

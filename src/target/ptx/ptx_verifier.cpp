@@ -55,7 +55,7 @@ std::string required_class_text(Type t) {
 bool is_unary_math(Opcode op) {
     switch (op) {
         case Opcode::rsqrt: case Opcode::sqrt: case Opcode::sin: case Opcode::cos:
-        case Opcode::ex2: case Opcode::lg2: case Opcode::rcp:
+        case Opcode::ex2: case Opcode::lg2: case Opcode::rcp: case Opcode::tanh:
             return true;
         default:
             return false;

@@ -88,10 +88,85 @@ std::vector<const BasicBlock*> find_loop_headers_rpo(const Function& fn) {
     return headers;
 }
 
+bool init_fn_sym_params(
+    BVContext& ctx,
+    const Function& fn,
+    std::vector<BVNodeId>& param_vars,
+    std::vector<std::vector<BVNodeId>>& param_vec_vars) {
+    param_vars.clear();
+    param_vec_vars.assign(fn.param_count(), {});
+    for (size_t i = 0; i < fn.param_count(); ++i) {
+        Type pt = fn.param_type(i);
+        if (pt.is_vector()) {
+            uint32_t lanes = pt.vector_lanes();
+            uint32_t ew = type_bv_width(pt.element_type());
+            if (lanes == 0 || ew == 0 || lanes * ew > 256) return false;
+            param_vars.push_back(UINT32_MAX);
+            std::vector<BVNodeId> vvars(lanes);
+            for (uint32_t l = 0; l < lanes; ++l) {
+                vvars[l] = ctx.make_var("arg" + std::to_string(i) + "_l" + std::to_string(l),
+                                        ew, pt.element_type().is_float());
+            }
+            param_vec_vars[i] = std::move(vvars);
+        } else {
+            uint32_t w = type_bv_width(pt);
+            if (w == 0) return false;
+            param_vars.push_back(ctx.make_var("arg" + std::to_string(i), w, pt.is_float()));
+        }
+    }
+    return true;
+}
+
+RuntimeValue extract_model_param(
+    const BVContext& ctx,
+    const Function& fn,
+    size_t i,
+    const std::vector<BVNodeId>& param_vars,
+    const std::vector<std::vector<BVNodeId>>& param_vec_vars,
+    const std::vector<uint64_t>& model) {
+    Type pt = fn.param_type(i);
+    if (pt.is_vector()) {
+        uint8_t bytes[32]{};
+        uint32_t lanes = pt.vector_lanes();
+        uint32_t ew = type_bv_width(pt.element_type());
+        uint32_t eb = (ew >= 8) ? (ew / 8) : 4;
+        const auto& vnodes = param_vec_vars[i];
+        for (uint32_t l = 0; l < lanes && l < vnodes.size() && (l + 1) * eb <= 32; ++l) {
+            uint64_t lb = ctx.eval_concrete(vnodes[l], model);
+            std::memcpy(bytes + l * eb, &lb, eb);
+        }
+        return (lanes * eb > 16) ? RuntimeValue::from_v256(pt, bytes)
+                                 : RuntimeValue::from_v128(pt, bytes);
+    }
+    uint64_t bits = ctx.eval_concrete(param_vars[i], model);
+    return bits_to_rv(pt, bits);
+}
+
+BVNodeId compare_captured_arg(
+    BVContext& ctx,
+    Type pt,
+    BVNodeId scalar_b,
+    BVNodeId scalar_a,
+    const std::vector<BVNodeId>& vec_b,
+    const std::vector<BVNodeId>& vec_a) {
+    if (!pt.is_vector()) {
+        return ctx.make_binary(BVOp::Ne, scalar_b, scalar_a, 1);
+    }
+    uint32_t lanes = pt.vector_lanes();
+    BVNodeId any_ne = ctx.make_const(0, 1);
+    for (uint32_t l = 0; l < lanes && l < vec_b.size() && l < vec_a.size(); ++l) {
+        BVNodeId lne = ctx.make_binary(BVOp::Ne, vec_b[l], vec_a[l], 1);
+        any_ne = ctx.make_binary(BVOp::Or, any_ne, lne, 1);
+    }
+    return any_ne;
+}
+
 struct MergedCapture {
     BVNodeId cond = 0;
     std::vector<BVNodeId> args;
+    std::vector<std::vector<BVNodeId>> vec_args;
     std::unordered_map<const Value*, BVNodeId> vals;
+    SymVecMap vec_vals;
 };
 
 MergedCapture merge_captured_edges(
@@ -103,17 +178,35 @@ MergedCapture merge_captured_edges(
     mc.cond = ctx.make_const(0, 1);
     size_t np = header->param_count();
     mc.args.resize(np, 0);
+    mc.vec_args.resize(np);
     for (size_t k = 0; k < np; ++k) {
-        uint32_t w = type_bv_width(header->param(k)->type());
-        mc.args[k] = ctx.make_const(0, w ? w : 64);
+        Type pt = header->param(k)->type();
+        if (pt.is_vector()) {
+            uint32_t lanes = pt.vector_lanes();
+            uint32_t ew = type_bv_width(pt.element_type());
+            mc.vec_args[k].assign(lanes, ctx.make_const(0, ew ? ew : 32));
+        } else {
+            uint32_t w = type_bv_width(pt);
+            mc.args[k] = ctx.make_const(0, w ? w : 64);
+        }
     }
     for (size_t ei = 0; ei < edges.size(); ++ei) {
         BVNodeId ec = edges[ei].cond;
         mc.cond = ctx.make_binary(BVOp::Or, mc.cond, ec, 1);
-        for (size_t k = 0; k < np && k < edges[ei].args.size(); ++k) {
-            BVNodeId v = edges[ei].args[k];
-            if (v == UINT32_MAX) continue;
-            mc.args[k] = (ei == 0) ? v : ctx.make_ite(ec, v, mc.args[k]);
+        for (size_t k = 0; k < np; ++k) {
+            if (header->param(k)->type().is_vector()) {
+                if (k < edges[ei].vec_args.size() && !edges[ei].vec_args[k].empty()) {
+                    const auto& src = edges[ei].vec_args[k];
+                    auto& dst = mc.vec_args[k];
+                    for (size_t l = 0; l < dst.size() && l < src.size(); ++l) {
+                        dst[l] = (ei == 0) ? src[l] : ctx.make_ite(ec, src[l], dst[l]);
+                    }
+                }
+            } else if (k < edges[ei].args.size()) {
+                BVNodeId v = edges[ei].args[k];
+                if (v == UINT32_MAX) continue;
+                mc.args[k] = (ei == 0) ? v : ctx.make_ite(ec, v, mc.args[k]);
+            }
         }
         for (const auto& [val_ptr, node_id] : edges[ei].vals) {
             auto vit = mc.vals.find(val_ptr);
@@ -121,6 +214,18 @@ MergedCapture merge_captured_edges(
                 mc.vals[val_ptr] = node_id;
             } else if (vit->second != node_id) {
                 vit->second = ctx.make_ite(ec, node_id, vit->second);
+            }
+        }
+        for (const auto& [val_ptr, lanes] : edges[ei].vec_vals) {
+            auto vit = mc.vec_vals.find(val_ptr);
+            if (vit == mc.vec_vals.end()) {
+                mc.vec_vals[val_ptr] = lanes;
+            } else {
+                for (size_t l = 0; l < vit->second.size() && l < lanes.size(); ++l) {
+                    if (vit->second[l] != lanes[l]) {
+                        vit->second[l] = ctx.make_ite(ec, lanes[l], vit->second[l]);
+                    }
+                }
             }
         }
     }
@@ -191,8 +296,18 @@ BVNodeId build_region_obs_diff(
         ctx.make_binary(BVOp::And, out_b.returned, out_a.returned, 1), 1);
 
     if (!ret_type.is_void()) {
-        BVNodeId r_ne = ctx.make_binary(BVOp::Ne, out_b.ret_val, out_a.ret_val, 1);
-        diff = ctx.make_binary(BVOp::Or, diff, ctx.make_binary(BVOp::And, both_ret, r_ne, 1), 1);
+        if (ret_type.is_vector()) {
+            uint32_t lanes = ret_type.vector_lanes();
+            BVNodeId any_ne = ctx.make_const(0, 1);
+            for (uint32_t l = 0; l < lanes && l < out_b.ret_vec.size() && l < out_a.ret_vec.size(); ++l) {
+                BVNodeId l_ne = ctx.make_binary(BVOp::Ne, out_b.ret_vec[l], out_a.ret_vec[l], 1);
+                any_ne = ctx.make_binary(BVOp::Or, any_ne, l_ne, 1);
+            }
+            diff = ctx.make_binary(BVOp::Or, diff, ctx.make_binary(BVOp::And, both_ret, any_ne, 1), 1);
+        } else {
+            BVNodeId r_ne = ctx.make_binary(BVOp::Ne, out_b.ret_val, out_a.ret_val, 1);
+            diff = ctx.make_binary(BVOp::Or, diff, ctx.make_binary(BVOp::And, both_ret, r_ne, 1), 1);
+        }
     }
 
     if (opts.check_memory && (!out_b.stores.empty() || !out_a.stores.empty())) {
@@ -230,15 +345,19 @@ EquivResult validate_bounded_counterexample(
 
     BVContext bctx;
     std::vector<BVNodeId> bparams;
-    for (size_t i = 0; i < before.param_count(); ++i) {
-        uint32_t w = type_bv_width(before.param_type(i));
-        bparams.push_back(bctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
+    std::vector<std::vector<BVNodeId>> bparam_vecs;
+    if (!init_fn_sym_params(bctx, before, bparams, bparam_vecs)) {
+        res.status = EquivStatus::Unsupported;
+        res.diagnostic = "Unsupported parameter type";
+        return res;
     }
     EquivOptions bopts = opts;
     bopts.loop_unroll_bound = std::max(opts.loop_unroll_bound, 4u);
     InitMemEnv bmem;
-    SymExecOutput ob = symbolically_execute_mir(bctx, before, bparams, bmem, bopts);
-    SymExecOutput oa = symbolically_execute_mir(bctx, after, bparams, bmem, bopts);
+    SymExecRegionConfig bcfg;
+    bcfg.param_vec_vars = bparam_vecs;
+    SymExecOutput ob = symbolically_execute_mir_region(bctx, before, bparams, bmem, bopts, bcfg);
+    SymExecOutput oa = symbolically_execute_mir_region(bctx, after, bparams, bmem, bopts, bcfg);
     if (ob.supported && oa.supported) {
         BVNodeId both_comp = bctx.make_binary(BVOp::And, ob.completed, oa.completed, 1);
         BVNodeId bdiff = build_region_obs_diff(bctx, both_comp, bmem, ob, oa, before.return_type(), bopts);
@@ -246,8 +365,8 @@ EquivResult validate_bounded_counterexample(
         if (bsolved.status == SolveOutcome::Sat) {
             res.status = EquivStatus::Counterexample;
             for (size_t i = 0; i < before.param_count(); ++i) {
-                uint64_t bits = (i < bsolved.model.size()) ? bsolved.model[i] : 0;
-                res.counterexample.push_back(bits_to_rv(before.param_type(i), bits));
+                res.counterexample.push_back(
+                    extract_model_param(bctx, before, i, bparams, bparam_vecs, bsolved.model));
             }
             std::ostringstream diag;
             diag << "MIR loop equivalence counterexample in @" << before.name() << "(";
@@ -298,9 +417,11 @@ EquivResult verify_mir_multi_loop_equivalence(
 
     BVContext ctx;
     std::vector<BVNodeId> param_vars;
-    for (size_t i = 0; i < before.param_count(); ++i) {
-        uint32_t w = type_bv_width(before.param_type(i));
-        param_vars.push_back(ctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
+    std::vector<std::vector<BVNodeId>> param_vec_vars;
+    if (!init_fn_sym_params(ctx, before, param_vars, param_vec_vars)) {
+        res.status = EquivStatus::Unsupported;
+        res.diagnostic = "Unsupported parameter type";
+        return res;
     }
 
     EquivOptions reg_opts = opts;
@@ -316,6 +437,8 @@ EquivResult verify_mir_multi_loop_equivalence(
         SymExecRegionConfig seg_cfg_a;
         seg_cfg_b.capture_blocks = cut_b;
         seg_cfg_a.capture_blocks = cut_a;
+        seg_cfg_b.param_vec_vars = param_vec_vars;
+        seg_cfg_a.param_vec_vars = param_vec_vars;
 
         BVNodeId seg_reach = ctx.make_const(1, 1);
         if (s < 0) {
@@ -332,12 +455,26 @@ EquivResult verify_mir_multi_loop_equivalence(
             MergedCapture init_a = merge_captured_edges(ctx, ha[si], incoming_a[si]);
             seg_cfg_b.initial_vals = std::move(init_b.vals);
             seg_cfg_a.initial_vals = std::move(init_a.vals);
+            seg_cfg_b.initial_vec_vals = std::move(init_b.vec_vals);
+            seg_cfg_a.initial_vec_vals = std::move(init_a.vec_vals);
             for (size_t k = 0; k < hb[si]->param_count(); ++k) {
                 Type pt = hb[si]->param(k)->type();
-                BVNodeId sh = ctx.make_var("loop" + std::to_string(si) + "_h" + std::to_string(k),
-                                           type_bv_width(pt), pt.is_float());
-                seg_cfg_b.initial_vals[hb[si]->param(k)] = sh;
-                seg_cfg_a.initial_vals[ha[si]->param(k)] = sh;
+                if (pt.is_vector()) {
+                    uint32_t lanes = pt.vector_lanes();
+                    uint32_t ew = type_bv_width(pt.element_type());
+                    std::vector<BVNodeId> shv(lanes);
+                    for (uint32_t l = 0; l < lanes; ++l) {
+                        shv[l] = ctx.make_var("loop" + std::to_string(si) + "_h" + std::to_string(k) + "_l" + std::to_string(l),
+                                              ew, pt.element_type().is_float());
+                    }
+                    seg_cfg_b.initial_vec_vals[hb[si]->param(k)] = shv;
+                    seg_cfg_a.initial_vec_vals[ha[si]->param(k)] = std::move(shv);
+                } else {
+                    BVNodeId sh = ctx.make_var("loop" + std::to_string(si) + "_h" + std::to_string(k),
+                                               type_bv_width(pt), pt.is_float());
+                    seg_cfg_b.initial_vals[hb[si]->param(k)] = sh;
+                    seg_cfg_a.initial_vals[ha[si]->param(k)] = sh;
+                }
             }
             seg_cfg_b.start_block = hb[si];
             seg_cfg_a.start_block = ha[si];
@@ -394,7 +531,9 @@ EquivResult verify_mir_multi_loop_equivalence(
             BVNodeId both_j = ctx.make_binary(BVOp::And, seg_no_abort,
                                               ctx.make_binary(BVOp::And, mc_b.cond, mc_a.cond, 1), 1);
             for (size_t k = 0; k < hb[j]->param_count(); ++k) {
-                BVNodeId arg_ne = ctx.make_binary(BVOp::Ne, mc_b.args[k], mc_a.args[k], 1);
+                BVNodeId arg_ne = compare_captured_arg(ctx, hb[j]->param(k)->type(),
+                                                       mc_b.args[k], mc_a.args[k],
+                                                       mc_b.vec_args[k], mc_a.vec_args[k]);
                 seg_diff = ctx.make_binary(BVOp::Or, seg_diff, ctx.make_binary(BVOp::And, both_j, arg_ne, 1), 1);
             }
             if (static_cast<int>(j) > s) {
@@ -427,12 +566,13 @@ EquivResult verify_mir_loop_equivalence(
         return res;
     }
     for (size_t i = 0; i < before.param_count(); ++i) {
-        if (before.param_type(i) != after.param_type(i)) {
+        Type pt = before.param_type(i);
+        if (pt != after.param_type(i)) {
             res.status = EquivStatus::Counterexample;
             res.diagnostic = "Parameter " + std::to_string(i) + " type mismatch";
             return res;
         }
-        if (type_bv_width(before.param_type(i)) == 0) {
+        if (type_bv_width(pt) == 0 && !pt.is_vector()) {
             res.status = EquivStatus::Unsupported;
             res.diagnostic = "Unsupported parameter type";
             return res;
@@ -460,9 +600,11 @@ EquivResult verify_mir_loop_equivalence(
 
     BVContext ctx;
     std::vector<BVNodeId> param_vars;
-    for (size_t i = 0; i < before.param_count(); ++i) {
-        uint32_t w = type_bv_width(before.param_type(i));
-        param_vars.push_back(ctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
+    std::vector<std::vector<BVNodeId>> param_vec_vars;
+    if (!init_fn_sym_params(ctx, before, param_vars, param_vec_vars)) {
+        res.status = EquivStatus::Unsupported;
+        res.diagnostic = "Unsupported parameter type";
+        return res;
     }
 
     EquivOptions reg_opts = opts;
@@ -476,6 +618,7 @@ EquivResult verify_mir_loop_equivalence(
     pre_cfg_b.start_block = before.entry_block();
     pre_cfg_b.capture_block = hb;
     pre_cfg_b.capture_on_first_visit = true;
+    pre_cfg_b.param_vec_vars = param_vec_vars;
     SymExecOutput pre_b = symbolically_execute_mir_region(ctx, before, param_vars, pre_mem, reg_opts, pre_cfg_b);
     if (!pre_b.supported) {
         res.status = EquivStatus::Unsupported;
@@ -487,6 +630,7 @@ EquivResult verify_mir_loop_equivalence(
     pre_cfg_a.start_block = after.entry_block();
     pre_cfg_a.capture_block = ha;
     pre_cfg_a.capture_on_first_visit = true;
+    pre_cfg_a.param_vec_vars = param_vec_vars;
     SymExecOutput pre_a = symbolically_execute_mir_region(ctx, after, param_vars, pre_mem, reg_opts, pre_cfg_a);
     if (!pre_a.supported) {
         res.status = EquivStatus::Unsupported;
@@ -533,7 +677,9 @@ EquivResult verify_mir_loop_equivalence(
         ctx.make_binary(BVOp::And, init_b.cond, init_a.cond, 1), 1);
 
     for (size_t k = 0; k < num_hp; ++k) {
-        BVNodeId init_k_ne = ctx.make_binary(BVOp::Ne, init_b.args[k], init_a.args[perm[k]], 1);
+        BVNodeId init_k_ne = compare_captured_arg(ctx, hb->param(k)->type(),
+                                                  init_b.args[k], init_a.args[perm[k]],
+                                                  init_b.vec_args[k], init_a.vec_args[perm[k]]);
         base_diff = ctx.make_binary(BVOp::Or, base_diff,
                                     ctx.make_binary(BVOp::And, enter_ok, init_k_ne, 1), 1);
     }
@@ -541,10 +687,21 @@ EquivResult verify_mir_loop_equivalence(
     // -----------------------------------------------------------------------
     // 2. Inductive Step: One Symbolic Iteration from Loop Header
     // -----------------------------------------------------------------------
-    std::vector<BVNodeId> sym_h(num_hp);
+    std::vector<BVNodeId> sym_h(num_hp, UINT32_MAX);
+    std::vector<std::vector<BVNodeId>> sym_h_vec(num_hp);
     for (size_t k = 0; k < num_hp; ++k) {
         Type pt = hb->param(k)->type();
-        sym_h[k] = ctx.make_var("loop_h" + std::to_string(k), type_bv_width(pt), pt.is_float());
+        if (pt.is_vector()) {
+            uint32_t lanes = pt.vector_lanes();
+            uint32_t ew = type_bv_width(pt.element_type());
+            sym_h_vec[k].resize(lanes);
+            for (uint32_t l = 0; l < lanes; ++l) {
+                sym_h_vec[k][l] = ctx.make_var("loop_h" + std::to_string(k) + "_l" + std::to_string(l),
+                                               ew, pt.element_type().is_float());
+            }
+        } else {
+            sym_h[k] = ctx.make_var("loop_h" + std::to_string(k), type_bv_width(pt), pt.is_float());
+        }
     }
 
     InitMemEnv iter_mem;
@@ -552,9 +709,15 @@ EquivResult verify_mir_loop_equivalence(
     iter_cfg_b.start_block = hb;
     iter_cfg_b.capture_block = hb;
     iter_cfg_b.capture_on_first_visit = false;
+    iter_cfg_b.param_vec_vars = param_vec_vars;
     iter_cfg_b.initial_vals = init_b.vals;
+    iter_cfg_b.initial_vec_vals = init_b.vec_vals;
     for (size_t k = 0; k < num_hp; ++k) {
-        iter_cfg_b.initial_vals[hb->param(k)] = sym_h[k];
+        if (hb->param(k)->type().is_vector()) {
+            iter_cfg_b.initial_vec_vals[hb->param(k)] = sym_h_vec[k];
+        } else {
+            iter_cfg_b.initial_vals[hb->param(k)] = sym_h[k];
+        }
     }
     SymExecOutput iter_b = symbolically_execute_mir_region(ctx, before, param_vars, iter_mem, reg_opts, iter_cfg_b);
     if (!iter_b.supported) {
@@ -567,9 +730,15 @@ EquivResult verify_mir_loop_equivalence(
     iter_cfg_a.start_block = ha;
     iter_cfg_a.capture_block = ha;
     iter_cfg_a.capture_on_first_visit = false;
+    iter_cfg_a.param_vec_vars = param_vec_vars;
     iter_cfg_a.initial_vals = init_a.vals;
+    iter_cfg_a.initial_vec_vals = init_a.vec_vals;
     for (size_t k = 0; k < num_hp; ++k) {
-        iter_cfg_a.initial_vals[ha->param(perm[k])] = sym_h[k];
+        if (hb->param(k)->type().is_vector()) {
+            iter_cfg_a.initial_vec_vals[ha->param(perm[k])] = sym_h_vec[k];
+        } else {
+            iter_cfg_a.initial_vals[ha->param(perm[k])] = sym_h[k];
+        }
     }
     SymExecOutput iter_a = symbolically_execute_mir_region(ctx, after, param_vars, iter_mem, reg_opts, iter_cfg_a);
     if (!iter_a.supported) {
@@ -621,7 +790,9 @@ EquivResult verify_mir_loop_equivalence(
         ctx.make_binary(BVOp::And, next_b.cond, next_a.cond, 1), 1);
 
     for (size_t k = 0; k < num_hp; ++k) {
-        BVNodeId next_k_ne = ctx.make_binary(BVOp::Ne, next_b.args[k], next_a.args[perm[k]], 1);
+        BVNodeId next_k_ne = compare_captured_arg(ctx, hb->param(k)->type(),
+                                                  next_b.args[k], next_a.args[perm[k]],
+                                                  next_b.vec_args[k], next_a.vec_args[perm[k]]);
         step_diff = ctx.make_binary(BVOp::Or, step_diff,
                                     ctx.make_binary(BVOp::And, both_cont, next_k_ne, 1), 1);
     }
@@ -641,34 +812,35 @@ EquivResult verify_mir_loop_equivalence(
     {
         BVContext bctx;
         std::vector<BVNodeId> bparams;
-        for (size_t i = 0; i < before.param_count(); ++i) {
-            uint32_t w = type_bv_width(before.param_type(i));
-            bparams.push_back(bctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
-        }
-        EquivOptions bopts = opts;
-        bopts.loop_unroll_bound = std::max(opts.loop_unroll_bound, 4u);
-        InitMemEnv bmem;
-        SymExecOutput ob = symbolically_execute_mir(bctx, before, bparams, bmem, bopts);
-        SymExecOutput oa = symbolically_execute_mir(bctx, after, bparams, bmem, bopts);
-        if (ob.supported && oa.supported) {
-            BVNodeId both_comp = bctx.make_binary(BVOp::And, ob.completed, oa.completed, 1);
-            BVNodeId bdiff = build_region_obs_diff(bctx, both_comp, bmem, ob, oa, before.return_type(), bopts);
-            SolveOutcome bsolved = solve_nonzero(bctx, bdiff, bopts.max_sat_conflicts);
-            if (bsolved.status == SolveOutcome::Sat) {
-                res.status = EquivStatus::Counterexample;
-                for (size_t i = 0; i < before.param_count(); ++i) {
-                    uint64_t bits = (i < bsolved.model.size()) ? bsolved.model[i] : 0;
-                    res.counterexample.push_back(bits_to_rv(before.param_type(i), bits));
+        std::vector<std::vector<BVNodeId>> bparam_vecs;
+        if (init_fn_sym_params(bctx, before, bparams, bparam_vecs)) {
+            EquivOptions bopts = opts;
+            bopts.loop_unroll_bound = std::max(opts.loop_unroll_bound, 4u);
+            InitMemEnv bmem;
+            SymExecRegionConfig bcfg;
+            bcfg.param_vec_vars = bparam_vecs;
+            SymExecOutput ob = symbolically_execute_mir_region(bctx, before, bparams, bmem, bopts, bcfg);
+            SymExecOutput oa = symbolically_execute_mir_region(bctx, after, bparams, bmem, bopts, bcfg);
+            if (ob.supported && oa.supported) {
+                BVNodeId both_comp = bctx.make_binary(BVOp::And, ob.completed, oa.completed, 1);
+                BVNodeId bdiff = build_region_obs_diff(bctx, both_comp, bmem, ob, oa, before.return_type(), bopts);
+                SolveOutcome bsolved = solve_nonzero(bctx, bdiff, bopts.max_sat_conflicts);
+                if (bsolved.status == SolveOutcome::Sat) {
+                    res.status = EquivStatus::Counterexample;
+                    for (size_t i = 0; i < before.param_count(); ++i) {
+                        res.counterexample.push_back(
+                            extract_model_param(bctx, before, i, bparams, bparam_vecs, bsolved.model));
+                    }
+                    std::ostringstream diag;
+                    diag << "MIR loop equivalence counterexample in @" << before.name() << "(";
+                    for (size_t i = 0; i < res.counterexample.size(); ++i) {
+                        if (i > 0) diag << ", ";
+                        diag << to_string(res.counterexample[i]);
+                    }
+                    diag << ")";
+                    res.diagnostic = diag.str();
+                    return res;
                 }
-                std::ostringstream diag;
-                diag << "MIR loop equivalence counterexample in @" << before.name() << "(";
-                for (size_t i = 0; i < res.counterexample.size(); ++i) {
-                    if (i > 0) diag << ", ";
-                    diag << to_string(res.counterexample[i]);
-                }
-                diag << ")";
-                res.diagnostic = diag.str();
-                return res;
             }
         }
     }
@@ -679,15 +851,24 @@ EquivResult verify_mir_loop_equivalence(
         //  while iteration 0 already corrupts the latch state or continuation condition).
         std::unordered_map<const Value*, BVNodeId> iter0_vals_b = init_b.vals;
         std::unordered_map<const Value*, BVNodeId> iter0_vals_a = init_a.vals;
+        SymVecMap iter0_vecs_b = init_b.vec_vals;
+        SymVecMap iter0_vecs_a = init_a.vec_vals;
         for (size_t k = 0; k < num_hp; ++k) {
-            iter0_vals_b[hb->param(k)] = init_b.args[k];
-            iter0_vals_a[ha->param(perm[k])] = init_a.args[perm[k]];
+            if (hb->param(k)->type().is_vector()) {
+                iter0_vecs_b[hb->param(k)] = init_b.vec_args[k];
+                iter0_vecs_a[ha->param(perm[k])] = init_a.vec_args[perm[k]];
+            } else {
+                iter0_vals_b[hb->param(k)] = init_b.args[k];
+                iter0_vals_a[ha->param(perm[k])] = init_a.args[perm[k]];
+            }
         }
         InitMemEnv iter0_mem;
         SymExecRegionConfig cfg0_b = iter_cfg_b;
         cfg0_b.initial_vals = std::move(iter0_vals_b);
+        cfg0_b.initial_vec_vals = std::move(iter0_vecs_b);
         SymExecRegionConfig cfg0_a = iter_cfg_a;
         cfg0_a.initial_vals = std::move(iter0_vals_a);
+        cfg0_a.initial_vec_vals = std::move(iter0_vecs_a);
         SymExecOutput out0_b = symbolically_execute_mir_region(ctx, before, param_vars, iter0_mem, reg_opts, cfg0_b);
         SymExecOutput out0_a = symbolically_execute_mir_region(ctx, after, param_vars, iter0_mem, reg_opts, cfg0_a);
         MergedCapture nxt0_b = merge_captured_edges(ctx, hb, out0_b.captured_edges);
@@ -699,7 +880,9 @@ EquivResult verify_mir_loop_equivalence(
         BVNodeId both_c0 = ctx.make_binary(BVOp::And, enter_ok,
                                            ctx.make_binary(BVOp::And, nxt0_b.cond, nxt0_a.cond, 1), 1);
         for (size_t k = 0; k < num_hp; ++k) {
-            BVNodeId nk_ne = ctx.make_binary(BVOp::Ne, nxt0_b.args[k], nxt0_a.args[perm[k]], 1);
+            BVNodeId nk_ne = compare_captured_arg(ctx, hb->param(k)->type(),
+                                                  nxt0_b.args[k], nxt0_a.args[perm[k]],
+                                                  nxt0_b.vec_args[k], nxt0_a.vec_args[perm[k]]);
             diff0 = ctx.make_binary(BVOp::Or, diff0, ctx.make_binary(BVOp::And, both_c0, nk_ne, 1), 1);
         }
         BVNodeId base_or_iter0 = ctx.make_binary(BVOp::Or, base_diff, diff0, 1);
@@ -707,8 +890,8 @@ EquivResult verify_mir_loop_equivalence(
         if (s0.status == SolveOutcome::Sat) {
             res.status = EquivStatus::Counterexample;
             for (size_t i = 0; i < before.param_count(); ++i) {
-                uint64_t bits = (i < s0.model.size()) ? s0.model[i] : 0;
-                res.counterexample.push_back(bits_to_rv(before.param_type(i), bits));
+                res.counterexample.push_back(
+                    extract_model_param(ctx, before, i, param_vars, param_vec_vars, s0.model));
             }
             res.diagnostic = "MIR loop equivalence counterexample on initial loop transition";
             return res;

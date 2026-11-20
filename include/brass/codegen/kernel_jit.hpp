@@ -2,6 +2,7 @@
 
 #include <brass/target/target.hpp>
 #include <brass/target/spirv_target.hpp>
+#include <brass/object/object_writer.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/block.hpp>
@@ -166,6 +167,22 @@ public:
         code_size_(code_size),
         engine_(std::move(engine)) {}
 
+    /// Wrap a symbol entry point kept alive by an arbitrary owner (e.g. a
+    /// cached NativeModule from brass::cache::NativeModuleCache).
+    static KernelFunction from_owner(
+        std::string name,
+        void* entry_point,
+        size_t code_size,
+        std::shared_ptr<const void> owner
+    ) {
+        KernelFunction kf;
+        kf.name_ = std::move(name);
+        kf.entry_point_ = entry_point;
+        kf.code_size_ = code_size;
+        kf.owner_ = std::move(owner);
+        return kf;
+    }
+
     bool is_valid() const noexcept { return entry_point_ != nullptr; }
     explicit operator bool() const noexcept { return is_valid(); }
 
@@ -190,6 +207,7 @@ private:
     void* entry_point_ = nullptr;
     size_t code_size_ = 0;
     std::shared_ptr<JitExecutionEngine> engine_;
+    std::shared_ptr<const void> owner_;
 };
 
 class KernelBuilder {
@@ -365,6 +383,9 @@ public:
     // Conversions
     Value* f16_to_f32(Value* bits_i32);
     Value* f32_to_f16(Value* x);     // i32 holding the f16 bits
+    Value* bf16_to_f32(Value* bits_i32);
+    Value* f32_to_bf16(Value* x);    // i32 holding the bf16 bits (RNE + qNaN)
+    Value* mul_hi_u32(Value* a, Value* b);
     Value* u32_to_f32(Value* x);
     Value* i32_to_f32(Value* x);
     Value* f32_to_u32(Value* x);
@@ -582,6 +603,7 @@ public:
     // Kernel compilation
     KernelFunction compile(Function& fn);
     KernelFunction compile(Module& mod, std::string_view entry_name);
+    object::ObjectFile compile_object(Module& mod) const;
 
     // Optimize and verify a MIR module in place using this JIT's KernelOptions.
     void prepare_module(Module& mod) const;

@@ -51,6 +51,7 @@ struct SpirvISel::Intrinsics {
     static void convert(SpirvISel& isel, const brass::Instruction& inst);
     static void f16_to_f32(SpirvISel& isel, const brass::Instruction& inst);
     static void f32_to_f16(SpirvISel& isel, const brass::Instruction& inst);
+    static void f32_to_bf16(SpirvISel& isel, const brass::Instruction& inst);
 
     // ---- barriers, shuffles, atomics, multiplies, memory (spirv_isel_intrinsics_mem.cpp)
     static void barrier(SpirvISel& isel);

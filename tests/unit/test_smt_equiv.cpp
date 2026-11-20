@@ -729,6 +729,203 @@ TEST_CASE("SMT Equiv - Multi-Loop Cutset Relational Induction (Sequential & Nest
     }
 }
 
+TEST_CASE("SMT Equiv - Native SIMD vstore/vbroadcast Memory Equivalence (f32x4 and i32x8)") {
+    auto build_f32_scalar = [](const char* name, bool buggy_offset) {
+        auto* mod = new Module(name);
+        Builder b(*mod);
+        Function* fn = mod->create_function("fill4", Type::void_type(), {Type::ptr(), Type::f32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* val = b.add_block_param(entry, Type::f32());
+        b.position_at_end(entry);
+        b.build_store(Type::f32(), ptr, 0, val);
+        b.build_store(Type::f32(), ptr, 4, val);
+        b.build_store(Type::f32(), ptr, 8, val);
+        b.build_store(Type::f32(), ptr, buggy_offset ? 16 : 12, val);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+        return std::pair{mod, fn};
+    };
+    auto build_f32_vec = [](const char* name) {
+        auto* mod = new Module(name);
+        Builder b(*mod);
+        Function* fn = mod->create_function("fill4", Type::void_type(), {Type::ptr(), Type::f32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* val = b.add_block_param(entry, Type::f32());
+        b.position_at_end(entry);
+        Value* vec = b.build_vbroadcast(Type::f32x4(), val);
+        b.build_vstore(Type::f32x4(), ptr, vec);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+        return std::pair{mod, fn};
+    };
+
+    auto [ms, fs] = build_f32_scalar("f32_scalar", false);
+    auto [msb, fsb] = build_f32_scalar("f32_scalar_bug", true);
+    auto [mv, fv] = build_f32_vec("f32_vec");
+    EquivOptions opts;
+    opts.check_memory = true;
+    CHECK_EQ(verify_mir_equivalence(*fs, *fv, opts).status, EquivStatus::ProvenEquivalent);
+    CHECK_EQ(verify_mir_equivalence(*fsb, *fv, opts).status, EquivStatus::Counterexample);
+    delete ms;
+    delete msb;
+    delete mv;
+
+    auto build_i32_loop = [](const char* name, int32_t bias) {
+        auto* mod = new Module(name);
+        Builder b(*mod);
+        Function* fn = mod->create_function("fill8", Type::void_type(), {Type::ptr(), Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* val = b.add_block_param(entry, Type::i32());
+        BasicBlock* head = b.append_block("head");
+        Value* idx = b.add_block_param(head, Type::i32());
+        BasicBlock* body = b.append_block("body");
+        BasicBlock* done = b.append_block("done");
+
+        b.position_at_end(entry);
+        b.build_br(head, {b.build_iconst_i32(0)});
+
+        b.position_at_end(head);
+        Value* cond = b.build_slt(idx, b.build_iconst_i32(8));
+        b.build_br_if(cond, body, {}, done, {});
+
+        b.position_at_end(body);
+        Value* stored = bias == 0 ? val : b.build_add(val, b.build_iconst_i32(bias));
+        b.build_store_indexed(Type::i32(), ptr, idx, 4, stored);
+        b.build_br(head, {b.build_add(idx, b.build_iconst_i32(1))});
+
+        b.position_at_end(done);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+        return std::pair{mod, fn};
+    };
+    auto build_i32_vec8 = [](const char* name) {
+        auto* mod = new Module(name);
+        Builder b(*mod);
+        Function* fn = mod->create_function("fill8", Type::void_type(), {Type::ptr(), Type::i32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* val = b.add_block_param(entry, Type::i32());
+        b.position_at_end(entry);
+        Value* vec = b.build_vbroadcast(Type::i32x8(), val);
+        b.build_vstore(Type::i32x8(), ptr, vec);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+        return std::pair{mod, fn};
+    };
+
+    auto [ml, fl] = build_i32_loop("i32_loop", 0);
+    auto [mlb, flb] = build_i32_loop("i32_loop_bug", 1);
+    auto [mv8, fv8] = build_i32_vec8("i32_vec8");
+    EquivOptions lopts;
+    lopts.loop_unroll_bound = 8;
+    lopts.check_memory = true;
+    CHECK_EQ(verify_mir_equivalence(*fl, *fv8, lopts).status, EquivStatus::ProvenEquivalent);
+    CHECK_EQ(verify_mir_equivalence(*flb, *fv8, lopts).status, EquivStatus::Counterexample);
+    delete ml;
+    delete mlb;
+    delete mv8;
+}
+
+TEST_CASE("SMT Equiv - Native SIMD Arithmetic, FMA, Select, Shuffle, Extract/Insert") {
+    // 1. f32x4 vector return & parameter round-trip with vfma, vadd, vmul, vinsert_lane, vextract_lane
+    Module mf1("vfma_scalar"), mf2("vfma_vec"), mf3("vfma_bug");
+    auto build_vfma_test = [](Module& m, int variant) -> Function* {
+        Builder b(m);
+        Function* fn = m.create_function("vfma_lane", Type::f32x4(),
+                                         {Type::f32x4(), Type::f32x4(), Type::f32()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* vx = b.add_block_param(entry, Type::f32x4());
+        Value* vy = b.add_block_param(entry, Type::f32x4());
+        Value* k = b.add_block_param(entry, Type::f32());
+        b.position_at_end(entry);
+
+        Value* vk = b.build_vbroadcast(Type::f32x4(), k);
+        if (variant == 1) {
+            Value* xy = b.build_vmul(vx, vy);
+            Value* sum = b.build_vadd(xy, vk);
+            // Replace lane 1 with lane 0 + k, keep other lanes from fma vs mul+add mismatch?
+            // Use build_vfma vs lane-by-lane build_fma_f32 below so floating rounding matches!
+            b.build_ret(sum);
+        } else if (variant == 0) {
+            // Variant 0 uses vfma == Variant 2 uses scalar lane-by-lane fma_f32
+            Value* f = b.build_vfma(vx, vy, vk);
+            Value* l2 = b.build_vextract_lane(f, 2);
+            Value* upd = b.build_vinsert_lane(f, b.build_fadd(l2, k), 0);
+            b.build_ret(upd);
+        } else {
+            Value* res = b.build_vzero(Type::f32x4());
+            Value* f_l0 = nullptr;
+            for (uint32_t i = 0; i < 4; ++i) {
+                Value* xi = b.build_vextract_lane(vx, i);
+                Value* yi = b.build_vextract_lane(vy, i);
+                Value* fi = b.build_fma_f32(xi, yi, k);
+                if (i == 2) f_l0 = b.build_fadd(fi, k);
+                res = b.build_vinsert_lane(res, fi, i);
+            }
+            if (variant == 3) f_l0 = k; // buggy lane 0
+            res = b.build_vinsert_lane(res, f_l0, 0);
+            b.build_ret(res);
+        }
+        fn->rebuild_cfg_predecessors();
+        return fn;
+    };
+
+    Function* fv_ref = build_vfma_test(mf1, 0);
+    Function* fv_lan = build_vfma_test(mf2, 2);
+    Function* fv_bug = build_vfma_test(mf3, 3);
+    CHECK_EQ(verify_mir_equivalence(*fv_ref, *fv_lan).status, EquivStatus::ProvenEquivalent);
+    CHECK_EQ(verify_mir_equivalence(*fv_ref, *fv_bug).status, EquivStatus::Counterexample);
+
+    // 2. i32x4 vcmp_slt + vselect + vshuffle vs scalar slt/select/extract
+    auto build_isel_shuffle = [](const char* name, bool use_vec, uint32_t bad_mask) {
+        auto* mod = new Module(name);
+        Builder b(*mod);
+        Function* fn = mod->create_function("sel_shuf", Type::i32x4(), {Type::i32x4(), Type::i32x4()});
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* va = b.add_block_param(entry, Type::i32x4());
+        Value* vb = b.add_block_param(entry, Type::i32x4());
+        b.position_at_end(entry);
+        if (use_vec) {
+            Value* mask = b.build_vcmp(Opcode::vcmp_lt, va, vb);
+            Value* chosen = b.build_vselect(mask, va, vb);
+            // mask = (lane0: a[1], lane1: a[0], lane2: b[2], lane3: b[3]) = 0xE1
+            uint32_t m = bad_mask ? bad_mask : 0xE1u;
+            b.build_ret(b.build_vshuffle(chosen, vb, m));
+        } else {
+            Value* c0 = b.build_slt(b.build_vextract_lane(va, 0), b.build_vextract_lane(vb, 0));
+            Value* c1 = b.build_slt(b.build_vextract_lane(va, 1), b.build_vextract_lane(vb, 1));
+            Value* s0 = b.build_select(c0, b.build_vextract_lane(va, 0), b.build_vextract_lane(vb, 0));
+            Value* s1 = b.build_select(c1, b.build_vextract_lane(va, 1), b.build_vextract_lane(vb, 1));
+            Value* r = b.build_vzero(Type::i32x4());
+            r = b.build_vinsert_lane(r, s1, 0);
+            r = b.build_vinsert_lane(r, s0, 1);
+            r = b.build_vinsert_lane(r, b.build_vextract_lane(vb, 2), 2);
+            r = b.build_vinsert_lane(r, b.build_vextract_lane(vb, 3), 3);
+            b.build_ret(r);
+        }
+        fn->rebuild_cfg_predecessors();
+        return std::pair{mod, fn};
+    };
+
+    auto [ms_i, fs_i] = build_isel_shuffle("i32_scalar_sel", false, 0);
+    auto [mv_i, fv_i] = build_isel_shuffle("i32_vec_sel", true, 0);
+    auto [mb_i, fb_i] = build_isel_shuffle("i32_vec_bad", true, 0xE4u);
+    CHECK_EQ(verify_mir_equivalence(*fs_i, *fv_i).status, EquivStatus::ProvenEquivalent);
+    CHECK_EQ(verify_mir_equivalence(*fs_i, *fb_i).status, EquivStatus::Counterexample);
+    delete ms_i;
+    delete mv_i;
+    delete mb_i;
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

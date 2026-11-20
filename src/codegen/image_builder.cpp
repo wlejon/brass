@@ -26,13 +26,15 @@ void ImageBuilder::premultiply_alpha_u8(
     Value* r, Value* g, Value* b, Value* a,
     Value*& out_r, Value*& out_g, Value*& out_b
 ) {
-    Value* c127 = const_i32(127);
-    Value* c255 = const_i32(255);
+    Value* c128 = const_i32(128);
+    Value* c257 = const_i32(257);
+    Value* c16 = const_i32(16);
 
     auto premul = [&](Value* ch) -> Value* {
         Value* prod = builder().build_mul(ch, a);
-        Value* sum = builder().build_add(prod, c127);
-        return builder().build_sdiv(sum, c255);
+        Value* sum = builder().build_add(prod, c128);
+        Value* scaled = builder().build_mul(sum, c257);
+        return builder().build_lshr(scaled, c16);
     };
 
     out_r = premul(r);
@@ -46,11 +48,10 @@ void ImageBuilder::unpremultiply_alpha_u8(
 ) {
     Value* zero_i = const_i32(0);
     Value* c255 = const_i32(255);
-    Value* c2 = const_i32(2);
 
     Value* is_zero = builder().build_eq(a, zero_i);
     Value* safe_a = builder().build_select(is_zero, const_i32(1), a);
-    Value* half_a = builder().build_sdiv(safe_a, c2);
+    Value* half_a = builder().build_lshr(safe_a, const_i32(1));
 
     auto unpremul = [&](Value* ch) -> Value* {
         Value* prod = builder().build_mul(ch, c255);
@@ -109,10 +110,9 @@ Value* ImageBuilder::f32_to_u8(Value* f32_val) {
 Value* ImageBuilder::load_u8(Value* ptr, Value* byte_offset) {
     Value* off_i64 = byte_offset->type().is_i64() ? byte_offset : builder().build_zext_i64(byte_offset);
     Value* addr = builder().build_add(ptr, off_i64);
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("ptx_load_u8")) {
-        builder().current_module()->add_external_symbol("ptx_load_u8");
-    }
-    return KernelBuilder::load_u8(addr, 0);
+    Value* raw_byte = builder().build_load(Type::i8(), addr, 0);
+    Value* byte_i64 = builder().build_zext_i64(raw_byte);
+    return builder().build_trunc_i32(byte_i64);
 }
 
 // ── Kernel Emitters ─────────────────────────────────────────────────────────
@@ -133,12 +133,6 @@ void ImageBuilder::emit_fused_preproc_kernel(
 ) {
     if (fn && builder().current_function() != fn) {
         builder().set_function(fn);
-    }
-
-    if (builder().current_module()) {
-        if (!builder().current_module()->has_external_symbol("ptx_load_u8")) {
-            builder().current_module()->add_external_symbol("ptx_load_u8");
-        }
     }
 
     Value* zero_i = const_i32(0);

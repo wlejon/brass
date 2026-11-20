@@ -189,6 +189,7 @@ std::string_view to_string(Opcode op) noexcept {
         case Opcode::ex2:   return "ex2";
         case Opcode::lg2:   return "lg2";
         case Opcode::rcp:   return "rcp";
+        case Opcode::tanh:  return "tanh";
         case Opcode::activemask: return "activemask";
         case Opcode::vote:  return "vote";
     }
@@ -346,7 +347,7 @@ bool allows_immediate(Opcode op, size_t src_index) noexcept {
         case Opcode::mov:
         case Opcode::neg: case Opcode::abs: case Opcode::not_:
         case Opcode::rsqrt: case Opcode::sqrt: case Opcode::sin: case Opcode::cos:
-        case Opcode::ex2: case Opcode::lg2: case Opcode::rcp:
+        case Opcode::ex2: case Opcode::lg2: case Opcode::rcp: case Opcode::tanh:
             return src_index == 0;
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::div: case Opcode::rem:
         case Opcode::min: case Opcode::max:

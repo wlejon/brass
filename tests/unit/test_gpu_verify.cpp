@@ -876,6 +876,99 @@ TEST_CASE("GPU Opt - optimize_gpu_function Preserves Stores/Loads Across Barrier
     CHECK_EQ(shared_stores, 2u);
 }
 
+TEST_CASE("GPU Opt - optimize_gpu_function Enables gpu_superopt by Default") {
+    Module mod("gpu_opt_default_superopt");
+    Function* fn = mod.create_function("div_and_idx", Type::void_type(), {Type::ptr(), Type::i32(), Type::i32()});
+    KernelBuilder kb(mod, fn);
+    Builder& b = kb.builder();
+    BasicBlock* entry = b.append_block("entry");
+    Value* out_ptr = b.add_block_param(entry, Type::ptr());
+    Value* raw_tid = b.add_block_param(entry, Type::i32());
+    Value* raw_stride = b.add_block_param(entry, Type::i32());
+    b.position_at_end(entry);
+
+    Value* stride = b.build_and(raw_stride, kb.const_i32(1023));
+    Value* tid = kb.tid_x();
+    Value* off64 = b.build_shl(b.build_mul(b.build_zext_i64(tid), b.build_zext_i64(stride)), b.build_iconst_i64(2));
+    Value* q = b.build_udiv(raw_tid, kb.const_i32(10));
+    Value* r = b.build_umod(raw_tid, kb.const_i32(10));
+    kb.store_i32(b.build_add(out_ptr, off64), b.build_add(q, r), 0);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    auto orig_mod = clone_module(mod);
+    Function* orig_fn = orig_mod->get_function("div_and_idx");
+
+    CHECK(optimize_gpu_function(*fn, mod));
+    CHECK(has_intrinsic_call(*fn, "ptx_mul_hi_u32"));
+    CHECK_EQ(count_opcode(*fn, Opcode::udiv), 0u);
+    CHECK_EQ(count_opcode(*fn, Opcode::umod), 0u);
+    CHECK_EQ(verify_mir_equivalence(*orig_fn, *fn).status, EquivStatus::ProvenEquivalent);
+}
+
+TEST_CASE("GPU Verify - MIR == SPIR-V == PTX on BF16, Tanh, and MulHi") {
+    Module mod("gpu_bf16_tanh_mulhi");
+    Function* fn = mod.create_function(
+        "bf16_tanh_mulhi", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i32()});
+    KernelBuilder kb(mod, fn);
+    Builder& b = kb.builder();
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* in_ptr = b.add_block_param(entry, Type::ptr());
+    Value* out_ptr = b.add_block_param(entry, Type::ptr());
+    Value* k = b.add_block_param(entry, Type::i32());
+
+    b.position_at_end(entry);
+    Value* tid = kb.tid_x();
+    Value* idx = b.build_add(tid, kb.mul_hi_u32(k, b.build_iconst_i32(0x11111112)));
+    Value* bits = kb.load_u16(in_ptr, 0);
+    Value* x = kb.bf16_to_f32(bits);
+    Value* y = kb.tanh_approx(x);
+    Value* out_bits = kb.f32_to_bf16(y);
+    kb.store_u16(b.build_add(out_ptr, b.build_sext_i64(b.build_shl(idx, kb.const_i32(1)))), out_bits, 0);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    auto spv = lower_spirv(*fn);
+    auto ptx_fn = lower_ptx(*fn);
+
+    CHECK_EQ(verify_spirv_equivalence(*fn, spv).status, EquivStatus::ProvenEquivalent);
+    CHECK_EQ(verify_ptx_equivalence(*fn, ptx_fn).status, EquivStatus::ProvenEquivalent);
+    CHECK_EQ(verify_spirv_ptx_equivalence(*fn, spv, ptx_fn).status, EquivStatus::ProvenEquivalent);
+}
+
+TEST_CASE("GPU Verify - MIR == SPIR-V == PTX on Masked Shared Index + Shuffle + Rsqrt + BF16") {
+    Module mod("gpu_smem_or_fold");
+    Function* fn = mod.create_function("rn_reduce_step", Type::void_type(), {Type::ptr(), Type::ptr()});
+    KernelBuilder kb(mod, fn);
+    Builder& b = kb.builder();
+
+    BasicBlock* entry = b.append_block("entry");
+    Value* p0 = b.add_block_param(entry, Type::ptr());
+    Value* p1 = b.add_block_param(entry, Type::ptr());
+
+    b.position_at_end(entry);
+    Value* tid = kb.tid_x();
+    Value* smem = kb.shared_alloc_f32(32);
+    Value* idx4 = b.build_shl(b.build_zext_i64(tid), b.build_iconst_i64(2));
+    Value* x = kb.load_f32(b.build_add(p0, idx4));
+    Value* sq = b.build_mul(x, x);
+    Value* sh = b.build_add(sq, kb.shfl_bfly_f32(sq, 1u));
+    Value* lane = b.build_and(tid, b.build_iconst_i32(31));
+    kb.shared_store_f32_indexed(smem, lane, sh);
+    kb.sync();
+    Value* rstd = kb.rsqrt_approx(b.build_add(kb.shared_load_f32_indexed(smem, lane), b.build_fconst_f32(1e-5f)));
+    Value* y = b.build_mul(x, rstd);
+    Value* idx2 = b.build_shl(b.build_zext_i64(tid), b.build_iconst_i64(1));
+    kb.store_u16(b.build_add(p1, idx2), kb.f32_to_bf16(y));
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    EquivOptions opts;
+    opts.max_sat_conflicts = 4000;
+    CHECK_EQ(verify_spirv_ptx_equivalence(*fn, nullptr, opts).status, EquivStatus::ProvenEquivalent);
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

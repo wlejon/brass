@@ -70,6 +70,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_u64_to_f32", Sig::i64_f32}, {"ptx_i64_to_f32", Sig::i64_f32},
         {"ptx_f32_to_i32", Sig::f32_i32}, {"ptx_f32_to_u32", Sig::f32_i32},
         {"ptx_f16_to_f32", Sig::i32_f32}, {"ptx_f32_to_f16", Sig::f32_i32},
+        {"ptx_f32_to_bf16", Sig::f32_i32},
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
 
         {"bar.sync", Sig::bar}, {"ptx_sync", Sig::bar}, {"ptx_bar_sync", Sig::bar_id},
@@ -513,6 +514,30 @@ TEST_CASE("SPIR-V intrinsics - KernelBuilder warp and block reductions validate"
     std::string d = dump_of(*f);
     CHECK_EQ(count_of(d, "OpControlBarrier"), 2u);
     CHECK_EQ(count_of(d, "OpGroupNonUniformShuffle "), 16u); // 3 x 5-step butterflies + 1 broadcast
+
+    Module m2("bf16");
+    Function* f2 = m2.create_function("bf16_k", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i32()});
+    KernelBuilder kb2(m2, f2);
+    Builder& b2 = kb2.builder();
+    BasicBlock* e2 = b2.append_block("entry");
+    b2.position_at_end(e2);
+    Value* p_in = b2.add_block_param(e2, Type::ptr());
+    Value* p_out = b2.add_block_param(e2, Type::ptr());
+    Value* cnt = b2.add_block_param(e2, Type::i32());
+    Value* idx = kb2.global_tid_x();
+    kb2.if_then(b2.build_slt(idx, cnt), [&] {
+        Value* x = kb2.load_f32_indexed(p_in, idx);
+        Value* bf = kb2.f32_to_bf16(kb2.tanh_approx(x));
+        kb2.store_i32_indexed(p_out, idx, bf);
+    });
+    b2.build_ret_void();
+    target::SpirvKernel k2 = compile_checked(*f2);
+    CHECK(!k2.words.empty());
+    std::string d2 = dump_of(*f2);
+    CHECK(d2.find("OpExtInst") != std::string::npos);
+    CHECK(d2.find("OpSelect") != std::string::npos);
+    std::string dis2 = disassemble(k2.words);
+    if (!dis2.empty()) CHECK(dis2.find("Tanh") != std::string::npos);
 }
 
 } // namespace

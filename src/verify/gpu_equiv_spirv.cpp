@@ -42,6 +42,8 @@ GpuExecTrace execute_gpu_spirv(
     std::unordered_map<spirv::Id, uint32_t> builtin_map;
     std::unordered_map<spirv::Id, uint32_t> spec_id_map;
     std::unordered_map<spirv::Id, uint32_t> location_map;
+    std::unordered_map<spirv::Id, uint32_t> array_strides;
+    std::unordered_map<uint64_t, uint32_t> member_offsets;
     for (const auto& ann : mod.annotations) {
         if (ann.op == spv::OpDecorate && ann.operands.size() >= 3) {
             spirv::Id target = ann.operands[0].value;
@@ -50,25 +52,33 @@ GpuExecTrace execute_gpu_spirv(
             if (dec == spv::DecorationBuiltIn) builtin_map[target] = val;
             else if (dec == spv::DecorationSpecId) spec_id_map[target] = val;
             else if (dec == spv::DecorationLocation) location_map[target] = val;
+            else if (dec == spv::DecorationArrayStride) array_strides[target] = val;
+        } else if (ann.op == spv::OpMemberDecorate && ann.operands.size() >= 4 &&
+                   ann.operands[2].value == spv::DecorationOffset) {
+            uint64_t key = (static_cast<uint64_t>(ann.operands[0].value) << 32) | ann.operands[1].value;
+            member_offsets[key] = ann.operands[3].value;
+        }
+    }
+
+    std::unordered_map<spirv::Id, std::vector<spirv::Id>> struct_members;
+    std::unordered_map<spirv::Id, spirv::Id> value_types;
+    spirv::Id pc_struct_id = 0;
+    for (const auto& g : mod.globals) {
+        if (g.result && g.type) value_types[g.result] = g.type;
+        if (g.op == spv::OpTypeStruct) {
+            std::vector<spirv::Id> mems;
+            for (const auto& op : g.operands) mems.push_back(op.value);
+            struct_members[g.result] = std::move(mems);
+        } else if (g.op == spv::OpVariable && !g.operands.empty() &&
+                   g.operands[0].value == spv::StorageClassPushConstant) {
+            const spirv::TypeInfo* pti = mod.type_info(g.type);
+            if (pti && pti->op == spv::OpTypePointer) pc_struct_id = pti->elem;
         }
     }
 
     // If env was not initialized with param_types (e.g. standalone SPIR-V safety check),
     // infer param_types from the PushConstant struct in mod.globals.
     if (env.param_vars.empty()) {
-        std::unordered_map<spirv::Id, std::vector<spirv::Id>> struct_members;
-        spirv::Id pc_struct_id = 0;
-        for (const auto& g : mod.globals) {
-            if (g.op == spv::OpTypeStruct) {
-                std::vector<spirv::Id> mems;
-                for (const auto& op : g.operands) mems.push_back(op.value);
-                struct_members[g.result] = std::move(mems);
-            } else if (g.op == spv::OpVariable && !g.operands.empty() &&
-                       g.operands[0].value == spv::StorageClassPushConstant) {
-                const spirv::TypeInfo* pti = mod.type_info(g.type);
-                if (pti && pti->op == spv::OpTypePointer) pc_struct_id = pti->elem;
-            }
-        }
         std::vector<Type> inferred;
         if (pc_struct_id && struct_members.count(pc_struct_id)) {
             for (spirv::Id mt : struct_members[pc_struct_id]) {
@@ -222,6 +232,8 @@ GpuExecTrace execute_gpu_spirv(
         bool is_workgroup = false;
         uint32_t index = 0;
         BVNodeId elem_idx = 0;
+        bool is_direct = false;
+        BVNodeId direct_val = 0;
     };
 
     struct ActiveState {
@@ -311,6 +323,7 @@ GpuExecTrace execute_gpu_spirv(
         };
 
         for (const auto& inst : bb.insts) {
+            if (inst.result && inst.type) value_types[inst.result] = inst.type;
             if (inst.op == spv::OpPhi || inst.op == spv::OpSelectionMerge || inst.op == spv::OpLoopMerge) {
                 continue;
             }
@@ -337,6 +350,53 @@ GpuExecTrace execute_gpu_spirv(
                         BVNodeId idx_v = get_v(idx_id);
                         uint64_t cidx = (bv_node(ctx, idx_v).op == BVOp::Const) ? bv_node(ctx, idx_v).imm : 0;
                         stage_out_base[inst.result] = stage_out_base[base_id] + cidx * 4ULL;
+                    } else if (var_composites.count(base_id)) {
+                        BVNodeId idx_v = get_v(idx_id);
+                        uint64_t cidx = (bv_node(ctx, idx_v).op == BVOp::Const) ? bv_node(ctx, idx_v).imm : UINT64_MAX;
+                        const auto& comp = var_composites[base_id];
+                        if (cidx < comp.size()) {
+                            cur.chains[inst.result] = {false, false, 0, 0, true, comp[static_cast<size_t>(cidx)]};
+                        }
+                    } else {
+                        const spirv::TypeInfo* rti = mod.type_info(inst.type);
+                        if (rti && rti->op == spv::OpTypePointer &&
+                            rti->storage == spv::StorageClassPhysicalStorageBuffer) {
+                            BVNodeId addr = gpu_coerce_width(ctx, get_v(base_id), 64, false);
+                            spirv::Id base_ty = value_types.count(base_id) ? value_types[base_id] : 0;
+                            const spirv::TypeInfo* bti = base_ty ? mod.type_info(base_ty) : nullptr;
+                            spirv::Id cur_ty = (bti && bti->op == spv::OpTypePointer) ? bti->elem : 0;
+                            for (size_t k = 1; k < inst.operands.size(); ++k) {
+                                const spirv::TypeInfo* cur_ti = cur_ty ? mod.type_info(cur_ty) : nullptr;
+                                BVNodeId iv = get_v(inst.operands[k].value);
+                                if (cur_ti && cur_ti->op == spv::OpTypeStruct) {
+                                    uint32_t m = (bv_node(ctx, iv).op == BVOp::Const)
+                                        ? static_cast<uint32_t>(bv_node(ctx, iv).imm) : 0u;
+                                    auto mit = member_offsets.find((static_cast<uint64_t>(cur_ty) << 32) | m);
+                                    if (mit != member_offsets.end() && mit->second != 0) {
+                                        addr = gpu_add_addr64(ctx, addr, bv_const(ctx, 64, mit->second));
+                                    }
+                                    auto sit = struct_members.find(cur_ty);
+                                    cur_ty = (sit != struct_members.end() && m < sit->second.size())
+                                        ? sit->second[m] : 0;
+                                } else if (cur_ti && (cur_ti->op == spv::OpTypeRuntimeArray ||
+                                                      cur_ti->op == spv::OpTypeArray)) {
+                                    auto ait = array_strides.find(cur_ty);
+                                    uint32_t stride = (ait != array_strides.end() && ait->second != 0)
+                                        ? ait->second
+                                        : std::max(1u, spirv_type_width(mod, cur_ti->elem) / 8u);
+                                    BVNodeId idx64 = gpu_coerce_width(ctx, iv, 64, false);
+                                    addr = gpu_add_addr64(ctx, addr,
+                                        gpu_mul_or_shl(ctx, 64, idx64, bv_const(ctx, 64, stride)));
+                                    cur_ty = cur_ti->elem;
+                                } else if (k + 1 == inst.operands.size()) {
+                                    uint32_t stride = std::max(1u, spirv_type_width(mod, rti->elem) / 8u);
+                                    BVNodeId idx64 = gpu_coerce_width(ctx, iv, 64, false);
+                                    addr = gpu_add_addr64(ctx, addr,
+                                        gpu_mul_or_shl(ctx, 64, idx64, bv_const(ctx, 64, stride)));
+                                }
+                            }
+                            res = addr;
+                        }
                     }
                 }
                 break;
@@ -364,6 +424,8 @@ GpuExecTrace execute_gpu_spirv(
                         record_shared_access(ctx, trace, cur.cond, false, ch.index, ch.elem_idx, nb);
                         BVNodeId caddr = make_shared_canonical_addr(ctx, ch.index, ch.elem_idx, nb);
                         res = env.read_mem(ctx, true, trace.shared_stores, caddr, nb);
+                    } else if (ch.is_direct) {
+                        res = gpu_coerce_width(ctx, ch.direct_val, rw);
                     }
                 } else {
                     BVNodeId addr = gpu_coerce_width(ctx, get_v(ptr_id), 64);

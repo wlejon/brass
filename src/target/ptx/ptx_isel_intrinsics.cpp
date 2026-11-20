@@ -114,6 +114,38 @@ void PtxISel::Intrinsics::f32_to_i32(PtxISel& isel, const brass::Instruction& in
 void PtxISel::Intrinsics::f32_to_u32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::u32, Type::f32, Rounding::rzi); }
 void PtxISel::Intrinsics::f16_to_f32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f32, Type::f16, Rounding::none); }
 void PtxISel::Intrinsics::f32_to_f16(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f16, Type::f32, Rounding::rn); }
+
+// Round-to-nearest-even + quiet-NaN f32 -> bf16 bits in low 16 bits of b32,
+// valid across all SM targets without requiring sm_80+ cvt.rn.bf16.f32.
+void PtxISel::Intrinsics::f32_to_bf16(PtxISel& isel, const brass::Instruction& inst) {
+    Reg src = isel.reg_of(inst.operand(0), "argument 0");
+    Reg u = isel.fn_->new_b32();
+    Reg hi = isel.fn_->new_b32();
+    Reg lsb = isel.fn_->new_b32();
+    Reg t0 = isel.fn_->new_b32();
+    Reg t1 = isel.fn_->new_b32();
+    Reg rnd = isel.fn_->new_b32();
+    Reg exp = isel.fn_->new_b32();
+    Reg man = isel.fn_->new_b32();
+    Reg p_exp = isel.fn_->new_pred();
+    Reg p_man = isel.fn_->new_pred();
+    Reg quiet = isel.fn_->new_b32();
+    Reg t_nan = isel.fn_->new_b32();
+
+    isel.emit(Inst::make(Opcode::mov, Type::b32).dst(u).src(src));
+    isel.emit(Inst::make(Opcode::shr, Type::u32).dst(hi).src(u).src(Operand::imm(16)));
+    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(lsb).src(hi).src(Operand::imm(1)));
+    isel.emit(Inst::make(Opcode::add, Type::u32).dst(t0).src(u).src(Operand::imm(0x7FFF)));
+    isel.emit(Inst::make(Opcode::add, Type::u32).dst(t1).src(t0).src(lsb));
+    isel.emit(Inst::make(Opcode::shr, Type::u32).dst(rnd).src(t1).src(Operand::imm(16)));
+    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(exp).src(u).src(Operand::imm(0x7F800000)));
+    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(man).src(u).src(Operand::imm(0x007FFFFF)));
+    isel.emit(Inst::make(Opcode::setp, Type::u32).cmp(CmpOp::eq).dst(p_exp).src(exp).src(Operand::imm(0x7F800000)));
+    isel.emit(Inst::make(Opcode::setp, Type::u32).cmp(CmpOp::ne).dst(p_man).src(man).src(Operand::imm(0)));
+    isel.emit(Inst::make(Opcode::or_, Type::b32).dst(quiet).src(hi).src(Operand::imm(0x40)));
+    isel.emit(Inst::make(Opcode::selp, Type::b32).dst(t_nan).src(quiet).src(rnd).src(p_man));
+    isel.emit(Inst::make(Opcode::selp, Type::b32).dst(isel.result_reg(inst)).src(t_nan).src(rnd).src(p_exp));
+}
 void PtxISel::Intrinsics::f32_to_f64(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f64, Type::f32, Rounding::none); }
 void PtxISel::Intrinsics::f64_to_f32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f32, Type::f64, Rounding::rn); }
 
@@ -163,6 +195,8 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "cosf",             &approx_f32<Opcode::cos> },
         { "cos",              &approx_f32<Opcode::cos> },
         { "ptx_cos",          &approx_f32<Opcode::cos> },
+        { "tanhf",            &approx_f32<Opcode::tanh> },
+        { "ptx_tanh",         &approx_f32<Opcode::tanh> },
         { "ex2f",             &approx_f32<Opcode::ex2> },
         { "ex2",              &approx_f32<Opcode::ex2> },
         { "ptx_ex2",          &approx_f32<Opcode::ex2> },
@@ -200,6 +234,7 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_f32_to_u32",   &f32_to_u32 },   // (f32) -> i32   cvt.rzi.u32.f32
         { "ptx_f16_to_f32",   &f16_to_f32 },   // (i32 bits) -> f32   cvt.f32.f16
         { "ptx_f32_to_f16",   &f32_to_f16 },   // (f32) -> i32 bits   cvt.rn.f16.f32
+        { "ptx_f32_to_bf16",  &f32_to_bf16 },  // (f32) -> i32 bits   RNE + qNaN bf16
         { "ptx_f32_to_f64",   &f32_to_f64 },   // (f32) -> f64   cvt.f64.f32
         { "ptx_f64_to_f32",   &f64_to_f32 },   // (f64) -> f32   cvt.rn.f32.f64
 

@@ -196,6 +196,12 @@ void init_gpu_sym_env(
             bv_bin(ctx, BVOp::Ult, 1, env.tid[d], bv_const(ctx, 32, tid_lim)));
         bounds = bv_bin(ctx, BVOp::And, 1, bounds,
             bv_bin(ctx, BVOp::Ult, 1, env.ctaid[d], bv_const(ctx, 32, cta_lim)));
+        bounds = bv_bin(ctx, BVOp::And, 1, bounds,
+            bv_bin(ctx, BVOp::Ugt, 1, env.nctaid[d], bv_const(ctx, 32, 0)));
+        bounds = bv_bin(ctx, BVOp::And, 1, bounds,
+            bv_bin(ctx, BVOp::Ule, 1, env.nctaid[d], bv_const(ctx, 32, cta_lim)));
+        bounds = bv_bin(ctx, BVOp::And, 1, bounds,
+            bv_bin(ctx, BVOp::Ult, 1, env.ctaid[d], env.nctaid[d]));
         if (!fixed_ntid) {
             bounds = bv_bin(ctx, BVOp::And, 1, bounds,
                 bv_bin(ctx, BVOp::Ugt, 1, env.ntid[d], bv_const(ctx, 32, 0)));
@@ -213,6 +219,15 @@ void init_gpu_sym_env(
     env.coord_bounds = bounds;
 }
 
+static bool is_disjoint_add_like(const BVContext& ctx, const BVNode& n) noexcept {
+    if (n.op == BVOp::Add) return true;
+    if (n.op == BVOp::Or) {
+        const uint64_t m = width_mask(n.width);
+        return ((ctx.interval(n.a).known_zeros | ctx.interval(n.b).known_zeros) & m) == m;
+    }
+    return false;
+}
+
 BVNodeId extract_shared_elem_index_32(BVContext& ctx, BVNodeId byte_off_64, uint32_t shift) {
     if (ctx.width(byte_off_64) == 32) {
         return shift == 0 ? byte_off_64
@@ -223,7 +238,7 @@ BVNodeId extract_shared_elem_index_32(BVContext& ctx, BVNodeId byte_off_64, uint
         auto signed_off = static_cast<int64_t>(n.imm);
         return bv_const(ctx, 32, static_cast<uint32_t>(signed_off >> shift));
     }
-    if (n.op == BVOp::Add) {
+    if (is_disjoint_add_like(ctx, n)) {
         BVNodeId lhs = extract_shared_elem_index_32(ctx, n.a, shift);
         BVNodeId rhs = extract_shared_elem_index_32(ctx, n.b, shift);
         return bv_bin(ctx, BVOp::Add, 32, lhs, rhs);
@@ -284,7 +299,7 @@ bool split_base_from_expr(
             return true;
         }
     }
-    if (n.op == BVOp::Add) {
+    if (is_disjoint_add_like(ctx, n)) {
         BVNodeId sub_rem = 0;
         if (split_base_from_expr(ctx, n.a, target_base, sub_rem)) {
             out_rem = gpu_add_addr64(ctx, sub_rem, n.b);

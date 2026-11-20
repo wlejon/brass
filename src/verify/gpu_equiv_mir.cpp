@@ -566,6 +566,23 @@ GpuExecTrace execute_gpu_mir(
                     res = env.eval_uf(ctx, "gpu_f16_to_f32", {gpu_coerce_width(ctx, get_v(inst->operand(0)), 32)}, 32, true);
                 } else if (sym == "ptx_f32_to_f16") {
                     res = env.eval_uf(ctx, "gpu_f32_to_f16", {gpu_coerce_width(ctx, get_v(inst->operand(0)), 32)}, 32, false);
+                } else if (sym == "ptx_f32_to_bf16") {
+                    BVNodeId u = gpu_coerce_width(ctx, get_v(inst->operand(0)), 32);
+                    BVNodeId hi = bv_bin(ctx, BVOp::LShr, 32, u, bv_const(ctx, 32, 16));
+                    BVNodeId lsb = bv_bin(ctx, BVOp::And, 32, hi, bv_const(ctx, 32, 1));
+                    BVNodeId biased = bv_bin(ctx, BVOp::Add, 32, u, bv_const(ctx, 32, 0x7FFFu));
+                    BVNodeId sum = bv_bin(ctx, BVOp::Add, 32, biased, lsb);
+                    BVNodeId rnd = bv_bin(ctx, BVOp::LShr, 32, sum, bv_const(ctx, 32, 16));
+                    BVNodeId exp_bits = bv_bin(ctx, BVOp::And, 32, u, bv_const(ctx, 32, 0x7F800000u));
+                    BVNodeId frac_bits = bv_bin(ctx, BVOp::And, 32, u, bv_const(ctx, 32, 0x007FFFFFu));
+                    BVNodeId is_inf_exp = bv_bin(ctx, BVOp::Eq, 1, exp_bits, bv_const(ctx, 32, 0x7F800000u));
+                    BVNodeId has_frac = bv_bin(ctx, BVOp::Ne, 1, frac_bits, bv_const(ctx, 32, 0));
+                    BVNodeId is_nan = bv_bin(ctx, BVOp::And, 1, is_inf_exp, has_frac);
+                    BVNodeId quiet = bv_bin(ctx, BVOp::Or, 32, hi, bv_const(ctx, 32, 0x40u));
+                    res = bv_ite(ctx, 32, is_nan, quiet, rnd);
+                } else if (sym == "ptx_bf16_to_f32") {
+                    res = bv_bin(ctx, BVOp::Shl, 32, gpu_coerce_width(ctx, get_v(inst->operand(0)), 32),
+                                 bv_const(ctx, 32, 16));
                 } else if (sym == "clampf" || sym == "ptx_clamp") {
                     res = env.eval_uf(ctx, "gpu_clamp", {
                         gpu_coerce_width(ctx, get_v(inst->operand(0)), rw),

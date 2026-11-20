@@ -76,6 +76,7 @@ const std::map<std::string, Sig>& signatures() {
         {"sqrtf", Sig::f32_f32}, {"sqrt", Sig::f32_f32}, {"ptx_sqrt", Sig::f32_f32},
         {"sinf", Sig::f32_f32}, {"sin", Sig::f32_f32}, {"ptx_sin", Sig::f32_f32},
         {"cosf", Sig::f32_f32}, {"cos", Sig::f32_f32}, {"ptx_cos", Sig::f32_f32},
+        {"tanhf", Sig::f32_f32}, {"ptx_tanh", Sig::f32_f32},
         {"ex2f", Sig::f32_f32}, {"ex2", Sig::f32_f32}, {"ptx_ex2", Sig::f32_f32},
         {"lg2f", Sig::f32_f32}, {"ptx_lg2", Sig::f32_f32},
         {"ptx_rcp", Sig::f32_f32}, {"ptx_rcp_approx", Sig::f32_f32},
@@ -91,6 +92,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_u64_to_f32", Sig::i64_f32}, {"ptx_i64_to_f32", Sig::i64_f32},
         {"ptx_f32_to_i32", Sig::f32_i32}, {"ptx_f32_to_u32", Sig::f32_i32},
         {"ptx_f16_to_f32", Sig::i32_f32}, {"ptx_f32_to_f16", Sig::f32_i32},
+        {"ptx_f32_to_bf16", Sig::f32_i32},
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
 
         {"bar.sync", Sig::bar}, {"ptx_sync", Sig::bar}, {"ptx_bar_sync", Sig::bar_id},
@@ -610,4 +612,30 @@ TEST_CASE("PTX intrinsics - atom.add on global f32/i32 and shared f32") {
     CHECK_EQ(f0, 256 * 1.5f);
     CHECK_EQ(got[1], uint32_t(255 * 256 / 2));
     CHECK_EQ(f2, 512.0f);
+}
+
+TEST_CASE("PTX intrinsics - tanh_approx, f32_to_bf16, mul_hi_u32 via KernelBuilder") {
+    Module mod("bf16_tanh");
+    Function* f = mod.create_function("bf16_tanh_k", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i32()});
+    KernelBuilder kb(mod, f);
+    Builder& b = kb.builder();
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* in = b.add_block_param(e, Type::ptr());
+    Value* out = b.add_block_param(e, Type::ptr());
+    Value* n = b.add_block_param(e, Type::i32());
+    Value* tid = kb.global_tid_x();
+    kb.if_then(b.build_slt(tid, n), [&] {
+        Value* x = kb.load_f32_indexed(in, tid);
+        Value* y = kb.tanh_approx(x);
+        Value* bf = kb.f32_to_bf16(y);
+        Value* hi = kb.mul_hi_u32(tid, kb.const_i32(0x1999999Au));
+        kb.store_i32_indexed(out, tid, b.build_add(bf, hi));
+    });
+    b.build_ret_void();
+
+    std::string ptx = emit_checked(*f);
+    CHECK(ptx.find("tanh.approx.f32") != std::string::npos);
+    CHECK(ptx.find("mul.hi.u32") != std::string::npos);
+    CHECK(ptx.find("selp.b32") != std::string::npos);
 }

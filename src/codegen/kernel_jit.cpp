@@ -327,6 +327,32 @@ KernelFunction KernelJit::compile(Function& fn) {
     return compile(temp_mod, cloned->name());
 }
 
+object::ObjectFile KernelJit::compile_object(Module& mod) const {
+    Module working_mod(mod.name());
+    working_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);
+
+    working_mod.copy_declarations_from(mod);
+    for (const auto* fn : mod.functions()) {
+        if (fn) {
+            clone_function(*fn, working_mod);
+        }
+    }
+
+    prepare_module(working_mod);
+    working_mod.set_has_loop_optimizations(true);
+
+    object::ModuleCompiler compiler(target_);
+    compiler.set_enable_mir_opts(false);
+    compiler.set_emit_stack_map_symbol(false);
+    compiler.set_x64_avx(target_.is_x64() && Target::host_has_avx());
+    if (options_.enable_optimizations && options_.opt_level >= 2 && options_.enable_superopt) {
+        codegen::SchedOptions sched_opts = compiler.sched_options();
+        sched_opts.enable_lir_superopt = true;
+        compiler.set_sched_options(sched_opts);
+    }
+    return compiler.compile(working_mod);
+}
+
 KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
     Module working_mod(mod.name());
     working_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);

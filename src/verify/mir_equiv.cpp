@@ -36,6 +36,7 @@ RuntimeValue model_bits_to_runtime_value(Type t, uint64_t bits) {
 struct BuiltEquivQuery {
     BVContext ctx;
     std::vector<BVNodeId> param_vars;
+    std::vector<std::vector<BVNodeId>> param_vec_vars;
     SymExecOutput out_before;
     SymExecOutput out_after;
     BVNodeId mismatch = 0;
@@ -59,29 +60,50 @@ BuiltEquivQuery build_mir_equiv_query(
         q.early_diag = "Function signature mismatch between unoptimized and optimized MIR";
         return q;
     }
+    q.param_vec_vars.resize(before.param_count());
     for (size_t i = 0; i < before.param_count(); ++i) {
-        if (before.param_type(i) != after.param_type(i)) {
+        Type pt = before.param_type(i);
+        if (pt != after.param_type(i)) {
             q.early_status = EquivStatus::Counterexample;
             q.early_diag = "Parameter " + std::to_string(i) + " type mismatch";
             return q;
         }
-        uint32_t w = type_bv_width(before.param_type(i));
-        if (w == 0) {
-            q.early_status = EquivStatus::Unsupported;
-            q.early_diag = "Unsupported parameter type";
-            return q;
+        if (pt.is_vector()) {
+            uint32_t lanes = pt.vector_lanes();
+            uint32_t ew = type_bv_width(pt.element_type());
+            if (lanes == 0 || ew == 0 || lanes * ew > 256) {
+                q.early_status = EquivStatus::Unsupported;
+                q.early_diag = "Unsupported vector parameter type";
+                return q;
+            }
+            q.param_vars.push_back(UINT32_MAX);
+            std::vector<BVNodeId> vvars(lanes);
+            for (uint32_t l = 0; l < lanes; ++l) {
+                vvars[l] = q.ctx.make_var("arg" + std::to_string(i) + "_l" + std::to_string(l),
+                                          ew, pt.element_type().is_float());
+            }
+            q.param_vec_vars[i] = std::move(vvars);
+        } else {
+            uint32_t w = type_bv_width(pt);
+            if (w == 0) {
+                q.early_status = EquivStatus::Unsupported;
+                q.early_diag = "Unsupported parameter type";
+                return q;
+            }
+            q.param_vars.push_back(q.ctx.make_var("arg" + std::to_string(i), w, pt.is_float()));
         }
-        q.param_vars.push_back(q.ctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
     }
 
     InitMemEnv init_mem;
-    q.out_before = symbolically_execute_mir(q.ctx, before, q.param_vars, init_mem, opts);
+    SymExecRegionConfig sym_cfg;
+    sym_cfg.param_vec_vars = q.param_vec_vars;
+    q.out_before = symbolically_execute_mir_region(q.ctx, before, q.param_vars, init_mem, opts, sym_cfg);
     if (!q.out_before.supported) {
         q.early_status = EquivStatus::Unsupported;
         q.early_diag = q.out_before.error_msg;
         return q;
     }
-    q.out_after = symbolically_execute_mir(q.ctx, after, q.param_vars, init_mem, opts);
+    q.out_after = symbolically_execute_mir_region(q.ctx, after, q.param_vars, init_mem, opts, sym_cfg);
     if (!q.out_after.supported) {
         q.early_status = EquivStatus::Unsupported;
         q.early_diag = q.out_after.error_msg;
@@ -145,8 +167,20 @@ BuiltEquivQuery build_mir_equiv_query(
 
     q.ret_diff = q.ctx.make_const(0, 1);
     if (!before.return_type().is_void()) {
-        BVNodeId r_ne = q.ctx.make_binary(BVOp::Ne, q.out_before.ret_val, q.out_after.ret_val, 1);
-        q.ret_diff = q.ctx.make_binary(BVOp::And, both_returned, r_ne, 1);
+        if (before.return_type().is_vector()) {
+            uint32_t lanes = before.return_type().vector_lanes();
+            BVNodeId any_lane_ne = q.ctx.make_const(0, 1);
+            for (uint32_t li = 0; li < lanes && li < q.out_before.ret_vec.size() &&
+                                  li < q.out_after.ret_vec.size(); ++li) {
+                BVNodeId l_ne = q.ctx.make_binary(BVOp::Ne, q.out_before.ret_vec[li],
+                                                  q.out_after.ret_vec[li], 1);
+                any_lane_ne = q.ctx.make_binary(BVOp::Or, any_lane_ne, l_ne, 1);
+            }
+            q.ret_diff = q.ctx.make_binary(BVOp::And, both_returned, any_lane_ne, 1);
+        } else {
+            BVNodeId r_ne = q.ctx.make_binary(BVOp::Ne, q.out_before.ret_val, q.out_after.ret_val, 1);
+            q.ret_diff = q.ctx.make_binary(BVOp::And, both_returned, r_ne, 1);
+        }
     }
 
     q.mem_diff = q.ctx.make_const(0, 1);
@@ -236,10 +270,28 @@ EquivResult verify_mir_equivalence(
         return res;
     }
 
+    auto model_vec_rv = [&](Type vt, const std::vector<BVNodeId>& lane_nodes) -> RuntimeValue {
+        uint8_t bytes[32]{};
+        uint32_t lanes = vt.vector_lanes();
+        uint32_t ew = type_bv_width(vt.element_type());
+        uint32_t eb = (ew >= 8) ? (ew / 8) : 4;
+        for (uint32_t l = 0; l < lanes && l < lane_nodes.size() && (l + 1) * eb <= 32; ++l) {
+            uint64_t lb = q.ctx.eval_concrete(lane_nodes[l], solved.model);
+            std::memcpy(bytes + l * eb, &lb, eb);
+        }
+        return (lanes * eb > 16) ? RuntimeValue::from_v256(vt, bytes)
+                                 : RuntimeValue::from_v128(vt, bytes);
+    };
+
     res.status = EquivStatus::Counterexample;
     for (size_t i = 0; i < before.param_count(); ++i) {
-        uint64_t bits = (i < solved.model.size()) ? solved.model[i] : 0;
-        res.counterexample.push_back(model_bits_to_runtime_value(before.param_type(i), bits));
+        Type pt = before.param_type(i);
+        if (pt.is_vector()) {
+            res.counterexample.push_back(model_vec_rv(pt, q.param_vec_vars[i]));
+        } else {
+            uint64_t bits = q.ctx.eval_concrete(q.param_vars[i], solved.model);
+            res.counterexample.push_back(model_bits_to_runtime_value(pt, bits));
+        }
     }
 
     std::ostringstream diag;
@@ -264,13 +316,16 @@ EquivResult verify_mir_equivalence(
              << ", after trapped="
              << q.ctx.eval_concrete(q.out_after.trapped, solved.model) << ")";
     } else if (q.ctx.eval_concrete(q.ret_diff, solved.model) != 0) {
-        diag << "return value mismatch (before="
-             << to_string(model_bits_to_runtime_value(before.return_type(),
-                                                      q.ctx.eval_concrete(q.out_before.ret_val, solved.model)))
-             << ", after="
-             << to_string(model_bits_to_runtime_value(after.return_type(),
-                                                      q.ctx.eval_concrete(q.out_after.ret_val, solved.model)))
-             << ")";
+        RuntimeValue rv_b = before.return_type().is_vector()
+            ? model_vec_rv(before.return_type(), q.out_before.ret_vec)
+            : model_bits_to_runtime_value(before.return_type(),
+                                          q.ctx.eval_concrete(q.out_before.ret_val, solved.model));
+        RuntimeValue rv_a = after.return_type().is_vector()
+            ? model_vec_rv(after.return_type(), q.out_after.ret_vec)
+            : model_bits_to_runtime_value(after.return_type(),
+                                          q.ctx.eval_concrete(q.out_after.ret_val, solved.model));
+        diag << "return value mismatch (before=" << to_string(rv_b)
+             << ", after=" << to_string(rv_a) << ")";
     } else {
         diag << "observable memory store mismatch";
     }

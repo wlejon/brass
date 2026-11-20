@@ -16,11 +16,12 @@ struct GpuOptOptions {
     bool enable_smt_guard_elim = true;
     bool fold_branches = false; // preserve uniform control flow for GPU barriers
     bool enable_superopt = true;
+    bool enable_gpu_superopt = true;
     bool enable_scalar_cleanup = true;
     uint32_t max_sat_conflicts = 1000;
-    uint32_t gpu_max_ctaid = 0;
-    uint32_t gpu_max_global_tid = 0;
-    uint32_t gpu_subgroup_size = 0;
+    uint32_t gpu_max_ctaid = 65535;
+    uint32_t gpu_max_global_tid = 0x3FFFFFFu;
+    uint32_t gpu_subgroup_size = 32;
 };
 
 // Shared barrier-safe GPU MIR optimization pipeline (for SPIR-V / PTX kernels).

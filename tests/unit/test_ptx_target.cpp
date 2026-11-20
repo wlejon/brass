@@ -257,3 +257,58 @@ TEST_CASE("PTX Target - Non-void kernels are rejected") {
     CHECK(threw);
 }
 
+TEST_CASE("PTX Target - Accumulator Chain Coalesces FMA In-Place in Loop") {
+    Module mod("acc_chain");
+    Function* fn = mod.create_function("sumsq4", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i32()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* head = b.append_block("head");
+    BasicBlock* body = b.append_block("body");
+    BasicBlock* done = b.append_block("done");
+    Value* in = b.add_block_param(entry, Type::ptr());
+    Value* out = b.add_block_param(entry, Type::ptr());
+    Value* n = b.add_block_param(entry, Type::i32());
+    Value* i = b.add_block_param(head, Type::i32());
+    Value* acc = b.add_block_param(head, Type::f32());
+
+    b.position_at_end(entry);
+    b.build_br(head, {b.build_iconst_i32(0), b.build_fconst_f32(0.0f)});
+
+    b.position_at_end(head);
+    b.build_br_if(b.build_slt(i, n), body, {}, done, {});
+
+    b.position_at_end(body);
+    Value* f0 = b.build_load_indexed(Type::f32(), in, i, 4, 0);
+    Value* f1 = b.build_load_indexed(Type::f32(), in, i, 4, 4);
+    Value* f2 = b.build_load_indexed(Type::f32(), in, i, 4, 8);
+    Value* f3 = b.build_load_indexed(Type::f32(), in, i, 4, 12);
+    Value* s0 = b.build_fma_f32(f0, f0, acc);
+    Value* s1 = b.build_fma_f32(f1, f1, s0);
+    Value* s2 = b.build_fma_f32(f2, f2, s1);
+    Value* s3 = b.build_fma_f32(f3, f3, s2);
+    b.build_br(head, {b.build_add(i, b.build_iconst_i32(4)), s3});
+
+    b.position_at_end(done);
+    b.build_store(Type::f32(), out, acc);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    std::string ptx = PtxTarget::emit_function(*fn);
+    // All four FMAs should accumulate directly into the same accumulator register with zero mov.f32 copies inside loop.
+    size_t fma_in_place = 0;
+    size_t pos = 0;
+    while ((pos = ptx.find("fma.rn.f32 ", pos)) != std::string::npos) {
+        size_t eol = ptx.find(';', pos);
+        std::string line = ptx.substr(pos, eol - pos);
+        size_t c1 = line.find('%');
+        size_t comma = line.find(',', c1);
+        std::string dst = line.substr(c1, comma - c1);
+        size_t last_c = line.rfind(',');
+        std::string src2 = line.substr(last_c + 2);
+        if (dst == src2) ++fma_in_place;
+        pos = eol;
+    }
+    CHECK_EQ(fma_in_place, 4u);
+}
+

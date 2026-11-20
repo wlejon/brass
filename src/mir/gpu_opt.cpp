@@ -32,13 +32,18 @@ bool optimize_gpu_function(Function& fn, Module& mod, const GpuOptOptions& opts)
             ge_opts.max_sat_conflicts = opts.max_sat_conflicts;
             changed |= run_smt_guard_elimination(fn, mod, ge_opts);
         }
-        if (opts.enable_superopt) {
+        if (opts.enable_superopt || opts.enable_gpu_superopt) {
             SuperoptOptions sopt_opts;
             sopt_opts.max_sat_conflicts = opts.max_sat_conflicts;
+            sopt_opts.enable_gpu_superopt = opts.enable_gpu_superopt;
             sopt_opts.gpu_max_ctaid = opts.gpu_max_ctaid;
             sopt_opts.gpu_max_global_tid = opts.gpu_max_global_tid;
             sopt_opts.gpu_subgroup_size = opts.gpu_subgroup_size;
-            changed |= run_mir_superopt(fn, mod, sopt_opts);
+            if (opts.enable_superopt) {
+                changed |= run_mir_superopt(fn, mod, sopt_opts);
+            } else {
+                changed |= run_gpu_mir_superopt(fn, mod, sopt_opts);
+            }
         }
     }
     if (opts.enable_scalar_cleanup) {

@@ -567,6 +567,9 @@ GpuExecTrace execute_gpu_ptx(
             case ptx::Opcode::rcp:
                 res = env.eval_uf(ctx, "fp_div", {bv_const(ctx, 32, 0x3F800000u), eval_op(inst.srcs[0], 32)}, 32, true);
                 break;
+            case ptx::Opcode::tanh:
+                res = env.eval_uf(ctx, "gpu_tanh", {eval_op(inst.srcs[0], dw)}, dw, true);
+                break;
             case ptx::Opcode::activemask:
                 res = bv_const(ctx, 32, 0xFFFFFFFFu);
                 break;

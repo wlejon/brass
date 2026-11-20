@@ -118,6 +118,26 @@ void SpirvISel::Intrinsics::f32_to_f16(SpirvISel& isel, const brass::Instruction
     isel.define(inst.result(), isel.ext(GLSLstd450PackHalf2x16, isel.t_u32(), {v2}));
 }
 
+// Round-to-nearest-even + quiet-NaN f32 -> bf16 bits in low 16 bits of u32.
+void SpirvISel::Intrinsics::f32_to_bf16(SpirvISel& isel, const brass::Instruction& inst) {
+    Id u32 = isel.t_u32();
+    Id tb  = isel.t_bool();
+    auto& m = isel.m_;
+    Id u   = isel.op(spv::OpBitcast, u32, {isel.id_of(inst.operand(0), "argument 0")});
+    Id hi  = isel.op(spv::OpShiftRightLogical, u32, {u, m.c_u32(16)});
+    Id lsb = isel.op(spv::OpBitwiseAnd, u32, {hi, m.c_u32(1)});
+    Id t0  = isel.op(spv::OpIAdd, u32, {u, m.c_u32(0x7FFF)});
+    Id t1  = isel.op(spv::OpIAdd, u32, {t0, lsb});
+    Id rnd = isel.op(spv::OpShiftRightLogical, u32, {t1, m.c_u32(16)});
+    Id exp = isel.op(spv::OpBitwiseAnd, u32, {u, m.c_u32(0x7F800000)});
+    Id man = isel.op(spv::OpBitwiseAnd, u32, {u, m.c_u32(0x007FFFFF)});
+    Id pe  = isel.op(spv::OpIEqual, tb, {exp, m.c_u32(0x7F800000)});
+    Id pm  = isel.op(spv::OpINotEqual, tb, {man, m.c_u32(0)});
+    Id pnan = isel.op(spv::OpLogicalAnd, tb, {pe, pm});
+    Id quiet = isel.op(spv::OpBitwiseOr, u32, {hi, m.c_u32(0x40)});
+    isel.define(inst.result(), isel.op(spv::OpSelect, u32, {pnan, quiet, rnd}));
+}
+
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
@@ -217,6 +237,7 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_f64_to_f32", &convert<spv::OpFConvert, 32, true> },
         { "ptx_f16_to_f32", &f16_to_f32 },
         { "ptx_f32_to_f16", &f32_to_f16 },
+        { "ptx_f32_to_bf16", &f32_to_bf16 },
 
         // Barriers                                                     -> void
         { "bar.sync",       &bar_sync },

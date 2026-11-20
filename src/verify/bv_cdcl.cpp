@@ -586,10 +586,13 @@ SolveOutcome solve_nonzero_impl(
             const auto& ba = blaster.bits[nodes[neq_eq_node].a];
             const auto& bb = blaster.bits[nodes[neq_eq_node].b];
             bool all_bits_unsat = true;
+            uint32_t rem_conflicts = max_sat_conflicts;
             const size_t bw = std::max(ba.size(), bb.size());
             for (size_t bi = 0; bi < bw; ++bi) {
                 CDCLSolver::Lit diff_i = blaster.sat.mk_xor(blaster.bit_at(ba, bi), blaster.bit_at(bb, bi));
-                SolveOutcome::Status bst = blaster.sat.solve_assuming(diff_i, max_sat_conflicts);
+                SolveOutcome::Status bst = blaster.sat.solve_assuming(diff_i, rem_conflicts);
+                uint32_t used = blaster.sat.last_conflicts();
+                rem_conflicts = (used >= rem_conflicts) ? 0u : (rem_conflicts - used);
                 if (bst == SolveOutcome::Unsat) {
                     if (!blaster.sat.add_clause(CDCLSolver::neg(diff_i))) {
                         out.status = SolveOutcome::Unsat;
@@ -599,9 +602,17 @@ SolveOutcome solve_nonzero_impl(
                     all_bits_unsat = false;
                     break;
                 }
+                if (rem_conflicts == 0) {
+                    all_bits_unsat = false;
+                    break;
+                }
             }
             if (all_bits_unsat) {
                 out.status = SolveOutcome::Unsat;
+                return out;
+            }
+            if (rem_conflicts == 0) {
+                out.status = SolveOutcome::Unknown;
                 return out;
             }
         }

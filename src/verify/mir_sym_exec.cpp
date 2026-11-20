@@ -42,7 +42,23 @@ BVNodeId InitMemEnv::eval_uninterpreted_call(BVContext& ctx, std::string_view sy
     BVNodeId v = ctx.make_var("call_" + std::string(sym) + "_" + std::to_string(calls.size()),
                               w, ret_type.is_float());
     if (w == 32 && args.empty() && sym.substr(0, 4) == "ptx_") {
-        v = ctx.make_binary(BVOp::And, v, ctx.make_const(0x3FFFFFFu, 32), 32);
+        if (sym == "ptx_tid_x" || sym == "ptx_tid_y" || sym == "ptx_tid_z") {
+            v = ctx.make_binary(BVOp::And, v, ctx.make_const(0x3FFu, 32), 32);
+        } else if (sym == "ptx_ntid_x" || sym == "ptx_ntid_y" || sym == "ptx_ntid_z") {
+            v = ctx.make_binary(BVOp::Add,
+                                ctx.make_binary(BVOp::And, v, ctx.make_const(0x3FFu, 32), 32),
+                                ctx.make_const(1u, 32), 32);
+        } else if (sym == "ptx_ctaid_x" || sym == "ptx_ctaid_y" || sym == "ptx_ctaid_z") {
+            v = ctx.make_binary(BVOp::And, v, ctx.make_const(0xFFFFu, 32), 32);
+        } else if (sym == "ptx_nctaid_x" || sym == "ptx_nctaid_y" || sym == "ptx_nctaid_z") {
+            BVNodeId m = ctx.make_binary(BVOp::And, v, ctx.make_const(0xFFFFu, 32), 32);
+            BVNodeId is0 = ctx.make_binary(BVOp::Eq, m, ctx.make_const(0u, 32), 1);
+            v = ctx.make_ite(is0, ctx.make_const(1u, 32), m);
+        } else if (sym == "ptx_laneid" || sym == "ptx_lane_id") {
+            v = ctx.make_binary(BVOp::And, v, ctx.make_const(0x1Fu, 32), 32);
+        } else {
+            v = ctx.make_binary(BVOp::And, v, ctx.make_const(0x3FFFFFFu, 32), 32);
+        }
     }
     for (const auto& c : calls) {
         if (c.sym == sym && c.args.size() == args.size() && ctx.width(c.ret_val) == w) {
@@ -166,19 +182,23 @@ SymExecOutput symbolically_execute_mir_region(
     out.returned = ctx.make_const(0, 1);
     uint32_t ret_w = type_bv_width(fn.return_type());
     out.ret_val = ret_w > 0 ? ctx.make_const(0, ret_w) : 0;
+    if (fn.return_type().is_vector()) {
+        uint32_t ew = type_bv_width(fn.return_type().element_type());
+        out.ret_vec.assign(fn.return_type().vector_lanes(), ctx.make_const(0, ew ? ew : 32));
+    }
 
     if (!fn.entry_block()) {
         out.supported = false;
         out.error_msg = "Function has no entry block";
         return out;
     }
-    if (!fn.return_type().is_void() && ret_w == 0) {
+    if (!fn.return_type().is_void() && ret_w == 0 && !fn.return_type().is_vector()) {
         out.supported = false;
         out.error_msg = "Unsupported return type in MIR equivalence checker";
         return out;
     }
     for (size_t i = 0; i < fn.param_count(); ++i) {
-        if (type_bv_width(fn.param_type(i)) == 0) {
+        if (type_bv_width(fn.param_type(i)) == 0 && !fn.param_type(i).is_vector()) {
             out.supported = false;
             out.error_msg = "Unsupported parameter type in MIR equivalence checker";
             return out;
@@ -196,6 +216,7 @@ SymExecOutput symbolically_execute_mir_region(
     struct IncomingEdge {
         BVNodeId cond = 0;
         std::unordered_map<const Value*, BVNodeId> vals;
+        SymVecMap vec_vals;
     };
 
     const uint32_t max_level = opts.loop_unroll_bound;
@@ -211,11 +232,12 @@ SymExecOutput symbolically_execute_mir_region(
         }
         IncomingEdge seed;
         seed.cond = ctx.make_const(1, 1);
-        if (!region_cfg.initial_vals.empty()) {
+        if (!region_cfg.initial_vals.empty() || !region_cfg.initial_vec_vals.empty()) {
             seed.vals = region_cfg.initial_vals;
+            seed.vec_vals = region_cfg.initial_vec_vals;
         } else {
             const BasicBlock* entry = fn.entry_block();
-            if (entry->param_count() != param_vars.size()) {
+            if (entry->param_count() != param_vars.size() && entry->param_count() != region_cfg.param_vec_vars.size()) {
                 out.has_type_error = true;
                 out.error_msg = "Entry block parameter count mismatch";
                 return out;
@@ -226,12 +248,28 @@ SymExecOutput symbolically_execute_mir_region(
                     out.error_msg = "Entry block parameter type mismatch";
                     return out;
                 }
-                seed.vals[entry->param(i)] = param_vars[i];
+                if (entry->param(i)->type().is_vector()) {
+                    if (i < region_cfg.param_vec_vars.size() && !region_cfg.param_vec_vars[i].empty()) {
+                        seed.vec_vals[entry->param(i)] = region_cfg.param_vec_vars[i];
+                    } else {
+                        uint32_t lanes = entry->param(i)->type().vector_lanes();
+                        uint32_t ew = type_bv_width(entry->param(i)->type().element_type());
+                        std::vector<BVNodeId> lanes_v(lanes);
+                        for (uint32_t l = 0; l < lanes; ++l) {
+                            lanes_v[l] = ctx.make_var("argvec_" + std::to_string(i) + "_" + std::to_string(l),
+                                                      ew, entry->param(i)->type().element_type().is_float());
+                        }
+                        seed.vec_vals[entry->param(i)] = std::move(lanes_v);
+                    }
+                } else {
+                    seed.vals[entry->param(i)] = param_vars[i];
+                }
             }
         }
         if (region_cfg.capture_on_first_visit &&
             (region_cfg.capture_block == start_bb || region_cfg.capture_blocks.count(start_bb) > 0)) {
-            out.captured_edges.push_back({start_bb, seed.cond, param_vars, seed.vals});
+            out.captured_edges.push_back({start_bb, seed.cond, param_vars, region_cfg.param_vec_vars,
+                                          seed.vals, seed.vec_vals});
             return out;
         }
         incoming[sit->second].push_back(std::move(seed));
@@ -244,7 +282,8 @@ SymExecOutput symbolically_execute_mir_region(
 
     auto route_branch = [&](size_t src_bi, uint32_t level, BVNodeId edge_cond,
                             const BranchTarget& target,
-                            const std::unordered_map<const Value*, BVNodeId>& cur_vals) {
+                            const std::unordered_map<const Value*, BVNodeId>& cur_vals,
+                            const SymVecMap& cur_vecs) {
         if (ctx.nodes()[edge_cond].op == BVOp::Const && ctx.nodes()[edge_cond].imm == 0) return;
         auto it = rpo_pos.find(target.block);
         if (it == rpo_pos.end()) return;
@@ -252,12 +291,14 @@ SymExecOutput symbolically_execute_mir_region(
         const BasicBlock* dst = target.block;
 
         std::unordered_map<const Value*, BVNodeId> next_vals = cur_vals;
+        SymVecMap next_vecs = cur_vecs;
         if (target.args.size() != dst->param_count()) {
             out.has_type_error = true;
             out.error_msg = "Branch argument count mismatch";
         }
         size_t n_args = std::min(target.args.size(), dst->param_count());
         std::vector<BVNodeId> arg_nodes(n_args, UINT32_MAX);
+        std::vector<std::vector<BVNodeId>> arg_vecs(n_args);
         for (size_t i = 0; i < n_args; ++i) {
             const Value* arg_v = target.args[i];
             const Value* param_v = dst->param(i);
@@ -265,10 +306,18 @@ SymExecOutput symbolically_execute_mir_region(
                 out.has_type_error = true;
                 out.error_msg = "Branch argument type mismatch";
             }
-            auto vit = cur_vals.find(arg_v);
-            if (vit != cur_vals.end()) {
-                arg_nodes[i] = vit->second;
-                next_vals[param_v] = vit->second;
+            if (param_v && param_v->type().is_vector()) {
+                auto vvit = cur_vecs.find(arg_v);
+                if (vvit != cur_vecs.end()) {
+                    arg_vecs[i] = vvit->second;
+                    next_vecs[param_v] = vvit->second;
+                }
+            } else {
+                auto vit = cur_vals.find(arg_v);
+                if (vit != cur_vals.end()) {
+                    arg_nodes[i] = vit->second;
+                    next_vals[param_v] = vit->second;
+                }
             }
         }
 
@@ -279,14 +328,15 @@ SymExecOutput symbolically_execute_mir_region(
         const bool is_capture_set =
             !region_cfg.capture_blocks.empty() && region_cfg.capture_blocks.count(dst) > 0;
         if (is_capture_single || is_capture_set) {
-            out.captured_edges.push_back({dst, edge_cond, std::move(arg_nodes), std::move(next_vals)});
+            out.captured_edges.push_back({dst, edge_cond, std::move(arg_nodes), std::move(arg_vecs),
+                                          std::move(next_vals), std::move(next_vecs)});
             return;
         }
         if (dst_level > max_level) {
             out.hit_truncation = true;
             return;
         }
-        incoming[dst_level * rpo.size() + dst_bi].push_back({edge_cond, std::move(next_vals)});
+        incoming[dst_level * rpo.size() + dst_bi].push_back({edge_cond, std::move(next_vals), std::move(next_vecs)});
     };
 
     for (uint32_t level = 0; level <= max_level; ++level) {
@@ -296,6 +346,7 @@ SymExecOutput symbolically_execute_mir_region(
 
             BVNodeId cur_cond = edges[0].cond;
             std::unordered_map<const Value*, BVNodeId> vals = edges[0].vals;
+            SymVecMap vec_vals = edges[0].vec_vals;
             for (size_t ei = 1; ei < edges.size(); ++ei) {
                 BVNodeId ec = edges[ei].cond;
                 cur_cond = ctx.make_binary(BVOp::Or, cur_cond, ec, 1);
@@ -306,6 +357,18 @@ SymExecOutput symbolically_execute_mir_region(
                     } else if (vit->second != node_id) {
                         uint32_t w = ctx.width(vit->second);
                         vit->second = ctx.make_ite(ec, coerce_width(ctx, node_id, w, false), vit->second);
+                    }
+                }
+                for (const auto& [val_ptr, lanes] : edges[ei].vec_vals) {
+                    auto vit = vec_vals.find(val_ptr);
+                    if (vit == vec_vals.end()) {
+                        vec_vals[val_ptr] = lanes;
+                    } else if (vit->second.size() == lanes.size()) {
+                        for (size_t l = 0; l < lanes.size(); ++l) {
+                            if (vit->second[l] != lanes[l]) {
+                                vit->second[l] = ctx.make_ite(ec, lanes[l], vit->second[l]);
+                            }
+                        }
                     }
                 }
             }
@@ -492,6 +555,17 @@ SymExecOutput symbolically_execute_mir_region(
                                                 coerce_width(ctx, get_op(1), w, false), w));
                         break;
                     }
+                    case Opcode::fma_f32: case Opcode::fma_f64: {
+                        uint32_t w = (op == Opcode::fma_f32) ? 32 : 64;
+                        Type ft = (op == Opcode::fma_f32) ? Type::f32() : Type::f64();
+                        set_res(init_mem.eval_uninterpreted_call(
+                            ctx, op == Opcode::fma_f32 ? "fmaf" : "fma",
+                            {coerce_width(ctx, get_op(0), w, false),
+                             coerce_width(ctx, get_op(1), w, false),
+                             coerce_width(ctx, get_op(2), w, false)},
+                            ft));
+                        break;
+                    }
                     case Opcode::and_: case Opcode::or_: case Opcode::xor_:
                     case Opcode::shl:  case Opcode::lshr: case Opcode::ashr: {
                         BVNodeId a = get_op(0), b = get_op(1);
@@ -560,7 +634,7 @@ SymExecOutput symbolically_execute_mir_region(
                     }
 
                     case Opcode::select: {
-                        BVNodeId cond_v = get_op(0), t_v = get_op(1), f_v = get_op(2);
+                        BVNodeId cond_v = get_op(0);
                         if (!inst->operand(0) || inst->operand(0)->type() != Type::i32() ||
                             !inst->operand(1) || !inst->operand(2) ||
                             inst->operand(1)->type() != inst->operand(2)->type() ||
@@ -568,8 +642,29 @@ SymExecOutput symbolically_execute_mir_region(
                             out.has_type_error = true;
                         uint32_t cw = ctx.width(cond_v);
                         BVNodeId cond_bit = ctx.make_binary(BVOp::Ne, cond_v, ctx.make_const(0, cw), 1);
-                        uint32_t w = res_w ? res_w : ctx.width(t_v);
-                        set_res(ctx.make_ite(cond_bit, coerce_width(ctx, t_v, w, false), coerce_width(ctx, f_v, w, false)));
+                        if (inst->type().is_vector()) {
+                            auto it1 = inst->operand(1) ? vec_vals.find(inst->operand(1)) : vec_vals.end();
+                            auto it2 = inst->operand(2) ? vec_vals.find(inst->operand(2)) : vec_vals.end();
+                            uint32_t lanes = inst->type().vector_lanes();
+                            uint32_t ew = type_bv_width(inst->type().element_type());
+                            ew = ew ? ew : 32;
+                            if (it1 == vec_vals.end() || it2 == vec_vals.end() ||
+                                it1->second.size() != lanes || it2->second.size() != lanes) {
+                                out.has_type_error = true;
+                            } else if (inst->result()) {
+                                std::vector<BVNodeId> dst(lanes);
+                                for (uint32_t li = 0; li < lanes; ++li) {
+                                    dst[li] = ctx.make_ite(cond_bit,
+                                        coerce_width(ctx, it1->second[li], ew, false),
+                                        coerce_width(ctx, it2->second[li], ew, false));
+                                }
+                                vec_vals[inst->result()] = std::move(dst);
+                            }
+                        } else {
+                            BVNodeId t_v = get_op(1), f_v = get_op(2);
+                            uint32_t w = res_w ? res_w : ctx.width(t_v);
+                            set_res(ctx.make_ite(cond_bit, coerce_width(ctx, t_v, w, false), coerce_width(ctx, f_v, w, false)));
+                        }
                         break;
                     }
 
@@ -713,7 +808,7 @@ SymExecOutput symbolically_execute_mir_region(
                     }
 
                     case Opcode::br:
-                        route_branch(bi, level, cur_cond, inst->branch_target(), vals);
+                        route_branch(bi, level, cur_cond, inst->branch_target(), vals, vec_vals);
                         break;
 
                     case Opcode::br_if: {
@@ -722,8 +817,8 @@ SymExecOutput symbolically_execute_mir_region(
                         uint32_t cw = ctx.width(cond_v);
                         BVNodeId c_true = ctx.make_binary(BVOp::Ne, cond_v, ctx.make_const(0, cw), 1);
                         BVNodeId c_false = ctx.make_binary(BVOp::Eq, cond_v, ctx.make_const(0, cw), 1);
-                        route_branch(bi, level, ctx.make_binary(BVOp::And, cur_cond, c_true, 1), inst->true_target(), vals);
-                        route_branch(bi, level, ctx.make_binary(BVOp::And, cur_cond, c_false, 1), inst->false_target(), vals);
+                        route_branch(bi, level, ctx.make_binary(BVOp::And, cur_cond, c_true, 1), inst->true_target(), vals, vec_vals);
+                        route_branch(bi, level, ctx.make_binary(BVOp::And, cur_cond, c_false, 1), inst->false_target(), vals, vec_vals);
                         break;
                     }
 
@@ -739,10 +834,10 @@ SymExecOutput symbolically_execute_mir_region(
                             if (unsigned nb = narrow_int_bits(ct))
                                 case_bits = static_cast<uint64_t>(narrow_zext(static_cast<uint64_t>(sc.value), nb));
                             BVNodeId hit = ctx.make_binary(BVOp::Eq, cond_v, ctx.make_const(case_bits, cw), 1);
-                            route_branch(bi, level, ctx.make_binary(BVOp::And, rem_cond, hit, 1), sc.target, vals);
+                            route_branch(bi, level, ctx.make_binary(BVOp::And, rem_cond, hit, 1), sc.target, vals, vec_vals);
                             rem_cond = ctx.make_binary(BVOp::And, rem_cond, ctx.make_unary(BVOp::Not, hit, 1), 1);
                         }
-                        route_branch(bi, level, rem_cond, inst->default_target(), vals);
+                        route_branch(bi, level, rem_cond, inst->default_target(), vals, vec_vals);
                         break;
                     }
 
@@ -755,8 +850,27 @@ SymExecOutput symbolically_execute_mir_region(
                             if (inst->operand_count() == 0 || !inst->operand(0) ||
                                 inst->operand(0)->type() != fn.return_type())
                                 out.has_type_error = true;
-                            BVNodeId rv = coerce_width(ctx, get_op(0), ret_w, false);
-                            out.ret_val = first_ret ? rv : ctx.make_ite(cur_cond, rv, out.ret_val);
+                            if (fn.return_type().is_vector()) {
+                                const Value* rv_val = inst->operand_count() > 0 ? inst->operand(0) : nullptr;
+                                auto vvit = rv_val ? vec_vals.find(rv_val) : vec_vals.end();
+                                uint32_t lanes = fn.return_type().vector_lanes();
+                                uint32_t ew = type_bv_width(fn.return_type().element_type());
+                                ew = ew ? ew : 32;
+                                if (vvit == vec_vals.end() || vvit->second.size() != lanes) {
+                                    out.has_type_error = true;
+                                } else {
+                                    if (out.ret_vec.size() != lanes)
+                                        out.ret_vec.assign(lanes, ctx.make_const(0, ew));
+                                    for (uint32_t li = 0; li < lanes; ++li) {
+                                        BVNodeId lane_v = coerce_width(ctx, vvit->second[li], ew, false);
+                                        out.ret_vec[li] = first_ret ? lane_v
+                                                                    : ctx.make_ite(cur_cond, lane_v, out.ret_vec[li]);
+                                    }
+                                }
+                            } else {
+                                BVNodeId rv = coerce_width(ctx, get_op(0), ret_w, false);
+                                out.ret_val = first_ret ? rv : ctx.make_ite(cur_cond, rv, out.ret_val);
+                            }
                         }
                         break;
                     }
@@ -768,6 +882,10 @@ SymExecOutput symbolically_execute_mir_region(
                         break;
 
                     default:
+                        if (symbolically_execute_vec_inst(ctx, init_mem, out, cur_cond, inst, vals, vec_vals, alloca_bases)) {
+                            if (!out.supported) return out;
+                            break;
+                        }
                         out.supported = false;
                         out.error_msg = "Unsupported opcode in MIR equivalence checker: " +
                                         std::string(opcode_name(op));

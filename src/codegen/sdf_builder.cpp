@@ -228,12 +228,9 @@ Value* SdfKernelBuilder::noise_3d(Value* px, Value* py, Value* pz) {
     Value* flr_y = floor_f32(py);
     Value* flr_z = floor_f32(pz);
 
-    if (builder().current_module() && !builder().current_module()->has_external_symbol("f32_to_i32")) {
-        builder().current_module()->add_external_symbol("f32_to_i32");
-    }
-    Value* i0 = builder().build_call("f32_to_i32", Type::i32(), {flr_x});
-    Value* j0 = builder().build_call("f32_to_i32", Type::i32(), {flr_y});
-    Value* k0 = builder().build_call("f32_to_i32", Type::i32(), {flr_z});
+    Value* i0 = builder().build_fptosi_i32_f32(flr_x);
+    Value* j0 = builder().build_fptosi_i32_f32(flr_y);
+    Value* k0 = builder().build_fptosi_i32_f32(flr_z);
 
     Value* one_i = const_i32(1);
     Value* i1 = builder().build_add(i0, one_i);

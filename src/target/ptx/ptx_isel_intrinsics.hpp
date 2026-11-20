@@ -61,6 +61,7 @@ struct PtxISel::Intrinsics {
     static void f32_to_u32(PtxISel& isel, const brass::Instruction& inst);
     static void f16_to_f32(PtxISel& isel, const brass::Instruction& inst);
     static void f32_to_f16(PtxISel& isel, const brass::Instruction& inst);
+    static void f32_to_bf16(PtxISel& isel, const brass::Instruction& inst);
     static void f32_to_f64(PtxISel& isel, const brass::Instruction& inst);
     static void f64_to_f32(PtxISel& isel, const brass::Instruction& inst);
 

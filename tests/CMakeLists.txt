@@ -319,6 +319,8 @@ add_executable(brass_unit_tests
     unit/test_mir_optimizer_hardening.cpp
     unit/test_frontend_gpu_hardening.cpp
     unit/test_smt_equiv.cpp
+    unit/test_x64_isel_equiv.cpp
+    unit/test_msl_target.cpp
     unit/test_bv_solver_oracle.cpp
     unit/test_verifier_certs.cpp
     unit/test_smt_guard_elim.cpp
@@ -350,6 +352,16 @@ add_executable(test_smt_equiv unit/test_smt_equiv.cpp unit/test_bv_solver_oracle
 target_compile_definitions(test_smt_equiv PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_smt_equiv PRIVATE brass)
 target_include_directories(test_smt_equiv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_x64_isel_equiv unit/test_x64_isel_equiv.cpp)
+target_compile_definitions(test_x64_isel_equiv PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_x64_isel_equiv PRIVATE brass)
+target_include_directories(test_x64_isel_equiv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_msl_target unit/test_msl_target.cpp)
+target_compile_definitions(test_msl_target PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_msl_target PRIVATE brass)
+target_include_directories(test_msl_target PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 add_executable(test_verifier_certs unit/test_verifier_certs.cpp)
 target_compile_definitions(test_verifier_certs PRIVATE BRASS_STANDALONE_TEST)
