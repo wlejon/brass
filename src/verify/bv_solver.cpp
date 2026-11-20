@@ -376,6 +376,28 @@ BVNodeId BVContext::make_zext(BVNodeId a, uint32_t ext_bits) {
     if (na.op == BVOp::Extract && na.extra == 0 && nodes_[na.a].width == w) {
         return make_binary(BVOp::And, na.a, make_const(width_mask(na.width), w), w);
     }
+    if (na.width < 64 && w <= 64) {
+        const uint64_t nm = width_mask(na.width);
+        if (na.op == BVOp::Shl && nodes_[na.b].op == BVOp::Const) {
+            const uint64_t sh = nodes_[na.b].imm & shift_mask(na.width);
+            if (sh < na.width && sh == (sh & shift_mask(w)) &&
+                intervals_[na.a].umax <= (nm >> sh)) {
+                return make_binary(BVOp::Shl, make_zext(na.a, ext_bits), make_const(sh, w), w);
+            }
+        } else if (na.op == BVOp::Mul) {
+            const BVInterval ia = intervals_[na.a];
+            const BVInterval ib = intervals_[na.b];
+            if (ia.umax == 0 || ib.umax <= nm / ia.umax) {
+                return make_binary(BVOp::Mul, make_zext(na.a, ext_bits), make_zext(na.b, ext_bits), w);
+            }
+        } else if (na.op == BVOp::Add) {
+            const BVInterval ia = intervals_[na.a];
+            const BVInterval ib = intervals_[na.b];
+            if (ib.umax <= nm && ia.umax <= nm - ib.umax) {
+                return make_binary(BVOp::Add, make_zext(na.a, ext_bits), make_zext(na.b, ext_bits), w);
+            }
+        }
+    }
     BVNode n;
     n.op = BVOp::ZExt;
     n.width = w;
@@ -513,6 +535,20 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             }
             if (cb.op == BVOp::Add && cb.b == a) {
                 return make_binary(BVOp::Sub, make_const(0, w), cb.a, w);
+            }
+            if (cb.op == BVOp::Mul) {
+                auto match_div_mul = [&](BVNodeId div_id, BVNodeId factor_id) -> BVNodeId {
+                    const BVNode& dn = nodes_[div_id];
+                    if ((dn.op == BVOp::UDiv || dn.op == BVOp::SDiv) &&
+                        dn.width == w && dn.a == a && dn.b == factor_id) {
+                        BVOp rem_op = (dn.op == BVOp::UDiv) ? BVOp::URem : BVOp::SRem;
+                        BVNodeId is_zero = make_binary(BVOp::Eq, factor_id, make_const(0, w), 1);
+                        return make_ite(is_zero, a, make_binary(rem_op, a, factor_id, w));
+                    }
+                    return UINT32_MAX;
+                };
+                if (BVNodeId r = match_div_mul(cb.a, cb.b); r != UINT32_MAX) return r;
+                if (BVNodeId r = match_div_mul(cb.b, cb.a); r != UINT32_MAX) return r;
             }
             break;
 
