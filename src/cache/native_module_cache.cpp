@@ -3,6 +3,7 @@
 // (native_module_cache.hpp, docs/artifact_cache.md "Native modules").
 #include <brass/cache/native_module_cache.hpp>
 
+#include <brass/core/hash128.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/object/object_writer.hpp>
 #include <brass/target/aot_linker.hpp>
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <exception>
+#include <string_view>
 #include <system_error>
 
 namespace brass::cache {
@@ -30,6 +32,16 @@ const char* image_extension() {
     if (host.is_macos()) return ".dylib";
     return ".so";
 }
+
+#if defined(__APPLE__)
+std::filesystem::path images_dir_for(const ArtifactCache& store) { return store.dir() / "images"; }
+
+std::filesystem::path cached_image_path(const ArtifactCache& store, const CacheKey& skey,
+                                        std::span<const uint8_t> image) {
+    const Digest128 digest = hash128(image.data(), image.size());
+    return images_dir_for(store) / (skey.hex() + "-" + digest.hex() + image_extension());
+}
+#endif
 
 void set_error(std::string* error, const std::string& text) {
     if (error) *error = text;
@@ -97,11 +109,92 @@ void NativeModuleCache::sweep_load_dir() {
         if (e2 || now - mtime <= kAbandonedAfter) continue;
         std::filesystem::remove(it->path(), e2);
     }
+#if defined(__APPLE__)
+    std::error_code img_ec;
+    std::filesystem::directory_iterator img_it(images_dir_for(store_), img_ec);
+    for (; !img_ec && img_it != end; img_it.increment(img_ec)) {
+        std::error_code e2;
+        if (!img_it->is_regular_file(e2) || e2) continue;
+        const std::string name = img_it->path().filename().string();
+        bool valid_key = false;
+        if (name.size() > 33 && name[32] == '-') {
+            Digest128 parsed;
+            if (Digest128::from_hex(std::string_view(name).substr(0, 32), parsed)) {
+                valid_key = true;
+                std::error_code e3;
+                const bool exists = std::filesystem::exists(store_.dir() / (name.substr(0, 32) + kEntryExt), e3);
+                if (!e3 && !exists) {
+                    std::filesystem::remove(img_it->path(), e2);
+                }
+            }
+        }
+        if (!valid_key) {
+            const auto mtime = img_it->last_write_time(e2);
+            if (!e2 && now - mtime > kAbandonedAfter) {
+                std::filesystem::remove(img_it->path(), e2);
+            }
+        }
+    }
+#endif
 }
 
 std::shared_ptr<const NativeModule> NativeModuleCache::load_image(const CacheKey& skey,
                                                                   std::span<const uint8_t> image, bool from_cache,
                                                                   std::string* error) {
+#if defined(__APPLE__)
+    // Persist the signed dylib under a content-addressed name in `<store>/images`
+    // so subsequent processes reuse the file path without paying macOS AMFI's
+    // synchronous verification cost on every newly created/unlinked inode.
+    std::error_code ec;
+    std::filesystem::create_directories(load_dir(), ec);
+    std::filesystem::create_directories(images_dir_for(store_), ec);
+    const std::filesystem::path path = cached_image_path(store_, skey, image);
+
+    auto materialize = [&](std::string* err) -> bool {
+        const std::filesystem::path tmp =
+            load_dir() / (skey.hex() + "-" + std::to_string(detail::process_id()) + "-" +
+                          std::to_string(detail::next_serial()) + image_extension());
+        if (!detail::write_new_file(tmp, image, err, /*executable=*/true)) return false;
+        std::error_code ren_ec;
+        std::filesystem::rename(tmp, path, ren_ec);
+        if (ren_ec) {
+            std::error_code rm_ec;
+            std::filesystem::remove(tmp, rm_ec);
+            std::error_code stat_ec;
+            const bool raced = std::filesystem::is_regular_file(path, stat_ec) && !stat_ec &&
+                               std::filesystem::file_size(path, stat_ec) == image.size() && !stat_ec;
+            if (!raced) {
+                set_error(err, "cannot place image in cache: " + ren_ec.message());
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const bool reused_file = std::filesystem::is_regular_file(path, ec) && !ec &&
+                             std::filesystem::file_size(path, ec) == image.size() && !ec;
+    if (!reused_file && !materialize(error)) return nullptr;
+
+    std::string why;
+    std::unique_ptr<target::DynamicLibrary> lib = target::DynamicLibrary::open(path.string(), &why);
+    if ((!lib || !lib->is_valid()) && reused_file) {
+        std::filesystem::remove(path, ec);
+        if (!materialize(error)) return nullptr;
+        why.clear();
+        lib = target::DynamicLibrary::open(path.string(), &why);
+    }
+    if (!lib || !lib->is_valid()) {
+        std::filesystem::remove(path, ec);
+        set_error(error, "cannot load the image: " + why);
+        return nullptr;
+    }
+    std::shared_ptr<NativeModule> m(new NativeModule());
+    m->library_ = std::move(lib);
+    m->key_ = skey;
+    m->image_bytes_ = image.size();
+    m->from_cache_ = from_cache;
+    return m;
+#else
     // A private copy per load: the entry can then be evicted or replaced
     // while the code runs, and on Windows (where a loaded file cannot be
     // deleted) the entry itself is never held.
@@ -132,6 +225,7 @@ std::shared_ptr<const NativeModule> NativeModuleCache::load_image(const CacheKey
     m->image_bytes_ = image.size();
     m->from_cache_ = from_cache;
     return m;
+#endif
 }
 
 std::shared_ptr<const NativeModule> NativeModuleCache::load_stored(const CacheKey& skey, std::string* error) {

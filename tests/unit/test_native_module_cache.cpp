@@ -122,6 +122,15 @@ TEST_CASE("native_module_cache: a loaded module outlives its evicted entry") {
     CHECK(natives.find(key) == m);   // still loaded here
     NativeModuleCache fresh(store);
     CHECK(fresh.find(key) == nullptr);
+#if defined(__APPLE__)
+    size_t persisted = 0;
+    std::error_code img_ec;
+    for (const auto& e : std::filesystem::directory_iterator(store.dir() / "images", img_ec)) {
+        (void)e;
+        ++persisted;
+    }
+    CHECK_EQ(persisted, 0u);
+#endif
     std::shared_ptr<const NativeModule> rebuilt = fresh.get_or_build(key, build);
     REQUIRE(rebuilt != nullptr);
     CHECK_FALSE(rebuilt->from_cache());

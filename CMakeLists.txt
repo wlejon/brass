@@ -253,6 +253,9 @@ if(BRASS_BUILD_SHARED)
     if(BRASS_WITH_SPIRV)
         target_include_directories(brass_shared PUBLIC $<BUILD_INTERFACE:${BRASS_SPIRV_HEADERS_DIR}>)
     endif()
+    if(BRASS_VULKAN_INCLUDE_DIR)
+        target_include_directories(brass_shared PRIVATE ${BRASS_VULKAN_INCLUDE_DIR})
+    endif()
 
     target_compile_definitions(brass_shared
         PRIVATE
