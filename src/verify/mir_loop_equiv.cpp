@@ -61,8 +61,9 @@ void collect_rpo(const BasicBlock* bb,
     postorder.push_back(bb);
 }
 
-const BasicBlock* find_single_loop_header(const Function& fn) {
-    if (!fn.entry_block()) return nullptr;
+std::vector<const BasicBlock*> find_loop_headers_rpo(const Function& fn) {
+    std::vector<const BasicBlock*> headers;
+    if (!fn.entry_block()) return headers;
     std::unordered_set<const BasicBlock*> visited;
     std::vector<const BasicBlock*> rpo;
     collect_rpo(fn.entry_block(), visited, rpo);
@@ -71,21 +72,20 @@ const BasicBlock* find_single_loop_header(const Function& fn) {
     std::unordered_map<const BasicBlock*, size_t> rpo_pos;
     for (size_t i = 0; i < rpo.size(); ++i) rpo_pos[rpo[i]] = i;
 
-    const BasicBlock* header = nullptr;
+    std::unordered_set<const BasicBlock*> is_header;
     for (size_t i = 0; i < rpo.size(); ++i) {
         const BasicBlock* bb = rpo[i];
         for (const BasicBlock* succ : bb->successors()) {
             auto it = rpo_pos.find(succ);
             if (it != rpo_pos.end() && it->second <= i) {
-                if (header == nullptr) {
-                    header = succ;
-                } else if (header != succ) {
-                    return nullptr; // Multiple loop headers
-                }
+                is_header.insert(succ);
             }
         }
     }
-    return header;
+    for (const BasicBlock* bb : rpo) {
+        if (is_header.count(bb) > 0) headers.push_back(bb);
+    }
+    return headers;
 }
 
 struct MergedCapture {
@@ -112,7 +112,7 @@ MergedCapture merge_captured_edges(
         mc.cond = ctx.make_binary(BVOp::Or, mc.cond, ec, 1);
         for (size_t k = 0; k < np && k < edges[ei].args.size(); ++k) {
             BVNodeId v = edges[ei].args[k];
-            if (v == 0) continue;
+            if (v == UINT32_MAX) continue;
             mc.args[k] = (ei == 0) ? v : ctx.make_ite(ec, v, mc.args[k]);
         }
         for (const auto& [val_ptr, node_id] : edges[ei].vals) {
@@ -221,6 +221,198 @@ BVNodeId build_region_obs_diff(
     return diff;
 }
 
+EquivResult validate_bounded_counterexample(
+    const Function& before,
+    const Function& after,
+    const EquivOptions& opts) {
+    EquivResult res;
+    res.status = EquivStatus::Unknown;
+
+    BVContext bctx;
+    std::vector<BVNodeId> bparams;
+    for (size_t i = 0; i < before.param_count(); ++i) {
+        uint32_t w = type_bv_width(before.param_type(i));
+        bparams.push_back(bctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
+    }
+    EquivOptions bopts = opts;
+    bopts.loop_unroll_bound = std::max(opts.loop_unroll_bound, 4u);
+    InitMemEnv bmem;
+    SymExecOutput ob = symbolically_execute_mir(bctx, before, bparams, bmem, bopts);
+    SymExecOutput oa = symbolically_execute_mir(bctx, after, bparams, bmem, bopts);
+    if (ob.supported && oa.supported) {
+        BVNodeId both_comp = bctx.make_binary(BVOp::And, ob.completed, oa.completed, 1);
+        BVNodeId bdiff = build_region_obs_diff(bctx, both_comp, bmem, ob, oa, before.return_type(), bopts);
+        SolveOutcome bsolved = solve_nonzero(bctx, bdiff, bopts.max_sat_conflicts);
+        if (bsolved.status == SolveOutcome::Sat) {
+            res.status = EquivStatus::Counterexample;
+            for (size_t i = 0; i < before.param_count(); ++i) {
+                uint64_t bits = (i < bsolved.model.size()) ? bsolved.model[i] : 0;
+                res.counterexample.push_back(bits_to_rv(before.param_type(i), bits));
+            }
+            std::ostringstream diag;
+            diag << "MIR loop equivalence counterexample in @" << before.name() << "(";
+            for (size_t i = 0; i < res.counterexample.size(); ++i) {
+                if (i > 0) diag << ", ";
+                diag << to_string(res.counterexample[i]);
+            }
+            diag << ")";
+            res.diagnostic = diag.str();
+            return res;
+        }
+    }
+    res.diagnostic = "Inductive loop equivalence check inconclusive";
+    return res;
+}
+
+EquivResult verify_mir_multi_loop_equivalence(
+    const Function& before,
+    const Function& after,
+    const std::vector<const BasicBlock*>& hb,
+    const std::vector<const BasicBlock*>& ha,
+    const EquivOptions& opts) {
+
+    EquivResult res;
+    const size_t m = hb.size();
+    if (m != ha.size() || m < 2) {
+        res.status = EquivStatus::Unsupported;
+        res.diagnostic = "Multi-loop cutset count mismatch";
+        return res;
+    }
+    for (size_t i = 0; i < m; ++i) {
+        if (hb[i]->param_count() != ha[i]->param_count()) {
+            res.status = EquivStatus::Unsupported;
+            res.diagnostic = "Loop header block parameter count mismatch";
+            return res;
+        }
+        for (size_t k = 0; k < hb[i]->param_count(); ++k) {
+            if (hb[i]->param(k)->type() != ha[i]->param(k)->type()) {
+                res.status = EquivStatus::Unsupported;
+                res.diagnostic = "Loop header parameter types do not match";
+                return res;
+            }
+        }
+    }
+
+    std::unordered_set<const BasicBlock*> cut_b(hb.begin(), hb.end());
+    std::unordered_set<const BasicBlock*> cut_a(ha.begin(), ha.end());
+
+    BVContext ctx;
+    std::vector<BVNodeId> param_vars;
+    for (size_t i = 0; i < before.param_count(); ++i) {
+        uint32_t w = type_bv_width(before.param_type(i));
+        param_vars.push_back(ctx.make_var("arg" + std::to_string(i), w, before.param_type(i).is_float()));
+    }
+
+    EquivOptions reg_opts = opts;
+    reg_opts.loop_unroll_bound = 0;
+
+    std::vector<std::vector<SymCapturedEdge>> incoming_b(m);
+    std::vector<std::vector<SymCapturedEdge>> incoming_a(m);
+    std::vector<BVNodeId> reach_cond(m, ctx.make_const(0, 1));
+    BVNodeId total_diff = ctx.make_const(0, 1);
+
+    for (int s = -1; s < static_cast<int>(m); ++s) {
+        SymExecRegionConfig seg_cfg_b;
+        SymExecRegionConfig seg_cfg_a;
+        seg_cfg_b.capture_blocks = cut_b;
+        seg_cfg_a.capture_blocks = cut_a;
+
+        BVNodeId seg_reach = ctx.make_const(1, 1);
+        if (s < 0) {
+            seg_cfg_b.start_block = before.entry_block();
+            seg_cfg_a.start_block = after.entry_block();
+            seg_cfg_b.capture_on_first_visit = true;
+            seg_cfg_a.capture_on_first_visit = true;
+        } else {
+            const size_t si = static_cast<size_t>(s);
+            if (incoming_b[si].empty() || incoming_a[si].empty()) {
+                continue;
+            }
+            MergedCapture init_b = merge_captured_edges(ctx, hb[si], incoming_b[si]);
+            MergedCapture init_a = merge_captured_edges(ctx, ha[si], incoming_a[si]);
+            seg_cfg_b.initial_vals = std::move(init_b.vals);
+            seg_cfg_a.initial_vals = std::move(init_a.vals);
+            for (size_t k = 0; k < hb[si]->param_count(); ++k) {
+                Type pt = hb[si]->param(k)->type();
+                BVNodeId sh = ctx.make_var("loop" + std::to_string(si) + "_h" + std::to_string(k),
+                                           type_bv_width(pt), pt.is_float());
+                seg_cfg_b.initial_vals[hb[si]->param(k)] = sh;
+                seg_cfg_a.initial_vals[ha[si]->param(k)] = sh;
+            }
+            seg_cfg_b.start_block = hb[si];
+            seg_cfg_a.start_block = ha[si];
+            seg_cfg_b.capture_on_first_visit = false;
+            seg_cfg_a.capture_on_first_visit = false;
+            seg_reach = reach_cond[si];
+        }
+
+        InitMemEnv seg_mem;
+        SymExecOutput seg_b = symbolically_execute_mir_region(ctx, before, param_vars, seg_mem, reg_opts, seg_cfg_b);
+        if (!seg_b.supported) {
+            res.status = EquivStatus::Unsupported;
+            res.diagnostic = seg_b.error_msg;
+            return res;
+        }
+        SymExecOutput seg_a = symbolically_execute_mir_region(ctx, after, param_vars, seg_mem, reg_opts, seg_cfg_a);
+        if (!seg_a.supported) {
+            res.status = EquivStatus::Unsupported;
+            res.diagnostic = seg_a.error_msg;
+            return res;
+        }
+        if (seg_b.hit_truncation || seg_a.hit_truncation) {
+            res.status = EquivStatus::Unknown;
+            res.diagnostic = "Cutset segment hit loop truncation bound";
+            return res;
+        }
+
+        BVNodeId seg_diff = build_region_obs_diff(ctx, seg_reach, seg_mem, seg_b, seg_a, before.return_type(), opts);
+        BVNodeId seg_no_abort = ctx.make_binary(
+            BVOp::And, seg_reach,
+            ctx.make_binary(
+                BVOp::And,
+                ctx.make_binary(BVOp::And,
+                                ctx.make_unary(BVOp::Not, seg_b.guard_failed, 1),
+                                ctx.make_unary(BVOp::Not, seg_a.guard_failed, 1), 1),
+                ctx.make_binary(BVOp::And,
+                                ctx.make_unary(BVOp::Not, seg_b.trapped, 1),
+                                ctx.make_unary(BVOp::Not, seg_a.trapped, 1), 1), 1), 1);
+
+        for (size_t j = 0; j < m; ++j) {
+            std::vector<SymCapturedEdge> eb, ea;
+            for (const auto& e : seg_b.captured_edges) {
+                if (e.target == hb[j]) eb.push_back(e);
+            }
+            for (const auto& e : seg_a.captured_edges) {
+                if (e.target == ha[j]) ea.push_back(e);
+            }
+            MergedCapture mc_b = merge_captured_edges(ctx, hb[j], eb);
+            MergedCapture mc_a = merge_captured_edges(ctx, ha[j], ea);
+
+            BVNodeId cond_ne = ctx.make_binary(BVOp::Xor, mc_b.cond, mc_a.cond, 1);
+            seg_diff = ctx.make_binary(BVOp::Or, seg_diff, ctx.make_binary(BVOp::And, seg_no_abort, cond_ne, 1), 1);
+
+            BVNodeId both_j = ctx.make_binary(BVOp::And, seg_no_abort,
+                                              ctx.make_binary(BVOp::And, mc_b.cond, mc_a.cond, 1), 1);
+            for (size_t k = 0; k < hb[j]->param_count(); ++k) {
+                BVNodeId arg_ne = ctx.make_binary(BVOp::Ne, mc_b.args[k], mc_a.args[k], 1);
+                seg_diff = ctx.make_binary(BVOp::Or, seg_diff, ctx.make_binary(BVOp::And, both_j, arg_ne, 1), 1);
+            }
+            if (static_cast<int>(j) > s) {
+                for (auto& e : eb) incoming_b[j].push_back(e);
+                for (auto& e : ea) incoming_a[j].push_back(e);
+                reach_cond[j] = ctx.make_binary(BVOp::Or, reach_cond[j], both_j, 1);
+            }
+        }
+        total_diff = ctx.make_binary(BVOp::Or, total_diff, seg_diff, 1);
+    }
+
+    if (solve_nonzero(ctx, total_diff, opts.max_sat_conflicts).status == SolveOutcome::Unsat) {
+        res.status = EquivStatus::ProvenEquivalent;
+        return res;
+    }
+    return validate_bounded_counterexample(before, after, opts);
+}
+
 } // namespace
 
 EquivResult verify_mir_loop_equivalence(
@@ -247,13 +439,19 @@ EquivResult verify_mir_loop_equivalence(
         }
     }
 
-    const BasicBlock* hb = find_single_loop_header(before);
-    const BasicBlock* ha = find_single_loop_header(after);
-    if (!hb || !ha) {
+    std::vector<const BasicBlock*> headers_b = find_loop_headers_rpo(before);
+    std::vector<const BasicBlock*> headers_a = find_loop_headers_rpo(after);
+    if (headers_b.size() != headers_a.size() || headers_b.empty()) {
         res.status = EquivStatus::Unsupported;
-        res.diagnostic = "Functions do not both contain a single natural loop header";
+        res.diagnostic = "Functions do not share matching natural loop structure";
         return res;
     }
+    if (headers_b.size() >= 2) {
+        return verify_mir_multi_loop_equivalence(before, after, headers_b, headers_a, opts);
+    }
+
+    const BasicBlock* hb = headers_b[0];
+    const BasicBlock* ha = headers_a[0];
     if (hb->param_count() == 0 || hb->param_count() != ha->param_count()) {
         res.status = EquivStatus::Unsupported;
         res.diagnostic = "Loop header block parameter count mismatch";

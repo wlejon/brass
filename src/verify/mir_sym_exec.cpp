@@ -229,8 +229,9 @@ SymExecOutput symbolically_execute_mir_region(
                 seed.vals[entry->param(i)] = param_vars[i];
             }
         }
-        if (region_cfg.capture_block == start_bb && region_cfg.capture_on_first_visit) {
-            out.captured_edges.push_back({seed.cond, param_vars, seed.vals});
+        if (region_cfg.capture_on_first_visit &&
+            (region_cfg.capture_block == start_bb || region_cfg.capture_blocks.count(start_bb) > 0)) {
+            out.captured_edges.push_back({start_bb, seed.cond, param_vars, seed.vals});
             return out;
         }
         incoming[sit->second].push_back(std::move(seed));
@@ -256,7 +257,7 @@ SymExecOutput symbolically_execute_mir_region(
             out.error_msg = "Branch argument count mismatch";
         }
         size_t n_args = std::min(target.args.size(), dst->param_count());
-        std::vector<BVNodeId> arg_nodes(n_args, 0);
+        std::vector<BVNodeId> arg_nodes(n_args, UINT32_MAX);
         for (size_t i = 0; i < n_args; ++i) {
             const Value* arg_v = target.args[i];
             const Value* param_v = dst->param(i);
@@ -272,12 +273,19 @@ SymExecOutput symbolically_execute_mir_region(
         }
 
         uint32_t dst_level = (dst_bi <= src_bi) ? (level + 1) : level;
-        if (region_cfg.capture_block && dst == region_cfg.capture_block &&
-            (region_cfg.capture_on_first_visit || dst_level > level)) {
-            out.captured_edges.push_back({edge_cond, std::move(arg_nodes), std::move(next_vals)});
+        const bool is_capture_single =
+            region_cfg.capture_block && dst == region_cfg.capture_block &&
+            (region_cfg.capture_on_first_visit || dst_level > level);
+        const bool is_capture_set =
+            !region_cfg.capture_blocks.empty() && region_cfg.capture_blocks.count(dst) > 0;
+        if (is_capture_single || is_capture_set) {
+            out.captured_edges.push_back({dst, edge_cond, std::move(arg_nodes), std::move(next_vals)});
             return;
         }
-        if (dst_level > max_level) return;
+        if (dst_level > max_level) {
+            out.hit_truncation = true;
+            return;
+        }
         incoming[dst_level * rpo.size() + dst_bi].push_back({edge_cond, std::move(next_vals)});
     };
 

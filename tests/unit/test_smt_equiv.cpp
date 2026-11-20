@@ -616,6 +616,119 @@ TEST_CASE("SMT Equiv - Soundness: Truncated Loops, INT_MIN/-1 Traps, TLS, Statef
     }
 }
 
+TEST_CASE("SMT Equiv - Multi-Loop Cutset Relational Induction (Sequential & Nested Loops)") {
+    // 1. Sequential 2-loop function: algebraic rewrite & umod-8->and-7 prove equivalent;
+    //    mutating second loop body yields Counterexample.
+    {
+        Module mod("seq_2loop");
+        Builder b(mod);
+        auto build_seq = [&](const char* name, bool opt_style, bool buggy) -> Function* {
+            Function* fn = mod.create_function(name, Type::i32(), {Type::i32()});
+            b.set_function(fn);
+            BasicBlock* entry = b.append_block("entry");
+            BasicBlock* h1 = b.append_block("h1");
+            BasicBlock* b1 = b.append_block("b1");
+            BasicBlock* h2 = b.append_block("h2");
+            BasicBlock* b2 = b.append_block("b2");
+            BasicBlock* done = b.append_block("done");
+            Value* n = b.add_block_param(entry, Type::i32());
+            Value* i1 = b.add_block_param(h1, Type::i32());
+            Value* a1 = b.add_block_param(h1, Type::i32());
+            Value* i2 = b.add_block_param(h2, Type::i32());
+            Value* a2 = b.add_block_param(h2, Type::i32());
+
+            b.position_at_end(entry);
+            b.build_br(h1, {b.build_iconst_i32(0), b.build_iconst_i32(0)});
+
+            b.position_at_end(h1);
+            b.build_br_if(b.build_slt(i1, n), b1, {}, h2, {b.build_iconst_i32(0), a1});
+
+            b.position_at_end(b1);
+            Value* step1 = opt_style ? i1 : b.build_add(i1, b.build_iconst_i32(0));
+            b.build_br(h1, {b.build_add(i1, b.build_iconst_i32(1)), b.build_add(a1, step1)});
+
+            b.position_at_end(h2);
+            b.build_br_if(b.build_slt(i2, n), b2, {}, done, {});
+
+            b.position_at_end(b2);
+            Value* rem = opt_style
+                ? b.build_and(i2, b.build_iconst_i32(7))
+                : b.build_umod(i2, b.build_iconst_i32(8));
+            if (buggy) rem = b.build_add(rem, b.build_iconst_i32(1));
+            b.build_br(h2, {b.build_add(i2, b.build_iconst_i32(1)), b.build_xor(a2, rem)});
+
+            b.position_at_end(done);
+            b.build_ret(a2);
+            fn->rebuild_cfg_predecessors();
+            return fn;
+        };
+
+        Function* f_unopt = build_seq("seq_unopt", false, false);
+        Function* f_opt   = build_seq("seq_opt",   true,  false);
+        Function* f_buggy = build_seq("seq_buggy", true,  true);
+
+        EquivOptions opts;
+        opts.loop_unroll_bound = 1;
+        CHECK_EQ(verify_mir_equivalence(*f_unopt, *f_opt, opts).status, EquivStatus::ProvenEquivalent);
+        CHECK_EQ(verify_mir_equivalence(*f_unopt, *f_buggy, opts).status, EquivStatus::Counterexample);
+    }
+
+    // 2. Nested 2-loop function: outer + inner loop equivalence and bug detection.
+    {
+        Module mod("nested_2loop");
+        Builder b(mod);
+        auto build_nested = [&](const char* name, bool opt_style, bool buggy) -> Function* {
+            Function* fn = mod.create_function(name, Type::i32(), {Type::i32(), Type::i32()});
+            b.set_function(fn);
+            BasicBlock* entry = b.append_block("entry");
+            BasicBlock* outer_h = b.append_block("outer_h");
+            BasicBlock* inner_h = b.append_block("inner_h");
+            BasicBlock* inner_b = b.append_block("inner_b");
+            BasicBlock* outer_latch = b.append_block("outer_latch");
+            BasicBlock* done = b.append_block("done");
+
+            Value* n = b.add_block_param(entry, Type::i32());
+            Value* m = b.add_block_param(entry, Type::i32());
+            Value* oi = b.add_block_param(outer_h, Type::i32());
+            Value* oa = b.add_block_param(outer_h, Type::i32());
+            Value* ij = b.add_block_param(inner_h, Type::i32());
+            Value* ia = b.add_block_param(inner_h, Type::i32());
+
+            b.position_at_end(entry);
+            b.build_br(outer_h, {b.build_iconst_i32(0), b.build_iconst_i32(0)});
+
+            b.position_at_end(outer_h);
+            b.build_br_if(b.build_slt(oi, n), inner_h, {b.build_iconst_i32(0), oa}, done, {});
+
+            b.position_at_end(inner_h);
+            b.build_br_if(b.build_slt(ij, m), inner_b, {}, outer_latch, {});
+
+            b.position_at_end(inner_b);
+            Value* contrib = opt_style ? b.build_shl(ij, b.build_iconst_i32(1))
+                                       : b.build_mul(ij, b.build_iconst_i32(2));
+            if (buggy) contrib = b.build_add(contrib, b.build_iconst_i32(3));
+            b.build_br(inner_h, {b.build_add(ij, b.build_iconst_i32(1)), b.build_add(ia, contrib)});
+
+            b.position_at_end(outer_latch);
+            b.build_br(outer_h, {b.build_add(oi, b.build_iconst_i32(1)), ia});
+
+            b.position_at_end(done);
+            b.build_ret(oa);
+            fn->rebuild_cfg_predecessors();
+            return fn;
+        };
+
+        Function* f_unopt = build_nested("nested_unopt", false, false);
+        Function* f_opt   = build_nested("nested_opt",   true,  false);
+        Function* f_buggy = build_nested("nested_buggy", true,  true);
+
+        EquivOptions opts;
+        opts.loop_unroll_bound = 1;
+        CHECK_EQ(verify_mir_equivalence(*f_unopt, *f_opt, opts).status, EquivStatus::ProvenEquivalent);
+        CHECK_EQ(verify_mir_equivalence(*f_unopt, *f_buggy, opts).status, EquivStatus::Counterexample);
+    }
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace brass::verify {
@@ -39,6 +40,7 @@ struct InitMemEnv {
 };
 
 struct SymCapturedEdge {
+    const BasicBlock* target = nullptr;
     BVNodeId cond = 0;
     std::vector<BVNodeId> args;
     std::unordered_map<const Value*, BVNodeId> vals;
@@ -47,6 +49,7 @@ struct SymCapturedEdge {
 struct SymExecRegionConfig {
     const BasicBlock* start_block = nullptr;
     const BasicBlock* capture_block = nullptr;
+    std::unordered_set<const BasicBlock*> capture_blocks;
     bool capture_on_first_visit = false;
     std::unordered_map<const Value*, BVNodeId> initial_vals;
 };
@@ -54,6 +57,7 @@ struct SymExecRegionConfig {
 struct SymExecOutput {
     bool supported = true;
     bool has_type_error = false;
+    bool hit_truncation = false;
     std::string error_msg;
     BVNodeId completed = 0;
     BVNodeId guard_failed = 0;
