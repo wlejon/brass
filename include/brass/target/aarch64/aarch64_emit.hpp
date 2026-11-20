@@ -104,6 +104,7 @@ private:
     void emit_alu_instruction(const codegen::LirInst& inst);
     void emit_fp_instruction(const codegen::LirInst& inst);
     void emit_vec_instruction(const codegen::LirInst& inst);
+    void emit_vec_lane_instruction(const codegen::LirInst& inst);
     void emit_parallel_copy(const codegen::LirInst& inst);
     void emit_control_instruction(const codegen::LirInst& inst);
     // The stack map record of a GC point (a call or safepoint): every live

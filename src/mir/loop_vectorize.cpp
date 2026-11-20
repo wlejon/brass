@@ -3,6 +3,7 @@
 #include <brass/mir/builder.hpp>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <stdexcept>
 
@@ -15,6 +16,14 @@ static Value* build_const_step(Builder& b, Type t, int64_t val) {
         return b.build_iconst_i32(static_cast<int32_t>(val));
     }
     return b.build_iconst_i64(val);
+}
+
+static Type vec_type_for_lane(Type elem, uint32_t w) {
+    if (elem == Type::f32()) return (w == 8) ? Type::f32x8() : (w == 4) ? Type::f32x4() : Type::void_type();
+    if (elem == Type::i32()) return (w == 8) ? Type::i32x8() : (w == 4) ? Type::i32x4() : Type::void_type();
+    if (elem == Type::f64()) return (w == 4) ? Type::f64x4() : (w == 2) ? Type::f64x2() : Type::void_type();
+    if (elem == Type::i64()) return (w == 4) ? Type::i64x4() : (w == 2) ? Type::i64x2() : Type::void_type();
+    return Type::void_type();
 }
 
 } // namespace
@@ -43,6 +52,7 @@ bool vectorize_loop(
     // 1. Create Blocks
     // =========================================================================
     std::string base_name = std::string(header->name());
+    BasicBlock* vec_preheader = b.create_block(base_name + "_vec_preheader");
     BasicBlock* vec_hdr = b.create_block(base_name + "_vec_hdr");
     BasicBlock* vec_body = b.create_block(base_name + "_vec_body");
     BasicBlock* vec_exit = b.create_block(base_name + "_vec_exit");
@@ -51,12 +61,15 @@ bool vectorize_loop(
 
     auto& fn_blocks = fn.blocks();
     auto it = std::find(fn_blocks.begin(), fn_blocks.end(), header);
+    fn_blocks.insert(it, vec_preheader);
+    it = std::find(fn_blocks.begin(), fn_blocks.end(), header);
     fn_blocks.insert(it, vec_hdr);
     fn_blocks.push_back(vec_body);
     fn_blocks.push_back(vec_exit);
     fn_blocks.push_back(rem_hdr);
     fn_blocks.push_back(rem_body);
 
+    vec_preheader->set_parent(&fn);
     vec_hdr->set_parent(&fn);
     vec_body->set_parent(&fn);
     vec_exit->set_parent(&fn);
@@ -163,15 +176,18 @@ bool vectorize_loop(
         tc_guard = b.build_and(tc_guard, no_overlap);
     }
 
+    Instruction* vec_pre_term = nullptr;
     if (ph_term->opcode() == Opcode::br) {
         ph_term->parent()->remove_instruction(ph_term);
         b.position_at_end(preheader);
-        b.build_br_if(tc_guard, vec_hdr, vec_ph_args, vec_exit, vec_ph_args);
+        b.build_br_if(tc_guard, vec_preheader, {}, vec_exit, vec_ph_args);
+        b.position_at_end(vec_preheader);
+        vec_pre_term = b.build_br(vec_hdr, vec_ph_args);
     } else if (ph_term->opcode() == Opcode::br_if) {
         BasicBlock* vec_guard = b.create_block(base_name + "_vec_guard");
         auto& fn_blks = fn.blocks();
-        auto it_vh = std::find(fn_blks.begin(), fn_blks.end(), vec_hdr);
-        fn_blks.insert(it_vh, vec_guard);
+        auto it_vp = std::find(fn_blks.begin(), fn_blks.end(), vec_preheader);
+        fn_blks.insert(it_vp, vec_guard);
         vec_guard->set_parent(&fn);
 
         if (ph_term->true_target().block == header) {
@@ -185,7 +201,9 @@ bool vectorize_loop(
         for (Value* a : vec_ph_args) {
             guard_params.push_back(b.add_block_param(vec_guard, a->type()));
         }
-        b.build_br_if(tc_guard, vec_hdr, guard_params, vec_exit, guard_params);
+        b.build_br_if(tc_guard, vec_preheader, {}, vec_exit, guard_params);
+        b.position_at_end(vec_preheader);
+        vec_pre_term = b.build_br(vec_hdr, guard_params);
     }
 
     // =========================================================================
@@ -211,6 +229,26 @@ bool vectorize_loop(
     // =========================================================================
     b.position_at_end(vec_body);
     std::unordered_map<const Value*, Value*> vec_map;
+    Builder pre_b(*fn.parent());
+    pre_b.set_function(&fn);
+    std::unordered_set<const Value*> hoisted_scalars;
+    std::unordered_map<const Value*, std::unordered_map<uint8_t, Value*>> preheader_bcasts;
+
+    auto get_or_build_broadcast = [&](Type vtype, Value* sc) -> Value* {
+        bool sc_before_hdr = !sc->defining_block() ||
+                             (sc->defining_block() != vec_hdr && sc->defining_block() != vec_body);
+        if (vec_pre_term && sc_before_hdr && (hoisted_scalars.count(sc) || loop.is_loop_invariant(sc))) {
+            auto& inner = preheader_bcasts[sc];
+            uint8_t tk = static_cast<uint8_t>(vtype.kind());
+            auto it_bc = inner.find(tk);
+            if (it_bc != inner.end()) return it_bc->second;
+            pre_b.position_before(vec_pre_term);
+            Value* bc = pre_b.build_vbroadcast(vtype, sc);
+            inner[tk] = bc;
+            return bc;
+        }
+        return b.build_vbroadcast(vtype, sc);
+    };
 
     for (size_t i = 0; i < header->param_count(); ++i) {
         vec_map[header->param(i)] = vec_hdr_params[i];
@@ -236,18 +274,32 @@ bool vectorize_loop(
         if (inst == step_inst || (next_iv && inst->result() == next_iv)) {
             continue;
         }
-        // Constants are rematerialized: the scalar body does not dominate
-        // the vector body.
+        // Constants are rematerialized in vec_preheader (the scalar body does
+        // not dominate the vector body, and hoisting avoids per-iteration broadcasts).
         if (inst->opcode() == Opcode::iconst_i64) {
-            vec_map[inst->result()] = b.build_iconst_i64(inst->imm_i64());
+            Builder& cb = vec_pre_term ? pre_b : b;
+            if (vec_pre_term) cb.position_before(vec_pre_term);
+            Value* c = cb.build_iconst_i64(inst->imm_i64());
+            vec_map[inst->result()] = c;
+            if (vec_pre_term) hoisted_scalars.insert(c);
             continue;
         }
         if (inst->opcode() == Opcode::iconst_i32) {
-            vec_map[inst->result()] = b.build_iconst_i32(inst->imm_i32());
+            Builder& cb = vec_pre_term ? pre_b : b;
+            if (vec_pre_term) cb.position_before(vec_pre_term);
+            Value* c = cb.build_iconst_i32(inst->imm_i32());
+            vec_map[inst->result()] = c;
+            if (vec_pre_term) hoisted_scalars.insert(c);
             continue;
         }
         if (inst->opcode() == Opcode::fconst_f64) {
-            vec_map[inst->result()] = b.build_fconst_f64(inst->imm_f64());
+            Builder& cb = vec_pre_term ? pre_b : b;
+            if (vec_pre_term) cb.position_before(vec_pre_term);
+            Value* c = (inst->type() == Type::f32())
+                ? cb.build_fconst_f32(static_cast<float>(inst->imm_f64()))
+                : cb.build_fconst_f64(inst->imm_f64());
+            vec_map[inst->result()] = c;
+            if (vec_pre_term) hoisted_scalars.insert(c);
             continue;
         }
 
@@ -255,8 +307,8 @@ bool vectorize_loop(
             if (inst->opcode() == Opcode::fma_f32 || inst->opcode() == Opcode::fma_f64) {
                 auto to_vec = [&](Value* v) -> Value* {
                     Value* mv = vec_map[v];
-                    if (!mv) return b.build_vbroadcast(vli.vec_type, v);
-                    if (mv->type() == vli.elem_type) return b.build_vbroadcast(vli.vec_type, mv);
+                    if (!mv) return get_or_build_broadcast(vli.vec_type, v);
+                    if (mv->type() == vli.elem_type) return get_or_build_broadcast(vli.vec_type, mv);
                     return mv;
                 };
                 Value* va = to_vec(inst->operand(0));
@@ -264,7 +316,7 @@ bool vectorize_loop(
                 Value* acc_op = inst->operand(2);
                 Value* current_acc = vec_map[acc_op];
                 if (current_acc && current_acc->type() == vli.elem_type) {
-                    current_acc = b.build_vbroadcast(vli.vec_type, current_acc);
+                    current_acc = get_or_build_broadcast(vli.vec_type, current_acc);
                 }
                 next_vec_acc = b.build_vfma(va, vb, current_acc ? current_acc : vec_acc_param);
                 vec_map[inst->result()] = next_vec_acc;
@@ -280,13 +332,13 @@ bool vectorize_loop(
                 if (val_op->type() != vli.elem_type) {
                     throw std::logic_error("loop_vectorize: reduction operand has no vector form");
                 }
-                vec_val = b.build_vbroadcast(vli.vec_type, val_op);
+                vec_val = get_or_build_broadcast(vli.vec_type, val_op);
             } else if (vec_val->type() == vli.elem_type) {
-                vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
+                vec_val = get_or_build_broadcast(vli.vec_type, vec_val);
             }
             Value* current_acc = vec_map[acc_op];
             if (current_acc && current_acc->type() == vli.elem_type) {
-                current_acc = b.build_vbroadcast(vli.vec_type, current_acc);
+                current_acc = get_or_build_broadcast(vli.vec_type, current_acc);
             }
             next_vec_acc = b.build_vadd(current_acc ? current_acc : vec_acc_param, vec_val);
             vec_map[inst->result()] = next_vec_acc;
@@ -314,9 +366,9 @@ bool vectorize_loop(
                 if (val_to_store->type() != vli.elem_type) {
                     throw std::logic_error("loop_vectorize: stored value has no vector form");
                 }
-                vec_val = b.build_vbroadcast(vli.vec_type, val_to_store);
+                vec_val = get_or_build_broadcast(vli.vec_type, val_to_store);
             } else if (vec_val->type() == vli.elem_type) {
-                vec_val = b.build_vbroadcast(vli.vec_type, vec_val);
+                vec_val = get_or_build_broadcast(vli.vec_type, vec_val);
             }
             uint8_t shift_amount = (vli.elem_type.size_in_bytes() == 4) ? 2 : 3;
             Value* iv64 = widen_i64(vec_iv_param);
@@ -326,8 +378,9 @@ bool vectorize_loop(
             continue;
         }
 
-        // Only vectorize element-type arithmetic
-        if (inst->type() != vli.elem_type) {
+        // Only vectorize lane-width-compatible operations
+        Type out_vec_type = vec_type_for_lane(inst->type(), W);
+        if (!out_vec_type.is_vector() || inst->type().size_in_bytes() != vli.elem_type.size_in_bytes()) {
             continue;
         }
 
@@ -335,19 +388,25 @@ bool vectorize_loop(
         bool can_vectorize = true;
         for (size_t op_i = 0; op_i < inst->operand_count(); ++op_i) {
             Value* op = inst->operand(op_i);
+            Type op_elem = op ? op->type() : Type::void_type();
+            Type op_vec = vec_type_for_lane(op_elem, W);
+            if (!op_vec.is_vector() || op_elem.size_in_bytes() != vli.elem_type.size_in_bytes()) {
+                can_vectorize = false;
+                break;
+            }
             auto it_v = vec_map.find(op);
             if (it_v != vec_map.end()) {
                 Value* v_op = it_v->second;
-                if (v_op->type() == vli.vec_type) {
+                if (v_op->type() == op_vec) {
                     vec_operands.push_back(v_op);
-                } else if (v_op->type() == vli.elem_type) {
-                    vec_operands.push_back(b.build_vbroadcast(vli.vec_type, v_op));
+                } else if (v_op->type() == op_elem) {
+                    vec_operands.push_back(get_or_build_broadcast(op_vec, v_op));
                 } else {
                     can_vectorize = false;
                     break;
                 }
-            } else if (op->type() == vli.elem_type && loop.is_loop_invariant(op)) {
-                vec_operands.push_back(b.build_vbroadcast(vli.vec_type, op));
+            } else if (loop.is_loop_invariant(op)) {
+                vec_operands.push_back(get_or_build_broadcast(op_vec, op));
             } else {
                 can_vectorize = false;
                 break;
@@ -366,6 +425,25 @@ bool vectorize_loop(
             case Opcode::sdiv:
             case Opcode::udiv: v_res = b.build_vdiv(vec_operands[0], vec_operands[1]); break;
             case Opcode::neg: v_res = b.build_vneg(vec_operands[0]); break;
+            case Opcode::fmin_f32:
+            case Opcode::fmin_f64: v_res = b.build_vmin(vec_operands[0], vec_operands[1]); break;
+            case Opcode::fmax_f32:
+            case Opcode::fmax_f64: v_res = b.build_vmax(vec_operands[0], vec_operands[1]); break;
+            case Opcode::floor_f32:
+            case Opcode::floor_f64: v_res = b.build_vfloor(vec_operands[0]); break;
+            case Opcode::ceil_f32:
+            case Opcode::ceil_f64: v_res = b.build_vceil(vec_operands[0]); break;
+            case Opcode::round_f32:
+            case Opcode::round_f64: v_res = b.build_vround(vec_operands[0]); break;
+            case Opcode::fptosi_i32_f32:
+            case Opcode::sitofp_f32_i32: v_res = b.build_vconvert(out_vec_type, vec_operands[0]); break;
+            case Opcode::bitcast_f32_i32:
+            case Opcode::bitcast_i32_f32:
+            case Opcode::bitcast_f64_i64:
+            case Opcode::bitcast_i64_f64: v_res = b.build_vbitcast(out_vec_type, vec_operands[0]); break;
+            case Opcode::shl: v_res = b.build_vshl(vec_operands[0], vec_operands[1]); break;
+            case Opcode::lshr: v_res = b.build_vlshr(vec_operands[0], vec_operands[1]); break;
+            case Opcode::ashr: v_res = b.build_vashr(vec_operands[0], vec_operands[1]); break;
             case Opcode::and_: v_res = b.build_vand(vec_operands[0], vec_operands[1]); break;
             case Opcode::or_: v_res = b.build_vor(vec_operands[0], vec_operands[1]); break;
             case Opcode::xor_: v_res = b.build_vxor(vec_operands[0], vec_operands[1]); break;
@@ -551,7 +629,7 @@ bool vectorize_loop(
 
         bool is_used_outside = false;
         for (BasicBlock* bb : fn.blocks()) {
-            if (bb == vec_hdr || bb == vec_body || bb == vec_exit ||
+            if (bb == vec_preheader || bb == vec_hdr || bb == vec_body || bb == vec_exit ||
                 bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
                 continue;
             }
@@ -600,7 +678,7 @@ bool vectorize_loop(
         };
 
         for (BasicBlock* bb : fn.blocks()) {
-            if (bb == vec_hdr || bb == vec_body || bb == vec_exit ||
+            if (bb == vec_preheader || bb == vec_hdr || bb == vec_body || bb == vec_exit ||
                 bb == rem_hdr || bb == rem_body || loop.contains(bb)) {
                 continue;
             }

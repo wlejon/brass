@@ -381,6 +381,68 @@ public:
     void vec_dup_4s(FPR dst, GPR src);
     void vec_dup_2d(FPR dst, GPR src);
 
+    // Floating-point vector rounding (FRINTN/FRINTM/FRINTP/FRINTZ .4S/.2D).
+    void vec_frintn_4s(FPR dst, FPR src);
+    void vec_frintn_2d(FPR dst, FPR src);
+    void vec_frintm_4s(FPR dst, FPR src);
+    void vec_frintm_2d(FPR dst, FPR src);
+    void vec_frintp_4s(FPR dst, FPR src);
+    void vec_frintp_2d(FPR dst, FPR src);
+    void vec_frintz_4s(FPR dst, FPR src);
+    void vec_frintz_2d(FPR dst, FPR src);
+
+    // Vector conversions & narrowing/widening.
+    void vec_fcvtzs_4s(FPR dst, FPR src);
+    void vec_fcvtzs_2d(FPR dst, FPR src);
+    void vec_scvtf_4s(FPR dst, FPR src);
+    void vec_scvtf_2d(FPR dst, FPR src);
+    void vec_ucvtf_4s(FPR dst, FPR src);
+    void vec_ucvtf_2d(FPR dst, FPR src);
+    void vec_fcvtl_2d(FPR dst, FPR src);
+    void vec_fcvtl2_2d(FPR dst, FPR src);
+    void vec_fcvtn_2s(FPR dst, FPR src);
+    void vec_fcvtn2_4s(FPR dst, FPR src);
+    void vec_sxtl_2d(FPR dst, FPR src);
+    void vec_sxtl2_2d(FPR dst, FPR src);
+    void vec_xtn_2s(FPR dst, FPR src);
+    void vec_xtn2_4s(FPR dst, FPR src);
+    void vec_sqxtn_2s(FPR dst, FPR src);
+    void vec_sqxtn2_4s(FPR dst, FPR src);
+
+    // Vector register & immediate shifts.
+    void vec_ushl_4s(FPR dst, FPR src1, FPR src2);
+    void vec_ushl_2d(FPR dst, FPR src1, FPR src2);
+    void vec_sshl_4s(FPR dst, FPR src1, FPR src2);
+    void vec_sshl_2d(FPR dst, FPR src1, FPR src2);
+    void vec_shl_imm_4s(FPR dst, FPR src, uint8_t shift);
+    void vec_shl_imm_2d(FPR dst, FPR src, uint8_t shift);
+    void vec_ushr_imm_4s(FPR dst, FPR src, uint8_t shift);
+    void vec_ushr_imm_2d(FPR dst, FPR src, uint8_t shift);
+    void vec_sshr_imm_4s(FPR dst, FPR src, uint8_t shift);
+    void vec_sshr_imm_2d(FPR dst, FPR src, uint8_t shift);
+
+    // Vector compares, bitwise insert-if-false, clamping & lane helpers.
+    void vec_cmeq_4s(FPR dst, FPR src1, FPR src2);
+    void vec_cmeq_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmge_4s(FPR dst, FPR src1, FPR src2);
+    void vec_cmge_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmhi_4s(FPR dst, FPR src1, FPR src2);
+    void vec_cmhi_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmhs_4s(FPR dst, FPR src1, FPR src2);
+    void vec_cmhs_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fcmeq_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fcmeq_2d(FPR dst, FPR src1, FPR src2);
+    void vec_fcmge_4s(FPR dst, FPR src1, FPR src2);
+    void vec_fcmge_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmlt_zero_4s(FPR dst, FPR src);
+    void vec_cmlt_zero_2d(FPR dst, FPR src);
+    void vec_bif(FPR dst, FPR src1, FPR src2);
+    void vec_umin_4s(FPR dst, FPR src1, FPR src2);
+    void vec_umaxv_4s(FPR dst, FPR src);
+    void vec_dup_d1(FPR dst, FPR src);
+    void vec_ins_d1(FPR dst, FPR src);
+    void vec_movi_4s(FPR dst, uint8_t imm8, uint8_t lsl_bits = 0);
+
     // =========================================================================
     // System & Miscellaneous
     // =========================================================================

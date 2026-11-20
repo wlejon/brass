@@ -189,6 +189,10 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Pcmpeqd: return "pcmpeqd";
         case LirOpcode::Pslld: return "pslld";
         case LirOpcode::Psllq: return "psllq";
+        case LirOpcode::Psrld: return "psrld";
+        case LirOpcode::Psrlq: return "psrlq";
+        case LirOpcode::Psrad: return "psrad";
+        case LirOpcode::Psraq: return "psraq";
         case LirOpcode::Shufps: return "shufps";
         case LirOpcode::Shufpd: return "shufpd";
         case LirOpcode::Pshufd: return "pshufd";
@@ -257,6 +261,7 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Vpsrlvd: return "vpsrlvd";
         case LirOpcode::Vpsrlvq: return "vpsrlvq";
         case LirOpcode::Vpsravd: return "vpsravd";
+        case LirOpcode::Vpsravq: return "vpsravq";
         case LirOpcode::Vshufps: return "vshufps";
         case LirOpcode::Vblendvps: return "vblendvps";
         case LirOpcode::Vblendvpd: return "vblendvpd";

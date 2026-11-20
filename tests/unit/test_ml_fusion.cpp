@@ -490,5 +490,184 @@ TEST_CASE("ML Fusion - FusedSwiGLU Accuracy Across Wide Range & KernelJit::prepa
     CHECK(verify_module(mod, &diag));
 }
 
+TEST_CASE("ML Fusion - FusedSwiGLU NEON Vectorization, Remainder Lengths & Exp Accuracy") {
+    // 1. Verify KernelJit::prepare_module vectorizes build_swiglu cleanly with
+    // hoisted broadcasts in _vec_preheader and 4-wide vector ops in _vec_body.
+    {
+        Module mod("swiglu_vec_check");
+        MlFusionCompiler fusion;
+        Function* fn = fusion.build_swiglu(mod, "fused_swiglu");
+        KernelOptions kopts;
+        kopts.opt_level = 2;
+        kopts.enable_vectorize = true;
+        kopts.enable_fp_reassociation = true;
+        KernelJit::prepare_module(mod, kopts);
+
+        bool saw_vec_preheader = false;
+        bool saw_vec_body = false;
+        bool saw_vload = false;
+        bool saw_vround = false;
+        bool saw_vfma = false;
+        bool saw_vconvert = false;
+        bool saw_vshl = false;
+        bool saw_vbitcast = false;
+        bool saw_vstore = false;
+        bool saw_vbroadcast_in_preheader = false;
+        bool saw_vbroadcast_in_vec_body = false;
+
+        for (const BasicBlock* bb : fn->blocks()) {
+            const std::string_view bname = bb->name();
+            const bool in_pre = bname.find("_vec_preheader") != std::string_view::npos;
+            const bool in_body = bname.find("_vec_body") != std::string_view::npos;
+            if (in_pre) saw_vec_preheader = true;
+            if (in_body) saw_vec_body = true;
+            for (const Instruction* inst : *bb) {
+                if (in_pre && inst->opcode() == Opcode::vbroadcast) saw_vbroadcast_in_preheader = true;
+                if (in_body) {
+                    if (inst->opcode() == Opcode::vbroadcast) saw_vbroadcast_in_vec_body = true;
+                    if (inst->opcode() == Opcode::vload) saw_vload = true;
+                    if (inst->opcode() == Opcode::vround) saw_vround = true;
+                    if (inst->opcode() == Opcode::vfma) saw_vfma = true;
+                    if (inst->opcode() == Opcode::vconvert) saw_vconvert = true;
+                    if (inst->opcode() == Opcode::vshl) saw_vshl = true;
+                    if (inst->opcode() == Opcode::vbitcast) saw_vbitcast = true;
+                    if (inst->opcode() == Opcode::vstore) saw_vstore = true;
+                }
+            }
+        }
+        CHECK(saw_vec_preheader);
+        CHECK(saw_vec_body);
+        CHECK(saw_vbroadcast_in_preheader);
+        CHECK(!saw_vbroadcast_in_vec_body);
+        CHECK(saw_vload);
+        CHECK(saw_vround);
+        CHECK(saw_vfma);
+        CHECK(saw_vconvert);
+        CHECK(saw_vshl);
+        CHECK(saw_vbitcast);
+        CHECK(saw_vstore);
+    }
+
+    // 2. Compare Scalar JIT (enable_vectorize=false) vs Vectorized JIT (enable_vectorize=true)
+    KernelOptions scalar_opts;
+    scalar_opts.opt_level = 2;
+    scalar_opts.enable_vectorize = false;
+    scalar_opts.enable_slp = false;
+    MlFusionCompiler scalar_comp(KernelJit(scalar_opts, Target::host()));
+    KernelFunction scalar_kfn = scalar_comp.compile_swiglu();
+    REQUIRE(scalar_kfn.is_valid());
+    auto scalar_fn = scalar_kfn.as<FusedSwiGLUFn>();
+
+    KernelOptions vec_opts;
+    vec_opts.opt_level = 2;
+    vec_opts.enable_vectorize = true;
+    MlFusionCompiler vec_comp(KernelJit(vec_opts, Target::host()));
+    KernelFunction vec_kfn = vec_comp.compile_swiglu();
+    REQUIRE(vec_kfn.is_valid());
+    auto vec_fn = vec_kfn.as<FusedSwiGLUFn>();
+
+    auto ulp_dist = [](float a, float b) -> uint32_t {
+        if (a == b) return 0;
+        int32_t ia = 0, ib = 0;
+        std::memcpy(&ia, &a, 4);
+        std::memcpy(&ib, &b, 4);
+        if (ia < 0) ia = static_cast<int32_t>(0x80000000u) - ia;
+        if (ib < 0) ib = static_cast<int32_t>(0x80000000u) - ib;
+        return static_cast<uint32_t>(std::abs(static_cast<int64_t>(ia) - static_cast<int64_t>(ib)));
+    };
+
+    // Non-multiple-of-4 lengths with guard sentinels before/after output slice
+    for (uint64_t len : {uint64_t{0}, uint64_t{1}, uint64_t{3}, uint64_t{4}, uint64_t{5},
+                         uint64_t{15}, uint64_t{16}, uint64_t{17}, uint64_t{1025}}) {
+        std::vector<float> gate(len + 8), up(len + 8);
+        std::vector<float> out_scalar(len + 8, -999.0f), out_vec(len + 8, -999.0f);
+        for (uint64_t i = 0; i < len + 8; ++i) {
+            gate[i] = -12.0f + 0.025f * static_cast<float>(i % 960);
+            up[i] = 0.5f + 0.1f * static_cast<float>(i % 7);
+        }
+        scalar_fn(gate.data(), up.data(), out_scalar.data() + 4, len);
+        vec_fn(gate.data(), up.data(), out_vec.data() + 4, len);
+
+        for (uint64_t i = 0; i < 4; ++i) {
+            CHECK_EQ(out_vec[i], -999.0f);
+            CHECK_EQ(out_vec[4 + len + i], -999.0f);
+        }
+        for (uint64_t i = 0; i < len; ++i) {
+            float ref = (gate[i] / (1.0f + std::exp(-gate[i]))) * up[i];
+            CHECK(std::isfinite(out_vec[4 + i]));
+            CHECK(ulp_dist(out_vec[4 + i], out_scalar[4 + i]) <= 2u);
+            if (std::abs(ref) > 1e-6f) {
+                CHECK(std::abs(out_vec[4 + i] - ref) <= std::max(1e-6f, 2e-6f * std::abs(ref)));
+            }
+        }
+    }
+
+    // Dense accuracy sweep of vectorizable Cody-Waite expf(x) across [-87.3, 88.0]
+    {
+        Module mod("cody_waite_exp_vec");
+        Function* fn = mod.create_function("exp_loop", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i64()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* px = b.add_block_param(entry, Type::ptr());
+        Value* po = b.add_block_param(entry, Type::ptr());
+        Value* n = b.add_block_param(entry, Type::i64());
+        BasicBlock* hdr = b.create_block("hdr");
+        BasicBlock* body = b.create_block("body");
+        BasicBlock* exit_bb = b.create_block("exit");
+        b.position_at_end(entry);
+        b.build_br(hdr, {b.build_iconst_i64(0)});
+        fn->append_block(hdr);
+        Value* iv = b.add_block_param(hdr, Type::i64());
+        b.position_at_end(hdr);
+        b.build_br_if(b.build_slt(iv, n), body, exit_bb);
+        fn->append_block(body);
+        b.position_at_end(body);
+        Value* xi = b.build_load_indexed(Type::f32(), px, iv, 4, 0);
+        Value* x = b.build_fmin_f32(b.build_fmax_f32(xi, b.build_fconst_f32(-87.3f)), b.build_fconst_f32(88.0f));
+        Value* n_fp = b.build_round_f32(b.build_mul(x, b.build_fconst_f32(1.4426950408889634f)));
+        Value* r1 = b.build_fma_f32(n_fp, b.build_fconst_f32(-0.693145751953125f), x);
+        Value* r = b.build_fma_f32(n_fp, b.build_fconst_f32(-1.428606765330187e-6f), r1);
+        Value* p = b.build_fma_f32(r, b.build_fconst_f32(1.0f / 720.0f), b.build_fconst_f32(1.0f / 120.0f));
+        p = b.build_fma_f32(r, p, b.build_fconst_f32(1.0f / 24.0f));
+        p = b.build_fma_f32(r, p, b.build_fconst_f32(1.0f / 6.0f));
+        p = b.build_fma_f32(r, p, b.build_fconst_f32(0.5f));
+        p = b.build_fma_f32(r, p, b.build_fconst_f32(1.0f));
+        p = b.build_fma_f32(r, p, b.build_fconst_f32(1.0f));
+        Value* k = b.build_fptosi_i32_f32(n_fp);
+        Value* scale = b.build_bitcast_f32_i32(b.build_shl(b.build_add(k, b.build_iconst_i32(127)),
+                                                           b.build_iconst_i32(23)));
+        b.build_store_indexed(Type::f32(), po, iv, 4, 0, b.build_mul(scale, p));
+        b.build_br(hdr, {b.build_add(iv, b.build_iconst_i64(1))});
+        fn->append_block(exit_bb);
+        b.position_at_end(exit_bb);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        KernelOptions exp_opts;
+        exp_opts.opt_level = 2;
+        exp_opts.enable_vectorize = true;
+        KernelJit exp_jit(exp_opts, Target::host());
+        KernelFunction exp_kfn = exp_jit.compile(*fn);
+        REQUIRE(exp_kfn.is_valid());
+        auto exp_fn = exp_kfn.as<void(*)(const float*, float*, int64_t)>();
+
+        std::vector<float> xs;
+        for (int s = -873; s <= 880; ++s) {
+            xs.push_back(static_cast<float>(s) * 0.1f);
+        }
+        std::vector<float> ys(xs.size(), 0.0f);
+        exp_fn(xs.data(), ys.data(), static_cast<int64_t>(xs.size()));
+
+        uint32_t max_ulp = 0;
+        for (size_t idx = 0; idx < xs.size(); ++idx) {
+            float ref = std::exp(xs[idx]);
+            uint32_t u = ulp_dist(ys[idx], ref);
+            if (u > max_ulp) max_ulp = u;
+        }
+        CHECK(max_ulp < 4u);
+    }
+}
+
 
 

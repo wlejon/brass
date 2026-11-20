@@ -331,12 +331,59 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
             return true;
         }
 
+        case LirOpcode::Psrld:
+        case LirOpcode::Psrad: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto [lo, hi] = read_v(inst.uses[0]);
+            uint32_t raw_sh = static_cast<uint32_t>(inst.uses.back().imm_int);
+            auto a = extract_4x32(ctx, lo, hi);
+            std::array<BVNodeId, 4> r{};
+            if (raw_sh >= 32u) {
+                if (op == LirOpcode::Psrld) {
+                    BVNodeId z = ctx.make_const(0, 32);
+                    r = {z, z, z, z};
+                } else {
+                    BVNodeId sh_c = ctx.make_const(31, 32);
+                    for (size_t i = 0; i < 4; ++i) r[i] = ctx.make_binary(BVOp::AShr, a[i], sh_c, 32);
+                }
+            } else {
+                BVNodeId sh_c = ctx.make_const(raw_sh, 32);
+                BVOp sop = (op == LirOpcode::Psrld) ? BVOp::LShr : BVOp::AShr;
+                for (size_t i = 0; i < 4; ++i) r[i] = ctx.make_binary(sop, a[i], sh_c, 32);
+            }
+            auto [r_lo, r_hi] = pack_4x32(ctx, r);
+            write_v(inst.defs[0], r_lo, r_hi);
+            return true;
+        }
+
         case LirOpcode::Psllq: {
             if (inst.defs.empty() || inst.uses.size() < 2) return true;
             auto [lo, hi] = read_v(inst.uses[0]);
             uint32_t sh = static_cast<uint32_t>(inst.uses.back().imm_int) & 63u;
             BVNodeId sh_c = ctx.make_const(sh, 64);
             write_v(inst.defs[0], ctx.make_binary(BVOp::Shl, lo, sh_c, 64), ctx.make_binary(BVOp::Shl, hi, sh_c, 64));
+            return true;
+        }
+
+        case LirOpcode::Psrlq:
+        case LirOpcode::Psraq: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto [lo, hi] = read_v(inst.uses[0]);
+            uint32_t raw_sh = static_cast<uint32_t>(inst.uses.back().imm_int);
+            if (raw_sh >= 64u) {
+                if (op == LirOpcode::Psrlq) {
+                    BVNodeId z = ctx.make_const(0, 64);
+                    write_v(inst.defs[0], z, z);
+                } else {
+                    BVNodeId sh_c = ctx.make_const(63, 64);
+                    write_v(inst.defs[0], ctx.make_binary(BVOp::AShr, lo, sh_c, 64),
+                            ctx.make_binary(BVOp::AShr, hi, sh_c, 64));
+                }
+            } else {
+                BVNodeId sh_c = ctx.make_const(raw_sh, 64);
+                BVOp sop = (op == LirOpcode::Psrlq) ? BVOp::LShr : BVOp::AShr;
+                write_v(inst.defs[0], ctx.make_binary(sop, lo, sh_c, 64), ctx.make_binary(sop, hi, sh_c, 64));
+            }
             return true;
         }
 
@@ -363,15 +410,22 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
             return true;
         }
 
-        case LirOpcode::Vpsllvq: case LirOpcode::Vpsrlvq: {
+        case LirOpcode::Vpsllvq: case LirOpcode::Vpsrlvq: case LirOpcode::Vpsravq: {
             if (inst.defs.empty() || inst.uses.size() < 2) return true;
             auto [al, ah] = read_v(inst.uses[0]);
             auto [sl, sh] = read_v(inst.uses[1]);
-            BVOp sop = (op == LirOpcode::Vpsllvq) ? BVOp::Shl : BVOp::LShr;
-            BVNodeId c64 = ctx.make_const(64, 64), z64 = ctx.make_const(0, 64);
-            BVNodeId lo = ctx.make_ite(ctx.make_binary(BVOp::Uge, sl, c64, 1), z64, ctx.make_binary(sop, al, sl, 64));
-            BVNodeId hi = ctx.make_ite(ctx.make_binary(BVOp::Uge, sh, c64, 1), z64, ctx.make_binary(sop, ah, sh, 64));
-            write_v(inst.defs[0], lo, hi);
+            BVNodeId c64 = ctx.make_const(64, 64), c63 = ctx.make_const(63, 64), z64 = ctx.make_const(0, 64);
+            if (op == LirOpcode::Vpsravq) {
+                BVNodeId amt_lo = ctx.make_ite(ctx.make_binary(BVOp::Uge, sl, c64, 1), c63, sl);
+                BVNodeId amt_hi = ctx.make_ite(ctx.make_binary(BVOp::Uge, sh, c64, 1), c63, sh);
+                write_v(inst.defs[0], ctx.make_binary(BVOp::AShr, al, amt_lo, 64),
+                        ctx.make_binary(BVOp::AShr, ah, amt_hi, 64));
+            } else {
+                BVOp sop = (op == LirOpcode::Vpsllvq) ? BVOp::Shl : BVOp::LShr;
+                BVNodeId lo = ctx.make_ite(ctx.make_binary(BVOp::Uge, sl, c64, 1), z64, ctx.make_binary(sop, al, sl, 64));
+                BVNodeId hi = ctx.make_ite(ctx.make_binary(BVOp::Uge, sh, c64, 1), z64, ctx.make_binary(sop, ah, sh, 64));
+                write_v(inst.defs[0], lo, hi);
+            }
             return true;
         }
 

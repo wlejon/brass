@@ -1,6 +1,7 @@
 #include "bench_simd_math.hpp"
 #include "bench_utils.hpp"
 #include <brass/brass.hpp>
+#include <brass/codegen/ml_fusion.hpp>
 #include <vector>
 #include <cmath>
 #include <iostream>
@@ -421,6 +422,62 @@ void run_simd_math_benchmarks(std::vector<BenchmarkResult>& results, const Ratch
 
         auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_scalar, make_jit_runner);
         results.push_back(make_paired_result("simd_matmul4x4", "SIMD 4x4 MatMul (f32x4 vs scalar loop)", iters, paired));
+        BenchmarkReporter::print_row(results.back());
+    }
+
+    // 4. FusedSwiGLU Scalar MIR JIT vs NEON Vectorized MIR JIT Benchmark (L1-resident)
+    {
+        size_t iters = 3000;
+        uint64_t count = 1024;
+        std::vector<float> gate(count);
+        std::vector<float> up(count);
+        std::vector<float> out_scalar(count, 0.0f);
+        std::vector<float> out_vec(count, 0.0f);
+        for (uint64_t i = 0; i < count; ++i) {
+            gate[i] = -4.0f + 0.001f * static_cast<float>(i % 8000);
+            up[i] = 0.5f + 0.001f * static_cast<float>(i % 1000);
+        }
+
+        MlFusionCompiler bench_prep;
+        Module scalar_mod("bench_swiglu_scalar");
+        bench_prep.build_swiglu(scalar_mod, "fused_swiglu");
+        KernelOptions scalar_opts;
+        scalar_opts.opt_level = 2;
+        scalar_opts.enable_vectorize = false;
+        scalar_opts.enable_slp = false;
+        KernelJit::prepare_module(scalar_mod, scalar_opts);
+        auto scalar_jit = std::make_shared<JitExecutionEngine>();
+        scalar_jit->compile_and_load(scalar_mod);
+        auto scalar_fn = scalar_jit->get_function_ptr<FusedSwiGLUFn>("fused_swiglu");
+
+        auto run_scalar = [scalar_jit, scalar_fn, g = gate.data(), u = up.data(), o = out_scalar.data(), count, iters]() {
+            for (size_t iter = 0; iter < iters; ++iter) {
+                scalar_fn(g, u, o, count);
+                DoNotOptimize(o);
+            }
+        };
+
+        auto vec_mod = std::make_shared<Module>("bench_swiglu_vec");
+        bench_prep.build_swiglu(*vec_mod, "fused_swiglu");
+        KernelOptions vec_opts;
+        vec_opts.opt_level = 2;
+        vec_opts.enable_vectorize = true;
+        KernelJit::prepare_module(*vec_mod, vec_opts);
+
+        auto make_jit_runner = [&](size_t padding) {
+            auto jit = std::make_shared<JitExecutionEngine>();
+            jit->compile_and_load(*vec_mod, padding);
+            auto vec_fn = jit->get_function_ptr<FusedSwiGLUFn>("fused_swiglu");
+            return [jit, vec_fn, g = gate.data(), u = up.data(), o = out_vec.data(), count, iters]() {
+                for (size_t iter = 0; iter < iters; ++iter) {
+                    vec_fn(g, u, o, count);
+                    DoNotOptimize(o);
+                }
+            };
+        };
+
+        auto paired = measure_paired_multi_placement(DEFAULT_BENCH_REPETITIONS, run_scalar, make_jit_runner);
+        results.push_back(make_paired_result("fused_swiglu_neon", "FusedSwiGLU (NEON f32x4 vs scalar JIT)", iters, paired));
         BenchmarkReporter::print_row(results.back());
     }
 }

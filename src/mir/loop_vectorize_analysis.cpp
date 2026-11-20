@@ -23,6 +23,14 @@ static bool get_const_int(const Value* val, int64_t& out_val) {
     return false;
 }
 
+static Type vec_type_for_lane(Type elem, uint32_t w) {
+    if (elem == Type::f32()) return (w == 8) ? Type::f32x8() : (w == 4) ? Type::f32x4() : Type::void_type();
+    if (elem == Type::i32()) return (w == 8) ? Type::i32x8() : (w == 4) ? Type::i32x4() : Type::void_type();
+    if (elem == Type::f64()) return (w == 4) ? Type::f64x4() : (w == 2) ? Type::f64x2() : Type::void_type();
+    if (elem == Type::i64()) return (w == 4) ? Type::i64x4() : (w == 2) ? Type::i64x2() : Type::void_type();
+    return Type::void_type();
+}
+
 static bool is_supported_loop_arithmetic(Opcode op) {
     switch (op) {
         case Opcode::add:
@@ -36,6 +44,25 @@ static bool is_supported_loop_arithmetic(Opcode op) {
         case Opcode::vmin:
         case Opcode::vmax:
         case Opcode::vsqrt:
+        case Opcode::fmin_f32:
+        case Opcode::fmin_f64:
+        case Opcode::fmax_f32:
+        case Opcode::fmax_f64:
+        case Opcode::floor_f32:
+        case Opcode::floor_f64:
+        case Opcode::ceil_f32:
+        case Opcode::ceil_f64:
+        case Opcode::round_f32:
+        case Opcode::round_f64:
+        case Opcode::fptosi_i32_f32:
+        case Opcode::sitofp_f32_i32:
+        case Opcode::bitcast_f32_i32:
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i64_f64:
+        case Opcode::shl:
+        case Opcode::lshr:
+        case Opcode::ashr:
         case Opcode::and_:
         case Opcode::or_:
         case Opcode::xor_:
@@ -49,15 +76,20 @@ static bool is_supported_loop_arithmetic(Opcode op) {
 
 // Whether `op` on `elem` lanes has a vector lowering: x64 has no integer
 // vector division and no 64-bit lane multiply below AVX-512, and lowers
-// vector negate and not only at 128 bits; select, min, max and sqrt are not
-// vectorized by the transform.
-bool vector_op_lowerable(Opcode op, Type elem, Type vec) {
+// vector negate and not only at 128 bits. `round_*` is ties-away while `vround`
+// is ties-to-even, and `fmin_*`/`fmax_*` may handle signed-zero/NaN differently,
+// so both require `allow_fp`.
+bool vector_op_lowerable(Opcode op, Type elem, Type vec, bool allow_fp, const Instruction* inst) {
     switch (op) {
         case Opcode::add:
         case Opcode::sub:
         case Opcode::and_:
         case Opcode::or_:
         case Opcode::xor_:
+        case Opcode::bitcast_f32_i32:
+        case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f64_i64:
+        case Opcode::bitcast_i64_f64:
             return true;
         case Opcode::mul:
             return elem != Type::i64();
@@ -65,7 +97,30 @@ bool vector_op_lowerable(Opcode op, Type elem, Type vec) {
         case Opcode::fma_f64:
         case Opcode::sdiv:
         case Opcode::udiv:
+        case Opcode::floor_f32:
+        case Opcode::floor_f64:
+        case Opcode::ceil_f32:
+        case Opcode::ceil_f64:
             return elem.is_float();
+        case Opcode::fmin_f32:
+        case Opcode::fmin_f64:
+        case Opcode::fmax_f32:
+        case Opcode::fmax_f64:
+        case Opcode::round_f32:
+        case Opcode::round_f64:
+            return elem.is_float() && allow_fp;
+        case Opcode::fptosi_i32_f32:
+            return elem == Type::i32();
+        case Opcode::sitofp_f32_i32:
+            return elem == Type::f32();
+        case Opcode::shl:
+        case Opcode::lshr:
+        case Opcode::ashr: {
+            int64_t shift_amt = 0;
+            return elem.is_integer() && inst != nullptr && inst->operand_count() == 2 &&
+                   get_const_int(inst->operand(1), shift_amt) &&
+                   shift_amt >= 0 && shift_amt < static_cast<int64_t>(elem.size_in_bytes() * 8);
+        }
         case Opcode::neg:
         case Opcode::not_:
             return !vec.is_v256();
@@ -80,6 +135,13 @@ bool transform_vectorizes(Opcode op) {
         case Opcode::add: case Opcode::sub: case Opcode::mul: case Opcode::fma_f32: case Opcode::fma_f64:
         case Opcode::sdiv: case Opcode::udiv:
         case Opcode::neg: case Opcode::and_: case Opcode::or_: case Opcode::xor_: case Opcode::not_:
+        case Opcode::fmin_f32: case Opcode::fmin_f64: case Opcode::fmax_f32: case Opcode::fmax_f64:
+        case Opcode::floor_f32: case Opcode::floor_f64: case Opcode::ceil_f32: case Opcode::ceil_f64:
+        case Opcode::round_f32: case Opcode::round_f64:
+        case Opcode::fptosi_i32_f32: case Opcode::sitofp_f32_i32:
+        case Opcode::bitcast_f32_i32: case Opcode::bitcast_i32_f32:
+        case Opcode::bitcast_f64_i64: case Opcode::bitcast_i64_f64:
+        case Opcode::shl: case Opcode::lshr: case Opcode::ashr:
             return true;
         default:
             return false;
@@ -130,13 +192,18 @@ bool transform_is_closed(const LoopInfo& loop,const VectorizableLoopInfo& vli, c
         const Value* p = header->param(i);
         if (p != iv && p != acc) mapped.emplace(p, p->type());
     }
-    auto usable = [&](const Value* op) {
-        if (!op || op == iv || op == acc || op == acc_next) return false;
+    auto usable_as = [&](const Value* op, Type want_elem) {
+        if (!op || op == iv || op == acc || op == acc_next || op->type() != want_elem) return false;
+        Type want_vec = vec_type_for_lane(want_elem, vli.vector_width);
+        if (!want_vec.is_vector()) return false;
         auto it = mapped.find(op);
         if (it == mapped.end()) {
-            return loop.is_loop_invariant(op) && op->type() == vli.elem_type;
+            return loop.is_loop_invariant(op);
         }
-        return it->second == vli.vec_type || it->second == vli.elem_type;
+        return it->second == want_vec || it->second == want_elem;
+    };
+    auto usable = [&](const Value* op) {
+        return usable_as(op, vli.elem_type);
     };
 
     for (const Instruction* inst = body->head(); inst != nullptr; inst = inst->next()) {
@@ -168,12 +235,25 @@ bool transform_is_closed(const LoopInfo& loop,const VectorizableLoopInfo& vli, c
             if (!usable(inst->operand(2))) return false;
             continue;
         }
-        // Anything else stays scalar and unmapped unless it is element-typed
-        // arithmetic with usable operands.
-        if (!inst->produces_value() || inst->type() != vli.elem_type || !transform_vectorizes(op)) continue;
+        // Anything else stays scalar and unmapped unless it is lane-width
+        // compatible arithmetic with usable operands.
+        if (!inst->produces_value() ||
+            inst->type().size_in_bytes() != vli.elem_type.size_in_bytes() ||
+            !transform_vectorizes(op)) {
+            continue;
+        }
+        Type out_vec = vec_type_for_lane(inst->type(), vli.vector_width);
+        if (!out_vec.is_vector()) continue;
         bool ok = true;
-        for (size_t i = 0; i < inst->operand_count(); ++i) ok = ok && usable(inst->operand(i));
-        if (ok) mapped.emplace(inst->result(), vli.vec_type);
+        for (size_t i = 0; i < inst->operand_count(); ++i) {
+            const Value* opnd = inst->operand(i);
+            if (!opnd || opnd->type().size_in_bytes() != vli.elem_type.size_in_bytes() ||
+                !usable_as(opnd, opnd->type())) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) mapped.emplace(inst->result(), out_vec);
     }
     return true;
 }
@@ -487,13 +567,16 @@ bool analyze_vectorizable_loop(
         return false;
     }
 
-    // Every element-typed operation must have a vector form the transform
-    // emits and the backends lower for this vector type; one that does not
+    // Every lane-width operation must have a vector form the transform
+    // emits and the backends lower for this vector width; one that does not
     // would be left scalar or lowered to nothing.
     for (Instruction* inst = body_bb->head(); inst != nullptr; inst = inst->next()) {
         if (inst->is_terminator() || inst == primary_iv_step_inst || !inst->produces_value()) continue;
-        if (inst->type() != vli.elem_type || !is_supported_loop_arithmetic(inst->opcode())) continue;
-        if (!vector_op_lowerable(inst->opcode(), vli.elem_type, vli.vec_type)) return false;
+        if (!is_supported_loop_arithmetic(inst->opcode())) continue;
+        if (inst->type().size_in_bytes() != vli.elem_type.size_in_bytes()) continue;
+        Type out_vec = vec_type_for_lane(inst->type(), vli.vector_width);
+        if (!out_vec.is_vector()) continue;
+        if (!vector_op_lowerable(inst->opcode(), inst->type(), out_vec, allow_fp, inst)) return false;
     }
 
     // Ensure memory accesses do not alias without runtime checks or proven NoAlias

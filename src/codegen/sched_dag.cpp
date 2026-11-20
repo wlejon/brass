@@ -214,6 +214,11 @@ uint32_t get_instruction_latency(const LirInst& inst) {
             return has_mem_load ? 5 : 1;
         case LirOpcode::Pslld:
         case LirOpcode::Psllq:
+        case LirOpcode::Psrld:
+        case LirOpcode::Psrlq:
+        case LirOpcode::Psrad:
+        case LirOpcode::Psraq:
+        case LirOpcode::Vpsravq:
         case LirOpcode::Shufps:
         case LirOpcode::Shufpd:
         case LirOpcode::Pshufd:

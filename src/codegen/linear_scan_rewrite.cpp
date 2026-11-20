@@ -226,6 +226,10 @@ static bool is_xmm_opcode(LirOpcode op) {
         case LirOpcode::Pcmpeqd:
         case LirOpcode::Pslld:
         case LirOpcode::Psllq:
+        case LirOpcode::Psrld:
+        case LirOpcode::Psrlq:
+        case LirOpcode::Psrad:
+        case LirOpcode::Psraq:
         case LirOpcode::Shufps:
         case LirOpcode::Shufpd:
         case LirOpcode::Pshufd:
@@ -243,6 +247,32 @@ static bool is_xmm_opcode(LirOpcode op) {
         case LirOpcode::Vfmadd231pd:
         case LirOpcode::Vbroadcastss:
         case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vcmpps:
+        case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqd:
+        case LirOpcode::Vpcmpgtd:
+        case LirOpcode::Vpcmpeqq:
+        case LirOpcode::Vpcmpgtq:
+        case LirOpcode::Vpminsd:
+        case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvd:
+        case LirOpcode::Vpsllvq:
+        case LirOpcode::Vpsrlvd:
+        case LirOpcode::Vpsrlvq:
+        case LirOpcode::Vpsravd:
+        case LirOpcode::Vpsravq:
+        case LirOpcode::Vshufps:
+        case LirOpcode::Vblendvps:
+        case LirOpcode::Vblendvpd:
+        case LirOpcode::Vcvtdq2ps:
+        case LirOpcode::Vcvttps2dq:
+        case LirOpcode::Vcvtdq2pd:
+        case LirOpcode::Vcvttpd2dq:
+        case LirOpcode::Vcvtps2pd:
+        case LirOpcode::Vcvtpd2ps:
+        case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vroundps:
+        case LirOpcode::Vroundpd:
             return true;
         default:
             return false;
@@ -618,7 +648,8 @@ void LinearScanAllocator::rewrite_instructions() {
                                inst->opcode == LirOpcode::Cvttss2si || inst->opcode == LirOpcode::Cvttss2si32 ||
                                inst->opcode == LirOpcode::Movq_gx || inst->opcode == LirOpcode::Movd_gx ||
                                inst->opcode == LirOpcode::Pextrd || inst->opcode == LirOpcode::Pextrq ||
-                               inst->opcode == LirOpcode::Extractps) {
+                               inst->opcode == LirOpcode::Extractps ||
+                               inst->opcode == LirOpcode::Vmovmskps || inst->opcode == LirOpcode::Vmovmskpd) {
                         is_xmm_use = true;
                     } else {
                         is_xmm_use = is_xmm_opcode(inst->opcode) || sz == 16 || sz == 32;

@@ -356,6 +356,10 @@ enum class LirOpcode : uint16_t {
     Pcmpeqd,
     Pslld,
     Psllq,
+    Psrld,
+    Psrlq,
+    Psrad,
+    Psraq,
     Shufps,
     Shufpd,
     Pshufd,
@@ -429,6 +433,7 @@ enum class LirOpcode : uint16_t {
     Vpsrlvd,
     Vpsrlvq,
     Vpsravd,
+    Vpsravq,
     Vshufps,        // uses: a, b, imm
     Vblendvps,      // uses: b (lanes where the mask is clear), a, mask
     Vblendvpd,

@@ -761,6 +761,41 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
             emit_vec_instruction(inst);
             break;
 
+        case LirOpcode::Psrld:
+        case LirOpcode::Psrlq:
+        case LirOpcode::Psrad:
+        case LirOpcode::Psraq:
+        case LirOpcode::Vcmpps:
+        case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqd:
+        case LirOpcode::Vpcmpgtd:
+        case LirOpcode::Vpcmpeqq:
+        case LirOpcode::Vpcmpgtq:
+        case LirOpcode::Vpminsd:
+        case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvd:
+        case LirOpcode::Vpsllvq:
+        case LirOpcode::Vpsrlvd:
+        case LirOpcode::Vpsrlvq:
+        case LirOpcode::Vpsravd:
+        case LirOpcode::Vpsravq:
+        case LirOpcode::Vshufps:
+        case LirOpcode::Vblendvps:
+        case LirOpcode::Vblendvpd:
+        case LirOpcode::Vcvtdq2ps:
+        case LirOpcode::Vcvttps2dq:
+        case LirOpcode::Vcvtdq2pd:
+        case LirOpcode::Vcvttpd2dq:
+        case LirOpcode::Vcvtps2pd:
+        case LirOpcode::Vcvtpd2ps:
+        case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vroundps:
+        case LirOpcode::Vroundpd:
+        case LirOpcode::Vmovmskps:
+        case LirOpcode::Vmovmskpd:
+            emit_vec_lane_instruction(inst);
+            break;
+
         case LirOpcode::ParallelCopy:
             emit_parallel_copy(inst);
             break;

@@ -644,6 +644,10 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Pcmpeqd:
         case LirOpcode::Pslld:
         case LirOpcode::Psllq:
+        case LirOpcode::Psrld:
+        case LirOpcode::Psrlq:
+        case LirOpcode::Psrad:
+        case LirOpcode::Psraq:
         case LirOpcode::Shufps:
         case LirOpcode::Shufpd:
         case LirOpcode::Pshufd:
@@ -706,7 +710,8 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
         case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
         case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
-        case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq: case LirOpcode::Vpsravd:
+        case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq:
+        case LirOpcode::Vpsravd: case LirOpcode::Vpsravq:
         case LirOpcode::Vshufps: case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
         case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
         case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:

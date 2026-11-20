@@ -269,7 +269,7 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
         LoopOptOptions loop_opts;
         loop_opts.enable_sroa = options_.enable_sroa && (options_.opt_level >= 2);
         loop_opts.enable_bce = options_.enable_bce && (options_.opt_level >= 2);
-        loop_opts.enable_avx2 = options_.enable_avx2;
+        loop_opts.enable_avx2 = options_.enable_avx2 && target_.is_x64();
         loop_opts.enable_fma = options_.enable_fma;
         loop_opts.enable_fp_reassociation = options_.enable_fp_reassociation || mod.allow_fp_reassociation();
         loop_opts.enable_vectorize = options_.enable_vectorize;
@@ -313,6 +313,7 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
                 }
             }
         }
+        mod.set_has_loop_optimizations(true);
     }
 }
 

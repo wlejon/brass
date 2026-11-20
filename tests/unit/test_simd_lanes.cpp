@@ -60,7 +60,7 @@ std::array<uint8_t, 32> run_both(const Module& mod, std::string_view name, const
     interp.run(mod, name, {RuntimeValue::from_ptr(in.a), RuntimeValue::from_ptr(in.b),
                            RuntimeValue::from_ptr(in.c), RuntimeValue::from_ptr(o1)});
     std::memcpy(interp_out.data(), o1, 32);
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
     alignas(32) uint8_t o2[32] = {};
     codegen::JitExecutionEngine jit(Target::host());
     REQUIRE(jit.compile_and_load(mod));
@@ -254,5 +254,102 @@ TEST_CASE("SIMD lanes - conversions and roundings") {
                 CHECK_EQ(lane<float>(o, 2), want2);
             }
         }
+    }
+}
+
+TEST_CASE("SIMD lanes - edge cases (huge shifts, MSB select, NaN/Inf convert, const shift)") {
+    const float f_nan = std::numeric_limits<float>::quiet_NaN();
+    const float f_inf = std::numeric_limits<float>::infinity();
+    const double d_nan = std::numeric_limits<double>::quiet_NaN();
+    const double d_inf = std::numeric_limits<double>::infinity();
+
+    // 1. Variable shifts >= 255 / 256 / negative-as-unsigned
+    Buffers sh32, sh64;
+    fill(sh32.a, {int32_t{-1}, int32_t{-8}, int32_t{0x12345678}, int32_t{0x7fffffff},
+                  int32_t{-1}, static_cast<int32_t>(0x80000001u), int32_t{42}, int32_t{-42}});
+    fill(sh32.b, {int32_t{255}, int32_t{256}, int32_t{32}, int32_t{-1},
+                  int32_t{255}, int32_t{256}, int32_t{0}, int32_t{31}});
+    fill(sh64.a, {int64_t{-8}, int64_t{0x123456789abcdef0LL}, int64_t{-1}, INT64_MIN});
+    fill(sh64.b, {int64_t{255}, int64_t{256}, int64_t{64}, int64_t{-1}});
+    for (Opcode op : {Opcode::vshl, Opcode::vlshr, Opcode::vashr}) {
+        for (Type t : {Type::i32x4(), Type::i32x8(), Type::i64x2(), Type::i64x4()}) {
+            Module mod("edge_shifts");
+            std::string name = "edge_" + std::string(opcode_name(op)) + "_" + std::string(t.name());
+            build_lane_fn(mod, name, t, t, t, [&](Builder& b, Value* x, Value* s, Value*) {
+                return op == Opcode::vshl ? b.build_vshl(x, s) : op == Opcode::vlshr ? b.build_vlshr(x, s)
+                                                                                    : b.build_vashr(x, s);
+            });
+            run_both(mod, name, (t.element_type() == Type::i64()) ? sh64 : sh32, t.size_in_bytes());
+        }
+    }
+
+    // 2. Broadcast-constant immediate shift fast paths (0, 23, 31, 32 / 0, 35, 63, 64)
+    for (Opcode op : {Opcode::vshl, Opcode::vlshr, Opcode::vashr}) {
+        for (int s : {0, 23, 31, 32}) {
+            Module mod("imm_sh32");
+            std::string name = "imm32_" + std::string(opcode_name(op)) + "_" + std::to_string(s);
+            build_lane_fn(mod, name, Type::i32x4(), Type::i32x4(), Type::i32x4(), [&](Builder& b, Value* x, Value*, Value*) {
+                Value* sv = b.build_vbroadcast(Type::i32x4(), b.build_iconst_i32(s));
+                return op == Opcode::vshl ? b.build_vshl(x, sv) : op == Opcode::vlshr ? b.build_vlshr(x, sv)
+                                                                                      : b.build_vashr(x, sv);
+            });
+            run_both(mod, name, sh32, 16);
+        }
+        for (int64_t s : {int64_t{0}, int64_t{35}, int64_t{63}, int64_t{64}}) {
+            Module mod("imm_sh64");
+            std::string name = "imm64_" + std::string(opcode_name(op)) + "_" + std::to_string(s);
+            build_lane_fn(mod, name, Type::i64x2(), Type::i64x2(), Type::i64x2(), [&](Builder& b, Value* x, Value*, Value*) {
+                Value* sv = b.build_vbroadcast(Type::i64x2(), b.build_iconst_i64(s));
+                return op == Opcode::vshl ? b.build_vshl(x, sv) : op == Opcode::vlshr ? b.build_vlshr(x, sv)
+                                                                                      : b.build_vashr(x, sv);
+            });
+            run_both(mod, name, sh64, 16);
+        }
+    }
+
+    // 3. vselect MSB-only vs non-MSB masks
+    Buffers msb32, msb64;
+    fill(msb32.a, {INT32_MIN, int32_t{0x7fffffff}, int32_t{1}, static_cast<int32_t>(0x80000001u),
+                   int32_t{0x7fffffff}, INT32_MIN, int32_t{0}, int32_t{-1}});
+    fill(msb32.b, {10.f, 20.f, 30.f, 40.f, 50.f, 60.f, 70.f, 80.f});
+    fill(msb32.c, {-10.f, -20.f, -30.f, -40.f, -50.f, -60.f, -70.f, -80.f});
+    fill(msb64.a, {INT64_MIN, int64_t{0x7fffffffffffffffLL}, int64_t{1}, int64_t{-2}});
+    fill(msb64.b, {10.0, 20.0, 30.0, 40.0});
+    fill(msb64.c, {-10.0, -20.0, -30.0, -40.0});
+    for (Type t : {Type::f32x4(), Type::f32x8(), Type::f64x2(), Type::f64x4()}) {
+        Module mod("msb_sel");
+        std::string name = "msb_sel_" + std::string(t.name());
+        build_lane_fn(mod, name, t.vector_mask_type(), t, t,
+                      [](Builder& b, Value* m, Value* x, Value* y) { return b.build_vselect(m, x, y); });
+        run_both(mod, name, (t.element_type() == Type::f64()) ? msb64 : msb32, t.size_in_bytes());
+    }
+
+    // 4. vconvert NaN, +/-Inf, +/-2^31 boundary values
+    Buffers cvt_f32, cvt_f64;
+    fill(cvt_f32.a, {f_nan, f_inf, -f_inf, 2147483520.0f,
+                     2147483648.0f, -2147483648.0f, -2147483904.0f, -0.0f});
+    fill(cvt_f64.a, {d_nan, d_inf, -2147483648.5, 2147483647.9});
+    {
+        Module mod("edge_cvt32");
+        build_lane_fn(mod, "cvt_f32x8_i32x8", Type::f32x8(), Type::f32x8(), Type::f32x8(),
+                      [](Builder& b, Value* x, Value*, Value*) { return b.build_vconvert(Type::i32x8(), x); });
+        auto o = run_both(mod, "cvt_f32x8_i32x8", cvt_f32, 32);
+        CHECK_EQ(lane<int32_t>(o, 0), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 1), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 2), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 3), 2147483520);
+        CHECK_EQ(lane<int32_t>(o, 4), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 5), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 6), INT32_MIN);
+    }
+    {
+        Module mod("edge_cvt64");
+        build_lane_fn(mod, "cvt_f64x4_i32x4", Type::f64x4(), Type::f64x4(), Type::f64x4(),
+                      [](Builder& b, Value* x, Value*, Value*) { return b.build_vconvert(Type::i32x4(), x); });
+        auto o = run_both(mod, "cvt_f64x4_i32x4", cvt_f64, 16);
+        CHECK_EQ(lane<int32_t>(o, 0), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 1), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 2), INT32_MIN);
+        CHECK_EQ(lane<int32_t>(o, 3), 2147483647);
     }
 }
