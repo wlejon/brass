@@ -197,7 +197,9 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
                 BVNodeId sn = is_213 ? a1[i] : a2[i];
                 BVNodeId sm = is_213 ? a2[i] : a3[i];
                 BVNodeId sa = is_213 ? a3[i] : a1[i];
-                r[i] = ctx.make_ternary(BVOp::FFma, sn, sm, sa, 32);
+                r[i] = (env.shared_mem != nullptr)
+                    ? env.shared_mem->eval_uninterpreted_call(ctx, "fmaf", {sn, sm, sa}, Type::f32())
+                    : ctx.make_ternary(BVOp::FFma, sn, sm, sa, 32);
             }
             auto [r_lo, r_hi] = pack_4x32(ctx, r);
             write_v(inst.defs[0], r_lo, r_hi);
@@ -260,8 +262,14 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
             auto [l1, h1] = read_v(op1);
             auto [l2, h2] = read_v(inst.uses[s2_idx]);
             auto [l3, h3] = read_v(inst.uses[s3_idx]);
-            BVNodeId lo = ctx.make_ternary(BVOp::FFma, is_213 ? l1 : l2, is_213 ? l2 : l3, is_213 ? l3 : l1, 64);
-            BVNodeId hi = ctx.make_ternary(BVOp::FFma, is_213 ? h1 : h2, is_213 ? h2 : h3, is_213 ? h3 : h1, 64);
+            BVNodeId sn0 = is_213 ? l1 : l2, sm0 = is_213 ? l2 : l3, sa0 = is_213 ? l3 : l1;
+            BVNodeId sn1 = is_213 ? h1 : h2, sm1 = is_213 ? h2 : h3, sa1 = is_213 ? h3 : h1;
+            BVNodeId lo = (env.shared_mem != nullptr)
+                ? env.shared_mem->eval_uninterpreted_call(ctx, "fma", {sn0, sm0, sa0}, Type::f64())
+                : ctx.make_ternary(BVOp::FFma, sn0, sm0, sa0, 64);
+            BVNodeId hi = (env.shared_mem != nullptr)
+                ? env.shared_mem->eval_uninterpreted_call(ctx, "fma", {sn1, sm1, sa1}, Type::f64())
+                : ctx.make_ternary(BVOp::FFma, sn1, sm1, sa1, 64);
             write_v(inst.defs[0], lo, hi);
             return true;
         }
@@ -433,10 +441,19 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
         case LirOpcode::Vroundps: {
             if (inst.defs.empty() || inst.uses.size() < 2) return true;
             auto [lo, hi] = read_v(inst.uses[0]);
-            BVOp rop = static_cast<BVOp>(round_bv_op_for_mode(static_cast<int>(inst.uses[1].imm_int)));
+            int mode = static_cast<int>(inst.uses[1].imm_int);
             auto a = extract_4x32(ctx, lo, hi);
             std::array<BVNodeId, 4> r{};
-            for (size_t i = 0; i < 4; ++i) r[i] = ctx.make_unary(rop, a[i], 32);
+            if (env.shared_mem != nullptr && (mode & 3) == 3) {
+                for (size_t i = 0; i < 4; ++i) {
+                    r[i] = env.shared_mem->eval_uninterpreted_call(ctx, "truncf", {a[i]}, Type::f32());
+                }
+            } else {
+                BVOp rop = (env.shared_mem != nullptr && (mode & 3) == 0)
+                    ? BVOp::FRound
+                    : static_cast<BVOp>(round_bv_op_for_mode(mode));
+                for (size_t i = 0; i < 4; ++i) r[i] = ctx.make_unary(rop, a[i], 32);
+            }
             auto [r_lo, r_hi] = pack_4x32(ctx, r);
             write_v(inst.defs[0], r_lo, r_hi);
             return true;
@@ -445,8 +462,17 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
         case LirOpcode::Vroundpd: {
             if (inst.defs.empty() || inst.uses.size() < 2) return true;
             auto [lo, hi] = read_v(inst.uses[0]);
-            BVOp rop = static_cast<BVOp>(round_bv_op_for_mode(static_cast<int>(inst.uses[1].imm_int)));
-            write_v(inst.defs[0], ctx.make_unary(rop, lo, 64), ctx.make_unary(rop, hi, 64));
+            int mode = static_cast<int>(inst.uses[1].imm_int);
+            if (env.shared_mem != nullptr && (mode & 3) == 3) {
+                write_v(inst.defs[0],
+                        env.shared_mem->eval_uninterpreted_call(ctx, "trunc", {lo}, Type::f64()),
+                        env.shared_mem->eval_uninterpreted_call(ctx, "trunc", {hi}, Type::f64()));
+            } else {
+                BVOp rop = (env.shared_mem != nullptr && (mode & 3) == 0)
+                    ? BVOp::FRound
+                    : static_cast<BVOp>(round_bv_op_for_mode(mode));
+                write_v(inst.defs[0], ctx.make_unary(rop, lo, 64), ctx.make_unary(rop, hi, 64));
+            }
             return true;
         }
 
@@ -466,7 +492,10 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
             auto [lo, hi] = read_v(inst.uses[0]);
             auto a = extract_4x32(ctx, lo, hi);
             std::array<BVNodeId, 4> r{};
-            for (size_t i = 0; i < 4; ++i) r[i] = fp_to_si_clamped32(ctx, a[i], 32);
+            for (size_t i = 0; i < 4; ++i) {
+                r[i] = (env.shared_mem != nullptr) ? ctx.make_unary(BVOp::FpToSi, a[i], 32)
+                                                   : fp_to_si_clamped32(ctx, a[i], 32);
+            }
             auto [r_lo, r_hi] = pack_4x32(ctx, r);
             write_v(inst.defs[0], r_lo, r_hi);
             return true;
@@ -503,10 +532,11 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
             if (inst.defs.empty() || inst.uses.size() < 2) return true;
             auto [l0, h0] = read_v(inst.uses[0]);
             auto [l1, h1] = read_v(inst.uses[1]);
-            std::array<BVNodeId, 4> r{
-                fp_to_si_clamped32(ctx, l0, 64), fp_to_si_clamped32(ctx, h0, 64),
-                fp_to_si_clamped32(ctx, l1, 64), fp_to_si_clamped32(ctx, h1, 64)
+            auto cvt = [&](BVNodeId f) {
+                return (env.shared_mem != nullptr) ? ctx.make_unary(BVOp::FpToSi, f, 32)
+                                                   : fp_to_si_clamped32(ctx, f, 64);
             };
+            std::array<BVNodeId, 4> r{cvt(l0), cvt(h0), cvt(l1), cvt(h1)};
             auto [r_lo, r_hi] = pack_4x32(ctx, r);
             write_v(inst.defs[0], r_lo, r_hi);
             return true;

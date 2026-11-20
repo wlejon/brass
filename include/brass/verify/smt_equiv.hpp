@@ -149,6 +149,22 @@ EquivResult verify_x64_isel(
     const EquivOptions& opts = {}
 );
 
+/// Prove symbolic equivalence between a MIR function and its lowered AArch64 LIR
+/// function (prior to register allocation), checking return value, traps, and
+/// observable memory stores under calling convention `lir_fn.calling_conv`.
+EquivResult verify_arm64_isel_equivalence(
+    const Function& mir_fn,
+    const codegen::LirFunction& lir_fn,
+    const EquivOptions& opts = {}
+);
+
+/// Lower `mir_fn` through AArch64ISel (`Target::aarch64_macos()`, Apple AAPCS64)
+/// and prove MIR == AArch64 LIR equivalence symbolically.
+EquivResult verify_arm64_isel(
+    const Function& mir_fn,
+    const EquivOptions& opts = {}
+);
+
 inline LirEquivResult verify_lir_equivalence(
     const codegen::LirBlock& before,
     const codegen::LirBlock& after,
@@ -174,6 +190,8 @@ using verify::verify_x64_lir_function_equivalence;
 using verify::verify_x64_peephole;
 using verify::verify_x64_isel_equivalence;
 using verify::verify_x64_isel;
+using verify::verify_arm64_isel_equivalence;
+using verify::verify_arm64_isel;
 } // namespace brass
 
 #include <brass/verify/gpu_equiv.hpp>

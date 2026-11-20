@@ -222,7 +222,25 @@ BVNodeId eval_mem_addr(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, co
     return addr;
 }
 
+bool is_arm64_local_stack_addr(const BVContext& ctx, BVNodeId addr, uint64_t local_base, uint64_t canon_fp) {
+    if (local_base == 0 && canon_fp == 0) return false;
+    if (addr < ctx.nodes().size() && ctx.nodes()[addr].op == BVOp::Const) {
+        uint64_t c = ctx.nodes()[addr].imm;
+        if (local_base != 0 && c >= local_base && c < (local_base + 0x1000000ULL)) return true;
+        if (canon_fp != 0 && c >= (canon_fp - 0x1000000ULL) && c < (canon_fp + 0x1000000ULL)) return true;
+        return false;
+    }
+    if (addr < ctx.nodes().size() &&
+        (ctx.nodes()[addr].op == BVOp::Add || ctx.nodes()[addr].op == BVOp::Sub)) {
+        return is_arm64_local_stack_addr(ctx, ctx.nodes()[addr].a, local_base, canon_fp);
+    }
+    return false;
+}
+
 BVNodeId read_mem_sized(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, BVNodeId addr, uint32_t sz) {
+    if (env.shared_mem != nullptr && st.shared_stores != nullptr) {
+        return read_memory_bv(ctx, *env.shared_mem, *st.shared_stores, addr, sz);
+    }
     uint32_t bits = sz * 8;
     BVNodeId val = env.read_init_mem(ctx, addr, sz);
     for (const auto& s : st.mem_stores) {
@@ -300,7 +318,13 @@ void arm64_write_op(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st,
             if (w > sz * 8) val = ctx.make_extract(val, sz * 8 - 1, 0);
             else if (w < sz * 8) val = ctx.make_zext(val, sz * 8 - w);
         }
-        st.mem_stores.push_back({addr, sz, val});
+        if (st.shared_stores != nullptr) {
+            BVNodeId g = (st.path_cond != 0) ? st.path_cond : ctx.make_const(1, 1);
+            st.shared_stores->push_back(
+                {g, addr, sz, val, is_arm64_local_stack_addr(ctx, addr, st.local_slot_base, st.canonical_fp)});
+        } else {
+            st.mem_stores.push_back({addr, sz, val});
+        }
     }
 }
 
@@ -354,23 +378,21 @@ void arm64_write_vec128(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st,
     } else if (dst.is_mem()) {
         BVNodeId addr_lo = eval_mem_addr(ctx, env, st, dst.mem_val);
         BVNodeId addr_hi = ctx.make_binary(BVOp::Add, addr_lo, ctx.make_const(8, 64), 64);
-        st.mem_stores.push_back({addr_lo, 8, lo});
-        st.mem_stores.push_back({addr_hi, 8, hi});
+        if (st.shared_stores != nullptr) {
+            BVNodeId g = (st.path_cond != 0) ? st.path_cond : ctx.make_const(1, 1);
+            bool is_local = is_arm64_local_stack_addr(ctx, addr_lo, st.local_slot_base, st.canonical_fp);
+            st.shared_stores->push_back({g, addr_lo, 8, lo, is_local});
+            st.shared_stores->push_back({g, addr_hi, 8, hi, is_local});
+        } else {
+            st.mem_stores.push_back({addr_lo, 8, lo});
+            st.mem_stores.push_back({addr_hi, 8, hi});
+        }
     } else {
         arm64_write_op(ctx, env, st, dst, lo);
     }
 }
 
-Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64InitEnv& env) {
-    Arm64ExecState st;
-    for (int i = 0; i < 32; ++i) {
-        st.gpr[i] = env.gpr_init[i];
-        st.vec_lo[i] = env.vec_lo_init[i];
-        st.vec_hi[i] = env.vec_hi_init[i];
-    }
-    st.nzcv = env.nzcv_init;
-    st.cond_branch_taken = ctx.make_const(0, 1);
-
+bool execute_arm64_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const LirInst& inst) {
     auto eval_mem_addr_fn = [&](const LirMem& m) { return eval_mem_addr(ctx, env, st, m); };
     auto read_mem_sized_fn = [&](BVNodeId addr, uint32_t sz) { return read_mem_sized(ctx, env, st, addr, sz); };
     auto read_op = [&](const LirOperand& op, uint32_t w) { return arm64_read_op(ctx, env, st, op, w); };
@@ -382,21 +404,17 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
     #define eval_mem_addr eval_mem_addr_fn
     #define read_mem_sized read_mem_sized_fn
 
-    for (const auto& inst_ptr : block.instructions) {
-        if (!inst_ptr) continue;
-        const LirInst& inst = *inst_ptr;
-        LirOpcode op = inst.opcode;
+    LirOpcode op = inst.opcode;
+    auto get_bin_lhs = [&](uint32_t w) -> BVNodeId {
+        if (inst.uses.size() >= 2) return read_op(inst.uses[0], w);
+        if (!inst.defs.empty()) return read_op(inst.defs[0], w);
+        return ctx.make_const(0, w);
+    };
+    auto get_bin_rhs = [&](uint32_t w) -> BVNodeId {
+        return !inst.uses.empty() ? read_op(inst.uses.back(), w) : ctx.make_const(0, w);
+    };
 
-        auto get_bin_lhs = [&](uint32_t w) -> BVNodeId {
-            if (inst.uses.size() >= 2) return read_op(inst.uses[0], w);
-            if (!inst.defs.empty()) return read_op(inst.defs[0], w);
-            return ctx.make_const(0, w);
-        };
-        auto get_bin_rhs = [&](uint32_t w) -> BVNodeId {
-            return !inst.uses.empty() ? read_op(inst.uses.back(), w) : ctx.make_const(0, w);
-        };
-
-        switch (op) {
+    switch (op) {
             case LirOpcode::Nop: case LirOpcode::KeepAlive:
             case LirOpcode::Cdq: case LirOpcode::Cqo: case LirOpcode::Ret:
                 break;
@@ -645,8 +663,13 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                     write_op(inst.defs[0], ctx.make_binary(BVOp::Add, fp,
                         ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(u.spill_slot) * 8), 64), 64));
                 } else if (u.is_local_slot()) {
-                    write_op(inst.defs[0], ctx.make_binary(BVOp::Add, fp,
-                        ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(u.local_offset)), 64), 64));
+                    if (st.local_slot_base != 0) {
+                        write_op(inst.defs[0], ctx.make_const(
+                            st.local_slot_base + static_cast<uint64_t>(static_cast<int64_t>(u.local_offset)), 64));
+                    } else {
+                        write_op(inst.defs[0], ctx.make_binary(BVOp::Add, fp,
+                            ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(u.local_offset)), 64), 64));
+                    }
                 }
                 break;
             }
@@ -774,7 +797,11 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                 BVNodeId sn = is_213 ? src1 : src2;
                 BVNodeId sm = is_213 ? src2 : src3;
                 BVNodeId sa = is_213 ? src3 : src1;
-                write_op(inst.defs[0], ctx.make_ternary(BVOp::FFma, sn, sm, sa, w));
+                BVNodeId fma_res = (env.shared_mem != nullptr)
+                    ? env.shared_mem->eval_uninterpreted_call(
+                          ctx, is_double ? "fma" : "fmaf", {sn, sm, sa}, is_double ? Type::f64() : Type::f32())
+                    : ctx.make_ternary(BVOp::FFma, sn, sm, sa, w);
+                write_op(inst.defs[0], fma_res);
                 break;
             }
 
@@ -805,11 +832,26 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                 st.error_msg = "Unsupported AArch64 LIR opcode in equivalence checker: " + std::string(to_string(op));
                 #undef eval_mem_addr
                 #undef read_mem_sized
-                return st;
-        }
+                return false;
     }
     #undef eval_mem_addr
     #undef read_mem_sized
+    return true;
+}
+
+Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64InitEnv& env) {
+    Arm64ExecState st;
+    for (int i = 0; i < 32; ++i) {
+        st.gpr[i] = env.gpr_init[i];
+        st.vec_lo[i] = env.vec_lo_init[i];
+        st.vec_hi[i] = env.vec_hi_init[i];
+    }
+    st.nzcv = env.nzcv_init;
+    st.cond_branch_taken = ctx.make_const(0, 1);
+    for (const auto& inst_ptr : block.instructions) {
+        if (!inst_ptr) continue;
+        if (!execute_arm64_inst(ctx, env, st, *inst_ptr)) return st;
+    }
     return st;
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <brass/verify/arm64_lir_equiv.hpp>
 #include "bv_solver.hpp"
+#include "mir_sym_exec.hpp"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,6 +23,7 @@ struct Arm64InitEnv {
     std::unordered_map<int32_t, BVNodeId> spill_init, spill_hi_init, local_init, local_hi_init;
     struct MemReadEntry { BVNodeId addr; uint32_t size; BVNodeId val; };
     std::vector<MemReadEntry> mem_reads;
+    InitMemEnv* shared_mem = nullptr;
 
     void init_defaults(BVContext& ctx);
     BVNodeId get_vreg_init(BVContext& ctx, uint32_t id);
@@ -41,6 +43,10 @@ struct Arm64ExecState {
     std::unordered_map<uint32_t, BVNodeId> vregs, vreg_hi;
     std::unordered_map<int32_t, BVNodeId> spill_slots, spill_slots_hi, local_slots, local_slots_hi;
     std::vector<Arm64SymMemStore> mem_stores;
+    std::vector<SymStore>* shared_stores = nullptr;
+    BVNodeId path_cond = 0;
+    uint64_t local_slot_base = 0;
+    uint64_t canonical_fp = 0;
     bool has_cond_branch = false, has_uncond_branch = false, uses_vec128 = false;
     BVNodeId cond_branch_taken = 0;
     uint32_t cond_target_label = UINT32_MAX, uncond_target_label = UINT32_MAX;
@@ -51,6 +57,7 @@ void arm64_write_op(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const
 std::pair<BVNodeId, BVNodeId> arm64_read_vec128(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const codegen::LirOperand& op);
 void arm64_write_vec128(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const codegen::LirOperand& dst, BVNodeId lo, BVNodeId hi);
 bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const codegen::LirInst& inst);
+bool execute_arm64_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const codegen::LirInst& inst);
 
 BVNodeId eval_arm64_cond(BVContext& ctx, const Arm64NzcvState& f, aarch64::Condition cond);
 void set_arm64_adds_flags(BVContext& ctx, Arm64NzcvState& f, BVNodeId a, BVNodeId b, BVNodeId res, uint32_t w);

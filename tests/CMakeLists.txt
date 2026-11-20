@@ -320,6 +320,7 @@ add_executable(brass_unit_tests
     unit/test_frontend_gpu_hardening.cpp
     unit/test_smt_equiv.cpp
     unit/test_x64_isel_equiv.cpp
+    unit/test_arm64_isel_equiv.cpp
     unit/test_msl_target.cpp
     unit/test_bv_solver_oracle.cpp
     unit/test_verifier_certs.cpp
@@ -357,6 +358,11 @@ add_executable(test_x64_isel_equiv unit/test_x64_isel_equiv.cpp)
 target_compile_definitions(test_x64_isel_equiv PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_x64_isel_equiv PRIVATE brass)
 target_include_directories(test_x64_isel_equiv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_arm64_isel_equiv unit/test_arm64_isel_equiv.cpp)
+target_compile_definitions(test_arm64_isel_equiv PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_arm64_isel_equiv PRIVATE brass)
+target_include_directories(test_arm64_isel_equiv PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 add_executable(test_msl_target unit/test_msl_target.cpp)
 target_compile_definitions(test_msl_target PRIVATE BRASS_STANDALONE_TEST)
