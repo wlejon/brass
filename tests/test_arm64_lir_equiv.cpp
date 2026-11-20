@@ -3,6 +3,7 @@
 #include <brass/verify/arm64_lir_equiv.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/codegen/peephole.hpp>
+#include <brass/codegen/ml_fusion.hpp>
 
 using namespace brass;
 using namespace brass::verify;
@@ -440,6 +441,199 @@ TEST_CASE("ARM64 LIR Equiv - PeepholeOptimizer & AArch64ISel End-to-End Verifica
     run_linear_scan_regalloc(*lir_fn, liveness, cc);
     LirEquivResult isel_peep_res = verify_arm64_peephole(*lir_fn);
     CHECK_EQ(isel_peep_res.status, EquivStatus::ProvenEquivalent);
+}
+
+TEST_CASE("ARM64 LIR Equiv - 128-Bit VRegs, 16-Byte Spills, Scalar/Vector FMA, and NEON Ops") {
+    // 1. 128-bit virtual register upper 64 bits + 16-byte spill slot forwarding
+    {
+        VReg vr0{0, RegClass::XMM, 16};
+        VReg vr1{1, RegClass::XMM, 16};
+        VReg vr2{2, RegClass::XMM, 16};
+
+        LirBlock b1(0, "vreg128_before");
+        auto st = std::make_unique<LirInst>(LirOpcode::Movaps);
+        st->add_def(LirOperand::slot(0, 16));
+        st->add_use(LirOperand::vreg(vr0, 16));
+        b1.append_inst(std::move(st));
+        auto ld = std::make_unique<LirInst>(LirOpcode::Movaps);
+        ld->add_def(LirOperand::vreg(vr1, 16));
+        ld->add_use(LirOperand::slot(0, 16));
+        b1.append_inst(std::move(ld));
+
+        LirBlock b2(0, "vreg128_after");
+        auto st2 = std::make_unique<LirInst>(LirOpcode::Movaps);
+        st2->add_def(LirOperand::slot(0, 16));
+        st2->add_use(LirOperand::vreg(vr0, 16));
+        b2.append_inst(std::move(st2));
+        auto mv = std::make_unique<LirInst>(LirOpcode::Movaps);
+        mv->add_def(LirOperand::vreg(vr1, 16));
+        mv->add_use(LirOperand::vreg(vr0, 16));
+        b2.append_inst(std::move(mv));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(b1, b2).status, EquivStatus::ProvenEquivalent);
+
+        // Seeded bug: replacing 128-bit Movaps with 64-bit Movsd zeroes vreg1.hi!
+        LirBlock buggy_64(0, "vreg128_trunc_bug");
+        auto st3 = std::make_unique<LirInst>(LirOpcode::Movaps);
+        st3->add_def(LirOperand::slot(0, 16));
+        st3->add_use(LirOperand::vreg(vr0, 16));
+        buggy_64.append_inst(std::move(st3));
+        auto mv64 = std::make_unique<LirInst>(LirOpcode::Movsd);
+        mv64->add_def(LirOperand::vreg(vr1, 8));
+        mv64->add_use(LirOperand::vreg(vr0, 8));
+        buggy_64.append_inst(std::move(mv64));
+
+        LirEquivResult r_hi = verify_arm64_lir_block_equivalence(b1, buggy_64);
+        CHECK_EQ(r_hi.status, EquivStatus::Counterexample);
+        CHECK(r_hi.diagnostic.find("vreg1.hi") != std::string::npos);
+
+        // Self-move on 128-bit vreg vs Paddd check
+        LirBlock b_self(0, "vreg128_self");
+        auto self_m = std::make_unique<LirInst>(LirOpcode::Movaps);
+        self_m->add_def(LirOperand::vreg(vr2, 16));
+        self_m->add_use(LirOperand::vreg(vr2, 16));
+        b_self.append_inst(std::move(self_m));
+        LirBlock b_empty(0, "vreg128_empty");
+        CHECK_EQ(verify_arm64_lir_block_equivalence(b_self, b_empty).status, EquivStatus::ProvenEquivalent);
+    }
+
+    // 2. Scalar and vector FMA equivalence + mul+add counterexample
+    {
+        // Scalar: Vfmadd213sd(a, b, c) == Vfmadd231sd(c, a, b)
+        LirBlock f213(0, "fma_213_sd");
+        auto i1 = std::make_unique<LirInst>(LirOpcode::Vfmadd213sd);
+        i1->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        i1->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        i1->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 8));
+        i1->add_use(LirOperand::preg_aarch64_fpr(FPR::V2, 8));
+        f213.append_inst(std::move(i1));
+
+        LirBlock f231(0, "fma_231_sd");
+        auto i2 = std::make_unique<LirInst>(LirOpcode::Vfmadd231sd);
+        i2->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        i2->add_use(LirOperand::preg_aarch64_fpr(FPR::V2, 8));
+        i2->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        i2->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 8));
+        f231.append_inst(std::move(i2));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(f213, f231, 0, reg_mask(FPR::V0), false).status,
+                 EquivStatus::ProvenEquivalent);
+
+        // Unfused mul + add is NOT bit-exact equivalent to FMA!
+        LirBlock unfused(0, "mul_add_sd");
+        auto m = std::make_unique<LirInst>(LirOpcode::Mulsd);
+        m->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        m->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        m->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 8));
+        unfused.append_inst(std::move(m));
+        auto a = std::make_unique<LirInst>(LirOpcode::Addsd);
+        a->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        a->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 8));
+        a->add_use(LirOperand::preg_aarch64_fpr(FPR::V2, 8));
+        unfused.append_inst(std::move(a));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(f213, unfused, 0, reg_mask(FPR::V0), false).status,
+                 EquivStatus::Counterexample);
+
+        // Vector 4x32 FMA: Vfmadd213ps(a, b, c) == Vfmadd231ps(c, a, b), != Mulps+Addps
+        LirBlock vf213(0, "vfma_213_ps");
+        auto vi1 = std::make_unique<LirInst>(LirOpcode::Vfmadd213ps);
+        vi1->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        vi1->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        vi1->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 16));
+        vi1->add_use(LirOperand::preg_aarch64_fpr(FPR::V2, 16));
+        vf213.append_inst(std::move(vi1));
+
+        LirBlock vf231(0, "vfma_231_ps");
+        auto vi2 = std::make_unique<LirInst>(LirOpcode::Vfmadd231ps);
+        vi2->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        vi2->add_use(LirOperand::preg_aarch64_fpr(FPR::V2, 16));
+        vi2->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        vi2->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 16));
+        vf231.append_inst(std::move(vi2));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(vf213, vf231, 0, reg_mask(FPR::V0), false).status,
+                 EquivStatus::ProvenEquivalent);
+
+        LirBlock vunfused(0, "vmul_add_ps");
+        auto vm = std::make_unique<LirInst>(LirOpcode::Mulps);
+        vm->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        vm->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        vm->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 16));
+        vunfused.append_inst(std::move(vm));
+        auto va = std::make_unique<LirInst>(LirOpcode::Addps);
+        va->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        va->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        va->add_use(LirOperand::preg_aarch64_fpr(FPR::V2, 16));
+        vunfused.append_inst(std::move(va));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(vf213, vunfused, 0, reg_mask(FPR::V0), false).status,
+                 EquivStatus::Counterexample);
+    }
+
+    // 3. NEON broadcast / shuffle / extract / fneg / int lane equivalence
+    {
+        // Pshufd(v1, v1, 0x00) == Vbroadcastss(v1)
+        LirBlock b1(0, "bcast_ss");
+        auto bc = std::make_unique<LirInst>(LirOpcode::Vbroadcastss);
+        bc->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        bc->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 4));
+        b1.append_inst(std::move(bc));
+
+        LirBlock b2(0, "pshufd_0");
+        auto sh = std::make_unique<LirInst>(LirOpcode::Pshufd);
+        sh->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        sh->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 16));
+        sh->add_use(LirOperand::imm(0, 1));
+        b2.append_inst(std::move(sh));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(b1, b2, 0, reg_mask(FPR::V0), false).status,
+                 EquivStatus::ProvenEquivalent);
+
+        // Pextrd(w0, v0, #2) == Pshufd(v1, v0, #2); Movd_gx(w0, v1)
+        LirBlock ex1(0, "pextrd_2");
+        auto pe = std::make_unique<LirInst>(LirOpcode::Pextrd);
+        pe->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 4));
+        pe->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        pe->add_use(LirOperand::imm(2, 1));
+        ex1.append_inst(std::move(pe));
+
+        LirBlock ex2(0, "shuf_movd_2");
+        auto sh2 = std::make_unique<LirInst>(LirOpcode::Pshufd);
+        sh2->add_def(LirOperand::preg_aarch64_fpr(FPR::V1, 16));
+        sh2->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        sh2->add_use(LirOperand::imm(2, 1));
+        ex2.append_inst(std::move(sh2));
+        auto md = std::make_unique<LirInst>(LirOpcode::Movd_gx);
+        md->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 4));
+        md->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 4));
+        ex2.append_inst(std::move(md));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(ex1, ex2, reg_mask(GPR::X0), 0, false).status,
+                 EquivStatus::ProvenEquivalent);
+    }
+
+    // 4. End-to-end real ML fusion & NEON kernels via verify_arm64_peephole (must NOT return Unsupported!)
+    {
+        Module mod("arm64_vec_real_peep");
+        MlFusionCompiler fusion;
+        Function* adaln = fusion.build_adaln_modulate(mod, true, "fused_adaln_modulate_gated");
+        KernelOptions kopts;
+        kopts.opt_level = 2;
+        kopts.enable_avx2 = false;
+        kopts.enable_vectorize = true;
+        KernelJit::prepare_module(mod, kopts);
+
+        CallingConvention cc = CallingConvention::apple_aapcs64();
+        auto lir_adaln = lower_to_aarch64_lir(*adaln, Target::aarch64_macos(), cc);
+        REQUIRE(lir_adaln != nullptr);
+        LivenessAnalysis live_a(*lir_adaln);
+        live_a.run();
+        run_linear_scan_regalloc(*lir_adaln, live_a, cc);
+
+        LirEquivResult peep_adaln = verify_arm64_peephole(*lir_adaln);
+        CHECK_EQ(peep_adaln.status, EquivStatus::ProvenEquivalent);
+    }
 }
 
 #ifdef BRASS_STANDALONE_TEST

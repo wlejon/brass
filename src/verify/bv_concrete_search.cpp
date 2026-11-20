@@ -119,7 +119,8 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
         if (vars[vi].is_float) { has_fp_var = true; break; }
     }
     if (has_fp_var) {
-        const double fp_interesting[] = {0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0,
+        const double fp_interesting[] = {0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2.0, -2.0,
+                                         2.5, -2.5, 3.5, -3.5,
                                          std::numeric_limits<double>::infinity(),
                                          -std::numeric_limits<double>::infinity(),
                                          std::numeric_limits<double>::quiet_NaN()};
@@ -132,6 +133,9 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
             std::memcpy(&b32, &f, 4);
             cands.push_back(b32);
         }
+        // Values near 1.0 where fused multiply-add differs from separate mul + add
+        cands.push_back(0x3f800800ULL);         // float32: 1.0f + 2^-13
+        cands.push_back(0x3ff0000002000000ULL); // float64: 1.0 + 2^-27
     }
 
     for (BVNodeId id : cone_nodes) {
@@ -168,6 +172,23 @@ bool try_concrete_search(const BVContext& ctx, BVNodeId bad_cond, std::vector<ui
                 if (check(model)) return true;
             }
             model[vi] = orig;
+        }
+    }
+
+    if (has_fp_var) {
+        const uint64_t fp_bgs[] = {0xBF800000ULL, 0xBFF0000000000000ULL, 0x3F800000ULL, 0x3FF0000000000000ULL};
+        const uint64_t fp_probes[] = {0x3f800800ULL, 0x3ff0000002000000ULL, 0x3fc00000ULL, 0x3ff8000000000000ULL};
+        for (uint64_t p : fp_probes) {
+            for (uint64_t bg : fp_bgs) {
+                for (uint32_t vi : cone_vars) model[vi] = p & width_mask(vars[vi].width);
+                for (size_t i = 0; i < sweep_vars; ++i) {
+                    uint32_t vi = cone_vars[i];
+                    uint64_t orig = model[vi];
+                    model[vi] = bg & width_mask(vars[vi].width);
+                    if (check(model)) return true;
+                    model[vi] = orig;
+                }
+            }
         }
     }
 
@@ -378,6 +399,10 @@ uint64_t BVContext::eval_node_concrete(const BVNode& n, uint64_t va, uint64_t vb
         case BVOp::FFloor: return (w == 32) ? f32_to_bits(std::floor(bits_to_f32(va))) : f64_to_bits(std::floor(bits_to_f64(va)));
         case BVOp::FCeil:  return (w == 32) ? f32_to_bits(std::ceil(bits_to_f32(va)))  : f64_to_bits(std::ceil(bits_to_f64(va)));
         case BVOp::FRound: return (w == 32) ? f32_to_bits(std::round(bits_to_f32(va))) : f64_to_bits(std::round(bits_to_f64(va)));
+        case BVOp::FTrunc: return (w == 32) ? f32_to_bits(std::trunc(bits_to_f32(va))) : f64_to_bits(std::trunc(bits_to_f64(va)));
+        case BVOp::FNearbyInt: return (w == 32) ? f32_to_bits(std::nearbyint(bits_to_f32(va))) : f64_to_bits(std::nearbyint(bits_to_f64(va)));
+        case BVOp::FFma:   return (w == 32) ? f32_to_bits(std::fma(bits_to_f32(va), bits_to_f32(vb), bits_to_f32(vc)))
+                                            : f64_to_bits(std::fma(bits_to_f64(va), bits_to_f64(vb), bits_to_f64(vc)));
         case BVOp::FMin:   return eval_ieee_fmin_fmax(va, vb, w, false);
         case BVOp::FMax:   return eval_ieee_fmin_fmax(va, vb, w, true);
         case BVOp::FEq:    return (aw == 32) ? (bits_to_f32(va) == bits_to_f32(vb) ? 1 : 0) : (bits_to_f64(va) == bits_to_f64(vb) ? 1 : 0);

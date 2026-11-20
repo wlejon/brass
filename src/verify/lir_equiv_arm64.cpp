@@ -74,23 +74,43 @@ LirEquivResult verify_arm64_lir_block_equivalence(
             }
         }
     }
-    for (const auto& [vid, b_v] : st_b.vregs) {
-        if (auto it = st_a.vregs.find(vid); it != st_a.vregs.end()) {
-            checks.push_back({"vreg" + std::to_string(vid), b_v, it->second, ctx.make_binary(BVOp::Ne, b_v, it->second, 1)});
+    auto check_u32_map = [&](const auto& map_b, const auto& map_a, const char* prefix, auto get_init) {
+        std::vector<uint32_t> keys;
+        for (const auto& [k, _] : map_b) keys.push_back(k);
+        for (const auto& [k, _] : map_a) if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
+        for (uint32_t k : keys) {
+            BVNodeId bv = map_b.count(k) ? map_b.at(k) : get_init(k);
+            BVNodeId av = map_a.count(k) ? map_a.at(k) : get_init(k);
+            checks.push_back({prefix + std::to_string(k), bv, av, ctx.make_binary(BVOp::Ne, bv, av, 1)});
+        }
+    };
+    check_u32_map(st_b.vregs, st_a.vregs, "vreg", [&](uint32_t id) { return env.get_vreg_init(ctx, id); });
+    {
+        std::vector<uint32_t> hi_keys;
+        for (const auto& [k, _] : st_b.vreg_hi) hi_keys.push_back(k);
+        for (const auto& [k, _] : st_a.vreg_hi) {
+            if (std::find(hi_keys.begin(), hi_keys.end(), k) == hi_keys.end()) hi_keys.push_back(k);
+        }
+        for (uint32_t k : hi_keys) {
+            BVNodeId bv = st_b.vreg_hi.count(k) ? st_b.vreg_hi.at(k) : env.get_vreg_hi_init(ctx, k);
+            BVNodeId av = st_a.vreg_hi.count(k) ? st_a.vreg_hi.at(k) : env.get_vreg_hi_init(ctx, k);
+            checks.push_back({"vreg" + std::to_string(k) + ".hi", bv, av, ctx.make_binary(BVOp::Ne, bv, av, 1)});
         }
     }
 
-    auto check_slot_map = [&](const auto& map_b, const auto& map_a, const char* prefix, auto get_init) {
+    auto check_slot_map = [&](const auto& map_b, const auto& map_a, const char* prefix, const char* suffix, auto get_init) {
         std::vector<int32_t> keys;
         for (const auto& [k, _] : map_b) keys.push_back(k);
         for (const auto& [k, _] : map_a) if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
         for (int32_t k : keys) {
             BVNodeId bv = map_b.count(k) ? map_b.at(k) : get_init(k), av = map_a.count(k) ? map_a.at(k) : get_init(k);
-            checks.push_back({std::string(prefix) + "[" + std::to_string(k) + "]", bv, av, ctx.make_binary(BVOp::Ne, bv, av, 1)});
+            checks.push_back({std::string(prefix) + "[" + std::to_string(k) + "]" + suffix, bv, av, ctx.make_binary(BVOp::Ne, bv, av, 1)});
         }
     };
-    check_slot_map(st_b.spill_slots, st_a.spill_slots, "spill", [&](int32_t s) { return env.get_spill_init(ctx, s); });
-    check_slot_map(st_b.local_slots, st_a.local_slots, "local", [&](int32_t o) { return env.get_local_init(ctx, o); });
+    check_slot_map(st_b.spill_slots, st_a.spill_slots, "spill", "", [&](int32_t s) { return env.get_spill_init(ctx, s); });
+    check_slot_map(st_b.spill_slots_hi, st_a.spill_slots_hi, "spill", ".hi", [&](int32_t s) { return env.get_spill_hi_init(ctx, s); });
+    check_slot_map(st_b.local_slots, st_a.local_slots, "local", "", [&](int32_t o) { return env.get_local_init(ctx, o); });
+    check_slot_map(st_b.local_slots_hi, st_a.local_slots_hi, "local", ".hi", [&](int32_t o) { return env.get_local_hi_init(ctx, o); });
 
     auto eval_final_mem = [&](const std::vector<Arm64SymMemStore>& stores, BVNodeId addr, uint32_t sz) {
         BVNodeId v = env.read_init_mem(ctx, addr, sz);
@@ -148,14 +168,27 @@ LirEquivResult verify_arm64_lir_function_equivalence(
     if (before.blocks.size() != after.blocks.size()) {
         return {EquivStatus::Counterexample, "Block count mismatch between before and after LirFunction"};
     }
+    LirEquivResult first_unknown{EquivStatus::ProvenEquivalent, {}};
+    LirEquivResult first_unsupported{EquivStatus::ProvenEquivalent, {}};
+    bool has_unknown = false;
+    bool has_unsupported = false;
     for (size_t i = 0; i < before.blocks.size(); ++i) {
         uint32_t fallthrough_id = (i + 1 < before.blocks.size()) ? before.blocks[i + 1]->id : UINT32_MAX;
         bool check_flags = are_flags_live_out_of_block(before, i) || are_flags_live_out_of_block(after, i);
         LirEquivResult blk_res = verify_arm64_lir_block_equivalence(
             *before.blocks[i], *after.blocks[i],
             kArm64AllGprsMask, kArm64AllVecMask, check_flags, fallthrough_id);
-        if (blk_res.status == EquivStatus::Counterexample || blk_res.status == EquivStatus::Unknown) return blk_res;
+        if (blk_res.status == EquivStatus::Counterexample) return blk_res;
+        if (blk_res.status == EquivStatus::Unknown && !has_unknown) {
+            has_unknown = true;
+            first_unknown = blk_res;
+        } else if (blk_res.status == EquivStatus::Unsupported && !has_unsupported) {
+            has_unsupported = true;
+            first_unsupported = blk_res;
+        }
     }
+    if (has_unknown) return first_unknown;
+    if (has_unsupported) return first_unsupported;
     return {EquivStatus::ProvenEquivalent, {}};
 }
 

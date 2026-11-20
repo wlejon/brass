@@ -131,7 +131,9 @@ void BVContext::compute_fp_interval(const BVNode& n, BVInterval& iv) const noexc
 
         case BVOp::FFloor:
         case BVOp::FCeil:
-        case BVOp::FRound: {
+        case BVOp::FRound:
+        case BVOp::FTrunc:
+        case BVOp::FNearbyInt: {
             const auto& ia = intervals_[n.a];
             iv.fp_non_nan = ia.fp_non_nan;
             iv.fp_non_inf = ia.fp_non_inf;
@@ -199,11 +201,14 @@ BVNodeId BVContext::simplify_fp_unary(BVOp op, BVNodeId a, uint32_t w) {
 
         case BVOp::FFloor:
         case BVOp::FCeil:
-        case BVOp::FRound: {
+        case BVOp::FRound:
+        case BVOp::FTrunc:
+        case BVOp::FNearbyInt: {
             if (ia.fp_exact_int && ia.fp_non_neg_zero && ia.fp_non_nan && ia.fp_non_inf) {
                 return a;
             }
-            if (na.op == BVOp::FFloor || na.op == BVOp::FCeil || na.op == BVOp::FRound) {
+            if (na.op == BVOp::FFloor || na.op == BVOp::FCeil || na.op == BVOp::FRound ||
+                na.op == BVOp::FTrunc || na.op == BVOp::FNearbyInt) {
                 return a;
             }
             break;

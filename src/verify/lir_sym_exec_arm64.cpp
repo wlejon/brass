@@ -30,15 +30,33 @@ BVNodeId Arm64InitEnv::get_vreg_init(BVContext& ctx, uint32_t id) {
     return it->second;
 }
 
+BVNodeId Arm64InitEnv::get_vreg_hi_init(BVContext& ctx, uint32_t id) {
+    auto [it, ins] = vreg_hi_init.try_emplace(id, 0);
+    if (ins) it->second = ctx.make_var("vreg" + std::to_string(id) + "_hi", 64, true);
+    return it->second;
+}
+
 BVNodeId Arm64InitEnv::get_spill_init(BVContext& ctx, int32_t slot) {
     auto [it, ins] = spill_init.try_emplace(slot, 0);
     if (ins) it->second = ctx.make_var("spill_" + std::to_string(slot), 64, false);
     return it->second;
 }
 
+BVNodeId Arm64InitEnv::get_spill_hi_init(BVContext& ctx, int32_t slot) {
+    auto [it, ins] = spill_hi_init.try_emplace(slot, 0);
+    if (ins) it->second = ctx.make_var("spill_" + std::to_string(slot) + "_hi", 64, true);
+    return it->second;
+}
+
 BVNodeId Arm64InitEnv::get_local_init(BVContext& ctx, int32_t off) {
     auto [it, ins] = local_init.try_emplace(off, 0);
     if (ins) it->second = ctx.make_var("local_" + std::to_string(off), 64, false);
+    return it->second;
+}
+
+BVNodeId Arm64InitEnv::get_local_hi_init(BVContext& ctx, int32_t off) {
+    auto [it, ins] = local_hi_init.try_emplace(off, 0);
+    if (ins) it->second = ctx.make_var("local_" + std::to_string(off) + "_hi", 64, true);
     return it->second;
 }
 
@@ -159,6 +177,190 @@ void set_arm64_fcmp_flags(BVContext& ctx, Arm64NzcvState& f, BVNodeId a, BVNodeI
     f.from_subs = false;
 }
 
+namespace {
+
+BVNodeId read_reg64(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const LirOperand& op) {
+    if (op.is_preg()) {
+        if (op.preg_val.is_gpr()) {
+            if (op.preg_val.code == static_cast<uint8_t>(aarch64::GPR::XZR)) return ctx.make_const(0, 64);
+            if (op.preg_val.code < 32) return st.gpr[op.preg_val.code];
+        }
+        if (op.preg_val.is_xmm() && op.preg_val.code < 32) return st.vec_lo[op.preg_val.code];
+    }
+    if (op.is_vreg()) {
+        auto [it, ins] = st.vregs.try_emplace(op.vreg_val.id, 0);
+        if (ins) it->second = env.get_vreg_init(ctx, op.vreg_val.id);
+        return it->second;
+    }
+    return ctx.make_const(0, 64);
+}
+
+BVNodeId eval_mem_addr(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, const LirMem& m) {
+    BVNodeId addr = ctx.make_const(0, 64);
+    bool has_base_or_idx = false;
+    if (m.base_preg.is_valid()) {
+        addr = read_reg64(ctx, env, st, LirOperand::preg(m.base_preg, 8));
+        has_base_or_idx = true;
+    } else if (m.base_vreg.is_valid()) {
+        addr = read_reg64(ctx, env, st, LirOperand::vreg(m.base_vreg, 8));
+        has_base_or_idx = true;
+    }
+    if (m.index_preg.is_valid() || m.index_vreg.is_valid()) {
+        BVNodeId idx = m.index_preg.is_valid()
+            ? read_reg64(ctx, env, st, LirOperand::preg(m.index_preg, 8))
+            : read_reg64(ctx, env, st, LirOperand::vreg(m.index_vreg, 8));
+        uint8_t sc = x64::scale_value(m.scale);
+        if (sc > 1) idx = ctx.make_binary(BVOp::Mul, idx, ctx.make_const(sc, 64), 64);
+        addr = has_base_or_idx ? ctx.make_binary(BVOp::Add, addr, idx, 64) : idx;
+        has_base_or_idx = true;
+    }
+    if (!has_base_or_idx) addr = st.gpr[static_cast<uint8_t>(aarch64::GPR::FP)];
+    if (m.disp != 0) {
+        addr = ctx.make_binary(BVOp::Add, addr,
+            ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(m.disp)), 64), 64);
+    }
+    return addr;
+}
+
+BVNodeId read_mem_sized(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, BVNodeId addr, uint32_t sz) {
+    uint32_t bits = sz * 8;
+    BVNodeId val = env.read_init_mem(ctx, addr, sz);
+    for (const auto& s : st.mem_stores) {
+        if (s.size == sz) {
+            BVNodeId hit = ctx.make_binary(BVOp::Eq, addr, s.addr, 1);
+            BVNodeId sv = ctx.width(s.val) == bits ? s.val : ctx.make_extract(s.val, bits - 1, 0);
+            val = ctx.make_ite(hit, sv, val);
+        } else if (s.size > sz && s.addr == addr) {
+            val = ctx.make_extract(s.val, bits - 1, 0);
+        }
+    }
+    return val;
+}
+
+} // namespace
+
+BVNodeId arm64_read_op(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st,
+                       const LirOperand& op, uint32_t width_bits) {
+    BVNodeId raw64 = 0;
+    if (op.is_preg() || op.is_vreg()) {
+        raw64 = read_reg64(ctx, env, st, op);
+    } else if (op.is_imm_int()) {
+        return ctx.make_const(static_cast<uint64_t>(op.imm_int), width_bits);
+    } else if (op.is_imm_float()) {
+        if (width_bits == 32) {
+            float f = static_cast<float>(op.imm_float);
+            uint32_t u32 = 0;
+            std::memcpy(&u32, &f, 4);
+            return ctx.make_const(u32, 32);
+        }
+        uint64_t u = 0;
+        std::memcpy(&u, &op.imm_float, 8);
+        return ctx.make_const(u, width_bits);
+    } else if (op.is_spill_slot()) {
+        auto it = st.spill_slots.find(op.spill_slot);
+        raw64 = (it != st.spill_slots.end()) ? it->second : env.get_spill_init(ctx, op.spill_slot);
+    } else if (op.is_local_slot()) {
+        auto it = st.local_slots.find(op.local_offset);
+        raw64 = (it != st.local_slots.end()) ? it->second : env.get_local_init(ctx, op.local_offset);
+    } else if (op.is_mem()) {
+        return read_mem_sized(ctx, env, st, eval_mem_addr(ctx, env, st, op.mem_val), width_bits / 8);
+    } else {
+        return ctx.make_const(0, width_bits);
+    }
+    return (width_bits == 64) ? raw64 : ctx.make_extract(raw64, width_bits - 1, 0);
+}
+
+void arm64_write_op(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st,
+                    const LirOperand& dst, BVNodeId val) {
+    uint32_t w = ctx.width(val);
+    BVNodeId v64 = (w == 64) ? val : ctx.make_zext(val, 64 - w);
+    if (dst.is_preg()) {
+        if (dst.preg_val.is_gpr()) {
+            uint8_t c = dst.preg_val.code;
+            if (c < 32 && c != static_cast<uint8_t>(aarch64::GPR::XZR)) st.gpr[c] = v64;
+        } else if (dst.preg_val.is_xmm() && dst.preg_val.code < 32) {
+            uint8_t c = dst.preg_val.code;
+            st.vec_lo[c] = v64;
+            st.vec_hi[c] = ctx.make_const(0, 64);
+        }
+    } else if (dst.is_vreg()) {
+        st.vregs[dst.vreg_val.id] = v64;
+        if (dst.vreg_val.is_xmm()) {
+            st.vreg_hi[dst.vreg_val.id] = ctx.make_const(0, 64);
+        }
+    } else if (dst.is_spill_slot()) {
+        st.spill_slots[dst.spill_slot] = v64;
+    } else if (dst.is_local_slot()) {
+        st.local_slots[dst.local_offset] = v64;
+    } else if (dst.is_mem()) {
+        BVNodeId addr = eval_mem_addr(ctx, env, st, dst.mem_val);
+        uint32_t sz = w / 8;
+        if (dst.size == 1 || dst.size == 2 || dst.size == 4 || dst.size == 8) {
+            sz = dst.size;
+            if (w > sz * 8) val = ctx.make_extract(val, sz * 8 - 1, 0);
+            else if (w < sz * 8) val = ctx.make_zext(val, sz * 8 - w);
+        }
+        st.mem_stores.push_back({addr, sz, val});
+    }
+}
+
+std::pair<BVNodeId, BVNodeId> arm64_read_vec128(BVContext& ctx, Arm64InitEnv& env,
+                                                Arm64ExecState& st, const LirOperand& op) {
+    st.uses_vec128 = true;
+    if (op.is_preg() && op.preg_val.is_xmm() && op.preg_val.code < 32) {
+        return {st.vec_lo[op.preg_val.code], st.vec_hi[op.preg_val.code]};
+    }
+    if (op.is_vreg()) {
+        BVNodeId lo = arm64_read_op(ctx, env, st, op, 64);
+        auto [it, ins] = st.vreg_hi.try_emplace(op.vreg_val.id, 0);
+        if (ins) it->second = env.get_vreg_hi_init(ctx, op.vreg_val.id);
+        return {lo, it->second};
+    }
+    if (op.is_spill_slot()) {
+        BVNodeId lo = arm64_read_op(ctx, env, st, op, 64);
+        auto [it, ins] = st.spill_slots_hi.try_emplace(op.spill_slot, 0);
+        if (ins) it->second = env.get_spill_hi_init(ctx, op.spill_slot);
+        return {lo, it->second};
+    }
+    if (op.is_local_slot()) {
+        BVNodeId lo = arm64_read_op(ctx, env, st, op, 64);
+        auto [it, ins] = st.local_slots_hi.try_emplace(op.local_offset, 0);
+        if (ins) it->second = env.get_local_hi_init(ctx, op.local_offset);
+        return {lo, it->second};
+    }
+    if (op.is_mem()) {
+        BVNodeId addr_lo = eval_mem_addr(ctx, env, st, op.mem_val);
+        BVNodeId addr_hi = ctx.make_binary(BVOp::Add, addr_lo, ctx.make_const(8, 64), 64);
+        return {read_mem_sized(ctx, env, st, addr_lo, 8), read_mem_sized(ctx, env, st, addr_hi, 8)};
+    }
+    return {arm64_read_op(ctx, env, st, op, 64), ctx.make_const(0, 64)};
+}
+
+void arm64_write_vec128(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st,
+                        const LirOperand& dst, BVNodeId lo, BVNodeId hi) {
+    st.uses_vec128 = true;
+    if (dst.is_preg() && dst.preg_val.is_xmm() && dst.preg_val.code < 32) {
+        st.vec_lo[dst.preg_val.code] = lo;
+        st.vec_hi[dst.preg_val.code] = hi;
+    } else if (dst.is_vreg()) {
+        st.vregs[dst.vreg_val.id] = lo;
+        st.vreg_hi[dst.vreg_val.id] = hi;
+    } else if (dst.is_spill_slot()) {
+        st.spill_slots[dst.spill_slot] = lo;
+        st.spill_slots_hi[dst.spill_slot] = hi;
+    } else if (dst.is_local_slot()) {
+        st.local_slots[dst.local_offset] = lo;
+        st.local_slots_hi[dst.local_offset] = hi;
+    } else if (dst.is_mem()) {
+        BVNodeId addr_lo = eval_mem_addr(ctx, env, st, dst.mem_val);
+        BVNodeId addr_hi = ctx.make_binary(BVOp::Add, addr_lo, ctx.make_const(8, 64), 64);
+        st.mem_stores.push_back({addr_lo, 8, lo});
+        st.mem_stores.push_back({addr_hi, 8, hi});
+    } else {
+        arm64_write_op(ctx, env, st, dst, lo);
+    }
+}
+
 Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64InitEnv& env) {
     Arm64ExecState st;
     for (int i = 0; i < 32; ++i) {
@@ -169,155 +371,16 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
     st.nzcv = env.nzcv_init;
     st.cond_branch_taken = ctx.make_const(0, 1);
 
-    auto read_reg64 = [&](const LirOperand& op) -> BVNodeId {
-        if (op.is_preg()) {
-            if (op.preg_val.is_gpr()) {
-                if (op.preg_val.code == static_cast<uint8_t>(aarch64::GPR::XZR)) return ctx.make_const(0, 64);
-                if (op.preg_val.code < 32) return st.gpr[op.preg_val.code];
-            }
-            if (op.preg_val.is_xmm() && op.preg_val.code < 32) return st.vec_lo[op.preg_val.code];
-        }
-        if (op.is_vreg()) {
-            auto [it, ins] = st.vregs.try_emplace(op.vreg_val.id, 0);
-            if (ins) it->second = env.get_vreg_init(ctx, op.vreg_val.id);
-            return it->second;
-        }
-        return ctx.make_const(0, 64);
-    };
-
-    auto eval_mem_addr = [&](const LirMem& m) -> BVNodeId {
-        BVNodeId addr = ctx.make_const(0, 64);
-        bool has_base_or_idx = false;
-        if (m.base_preg.is_valid()) {
-            addr = read_reg64(LirOperand::preg(m.base_preg, 8));
-            has_base_or_idx = true;
-        } else if (m.base_vreg.is_valid()) {
-            addr = read_reg64(LirOperand::vreg(m.base_vreg, 8));
-            has_base_or_idx = true;
-        }
-        if (m.index_preg.is_valid() || m.index_vreg.is_valid()) {
-            BVNodeId idx = m.index_preg.is_valid()
-                ? read_reg64(LirOperand::preg(m.index_preg, 8))
-                : read_reg64(LirOperand::vreg(m.index_vreg, 8));
-            uint8_t sc = x64::scale_value(m.scale);
-            if (sc > 1) idx = ctx.make_binary(BVOp::Mul, idx, ctx.make_const(sc, 64), 64);
-            addr = has_base_or_idx ? ctx.make_binary(BVOp::Add, addr, idx, 64) : idx;
-            has_base_or_idx = true;
-        }
-        if (!has_base_or_idx) addr = st.gpr[static_cast<uint8_t>(aarch64::GPR::FP)];
-        if (m.disp != 0) {
-            addr = ctx.make_binary(BVOp::Add, addr,
-                ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(m.disp)), 64), 64);
-        }
-        return addr;
-    };
-
-    auto read_mem_sized = [&](BVNodeId addr, uint32_t sz) -> BVNodeId {
-        uint32_t bits = sz * 8;
-        BVNodeId val = env.read_init_mem(ctx, addr, sz);
-        for (const auto& s : st.mem_stores) {
-            if (s.size == sz) {
-                BVNodeId hit = ctx.make_binary(BVOp::Eq, addr, s.addr, 1);
-                BVNodeId sv = ctx.width(s.val) == bits ? s.val : ctx.make_extract(s.val, bits - 1, 0);
-                val = ctx.make_ite(hit, sv, val);
-            } else if (s.size > sz && s.addr == addr) {
-                val = ctx.make_extract(s.val, bits - 1, 0);
-            }
-        }
-        return val;
-    };
-
-    auto read_op = [&](const LirOperand& op, uint32_t width_bits) -> BVNodeId {
-        BVNodeId raw64 = 0;
-        if (op.is_preg() || op.is_vreg()) {
-            raw64 = read_reg64(op);
-        } else if (op.is_imm_int()) {
-            return ctx.make_const(static_cast<uint64_t>(op.imm_int), width_bits);
-        } else if (op.is_imm_float()) {
-            if (width_bits == 32) {
-                float f = static_cast<float>(op.imm_float);
-                uint32_t u32 = 0;
-                std::memcpy(&u32, &f, 4);
-                return ctx.make_const(u32, 32);
-            }
-            uint64_t u = 0;
-            std::memcpy(&u, &op.imm_float, 8);
-            return ctx.make_const(u, width_bits);
-        } else if (op.is_spill_slot()) {
-            auto it = st.spill_slots.find(op.spill_slot);
-            raw64 = (it != st.spill_slots.end()) ? it->second : env.get_spill_init(ctx, op.spill_slot);
-        } else if (op.is_local_slot()) {
-            auto it = st.local_slots.find(op.local_offset);
-            raw64 = (it != st.local_slots.end()) ? it->second : env.get_local_init(ctx, op.local_offset);
-        } else if (op.is_mem()) {
-            return read_mem_sized(eval_mem_addr(op.mem_val), width_bits / 8);
-        } else {
-            return ctx.make_const(0, width_bits);
-        }
-        return (width_bits == 64) ? raw64 : ctx.make_extract(raw64, width_bits - 1, 0);
-    };
-
-    // Write to destination operand with exact ARMv8-A semantics:
-    // - Any 32-bit W-register write (or narrow write) to a GPR unconditionally zero-extends to 64 bits!
-    // - Writes to XZR (code 32) are discarded.
-    // - Scalar S/D writes to V0..V31 zero the upper 64 bits of Vn.
-    auto write_op = [&](const LirOperand& dst, BVNodeId val) {
-        uint32_t w = ctx.width(val);
-        BVNodeId v64 = (w == 64) ? val : ctx.make_zext(val, 64 - w);
-        if (dst.is_preg()) {
-            if (dst.preg_val.is_gpr()) {
-                uint8_t c = dst.preg_val.code;
-                if (c < 32 && c != static_cast<uint8_t>(aarch64::GPR::XZR)) st.gpr[c] = v64;
-            } else if (dst.preg_val.is_xmm() && dst.preg_val.code < 32) {
-                uint8_t c = dst.preg_val.code;
-                st.vec_lo[c] = v64;
-                st.vec_hi[c] = ctx.make_const(0, 64);
-            }
-        } else if (dst.is_vreg()) {
-            st.vregs[dst.vreg_val.id] = v64;
-        } else if (dst.is_spill_slot()) {
-            st.spill_slots[dst.spill_slot] = v64;
-        } else if (dst.is_local_slot()) {
-            st.local_slots[dst.local_offset] = v64;
-        } else if (dst.is_mem()) {
-            BVNodeId addr = eval_mem_addr(dst.mem_val);
-            uint32_t sz = w / 8;
-            if (dst.size == 1 || dst.size == 2 || dst.size == 4 || dst.size == 8) {
-                sz = dst.size;
-                if (w > sz * 8) val = ctx.make_extract(val, sz * 8 - 1, 0);
-                else if (w < sz * 8) val = ctx.make_zext(val, sz * 8 - w);
-            }
-            st.mem_stores.push_back({addr, sz, val});
-        }
-    };
-
-    auto read_vec128 = [&](const LirOperand& op) -> std::pair<BVNodeId, BVNodeId> {
-        st.uses_vec128 = true;
-        if (op.is_preg() && op.preg_val.is_xmm() && op.preg_val.code < 32) {
-            return {st.vec_lo[op.preg_val.code], st.vec_hi[op.preg_val.code]};
-        }
-        if (op.is_mem()) {
-            BVNodeId addr_lo = eval_mem_addr(op.mem_val);
-            BVNodeId addr_hi = ctx.make_binary(BVOp::Add, addr_lo, ctx.make_const(8, 64), 64);
-            return {read_mem_sized(addr_lo, 8), read_mem_sized(addr_hi, 8)};
-        }
-        return {read_op(op, 64), ctx.make_const(0, 64)};
-    };
-
+    auto eval_mem_addr_fn = [&](const LirMem& m) { return eval_mem_addr(ctx, env, st, m); };
+    auto read_mem_sized_fn = [&](BVNodeId addr, uint32_t sz) { return read_mem_sized(ctx, env, st, addr, sz); };
+    auto read_op = [&](const LirOperand& op, uint32_t w) { return arm64_read_op(ctx, env, st, op, w); };
+    auto write_op = [&](const LirOperand& dst, BVNodeId val) { arm64_write_op(ctx, env, st, dst, val); };
+    auto read_vec128 = [&](const LirOperand& op) { return arm64_read_vec128(ctx, env, st, op); };
     auto write_vec128 = [&](const LirOperand& dst, BVNodeId lo, BVNodeId hi) {
-        st.uses_vec128 = true;
-        if (dst.is_preg() && dst.preg_val.is_xmm() && dst.preg_val.code < 32) {
-            st.vec_lo[dst.preg_val.code] = lo;
-            st.vec_hi[dst.preg_val.code] = hi;
-        } else if (dst.is_mem()) {
-            BVNodeId addr_lo = eval_mem_addr(dst.mem_val);
-            BVNodeId addr_hi = ctx.make_binary(BVOp::Add, addr_lo, ctx.make_const(8, 64), 64);
-            st.mem_stores.push_back({addr_lo, 8, lo});
-            st.mem_stores.push_back({addr_hi, 8, hi});
-        } else {
-            write_op(dst, lo);
-        }
+        arm64_write_vec128(ctx, env, st, dst, lo, hi);
     };
+    #define eval_mem_addr eval_mem_addr_fn
+    #define read_mem_sized read_mem_sized_fn
 
     for (const auto& inst_ptr : block.instructions) {
         if (!inst_ptr) continue;
@@ -695,59 +758,29 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                 write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, read_op(inst.uses[0], 32), 64));
                 break;
 
+            case LirOpcode::Vfmadd213ss:
+            case LirOpcode::Vfmadd231ss:
+            case LirOpcode::Vfmadd213sd:
+            case LirOpcode::Vfmadd231sd: {
+                if (inst.defs.empty() || inst.uses.size() < 2) break;
+                bool is_double = (op == LirOpcode::Vfmadd213sd || op == LirOpcode::Vfmadd231sd);
+                bool is_213 = (op == LirOpcode::Vfmadd213ss || op == LirOpcode::Vfmadd213sd);
+                uint32_t w = is_double ? 64u : 32u;
+                BVNodeId src1 = (inst.uses.size() >= 3) ? read_op(inst.uses[0], w) : read_op(inst.defs[0], w);
+                size_t s2_idx = (inst.uses.size() >= 3) ? 1u : 0u;
+                size_t s3_idx = (inst.uses.size() >= 3) ? 2u : 1u;
+                BVNodeId src2 = read_op(inst.uses[s2_idx], w);
+                BVNodeId src3 = read_op(inst.uses[s3_idx], w);
+                BVNodeId sn = is_213 ? src1 : src2;
+                BVNodeId sm = is_213 ? src2 : src3;
+                BVNodeId sa = is_213 ? src3 : src1;
+                write_op(inst.defs[0], ctx.make_ternary(BVOp::FFma, sn, sm, sa, w));
+                break;
+            }
+
             case LirOpcode::Ucomisd: case LirOpcode::Ucomiss: {
                 uint32_t w = (op == LirOpcode::Ucomiss) ? 32 : 64;
                 set_arm64_fcmp_flags(ctx, st.nzcv, read_op(inst.uses[0], w), read_op(inst.uses[1], w));
-                break;
-            }
-
-            case LirOpcode::Movaps:  case LirOpcode::Movups:
-            case LirOpcode::Vmovaps: case LirOpcode::Vmovups: {
-                if (inst.defs.empty() || inst.uses.empty()) break;
-                auto [lo, hi] = read_vec128(inst.uses[0]);
-                write_vec128(inst.defs[0], lo, hi);
-                break;
-            }
-
-            case LirOpcode::Xorpd:  case LirOpcode::Xorps:  case LirOpcode::Pxor:
-            case LirOpcode::Vxorps: case LirOpcode::Vxorpd: case LirOpcode::Vpxor:
-            case LirOpcode::Pand:   case LirOpcode::Vandps: case LirOpcode::Vandpd: case LirOpcode::Vpand:
-            case LirOpcode::Por:    case LirOpcode::Vorps:  case LirOpcode::Vorpd:  case LirOpcode::Vpor: {
-                if (inst.defs.empty()) break;
-                const auto& lhs_op = (inst.uses.size() >= 2) ? inst.uses[0] : inst.defs[0];
-                auto [a_lo, a_hi] = read_vec128(lhs_op);
-                auto [b_lo, b_hi] = read_vec128(inst.uses.back());
-                BVOp bop = (op == LirOpcode::Pand || op == LirOpcode::Vandps ||
-                            op == LirOpcode::Vandpd || op == LirOpcode::Vpand) ? BVOp::And
-                         : (op == LirOpcode::Por || op == LirOpcode::Vorps ||
-                            op == LirOpcode::Vorpd || op == LirOpcode::Vpor) ? BVOp::Or : BVOp::Xor;
-                write_vec128(inst.defs[0], ctx.make_binary(bop, a_lo, b_lo, 64), ctx.make_binary(bop, a_hi, b_hi, 64));
-                break;
-            }
-
-            case LirOpcode::Pnot: {
-                if (inst.defs.empty() || inst.uses.empty()) break;
-                auto [lo, hi] = read_vec128(inst.uses[0]);
-                write_vec128(inst.defs[0], ctx.make_unary(BVOp::Not, lo, 64), ctx.make_unary(BVOp::Not, hi, 64));
-                break;
-            }
-
-            case LirOpcode::Paddq:  case LirOpcode::Vpaddq:
-            case LirOpcode::Psubq:  case LirOpcode::Vpsubq:
-            case LirOpcode::Addpd:  case LirOpcode::Vaddpd:
-            case LirOpcode::Subpd:  case LirOpcode::Vsubpd:
-            case LirOpcode::Mulpd:  case LirOpcode::Vmulpd:
-            case LirOpcode::Divpd:  case LirOpcode::Vdivpd: {
-                if (inst.defs.empty()) break;
-                const auto& lhs_op = (inst.uses.size() >= 2) ? inst.uses[0] : inst.defs[0];
-                auto [a_lo, a_hi] = read_vec128(lhs_op);
-                auto [b_lo, b_hi] = read_vec128(inst.uses.back());
-                BVOp vop = (op == LirOpcode::Paddq || op == LirOpcode::Vpaddq) ? BVOp::Add
-                         : (op == LirOpcode::Psubq || op == LirOpcode::Vpsubq) ? BVOp::Sub
-                         : (op == LirOpcode::Addpd || op == LirOpcode::Vaddpd) ? BVOp::FAdd
-                         : (op == LirOpcode::Subpd || op == LirOpcode::Vsubpd) ? BVOp::FSub
-                         : (op == LirOpcode::Mulpd || op == LirOpcode::Vmulpd) ? BVOp::FMul : BVOp::FDiv;
-                write_vec128(inst.defs[0], ctx.make_binary(vop, a_lo, b_lo, 64), ctx.make_binary(vop, a_hi, b_hi, 64));
                 break;
             }
 
@@ -767,11 +800,16 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
                 break;
 
             default:
+                if (execute_arm64_vec_inst(ctx, env, st, inst)) break;
                 st.supported = false;
                 st.error_msg = "Unsupported AArch64 LIR opcode in equivalence checker: " + std::string(to_string(op));
+                #undef eval_mem_addr
+                #undef read_mem_sized
                 return st;
         }
     }
+    #undef eval_mem_addr
+    #undef read_mem_sized
     return st;
 }
 

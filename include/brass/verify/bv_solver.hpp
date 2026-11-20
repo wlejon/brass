@@ -74,7 +74,10 @@ enum class BVOp : uint8_t {
     SiToFp,
     FpToSi,
     FpExt,
-    FpTrunc
+    FpTrunc,
+    FFma,
+    FTrunc,
+    FNearbyInt
 };
 
 struct BVNode {
@@ -166,6 +169,7 @@ public:
     BVNodeId make_sext(BVNodeId a, uint32_t ext_bits);
     BVNodeId make_unary(BVOp op, BVNodeId a, uint32_t res_width = 0);
     BVNodeId make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_width = 0);
+    BVNodeId make_ternary(BVOp op, BVNodeId a, BVNodeId b, BVNodeId c, uint32_t res_width = 0);
     BVNodeId make_ite(BVNodeId cond, BVNodeId t_val, BVNodeId f_val);
 
     const std::vector<BVNode>& nodes() const noexcept { return nodes_; }

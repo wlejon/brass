@@ -728,6 +728,32 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
     return intern(n);
 }
 
+BVNodeId BVContext::make_ternary(BVOp op, BVNodeId a, BVNodeId b, BVNodeId c, uint32_t res_width) {
+    if (op == BVOp::Ite) {
+        return make_ite(a, b, c);
+    }
+    const BVNode na = nodes_[a];
+    const BVNode nb = nodes_[b];
+    const BVNode nc = nodes_[c];
+    uint32_t w = (res_width != 0) ? res_width : std::max({na.width, nb.width, nc.width});
+    if (na.op == BVOp::Const && nb.op == BVOp::Const && nc.op == BVOp::Const) {
+        BVNode tmp;
+        tmp.op = op;
+        tmp.width = w;
+        tmp.a = a;
+        tmp.b = b;
+        tmp.c = c;
+        return make_const(eval_node_concrete(tmp, na.imm, nb.imm, nc.imm), w);
+    }
+    BVNode n;
+    n.op = op;
+    n.width = w;
+    n.a = a;
+    n.b = b;
+    n.c = c;
+    return intern(n);
+}
+
 BVNodeId BVContext::make_ite(BVNodeId cond, BVNodeId t_val, BVNodeId f_val) {
     if (t_val == f_val) return t_val;
     const BVNode nc = nodes_[cond];
