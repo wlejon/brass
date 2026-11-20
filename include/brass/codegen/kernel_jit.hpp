@@ -583,6 +583,10 @@ public:
     KernelFunction compile(Function& fn);
     KernelFunction compile(Module& mod, std::string_view entry_name);
 
+    // Optimize and verify a MIR module in place using this JIT's KernelOptions.
+    void prepare_module(Module& mod) const;
+    static void prepare_module(Module& mod, const KernelOptions& options);
+
 private:
     KernelOptions options_;
     Target target_;

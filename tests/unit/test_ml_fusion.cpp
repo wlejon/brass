@@ -2,9 +2,12 @@
 #include <brass/codegen/ml_fusion.hpp>
 #include <brass/target/target.hpp>
 #include <brass/mir/printer.hpp>
+#include <brass/mir/verifier.hpp>
 
 #include <vector>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <random>
 
 using namespace brass;
@@ -420,6 +423,71 @@ TEST_CASE("ML Fusion - FusedGemvQ8_0 and FusedGemvQ4_K CPU JIT") {
             CHECK_NEAR(y[r], ref_y[r], 1e-4f);
         }
     }
+}
+
+TEST_CASE("ML Fusion - FusedSwiGLU Accuracy Across Wide Range & KernelJit::prepare_module") {
+    MlFusionCompiler compiler;
+    KernelFunction kfn = compiler.compile_swiglu();
+    REQUIRE(kfn.is_valid());
+    auto fn_ptr = kfn.as<FusedSwiGLUFn>();
+    REQUIRE(fn_ptr != nullptr);
+
+    // 1. Dense sweep across [-20, 20]: verify tight ULP accuracy for up = 1.0
+    std::vector<float> gate;
+    std::vector<float> up;
+    for (int k = -400; k <= 400; ++k) {
+        gate.push_back(static_cast<float>(k) * 0.05f);
+        up.push_back(1.0f);
+    }
+    // Append extreme tails where old (1 + u)^16 catastrophically diverged
+    const float tails[] = {-100.0f, -85.0f, -50.0f, -30.0f, 30.0f, 50.0f, 85.0f, 100.0f};
+    for (float t : tails) {
+        gate.push_back(t);
+        up.push_back(1.0f);
+    }
+
+    std::vector<float> out(gate.size(), 0.0f);
+    fn_ptr(gate.data(), up.data(), out.data(), gate.size());
+
+    auto ulp_dist = [](float a, float b) -> uint32_t {
+        if (a == b) return 0;
+        int32_t ia = 0, ib = 0;
+        std::memcpy(&ia, &a, 4);
+        std::memcpy(&ib, &b, 4);
+        if (ia < 0) ia = static_cast<int32_t>(0x80000000u) - ia;
+        if (ib < 0) ib = static_cast<int32_t>(0x80000000u) - ib;
+        return static_cast<uint32_t>(std::abs(static_cast<int64_t>(ia) - static_cast<int64_t>(ib)));
+    };
+
+    for (size_t i = 0; i < gate.size(); ++i) {
+        float g = gate[i];
+        float ref = g / (1.0f + std::exp(-g));
+        CHECK(std::isfinite(out[i]));
+        if (std::abs(g) <= 20.0f && std::abs(ref) > 1e-6f) {
+            CHECK(ulp_dist(out[i], ref) <= 6u);
+            CHECK(std::abs(out[i] - ref) <= std::max(1e-6f, 2e-6f * std::abs(ref)));
+        } else {
+            CHECK(std::abs(out[i] - ref) <= std::max(1e-6f, 1e-5f * std::abs(ref)));
+        }
+    }
+
+    // 2. Verify KernelJit::prepare_module optimizes and validates a module cleanly
+    Module mod("prep_mod");
+    Builder b(mod);
+    Function* fn = mod.create_function("prep_add", Type::i32(), {Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* x = b.add_block_param(entry, Type::i32());
+    b.position_at_end(entry);
+    Value* z = b.build_add(x, b.build_iconst_i32(0));
+    b.build_ret(z);
+    fn->rebuild_cfg_predecessors();
+
+    KernelOptions kopts;
+    kopts.opt_level = 2;
+    KernelJit::prepare_module(mod, kopts);
+    DiagnosticReporter diag;
+    CHECK(verify_module(mod, &diag));
 }
 
 

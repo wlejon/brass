@@ -3,6 +3,7 @@
 #include <brass/brass.hpp>
 #include <brass/codegen/kernel_jit.hpp>
 #include <brass/mir/builder.hpp>
+#include <brass/mir/gpu_opt.hpp>
 #include <brass/mir/gpu_superopt.h>
 #include <brass/mir/gpu_superopt.hpp>
 #include <brass/mir/module.hpp>
@@ -755,6 +756,62 @@ TEST_CASE("GPU Prover - Soundness: Missing Buffer Spec -> Unknown, Shared Alignm
         opts.loop_unroll_bound = 2;
         CHECK_EQ(verify_gpu_barrier_uniformity(*fn, opts).status, EquivStatus::Unknown);
     }
+}
+
+TEST_CASE("GPU Opt - optimize_gpu_function Preserves Stores/Loads Across Barriers") {
+    Module mod("gpu_opt_barrier_clobber");
+    Function* fn = mod.create_function("barrier_rw", Type::void_type(), {Type::ptr(), Type::ptr()});
+    KernelBuilder kb(mod, fn);
+    Builder& b = kb.builder();
+    BasicBlock* entry = b.append_block("entry");
+    Value* gptr = b.add_block_param(entry, Type::ptr());
+    Value* out_ptr = b.add_block_param(entry, Type::ptr());
+    b.position_at_end(entry);
+
+    Value* smem = kb.shared_alloc_i32(64);
+    Value* tid = kb.tid_x();
+    Value* mate = b.build_xor(tid, kb.const_i32(1));
+    Value* v0 = b.build_add(tid, kb.const_i32(7));
+
+    // Write both shared and global memory before barrier
+    kb.shared_store_i32_indexed(smem, tid, v0);
+    kb.store_i32_indexed(gptr, tid, v0);
+    kb.sync();
+
+    // Reload from same shared & global locations (peer/global could have modified them!)
+    Value* s_reloaded = kb.shared_load_i32_indexed(smem, tid);
+    Value* s_mate = kb.shared_load_i32_indexed(smem, mate);
+    Value* g_reloaded = kb.load_i32_indexed(gptr, tid);
+    Value* sum = b.build_add(b.build_add(s_reloaded, s_mate), g_reloaded);
+    kb.store_i32_indexed(out_ptr, tid, sum);
+
+    // Overwrite shared/global AFTER another barrier to check pre-barrier stores aren't dead-store-eliminated
+    kb.sync();
+    kb.shared_store_i32_indexed(smem, tid, kb.const_i32(0));
+    kb.store_i32_indexed(gptr, tid, kb.const_i32(0));
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    optimize_gpu_function(*fn, mod);
+
+    DiagnosticReporter diag;
+    CHECK(verify_module(mod, &diag));
+    CHECK_EQ(count_opcode(*fn, Opcode::load_indexed), 1u);
+    CHECK_EQ(count_opcode(*fn, Opcode::store_indexed), 3u);
+    CHECK(has_intrinsic_call(*fn, "ptx_sync"));
+
+    size_t shared_loads = 0;
+    size_t shared_stores = 0;
+    for (const BasicBlock* bb : fn->blocks()) {
+        for (const Instruction* inst : *bb) {
+            if (inst->opcode() == Opcode::call) {
+                if (inst->symbol() == "ptx_shared_load_i32_indexed") ++shared_loads;
+                if (inst->symbol() == "ptx_shared_store_i32_indexed") ++shared_stores;
+            }
+        }
+    }
+    CHECK_EQ(shared_loads, 2u);
+    CHECK_EQ(shared_stores, 2u);
 }
 
 #ifdef BRASS_STANDALONE_TEST

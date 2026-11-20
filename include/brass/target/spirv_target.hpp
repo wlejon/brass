@@ -19,6 +19,7 @@
 #include <brass/mir/module.hpp>
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -128,5 +129,11 @@ public:
     // opcode names) for tests and diagnostics; needs no external tools.
     static std::string dump_function(const Function& fn, const SpirvOptions& opts = {});
 };
+
+// Serialize/deserialize a compiled SpirvKernel into a versioned binary blob.
+std::vector<uint8_t> serialize_spirv_kernel(const SpirvKernel& kernel);
+bool deserialize_spirv_kernel(std::span<const uint8_t> bytes,
+                              SpirvKernel& out_kernel,
+                              std::string* err_out = nullptr);
 
 } // namespace brass::target

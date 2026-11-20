@@ -35,6 +35,7 @@
 #include <brass/mir/bounds_check_elim.hpp>
 #include <brass/mir/smt_guard_elim.hpp>
 #include <brass/mir/superopt.hpp>
+#include <brass/mir/gpu_opt.hpp>
 #include <brass/mir/loop_unswitch.hpp>
 #include <brass/mir/jump_threading.hpp>
 #include <brass/mir/branch_probability.hpp>

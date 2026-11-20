@@ -141,32 +141,43 @@ Function* MlFusionCompiler::build_swiglu(Module& mod, std::string_view name) {
     kb.builder().build_br_if(cond, loop_body, loop_exit);
 
     // loop_body: silu(g) = g / (1.0f + exp(-g)); out[i] = silu(g) * up[i]
-    // Inlined 5th-degree polynomial approximation for exp(-g) with scaling & squaring
+    // Vectorizable-scalar Cody-Waite range reduction + degree-6 Horner minimax + ldexp scale
     fn->append_block(loop_body);
     kb.position_at_end(loop_body);
     Value* gi = kb.load_f32_indexed(gate, i, 4, 0);
     Value* ui = kb.load_f32_indexed(up, i, 4, 0);
 
     Value* neg_gi = kb.builder().build_neg(gi);
-    Value* c_inv16 = kb.builder().build_fconst_f32(0.0625f);
-    Value* u = kb.mul(neg_gi, c_inv16);
+    Value* c_min_x = kb.builder().build_fconst_f32(-87.3f);
+    Value* c_max_x = kb.builder().build_fconst_f32(88.0f);
+    Value* x = kb.builder().build_fmin_f32(kb.builder().build_fmax_f32(neg_gi, c_min_x), c_max_x);
 
+    Value* c_log2e = kb.builder().build_fconst_f32(1.4426950408889634f);
+    Value* c_neg_ln2_hi = kb.builder().build_fconst_f32(-0.693145751953125f);
+    Value* c_neg_ln2_lo = kb.builder().build_fconst_f32(-1.428606765330187e-6f);
+    Value* n_fp = kb.builder().build_round_f32(kb.mul(x, c_log2e));
+    Value* r1 = kb.builder().build_fma_f32(n_fp, c_neg_ln2_hi, x);
+    Value* r = kb.builder().build_fma_f32(n_fp, c_neg_ln2_lo, r1);
+
+    Value* c_1_720 = kb.builder().build_fconst_f32(1.0f / 720.0f);
     Value* c_1_120 = kb.builder().build_fconst_f32(1.0f / 120.0f);
     Value* c_1_24  = kb.builder().build_fconst_f32(1.0f / 24.0f);
     Value* c_1_6   = kb.builder().build_fconst_f32(1.0f / 6.0f);
     Value* c_1_2   = kb.builder().build_fconst_f32(0.5f);
     Value* c_1_0   = kb.builder().build_fconst_f32(1.0f);
 
-    Value* p5 = kb.builder().build_fma_f32(u, c_1_120, c_1_24);
-    Value* p4 = kb.builder().build_fma_f32(u, p5, c_1_6);
-    Value* p3 = kb.builder().build_fma_f32(u, p4, c_1_2);
-    Value* p2 = kb.builder().build_fma_f32(u, p3, c_1_0);
-    Value* p1 = kb.builder().build_fma_f32(u, p2, c_1_0);
+    Value* p6 = kb.builder().build_fma_f32(r, c_1_720, c_1_120);
+    Value* p5 = kb.builder().build_fma_f32(r, p6, c_1_24);
+    Value* p4 = kb.builder().build_fma_f32(r, p5, c_1_6);
+    Value* p3 = kb.builder().build_fma_f32(r, p4, c_1_2);
+    Value* p2 = kb.builder().build_fma_f32(r, p3, c_1_0);
+    Value* p1 = kb.builder().build_fma_f32(r, p2, c_1_0);
 
-    Value* sq1 = kb.mul(p1, p1);
-    Value* sq2 = kb.mul(sq1, sq1);
-    Value* sq3 = kb.mul(sq2, sq2);
-    Value* exp_neg_g = kb.mul(sq3, sq3);
+    Value* k = kb.builder().build_fptosi_i32_f32(n_fp);
+    Value* biased = kb.builder().build_add(k, kb.builder().build_iconst_i32(127));
+    Value* exp_bits = kb.builder().build_shl(biased, kb.builder().build_iconst_i32(23));
+    Value* scale = kb.builder().build_bitcast_f32_i32(exp_bits);
+    Value* exp_neg_g = kb.mul(scale, p1);
 
     Value* denom = kb.add(c_1_0, exp_neg_g);
     Value* silu_g = kb.div(gi, denom);

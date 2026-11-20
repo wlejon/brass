@@ -12,6 +12,7 @@
 
 #include <brass/target/spirv/spirv_binary_reader.hpp>
 #include <brass/target/spirv/spirv_isel.hpp>
+#include <brass/target/spirv_target.hpp>
 #include <spirv/unified1/GLSL.std.450.h>
 
 #include <filesystem>
@@ -534,6 +535,85 @@ TEST_CASE("SPIR-V prover - audits compiled bro and brotensor GLSL .comp shader c
     std::cout << "[SPIR-V Prover Corpus] Audited " << audited_brotensor
               << " brotensor shader binaries and " << audited_bro
               << " bro shader binaries.\n";
+}
+
+TEST_CASE("SpirvKernel Serialization - Round-Trip and Corrupt Input Rejection") {
+    brass::target::SpirvKernel src;
+    src.entry = "kernel_main_vk";
+    src.stage = brass::target::SpirvStage::Fragment;
+    src.words = {0x07230203u, 0x00010500u, 0u, 42u, 0u, 0x00030011u};
+    src.params = {
+        {brass::Type::ptr(), 0u, 8u},
+        {brass::Type::f32(), 8u, 4u},
+        {brass::Type::i32(), 12u, 4u},
+    };
+    src.descriptors = {
+        {0u, 0u, brass::target::SpirvDescriptorKind::StorageBuffer, brass::target::SpirvImageDim::D1, false, false,
+         brass::target::SpirvImageScalar::F32, 0u, 64u},
+        {1u, 3u, brass::target::SpirvDescriptorKind::CombinedImageSampler, brass::target::SpirvImageDim::D2, true, true,
+         brass::target::SpirvImageScalar::U32, 0x20u, 0u},
+    };
+    src.push_constant_bytes = 16u;
+    src.shared_bytes = 2048u;
+    src.local_size[0] = 64u;
+    src.local_size[1] = 2u;
+    src.local_size[2] = 1u;
+    src.local_size_spec_constants = false;
+    src.capabilities = {"Int64", "GroupNonUniformShuffle"};
+    src.extensions = {"SPV_EXT_shader_atomic_float_add"};
+
+    std::vector<uint8_t> blob = brass::target::serialize_spirv_kernel(src);
+    REQUIRE(blob.size() > 16u);
+
+    brass::target::SpirvKernel dst;
+    std::string err;
+    CHECK(brass::target::deserialize_spirv_kernel(blob, dst, &err));
+    CHECK_EQ(dst.entry, src.entry);
+    CHECK(dst.stage == src.stage);
+    CHECK(dst.words == src.words);
+    REQUIRE_EQ(dst.params.size(), src.params.size());
+    for (size_t i = 0; i < src.params.size(); ++i) {
+        CHECK(dst.params[i].type.kind() == src.params[i].type.kind());
+        CHECK_EQ(dst.params[i].offset, src.params[i].offset);
+        CHECK_EQ(dst.params[i].size, src.params[i].size);
+    }
+    CHECK(dst.descriptors == src.descriptors);
+    CHECK_EQ(dst.push_constant_bytes, src.push_constant_bytes);
+    CHECK_EQ(dst.shared_bytes, src.shared_bytes);
+    CHECK_EQ(dst.local_size[0], src.local_size[0]);
+    CHECK_EQ(dst.local_size[1], src.local_size[1]);
+    CHECK_EQ(dst.local_size[2], src.local_size[2]);
+    CHECK_EQ(dst.local_size_spec_constants, src.local_size_spec_constants);
+    CHECK(dst.capabilities == src.capabilities);
+    CHECK(dst.extensions == src.extensions);
+
+    // Reject empty / bad magic / wrong version / truncated / trailing bytes / hostile count
+    brass::target::SpirvKernel untouched = dst;
+    CHECK(!brass::target::deserialize_spirv_kernel({}, untouched, &err));
+    CHECK_EQ(untouched.entry, src.entry); // no partial mutation
+
+    auto bad_magic = blob;
+    bad_magic[0] = 'X';
+    CHECK(!brass::target::deserialize_spirv_kernel(bad_magic, untouched, &err));
+
+    auto bad_ver = blob;
+    bad_ver[4] = 99;
+    CHECK(!brass::target::deserialize_spirv_kernel(bad_ver, untouched, &err));
+
+    std::vector<uint8_t> truncated(blob.begin(), blob.begin() + static_cast<std::ptrdiff_t>(blob.size() - 5));
+    CHECK(!brass::target::deserialize_spirv_kernel(truncated, untouched, &err));
+
+    auto trailing = blob;
+    trailing.push_back(0xAAu);
+    CHECK(!brass::target::deserialize_spirv_kernel(trailing, untouched, &err));
+
+    // Corrupt entry string length (offset 8..11) to huge hostile count
+    auto huge_len = blob;
+    huge_len[8] = 0xFFu;
+    huge_len[9] = 0xFFu;
+    huge_len[10] = 0xFFu;
+    huge_len[11] = 0x7Fu;
+    CHECK(!brass::target::deserialize_spirv_kernel(huge_len, untouched, &err));
 }
 
 } // namespace

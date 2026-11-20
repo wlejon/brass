@@ -297,6 +297,25 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
     }
 }
 
+void KernelJit::prepare_module(Module& mod) const {
+    mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);
+    run_kernel_optimizations(mod);
+    for (auto* fn : mod.functions()) {
+        if (fn) {
+            fn->rebuild_cfg_predecessors();
+        }
+    }
+    DiagnosticReporter diag;
+    if (!verify_module(mod, &diag)) {
+        throw std::runtime_error("Kernel JIT verification failed: " + diag.format_all());
+    }
+}
+
+void KernelJit::prepare_module(Module& mod, const KernelOptions& options) {
+    KernelJit jit(options);
+    jit.prepare_module(mod);
+}
+
 KernelFunction KernelJit::compile(Function& fn) {
     if (fn.parent()) {
         return compile(*fn.parent(), fn.name());
@@ -320,17 +339,7 @@ KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
         }
     }
 
-    run_kernel_optimizations(working_mod);
-
-    for (auto* fn : working_mod.functions()) {
-        if (fn) {
-            fn->rebuild_cfg_predecessors();
-        }
-    }
-    DiagnosticReporter diag;
-    if (!verify_module(working_mod, &diag)) {
-        throw std::runtime_error("Kernel JIT verification failed: " + diag.format_all());
-    }
+    prepare_module(working_mod);
 
     auto engine = std::make_shared<codegen::JitExecutionEngine>(target_);
     setup_default_symbols(*engine);
