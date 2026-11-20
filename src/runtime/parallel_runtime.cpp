@@ -1,8 +1,11 @@
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/gc/native_frames.hpp>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <fstream>
+#include <string>
 
 namespace brass::runtime {
 
@@ -32,6 +35,28 @@ double get_initial_reduction_f64(ReductionKind kind) noexcept {
     }
 }
 
+uint32_t default_parallel_workers() noexcept {
+    if (const char* env = std::getenv("BRASS_PARALLEL_WORKERS"); env && env[0] != '\0') {
+        char* end = nullptr;
+        unsigned long val = std::strtoul(env, &end, 10);
+        if (end != env && *end == '\0' && val > 0ul) {
+            return std::clamp<uint32_t>(static_cast<uint32_t>(std::min<unsigned long>(val, 64ul)), 1u, 64u);
+        }
+    }
+    uint32_t hw = std::thread::hardware_concurrency();
+    if (hw == 0u) hw = 4u;
+#if defined(__linux__)
+    std::ifstream sibs("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
+    std::string line;
+    if (sibs && std::getline(sibs, line)) {
+        if ((line.find(',') != std::string::npos || line.find('-') != std::string::npos) && hw >= 4u) {
+            hw /= 2u;
+        }
+    }
+#endif
+    return std::clamp(hw, 2u, 16u);
+}
+
 } // namespace
 
 ParallelRuntime& ParallelRuntime::instance() {
@@ -41,8 +66,7 @@ ParallelRuntime& ParallelRuntime::instance() {
 
 ParallelRuntime::ParallelRuntime(uint32_t num_workers) {
     if (num_workers == 0) {
-        uint32_t hw = std::thread::hardware_concurrency();
-        num_workers = std::clamp(hw == 0 ? 4u : hw, 2u, 8u);
+        num_workers = default_parallel_workers();
     }
     set_num_workers(num_workers);
 }

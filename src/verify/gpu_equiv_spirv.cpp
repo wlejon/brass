@@ -104,8 +104,37 @@ GpuExecTrace execute_gpu_spirv(
     std::unordered_map<spirv::Id, std::vector<BVNodeId>> var_composites;
     std::unordered_map<spirv::Id, BVNodeId> var_scalars;
     std::unordered_map<spirv::Id, uint32_t> workgroup_var_idx;
+    std::unordered_map<spirv::Id, spirv::Id> workgroup_var_type;
+    std::unordered_map<spirv::Id, spirv::Id> array_len_id;
+    std::unordered_map<spirv::Id, uint32_t> wg_size_spec_axis;
     std::unordered_map<spirv::Id, uint64_t> stage_out_base;
     spirv::Id push_const_var = 0;
+
+    for (const auto& g : mod.globals) {
+        if (g.op == spv::OpTypeArray && g.operands.size() >= 2) {
+            array_len_id[g.result] = g.operands[1].value;
+        } else if (g.op == spv::OpSpecConstantComposite) {
+            auto bit = builtin_map.find(g.result);
+            if (bit != builtin_map.end() && bit->second == spv::BuiltInWorkgroupSize) {
+                for (uint32_t axis = 0; axis < 3 && axis < g.operands.size(); ++axis) {
+                    wg_size_spec_axis[g.operands[axis].value] = axis;
+                }
+            }
+        }
+    }
+
+    auto resolve_array_dim = [&](spirv::Id ty_id, const spirv::TypeInfo* ati) -> uint32_t {
+        if (!ati) return 1u;
+        if (ati->width > 0) return ati->width;
+        auto alit = array_len_id.find(ty_id);
+        if (alit != array_len_id.end()) {
+            auto gvit = global_vals.find(alit->second);
+            if (gvit != global_vals.end() && bv_node(ctx, gvit->second).op == BVOp::Const) {
+                return static_cast<uint32_t>(bv_node(ctx, gvit->second).imm);
+            }
+        }
+        return 256u;
+    };
 
     for (const auto& g : mod.globals) {
         switch (g.op) {
@@ -120,21 +149,78 @@ GpuExecTrace execute_gpu_spirv(
             break;
         }
         case spv::OpConstantTrue:
+        case spv::OpSpecConstantTrue:
             global_vals[g.result] = bv_true(ctx);
             break;
         case spv::OpConstantFalse:
+        case spv::OpSpecConstantFalse:
             global_vals[g.result] = bv_false(ctx);
             break;
         case spv::OpConstantNull:
             global_vals[g.result] = bv_const(ctx, spirv_type_width(mod, g.type), 0);
             break;
         case spv::OpSpecConstant: {
-            auto it = spec_id_map.find(g.result);
-            if (it != spec_id_map.end() && it->second < 3) {
-                global_vals[g.result] = env.ntid[it->second];
+            auto axis_it = wg_size_spec_axis.find(g.result);
+            if (axis_it != wg_size_spec_axis.end() && axis_it->second < 3) {
+                global_vals[g.result] = env.ntid[axis_it->second];
             } else {
-                uint32_t def_v = g.operands.empty() ? 1u : g.operands[0].value;
-                global_vals[g.result] = bv_const(ctx, 32, def_v);
+                uint32_t w = spirv_type_width(mod, g.type);
+                uint64_t bits = g.operands.empty() ? 0ULL : g.operands[0].value;
+                if (w == 64 && g.operands.size() >= 2) {
+                    bits |= (static_cast<uint64_t>(g.operands[1].value) << 32);
+                }
+                global_vals[g.result] = bv_const(ctx, w, bits);
+            }
+            break;
+        }
+        case spv::OpSpecConstantOp: {
+            if (!g.operands.empty()) {
+                auto inner = static_cast<spv::Op>(g.operands[0].value);
+                uint32_t rw = spirv_type_width(mod, g.type);
+                auto gv = [&](size_t idx, uint32_t fallback_w = 32) -> BVNodeId {
+                    if (idx < g.operands.size()) {
+                        auto it = global_vals.find(g.operands[idx].value);
+                        if (it != global_vals.end()) return it->second;
+                    }
+                    return bv_const(ctx, fallback_w, 0);
+                };
+                if (inner == spv::OpLogicalNot) {
+                    global_vals[g.result] = bv_un(ctx, BVOp::Not, 1, gpu_coerce_width(ctx, gv(1, 1), 1));
+                } else if (inner == spv::OpLogicalAnd || inner == spv::OpLogicalOr) {
+                    BVNodeId a = gpu_coerce_width(ctx, gv(1, 1), 1);
+                    BVNodeId b = gpu_coerce_width(ctx, gv(2, 1), 1);
+                    global_vals[g.result] = bv_bin(ctx, inner == spv::OpLogicalAnd ? BVOp::And : BVOp::Or, 1, a, b);
+                } else if (inner == spv::OpSelect) {
+                    BVNodeId c = gpu_coerce_width(ctx, gv(1, 1), 1);
+                    BVNodeId tv = gpu_coerce_width(ctx, gv(2, rw), rw);
+                    BVNodeId fv = gpu_coerce_width(ctx, gv(3, rw), rw);
+                    global_vals[g.result] = bv_ite(ctx, rw, c, tv, fv);
+                } else if (inner == spv::OpIEqual || inner == spv::OpINotEqual ||
+                           inner == spv::OpULessThan || inner == spv::OpUGreaterThan ||
+                           inner == spv::OpULessThanEqual || inner == spv::OpUGreaterThanEqual ||
+                           inner == spv::OpSLessThan || inner == spv::OpSGreaterThan ||
+                           inner == spv::OpSLessThanEqual || inner == spv::OpSGreaterThanEqual) {
+                    BVNodeId a = gv(1);
+                    BVNodeId b = gpu_coerce_width(ctx, gv(2, ctx.width(a)), ctx.width(a));
+                    BVOp cop = (inner == spv::OpIEqual) ? BVOp::Eq : (inner == spv::OpINotEqual) ? BVOp::Ne
+                             : (inner == spv::OpSLessThan) ? BVOp::Slt : (inner == spv::OpSLessThanEqual) ? BVOp::Sle
+                             : (inner == spv::OpSGreaterThan) ? BVOp::Sgt : (inner == spv::OpSGreaterThanEqual) ? BVOp::Sge
+                             : (inner == spv::OpULessThan) ? BVOp::Ult : (inner == spv::OpULessThanEqual) ? BVOp::Ule
+                             : (inner == spv::OpUGreaterThan) ? BVOp::Ugt : BVOp::Uge;
+                    global_vals[g.result] = bv_bin(ctx, cop, 1, a, b);
+                } else if (inner == spv::OpIAdd || inner == spv::OpISub || inner == spv::OpIMul ||
+                           inner == spv::OpUDiv || inner == spv::OpUMod ||
+                           inner == spv::OpShiftLeftLogical || inner == spv::OpShiftRightLogical) {
+                    BVNodeId a = gpu_coerce_width(ctx, gv(1, rw), rw);
+                    BVNodeId b = gpu_coerce_width(ctx, gv(2, rw), rw);
+                    BVOp bop = (inner == spv::OpIAdd) ? BVOp::Add : (inner == spv::OpISub) ? BVOp::Sub
+                             : (inner == spv::OpIMul) ? BVOp::Mul : (inner == spv::OpUDiv) ? BVOp::UDiv
+                             : (inner == spv::OpUMod) ? BVOp::URem : (inner == spv::OpShiftLeftLogical) ? BVOp::Shl
+                             : BVOp::LShr;
+                    global_vals[g.result] = bv_bin(ctx, bop, rw, a, b);
+                } else {
+                    global_vals[g.result] = bv_const(ctx, rw, 0);
+                }
             }
             break;
         }
@@ -168,6 +254,13 @@ GpuExecTrace execute_gpu_spirv(
                     var_composites[g.result] = {env.ntid[0], env.ntid[1], env.ntid[2]};
                 } else if (bi == spv::BuiltInSubgroupLocalInvocationId) {
                     var_scalars[g.result] = env.raw_subgroup_lane;
+                } else if (bi == spv::BuiltInSubgroupId) {
+                    var_scalars[g.result] = bv_bin(ctx, BVOp::LShr, 32, env.tid[0], bv_const(ctx, 32, 5));
+                } else if (bi == spv::BuiltInNumSubgroups) {
+                    var_scalars[g.result] = bv_bin(
+                        ctx, BVOp::LShr, 32,
+                        bv_bin(ctx, BVOp::Add, 32, env.ntid[0], bv_const(ctx, 32, 31)),
+                        bv_const(ctx, 32, 5));
                 } else if (bi == spv::BuiltInVertexIndex) {
                     var_scalars[g.result] = env.eval_uf(ctx, "spirv_vertex_index", {}, 32, false);
                 } else if (bi == spv::BuiltInInstanceIndex) {
@@ -197,19 +290,28 @@ GpuExecTrace execute_gpu_spirv(
                 push_const_var = g.result;
             } else if (sc == spv::StorageClassWorkgroup) {
                 uint32_t arr_idx = static_cast<uint32_t>(trace.shared_allocs.size());
-                uint32_t cnt = 256, ebytes = 4;
+                uint64_t total_cnt = 1;
+                bool saw_array = false;
+                uint32_t ebytes = 4;
                 const spirv::TypeInfo* pti = mod.type_info(g.type);
                 if (pti && pti->op == spv::OpTypePointer) {
-                    const spirv::TypeInfo* ati = mod.type_info(pti->elem);
-                    if (ati && ati->op == spv::OpTypeArray) {
-                        cnt = ati->width;
-                        if (global_vals.count(cnt) && bv_node(ctx, global_vals[cnt]).op == BVOp::Const) {
-                            cnt = static_cast<uint32_t>(bv_node(ctx, global_vals[cnt]).imm);
-                        }
-                        ebytes = spirv_type_width(mod, ati->elem) / 8;
+                    workgroup_var_type[g.result] = pti->elem;
+                    spirv::Id cur_ty = pti->elem;
+                    for (int depth = 0; depth < 8 && cur_ty != 0; ++depth) {
+                        const spirv::TypeInfo* ati = mod.type_info(cur_ty);
+                        if (!ati || ati->op != spv::OpTypeArray) break;
+                        saw_array = true;
+                        uint32_t dim = std::max(1u, resolve_array_dim(cur_ty, ati));
+                        total_cnt *= dim;
+                        if (total_cnt > 0x0FFFFFFFULL) total_cnt = 0x0FFFFFFFULL;
+                        cur_ty = ati->elem;
+                    }
+                    if (saw_array && cur_ty != 0) {
+                        ebytes = spirv_type_width(mod, cur_ty) / 8;
                         if (ebytes == 0) ebytes = 4;
                     }
                 }
+                uint32_t cnt = saw_array ? static_cast<uint32_t>(total_cnt) : 256u;
                 uint64_t sym_base = kGpuSharedBase0 + static_cast<uint64_t>(arr_idx) * kGpuSharedStride;
                 trace.shared_allocs.push_back({arr_idx, cnt, ebytes, sym_base});
                 workgroup_var_idx[g.result] = arr_idx;
@@ -234,6 +336,7 @@ GpuExecTrace execute_gpu_spirv(
         BVNodeId elem_idx = 0;
         bool is_direct = false;
         BVNodeId direct_val = 0;
+        spirv::Id wg_cur_ty = 0;
     };
 
     struct ActiveState {
@@ -342,10 +445,30 @@ GpuExecTrace execute_gpu_spirv(
                         uint32_t pidx = (bv_node(ctx, idx_v).op == BVOp::Const)
                             ? static_cast<uint32_t>(bv_node(ctx, idx_v).imm) : 0;
                         cur.chains[inst.result] = {true, false, pidx, 0};
-                    } else if (workgroup_var_idx.count(base_id)) {
-                        cur.chains[inst.result] = {
-                            false, true, workgroup_var_idx[base_id],
-                            gpu_coerce_width(ctx, get_v(idx_id), 32, false)};
+                    } else if (workgroup_var_idx.count(base_id) ||
+                               (cur.chains.count(base_id) && cur.chains[base_id].is_workgroup)) {
+                        const bool is_root = workgroup_var_idx.count(base_id) > 0;
+                        uint32_t wg_idx = is_root ? workgroup_var_idx[base_id] : cur.chains[base_id].index;
+                        spirv::Id cur_ty = is_root
+                            ? (workgroup_var_type.count(base_id) ? workgroup_var_type[base_id] : 0)
+                            : cur.chains[base_id].wg_cur_ty;
+                        BVNodeId flat_idx = is_root ? 0 : cur.chains[base_id].elem_idx;
+                        bool first = is_root;
+                        for (size_t k = 1; k < inst.operands.size(); ++k) {
+                            BVNodeId idx32 = gpu_coerce_width(ctx, get_v(inst.operands[k].value), 32, false);
+                            const spirv::TypeInfo* cur_ti = cur_ty ? mod.type_info(cur_ty) : nullptr;
+                            if (first) {
+                                flat_idx = idx32;
+                                first = false;
+                            } else {
+                                uint32_t dim = (cur_ti && cur_ti->op == spv::OpTypeArray)
+                                    ? std::max(1u, resolve_array_dim(cur_ty, cur_ti)) : 1u;
+                                flat_idx = bv_bin(ctx, BVOp::Add, 32,
+                                    gpu_mul_or_shl(ctx, 32, flat_idx, bv_const(ctx, 32, dim)), idx32);
+                            }
+                            cur_ty = (cur_ti && cur_ti->op == spv::OpTypeArray) ? cur_ti->elem : 0;
+                        }
+                        cur.chains[inst.result] = {false, true, wg_idx, flat_idx, false, 0, cur_ty};
                     } else if (stage_out_base.count(base_id)) {
                         BVNodeId idx_v = get_v(idx_id);
                         uint64_t cidx = (bv_node(ctx, idx_v).op == BVOp::Const) ? bv_node(ctx, idx_v).imm : 0;
@@ -742,6 +865,25 @@ GpuExecTrace execute_gpu_spirv(
                 BVNodeId src_lane = gpu_coerce_width(ctx, get_v(inst.operands[2].value), 32);
                 trace.barriers.push_back({cur.cond, bv_const(ctx, 32, 0), true, barrier_seq++});
                 res = env.eval_uf(ctx, "gpu_shfl", {val32, src_lane}, 32, false);
+                break;
+            }
+            case spv::OpGroupNonUniformElect:
+                trace.barriers.push_back({cur.cond, bv_const(ctx, 32, 0), true, barrier_seq++});
+                res = env.eval_uf(ctx, "gpu_sg_elect", {env.raw_subgroup_lane}, 1, false);
+                break;
+            case spv::OpGroupNonUniformIAdd:
+            case spv::OpGroupNonUniformFAdd:
+            case spv::OpGroupNonUniformSMin:
+            case spv::OpGroupNonUniformUMin:
+            case spv::OpGroupNonUniformFMin:
+            case spv::OpGroupNonUniformSMax:
+            case spv::OpGroupNonUniformUMax:
+            case spv::OpGroupNonUniformFMax: {
+                trace.barriers.push_back({cur.cond, bv_const(ctx, 32, 0), true, barrier_seq++});
+                BVNodeId val = inst.operands.size() >= 3
+                    ? gpu_coerce_width(ctx, get_v(inst.operands[2].value), rw)
+                    : bv_const(ctx, rw, 0);
+                res = env.eval_uf(ctx, "gpu_sg_red_" + std::to_string(inst.op), {val}, rw, is_fl);
                 break;
             }
             case spv::OpAtomicIAdd:

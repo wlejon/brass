@@ -489,7 +489,8 @@ LirExecResult symbolically_execute_lir(
                         st.of = st.cf = ctx.make_binary(BVOp::SMulOvf, a, b, 1);
                         break;
                     }
-                    case LirOpcode::Smulh: {
+                    case LirOpcode::Smulh:
+                    case LirOpcode::Umulh: {
                         BVNodeId a = read_op(inst.uses[0], 64), b = read_op(inst.uses[1], 64);
                         BVNodeId a_lo = ctx.make_zext(ctx.make_extract(a, 31, 0), 32);
                         BVNodeId a_hi = ctx.make_zext(ctx.make_extract(a, 63, 32), 32);
@@ -512,12 +513,16 @@ LirExecResult symbolically_execute_lir(
                                 ctx.make_binary(BVOp::Add,
                                     ctx.make_binary(BVOp::LShr, p10, c32, 64),
                                     ctx.make_binary(BVOp::LShr, mid, c32, 64), 64), 64), 64);
-                        BVNodeId z64 = ctx.make_const(0ULL, 64);
-                        BVNodeId adj_a = ctx.make_ite(ctx.make_extract(a, 63, 63), b, z64);
-                        BVNodeId adj_b = ctx.make_ite(ctx.make_extract(b, 63, 63), a, z64);
-                        BVNodeId hi_s = ctx.make_binary(BVOp::Sub, ctx.make_binary(BVOp::Sub, hi_u, adj_a, 64), adj_b, 64);
                         st.gprs[static_cast<size_t>(GPR::RAX)] = ctx.make_binary(BVOp::Mul, a, b, 64);
-                        st.gprs[static_cast<size_t>(GPR::RDX)] = hi_s;
+                        if (op == LirOpcode::Umulh) {
+                            st.gprs[static_cast<size_t>(GPR::RDX)] = hi_u;
+                        } else {
+                            BVNodeId z64 = ctx.make_const(0ULL, 64);
+                            BVNodeId adj_a = ctx.make_ite(ctx.make_extract(a, 63, 63), b, z64);
+                            BVNodeId adj_b = ctx.make_ite(ctx.make_extract(b, 63, 63), a, z64);
+                            BVNodeId hi_s = ctx.make_binary(BVOp::Sub, ctx.make_binary(BVOp::Sub, hi_u, adj_a, 64), adj_b, 64);
+                            st.gprs[static_cast<size_t>(GPR::RDX)] = hi_s;
+                        }
                         break;
                     }
                     case LirOpcode::Cdq: {

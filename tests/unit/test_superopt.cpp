@@ -363,6 +363,78 @@ TEST_CASE("Superopt - x64 LIR Peephole Superoptimizer with Solver Verification (
     }
 }
 
+TEST_CASE("Superopt - General i32 Constant Magic Division & Modulo") {
+    for (int32_t d : {3, 7, 255}) {
+        // 1. Unsigned udiv / umod i32 and arbitrary signed sdiv / smod i32
+        Module mod("superopt_const_div_" + std::to_string(d));
+        Builder b(mod);
+
+        Function* ufn = mod.create_function("udiv_umod", Type::i32(), {Type::i32()});
+        b.set_function(ufn);
+        BasicBlock* ue = b.append_block("entry");
+        Value* ux = b.add_block_param(ue, Type::i32());
+        b.position_at_end(ue);
+        Value* dc = b.build_iconst_i32(d);
+        b.build_ret(b.build_add(b.build_udiv(ux, dc), b.build_umod(ux, dc)));
+        ufn->rebuild_cfg_predecessors();
+
+        auto u_before = clone_module(mod);
+        SuperoptStats ustats;
+        SuperoptOptions uopts;
+        uopts.stats = &ustats;
+        CHECK(run_mir_superopt(*ufn, mod, uopts));
+        CHECK_EQ(ustats.magic_divs_reduced, 2u);
+        CHECK_EQ(count_opcode(*ufn, Opcode::udiv), 0u);
+        CHECK_EQ(count_opcode(*ufn, Opcode::umod), 0u);
+        CHECK_EQ(verify::verify_mir_equivalence(*u_before->get_function("udiv_umod"), *ufn).status,
+                 verify::EquivStatus::ProvenEquivalent);
+
+        // 2. Signed arbitrary sdiv / smod i32 (handles negative dividends too)
+        Function* sfn = mod.create_function("sdiv_smod", Type::i32(), {Type::i32()});
+        b.set_function(sfn);
+        BasicBlock* se = b.append_block("entry");
+        Value* sx = b.add_block_param(se, Type::i32());
+        b.position_at_end(se);
+        Value* sdc = b.build_iconst_i32(d);
+        b.build_ret(b.build_add(b.build_sdiv(sx, sdc), b.build_smod(sx, sdc)));
+        sfn->rebuild_cfg_predecessors();
+
+        auto s_before = clone_module(mod);
+        SuperoptStats sstats;
+        SuperoptOptions sopts;
+        sopts.stats = &sstats;
+        CHECK(run_mir_superopt(*sfn, mod, sopts));
+        CHECK_EQ(sstats.magic_divs_reduced, 2u);
+        CHECK_EQ(count_opcode(*sfn, Opcode::sdiv), 0u);
+        CHECK_EQ(count_opcode(*sfn, Opcode::smod), 0u);
+        CHECK_EQ(verify::verify_mir_equivalence(*s_before->get_function("sdiv_smod"), *sfn).status,
+                 verify::EquivStatus::ProvenEquivalent);
+
+        // 3. Guarded non-negative sdiv / smod i32 uses shorter unsigned magic path (no sext / ashr)
+        Function* gfn = mod.create_function("guarded_sdiv_smod", Type::i32(), {Type::i32()});
+        b.set_function(gfn);
+        BasicBlock* ge = b.append_block("entry");
+        Value* gx = b.add_block_param(ge, Type::i32());
+        b.position_at_end(ge);
+        b.build_guard(b.build_sge(gx, b.build_iconst_i32(0)), "deopt");
+        Value* gdc = b.build_iconst_i32(d);
+        b.build_ret(b.build_add(b.build_sdiv(gx, gdc), b.build_smod(gx, gdc)));
+        gfn->rebuild_cfg_predecessors();
+
+        auto g_before = clone_module(mod);
+        SuperoptStats gstats;
+        SuperoptOptions gopts;
+        gopts.stats = &gstats;
+        CHECK(run_mir_superopt(*gfn, mod, gopts));
+        CHECK_EQ(gstats.magic_divs_reduced, 2u);
+        CHECK_EQ(count_opcode(*gfn, Opcode::sdiv), 0u);
+        CHECK_EQ(count_opcode(*gfn, Opcode::smod), 0u);
+        CHECK_EQ(count_opcode(*gfn, Opcode::ashr), 0u);
+        CHECK_EQ(verify::verify_mir_equivalence(*g_before->get_function("guarded_sdiv_smod"), *gfn).status,
+                 verify::EquivStatus::ProvenEquivalent);
+    }
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

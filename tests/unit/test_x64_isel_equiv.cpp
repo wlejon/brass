@@ -108,6 +108,43 @@ TEST_CASE("X64 ISel Equiv - Signed/Unsigned Div/Mod (Variable & Magic/Shift Fold
     EquivOptions magic_opts;
     magic_opts.max_sat_conflicts = 50000;
     CHECK_EQ(verify_x64_isel(*magic, false, magic_opts).status, EquivStatus::ProvenEquivalent);
+
+    // 32-bit signed & unsigned non-power-of-two magic division/modulo (unbounded i32)
+    for (int32_t d : {3, 7, 10, 255}) {
+        Function* s32 = mod.create_function("magic_s32_" + std::to_string(d), Type::i32(), {Type::i32()});
+        b.set_function(s32);
+        BasicBlock* sb = b.append_block("entry");
+        Value* sx = b.add_block_param(sb, Type::i32());
+        b.position_at_end(sb);
+        Value* dc = b.build_iconst_i32(d);
+        b.build_ret(b.build_add(b.build_sdiv(sx, dc), b.build_smod(sx, dc)));
+        s32->rebuild_cfg_predecessors();
+        CHECK_EQ(verify_x64_isel(*s32, false, magic_opts).status, EquivStatus::ProvenEquivalent);
+
+        Function* u32 = mod.create_function("magic_u32_" + std::to_string(d), Type::i32(), {Type::i32()});
+        b.set_function(u32);
+        BasicBlock* ub = b.append_block("entry");
+        Value* ux = b.add_block_param(ub, Type::i32());
+        b.position_at_end(ub);
+        Value* udc = b.build_iconst_i32(d);
+        b.build_ret(b.build_add(b.build_udiv(ux, udc), b.build_umod(ux, udc)));
+        u32->rebuild_cfg_predecessors();
+        CHECK_EQ(verify_x64_isel(*u32, false, magic_opts).status, EquivStatus::ProvenEquivalent);
+    }
+
+    // 64-bit unsigned non-power-of-two magic division/modulo (Umulh)
+    for (int64_t d : {int64_t{3}, int64_t{7}}) {
+        Function* u64 = mod.create_function("magic_u64_" + std::to_string(d), Type::i64(), {Type::i64()});
+        b.set_function(u64);
+        BasicBlock* ub = b.append_block("entry");
+        Value* raw_ux = b.add_block_param(ub, Type::i64());
+        b.position_at_end(ub);
+        Value* ux = b.build_and(raw_ux, b.build_iconst_i64(63));
+        Value* udc = b.build_iconst_i64(d);
+        b.build_ret(b.build_add(b.build_udiv(ux, udc), b.build_umod(ux, udc)));
+        u64->rebuild_cfg_predecessors();
+        CHECK_EQ(verify_x64_isel(*u64, false, magic_opts).status, EquivStatus::ProvenEquivalent);
+    }
 }
 
 TEST_CASE("X64 ISel Equiv - Diamond CFG and Bounded Loop") {

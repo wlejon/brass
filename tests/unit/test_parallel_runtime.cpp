@@ -43,7 +43,10 @@ TEST_CASE("WorkStealingQueue Basic Operations") {
 
 TEST_CASE("Parallel Workers Configuration") {
     uint32_t orig = brass_get_parallel_workers();
-    CHECK(orig > 0u);
+    CHECK(orig >= 2u && orig <= 16u);
+
+    brass_set_parallel_workers(16);
+    CHECK_EQ(brass_get_parallel_workers(), 16u);
 
     brass_set_parallel_workers(4);
     CHECK_EQ(brass_get_parallel_workers(), 4u);

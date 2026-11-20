@@ -411,6 +411,7 @@ if(BRASS_WITH_SPIRV)
         unit/test_spirv_kernels.cpp
         unit/test_spirv_kernels_quant.cpp
         unit/test_gpu_verify.cpp
+        unit/test_gpu_mem_safety.cpp
     )
     find_program(BRASS_SPIRV_VAL spirv-val HINTS "$ENV{VULKAN_SDK}/bin")
     find_program(BRASS_SPIRV_DIS spirv-dis HINTS "$ENV{VULKAN_SDK}/bin")
@@ -438,6 +439,11 @@ if(BRASS_WITH_SPIRV)
     target_compile_definitions(test_gpu_verify PRIVATE BRASS_STANDALONE_TEST)
     target_link_libraries(test_gpu_verify PRIVATE brass)
     target_include_directories(test_gpu_verify PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}" "${BRASS_SPIRV_HEADERS_DIR}")
+
+    add_executable(test_gpu_mem_safety unit/test_gpu_mem_safety.cpp)
+    target_compile_definitions(test_gpu_mem_safety PRIVATE BRASS_STANDALONE_TEST)
+    target_link_libraries(test_gpu_mem_safety PRIVATE brass)
+    target_include_directories(test_gpu_mem_safety PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}" "${BRASS_SPIRV_HEADERS_DIR}")
 endif()
 
 target_include_directories(brass_unit_tests

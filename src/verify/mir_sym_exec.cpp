@@ -5,6 +5,7 @@
 #include <brass/mir/opcodes.hpp>
 #include <brass/interpreter/narrow_int.hpp>
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
@@ -520,6 +521,20 @@ SymExecOutput symbolically_execute_mir_region(
                             cur_cond = ctx.make_binary(BVOp::And, cur_cond, ctx.make_unary(BVOp::Not, trap_cond, 1), 1);
                             BVOp iop = (op == Opcode::sdiv) ? BVOp::SDiv : (op == Opcode::udiv) ? BVOp::UDiv
                                      : (op == Opcode::smod) ? BVOp::SRem : BVOp::URem;
+                            if (w == 32 && (iop == BVOp::SDiv || iop == BVOp::SRem)) {
+                                const BVNode& cb = ctx.nodes()[b];
+                                if (cb.op == BVOp::Const) {
+                                    const uint32_t u_d = static_cast<uint32_t>(cb.imm & 0xFFFFFFFFULL);
+                                    const int32_t sd = static_cast<int32_t>(u_d);
+                                    if (sd > 1 && !std::has_single_bit(u_d)) {
+                                        BVNodeId neg_a = ctx.make_binary(BVOp::Slt, a, ctx.make_const(0, 32), 1);
+                                        BVNodeId bad = ctx.make_binary(BVOp::And, cur_cond, neg_a, 1);
+                                        if (solve_nonzero(ctx, bad, 500).status == SolveOutcome::Unsat) {
+                                            iop = (iop == BVOp::SDiv) ? BVOp::UDiv : BVOp::URem;
+                                        }
+                                    }
+                                }
+                            }
                             set_res(ctx.make_binary(iop, a, b, w));
                         }
                         break;

@@ -1,4 +1,5 @@
 #include <brass/mir/superopt.hpp>
+#include "const_div_opt.hpp"
 #include <brass/mir/egraph.hpp>
 #include "../verify/bv_solver.hpp"
 #include <brass/mir/builder.hpp>
@@ -540,9 +541,9 @@ bool run_mir_superopt(
             if (op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod || op == Opcode::umod) {
                 Value* lhs = cur->operand(0);
                 int64_t div_imm = 0;
-                if (lhs && get_const_imm(cur->operand(1), div_imm) && div_imm > 1) {
+                if (lhs && get_const_imm(cur->operand(1), div_imm)) {
                     uint64_t udiv_imm = static_cast<uint64_t>(div_imm);
-                    if (std::has_single_bit(udiv_imm)) {
+                    if (div_imm > 1 && std::has_single_bit(udiv_imm)) {
                         uint32_t sh = static_cast<uint32_t>(std::countr_zero(udiv_imm));
                         BVNodeId lhs_bv = enc.encode(lhs);
                         if (op == Opcode::sdiv || op == Opcode::udiv) {
@@ -576,6 +577,28 @@ bool run_mir_superopt(
                                 cur = next;
                                 continue;
                             }
+                        }
+                    } else if (res_t == Type::i32() && !opts.enable_gpu_superopt) {
+                        auto prove_non_neg = [&]() -> bool {
+                            if (block_queries >= kMaxBlockQueries) return false;
+                            BVNodeId lhs_bv = enc.encode(lhs);
+                            if (lhs_bv == kInvalidBV || ctx.width(lhs_bv) != 32) return false;
+                            ++block_queries;
+                            if (opts.stats) opts.stats->solver_queries++;
+                            BVNodeId neg = ctx.make_binary(BVOp::Slt, lhs_bv, ctx.make_const(0, 32), 1);
+                            BVNodeId bad = ctx.make_binary(BVOp::And, path_cond, neg, 1);
+                            return verify::solve_nonzero(ctx, bad, opts.max_sat_conflicts).status == SolveOutcome::Unsat;
+                        };
+                        if (Value* repl = detail::try_lower_const_div_i32_mir(
+                                mod, fn, cur, lhs, op, div_imm, prove_non_neg)) {
+                            replace_all_uses(fn, cur->result(), repl);
+                            if (opts.stats) {
+                                opts.stats->magic_divs_reduced++;
+                                opts.stats->dags_synthesized++;
+                            }
+                            changed = true;
+                            cur = next;
+                            continue;
                         }
                     }
                 }

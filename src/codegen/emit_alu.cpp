@@ -252,10 +252,11 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
             } else enc_.imul32(dst, to_mem_address(src));
             break;
         }
-        case LirOpcode::Smulh: {
-            // One-operand imul: RDX:RAX = RAX * src (x64_isel_shift_div.cpp
+        case LirOpcode::Smulh:
+        case LirOpcode::Umulh: {
+            // One-operand imul / mul: RDX:RAX = RAX * src (x64_isel_shift_div.cpp
             // fixes RAX / RDX as the operands and both defs). Any other
-            // shape, such as AArch64's three-register smulh, has no x64
+            // shape, such as AArch64's three-register smulh/umulh, has no x64
             // encoding: a compile error, not a wrong multiply.
             if (inst.defs.size() != 2 || inst.uses.size() != 2 || !inst.defs[0].is_preg() ||
                 !inst.defs[1].is_preg() || !inst.uses[0].is_preg() || to_gpr(inst.defs[0]) != GPR::RAX ||
@@ -263,8 +264,13 @@ void EmitContext::emit_alu_instruction(const LirInst& inst) {
                 throw_unsupported("x64 emit", to_string(inst.opcode));
             }
             const auto& src = inst.uses.back();
-            if (src.is_preg()) enc_.imul(to_gpr(src));
-            else enc_.imul(to_mem_address(src));
+            if (inst.opcode == LirOpcode::Smulh) {
+                if (src.is_preg()) enc_.imul(to_gpr(src));
+                else enc_.imul(to_mem_address(src));
+            } else {
+                if (src.is_preg()) enc_.mul(to_gpr(src));
+                else enc_.mul(to_mem_address(src));
+            }
             break;
         }
         case LirOpcode::Idiv:

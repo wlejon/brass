@@ -1,4 +1,5 @@
 #include <brass/mir/gpu_superopt.hpp>
+#include <brass/codegen/div_magic.hpp>
 #include <brass/mir/superopt.hpp>
 #include "../verify/bv_solver.hpp"
 #include <brass/mir/builder.hpp>
@@ -102,12 +103,14 @@ BVNodeId expand_const_div_rem_bv(BVContext& ctx, BVOp op, BVNodeId a, BVNodeId b
                 return build_magic_udiv_u32(ctx, a, compute_magic_const_u32(d));
             }
             if (op == BVOp::SDiv && static_cast<int32_t>(d) > 1 && !std::has_single_bit(d)) {
-                MagicConstU32 mag = compute_magic_const_u32(d);
-                BVNodeId non_neg = ctx.make_binary(BVOp::Sge, a, ctx.make_const(0, 32), 1);
-                BVNodeId pos_q = build_magic_udiv_u32(ctx, a, mag);
-                BVNodeId neg_a = ctx.make_unary(BVOp::Neg, a, 32);
-                BVNodeId neg_q = ctx.make_unary(BVOp::Neg, build_magic_udiv_u32(ctx, neg_a, mag), 32);
-                return ctx.make_ite(non_neg, pos_q, neg_q);
+                const codegen::SignedDivMagic32 sm = codegen::signed_div_magic32(static_cast<int32_t>(d));
+                BVNodeId m64 = ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(sm.multiplier)), 64);
+                BVNodeId prod64 = ctx.make_binary(BVOp::Mul, ctx.make_sext(a, 32), m64, 64);
+                BVNodeId q = ctx.make_extract(prod64, 63, 32);
+                if (sm.multiplier < 0) q = ctx.make_binary(BVOp::Add, q, a, 32);
+                if (sm.shift > 0) q = ctx.make_binary(BVOp::AShr, q, ctx.make_const(sm.shift, 32), 32);
+                BVNodeId sign = ctx.make_binary(BVOp::LShr, a, ctx.make_const(31, 32), 32);
+                return ctx.make_binary(BVOp::Add, q, sign, 32);
             }
         }
         return UINT32_MAX;
@@ -133,15 +136,15 @@ BVNodeId expand_const_div_rem_bv(BVContext& ctx, BVOp op, BVNodeId a, BVNodeId b
             return ctx.make_binary(BVOp::Sub, a, ctx.make_binary(BVOp::Mul, q, b, 32), 32);
         }
         if (op == BVOp::SRem && static_cast<int32_t>(d) > 1 && !std::has_single_bit(d)) {
-            MagicConstU32 mag = compute_magic_const_u32(d);
-            BVNodeId non_neg = ctx.make_binary(BVOp::Sge, a, ctx.make_const(0, 32), 1);
-            BVNodeId pos_q = build_magic_udiv_u32(ctx, a, mag);
-            BVNodeId pos_r = ctx.make_binary(BVOp::Sub, a, ctx.make_binary(BVOp::Mul, pos_q, b, 32), 32);
-            BVNodeId neg_a = ctx.make_unary(BVOp::Neg, a, 32);
-            BVNodeId neg_q = build_magic_udiv_u32(ctx, neg_a, mag);
-            BVNodeId neg_r = ctx.make_unary(
-                BVOp::Neg, ctx.make_binary(BVOp::Sub, neg_a, ctx.make_binary(BVOp::Mul, neg_q, b, 32), 32), 32);
-            return ctx.make_ite(non_neg, pos_r, neg_r);
+            const codegen::SignedDivMagic32 sm = codegen::signed_div_magic32(static_cast<int32_t>(d));
+            BVNodeId m64 = ctx.make_const(static_cast<uint64_t>(static_cast<int64_t>(sm.multiplier)), 64);
+            BVNodeId prod64 = ctx.make_binary(BVOp::Mul, ctx.make_sext(a, 32), m64, 64);
+            BVNodeId q = ctx.make_extract(prod64, 63, 32);
+            if (sm.multiplier < 0) q = ctx.make_binary(BVOp::Add, q, a, 32);
+            if (sm.shift > 0) q = ctx.make_binary(BVOp::AShr, q, ctx.make_const(sm.shift, 32), 32);
+            BVNodeId sign = ctx.make_binary(BVOp::LShr, a, ctx.make_const(31, 32), 32);
+            q = ctx.make_binary(BVOp::Add, q, sign, 32);
+            return ctx.make_binary(BVOp::Sub, a, ctx.make_binary(BVOp::Mul, q, b, 32), 32);
         }
     }
     return UINT32_MAX;

@@ -3,6 +3,7 @@
 #include <brass/mir/printer.hpp>
 #include <iostream>
 #include <brass/mir/loop_opt.hpp>
+#include <brass/mir/pass_catalog.hpp>
 #include <brass/mir/smt_guard_elim.hpp>
 #include <brass/mir/superopt.hpp>
 #include <brass/mir/scalar_opt.hpp>
@@ -288,10 +289,28 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
                 if (options_.enable_smt_guard_elim) {
                     run_smt_guard_elimination(*fn, mod);
                 }
+                bool superopt_changed = false;
                 if (options_.enable_superopt) {
-                    run_mir_superopt(*fn, mod);
+                    superopt_changed = run_mir_superopt(*fn, mod);
                 }
                 eliminate_dead_code(*fn);
+                if (superopt_changed) {
+                    Pipeline clean_p;
+                    clean_p.add(passes::gvn(FunctionFilter::All));
+                    LoopOptOptions c_opts;
+                    c_opts.enable_licm = true;
+                    c_opts.enable_dce = true;
+                    c_opts.enable_gvn = false;
+                    c_opts.enable_sccp = false;
+                    c_opts.enable_unroll = false;
+                    c_opts.enable_vectorize = false;
+                    c_opts.enable_slp = false;
+                    c_opts.enable_f64_demote = false;
+                    c_opts.enable_diamond_select = false;
+                    c_opts.enable_ivsr = false;
+                    clean_p.add(passes::loop_cleanup(c_opts));
+                    run_pipeline(*fn, clean_p);
+                }
             }
         }
     }
@@ -299,7 +318,10 @@ void KernelJit::run_kernel_optimizations(Module& mod) const {
 
 void KernelJit::prepare_module(Module& mod) const {
     mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);
-    run_kernel_optimizations(mod);
+    if (!mod.has_loop_optimizations()) {
+        run_kernel_optimizations(mod);
+        mod.set_has_loop_optimizations(true);
+    }
     for (auto* fn : mod.functions()) {
         if (fn) {
             fn->rebuild_cfg_predecessors();
@@ -330,6 +352,7 @@ KernelFunction KernelJit::compile(Function& fn) {
 object::ObjectFile KernelJit::compile_object(Module& mod) const {
     Module working_mod(mod.name());
     working_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);
+    working_mod.set_has_loop_optimizations(mod.has_loop_optimizations());
 
     working_mod.copy_declarations_from(mod);
     for (const auto* fn : mod.functions()) {
@@ -339,12 +362,12 @@ object::ObjectFile KernelJit::compile_object(Module& mod) const {
     }
 
     prepare_module(working_mod);
-    working_mod.set_has_loop_optimizations(true);
 
     object::ModuleCompiler compiler(target_);
     compiler.set_enable_mir_opts(false);
     compiler.set_emit_stack_map_symbol(false);
-    compiler.set_x64_avx(target_.is_x64() && Target::host_has_avx());
+    compiler.set_threads(1);
+    compiler.set_x64_avx(options_.enable_avx2 && target_.is_x64() && target_ == Target::host() && Target::host_has_avx());
     if (options_.enable_optimizations && options_.opt_level >= 2 && options_.enable_superopt) {
         codegen::SchedOptions sched_opts = compiler.sched_options();
         sched_opts.enable_lir_superopt = true;
@@ -356,6 +379,7 @@ object::ObjectFile KernelJit::compile_object(Module& mod) const {
 KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
     Module working_mod(mod.name());
     working_mod.set_allow_fp_reassociation(mod.allow_fp_reassociation() || options_.enable_fp_reassociation);
+    working_mod.set_has_loop_optimizations(mod.has_loop_optimizations());
 
     working_mod.copy_declarations_from(mod);
 

@@ -287,9 +287,6 @@ BVNodeId BVContext::make_extract(BVNodeId a, uint32_t hi, uint32_t lo) {
     if (((intervals_[a].known_zeros >> lo) & w_mask) == w_mask) {
         return make_const(0, w);
     }
-    if (na.op == BVOp::Ite) {
-        return make_ite(na.a, make_extract(na.b, hi, lo), make_extract(na.c, hi, lo));
-    }
     if (na.op == BVOp::Extract) {
         return make_extract(na.a, na.extra + hi, na.extra + lo);
     }
@@ -308,14 +305,31 @@ BVNodeId BVContext::make_extract(BVNodeId a, uint32_t hi, uint32_t lo) {
             return make_extract(na.a, hi - lo_w, lo - lo_w);
         }
     }
-    if (lo == 0 && (na.op == BVOp::And || na.op == BVOp::Or || na.op == BVOp::Xor ||
-                    na.op == BVOp::Add || na.op == BVOp::Sub || na.op == BVOp::Mul)) {
-        return make_binary(na.op, make_extract(na.a, hi, 0), make_extract(na.b, hi, 0), w);
-    }
-    if (lo == 0 && na.op == BVOp::Shl && nodes_[na.b].op == BVOp::Const &&
-        (nodes_[na.b].imm & shift_mask(na.width)) < w) {
-        return make_binary(BVOp::Shl, make_extract(na.a, hi, 0),
-                           make_const(nodes_[na.b].imm & shift_mask(na.width), w), w);
+    const bool is_branching_ite = (na.op == BVOp::Ite);
+    const bool is_branching_low_bin =
+        (lo == 0 && (na.op == BVOp::And || na.op == BVOp::Or || na.op == BVOp::Xor ||
+                     na.op == BVOp::Add || na.op == BVOp::Sub || na.op == BVOp::Mul));
+    const bool is_branching_low_shl =
+        (lo == 0 && na.op == BVOp::Shl && nodes_[na.b].op == BVOp::Const &&
+         (nodes_[na.b].imm & shift_mask(na.width)) < w);
+    if (is_branching_ite || is_branching_low_bin || is_branching_low_shl) {
+        const uint64_t extract_key = (static_cast<uint64_t>(a) << 16) |
+                                     (static_cast<uint64_t>(hi & 0xFFu) << 8) |
+                                     static_cast<uint64_t>(lo & 0xFFu);
+        if (auto it = extract_memo_.find(extract_key); it != extract_memo_.end()) {
+            return it->second;
+        }
+        BVNodeId res = UINT32_MAX;
+        if (is_branching_ite) {
+            res = make_ite(na.a, make_extract(na.b, hi, lo), make_extract(na.c, hi, lo));
+        } else if (is_branching_low_bin) {
+            res = make_binary(na.op, make_extract(na.a, hi, 0), make_extract(na.b, hi, 0), w);
+        } else {
+            res = make_binary(BVOp::Shl, make_extract(na.a, hi, 0),
+                              make_const(nodes_[na.b].imm & shift_mask(na.width), w), w);
+        }
+        extract_memo_.emplace(extract_key, res);
+        return res;
     }
     BVNode n;
     n.op = BVOp::Extract;

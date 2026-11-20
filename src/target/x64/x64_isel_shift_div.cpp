@@ -107,6 +107,307 @@ void X64ISel::lower_signed_div_magic(const Instruction& inst, LirBlock& lir_bb, 
     lir_bb.append_inst(std::move(sub_r));
 }
 
+void X64ISel::lower_signed_div_magic32(const Instruction& inst, LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor) {
+    const int32_t d = static_cast<int32_t>(divisor.val);
+    const SignedDivMagic32 mg = signed_div_magic32(d);
+    VReg dst = get_vreg(inst.result());
+    VReg n = get_vreg(inst.operand(0));
+
+    VReg t64 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto sext_n = std::make_unique<LirInst>(LirOpcode::Movsxd);
+    sext_n->add_def(LirOperand::vreg(t64, 8));
+    sext_n->add_use(LirOperand::vreg(n, 4));
+    lir_bb.append_inst(std::move(sext_n));
+
+    auto mul_m = std::make_unique<LirInst>(LirOpcode::Imul);
+    mul_m->add_def(LirOperand::vreg(t64, 8));
+    mul_m->add_use(LirOperand::vreg(t64, 8));
+    mul_m->add_use(LirOperand::imm(static_cast<int64_t>(mg.multiplier), 8));
+    lir_bb.append_inst(std::move(mul_m));
+
+    auto shr32 = std::make_unique<LirInst>(LirOpcode::Shr);
+    shr32->add_def(LirOperand::vreg(t64, 8));
+    shr32->add_use(LirOperand::vreg(t64, 8));
+    shr32->add_use(LirOperand::imm(32, 1));
+    lir_bb.append_inst(std::move(shr32));
+
+    if (mg.multiplier < 0) {
+        auto add_n = std::make_unique<LirInst>(LirOpcode::Add32);
+        add_n->add_def(LirOperand::vreg(t64, 4));
+        add_n->add_use(LirOperand::vreg(t64, 4));
+        add_n->add_use(LirOperand::vreg(n, 4));
+        lir_bb.append_inst(std::move(add_n));
+    }
+    if (mg.shift > 0) {
+        auto sar = std::make_unique<LirInst>(LirOpcode::Sar32);
+        sar->add_def(LirOperand::vreg(t64, 4));
+        sar->add_use(LirOperand::vreg(t64, 4));
+        sar->add_use(LirOperand::imm(mg.shift, 1));
+        lir_bb.append_inst(std::move(sar));
+    }
+
+    VReg sign = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+    auto mov_s = std::make_unique<LirInst>(LirOpcode::Mov32);
+    mov_s->add_def(LirOperand::vreg(sign, 4));
+    mov_s->add_use(LirOperand::vreg(n, 4));
+    lir_bb.append_inst(std::move(mov_s));
+    auto shr_s = std::make_unique<LirInst>(LirOpcode::Shr32);
+    shr_s->add_def(LirOperand::vreg(sign, 4));
+    shr_s->add_use(LirOperand::vreg(sign, 4));
+    shr_s->add_use(LirOperand::imm(31, 1));
+    lir_bb.append_inst(std::move(shr_s));
+
+    if (!is_mod) {
+        auto mov_d = std::make_unique<LirInst>(LirOpcode::Mov32);
+        mov_d->add_def(LirOperand::vreg(dst, 4));
+        mov_d->add_use(LirOperand::vreg(t64, 4));
+        lir_bb.append_inst(std::move(mov_d));
+        auto add_d = std::make_unique<LirInst>(LirOpcode::Add32);
+        add_d->add_def(LirOperand::vreg(dst, 4));
+        add_d->add_use(LirOperand::vreg(dst, 4));
+        add_d->add_use(LirOperand::vreg(sign, 4));
+        add_d->mir_origin = &inst;
+        lir_bb.append_inst(std::move(add_d));
+        return;
+    }
+
+    auto add_q = std::make_unique<LirInst>(LirOpcode::Add32);
+    add_q->add_def(LirOperand::vreg(t64, 4));
+    add_q->add_use(LirOperand::vreg(t64, 4));
+    add_q->add_use(LirOperand::vreg(sign, 4));
+    lir_bb.append_inst(std::move(add_q));
+
+    VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+    auto mul_d = std::make_unique<LirInst>(LirOpcode::Imul32);
+    mul_d->add_def(LirOperand::vreg(prod, 4));
+    mul_d->add_use(LirOperand::vreg(t64, 4));
+    mul_d->add_use(LirOperand::imm(d, 4));
+    lir_bb.append_inst(std::move(mul_d));
+
+    auto mov_r = std::make_unique<LirInst>(LirOpcode::Mov32);
+    mov_r->add_def(LirOperand::vreg(dst, 4));
+    mov_r->add_use(LirOperand::vreg(n, 4));
+    lir_bb.append_inst(std::move(mov_r));
+    auto sub_r = std::make_unique<LirInst>(LirOpcode::Sub32);
+    sub_r->add_def(LirOperand::vreg(dst, 4));
+    sub_r->add_use(LirOperand::vreg(dst, 4));
+    sub_r->add_use(LirOperand::vreg(prod, 4));
+    sub_r->mir_origin = &inst;
+    lir_bb.append_inst(std::move(sub_r));
+}
+
+void X64ISel::lower_unsigned_div_magic32(const Instruction& inst, LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor) {
+    const uint32_t d = static_cast<uint32_t>(divisor.val);
+    const UnsignedDivMagic32 mg = unsigned_div_magic32(d);
+    VReg dst = get_vreg(inst.result());
+    VReg n = get_vreg(inst.operand(0));
+
+    VReg x = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mov_x = std::make_unique<LirInst>(LirOpcode::Mov32);
+    mov_x->add_def(LirOperand::vreg(x, 4));
+    mov_x->add_use(LirOperand::vreg(n, 4));
+    lir_bb.append_inst(std::move(mov_x));
+    if (mg.pre_shift > 0u) {
+        auto pre = std::make_unique<LirInst>(LirOpcode::Shr32);
+        pre->add_def(LirOperand::vreg(x, 4));
+        pre->add_use(LirOperand::vreg(x, 4));
+        pre->add_use(LirOperand::imm(mg.pre_shift, 1));
+        lir_bb.append_inst(std::move(pre));
+    }
+
+    VReg prod64 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mov_m = std::make_unique<LirInst>(LirOpcode::Mov32);
+    mov_m->add_def(LirOperand::vreg(prod64, 4));
+    mov_m->add_use(LirOperand::imm(static_cast<int64_t>(mg.multiplier), 4));
+    lir_bb.append_inst(std::move(mov_m));
+
+    auto mul_m = std::make_unique<LirInst>(LirOpcode::Imul);
+    mul_m->add_def(LirOperand::vreg(prod64, 8));
+    mul_m->add_use(LirOperand::vreg(prod64, 8));
+    mul_m->add_use(LirOperand::vreg(x, 8));
+    lir_bb.append_inst(std::move(mul_m));
+
+    VReg q = prod64;
+    if (!mg.needs_add) {
+        auto shr_all = std::make_unique<LirInst>(LirOpcode::Shr);
+        shr_all->add_def(LirOperand::vreg(prod64, 8));
+        shr_all->add_use(LirOperand::vreg(prod64, 8));
+        shr_all->add_use(LirOperand::imm(32u + mg.post_shift, 1));
+        if (!is_mod) shr_all->mir_origin = &inst;
+        lir_bb.append_inst(std::move(shr_all));
+        if (!is_mod) {
+            auto mov_d = std::make_unique<LirInst>(LirOpcode::Mov32);
+            mov_d->add_def(LirOperand::vreg(dst, 4));
+            mov_d->add_use(LirOperand::vreg(q, 4));
+            mov_d->mir_origin = &inst;
+            lir_bb.append_inst(std::move(mov_d));
+            return;
+        }
+    } else {
+        auto shr_hi = std::make_unique<LirInst>(LirOpcode::Shr);
+        shr_hi->add_def(LirOperand::vreg(prod64, 8));
+        shr_hi->add_use(LirOperand::vreg(prod64, 8));
+        shr_hi->add_use(LirOperand::imm(32, 1));
+        lir_bb.append_inst(std::move(shr_hi));
+
+        VReg t = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+        auto mov_t = std::make_unique<LirInst>(LirOpcode::Mov32);
+        mov_t->add_def(LirOperand::vreg(t, 4));
+        mov_t->add_use(LirOperand::vreg(x, 4));
+        lir_bb.append_inst(std::move(mov_t));
+        auto sub_t = std::make_unique<LirInst>(LirOpcode::Sub32);
+        sub_t->add_def(LirOperand::vreg(t, 4));
+        sub_t->add_use(LirOperand::vreg(t, 4));
+        sub_t->add_use(LirOperand::vreg(prod64, 4));
+        lir_bb.append_inst(std::move(sub_t));
+        auto shr_t = std::make_unique<LirInst>(LirOpcode::Shr32);
+        shr_t->add_def(LirOperand::vreg(t, 4));
+        shr_t->add_use(LirOperand::vreg(t, 4));
+        shr_t->add_use(LirOperand::imm(1, 1));
+        lir_bb.append_inst(std::move(shr_t));
+        auto add_t = std::make_unique<LirInst>(LirOpcode::Add32);
+        add_t->add_def(LirOperand::vreg(t, 4));
+        add_t->add_use(LirOperand::vreg(t, 4));
+        add_t->add_use(LirOperand::vreg(prod64, 4));
+        lir_bb.append_inst(std::move(add_t));
+        if (mg.post_shift > 1u) {
+            auto shr_f = std::make_unique<LirInst>(LirOpcode::Shr32);
+            shr_f->add_def(LirOperand::vreg(t, 4));
+            shr_f->add_use(LirOperand::vreg(t, 4));
+            shr_f->add_use(LirOperand::imm(mg.post_shift - 1u, 1));
+            lir_bb.append_inst(std::move(shr_f));
+        }
+        q = t;
+        if (!is_mod) {
+            auto mov_d = std::make_unique<LirInst>(LirOpcode::Mov32);
+            mov_d->add_def(LirOperand::vreg(dst, 4));
+            mov_d->add_use(LirOperand::vreg(q, 4));
+            mov_d->mir_origin = &inst;
+            lir_bb.append_inst(std::move(mov_d));
+            return;
+        }
+    }
+
+    VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+    auto mul_d = std::make_unique<LirInst>(LirOpcode::Imul32);
+    mul_d->add_def(LirOperand::vreg(prod, 4));
+    mul_d->add_use(LirOperand::vreg(q, 4));
+    mul_d->add_use(LirOperand::imm(static_cast<int32_t>(d), 4));
+    lir_bb.append_inst(std::move(mul_d));
+
+    auto mov_r = std::make_unique<LirInst>(LirOpcode::Mov32);
+    mov_r->add_def(LirOperand::vreg(dst, 4));
+    mov_r->add_use(LirOperand::vreg(n, 4));
+    lir_bb.append_inst(std::move(mov_r));
+    auto sub_r = std::make_unique<LirInst>(LirOpcode::Sub32);
+    sub_r->add_def(LirOperand::vreg(dst, 4));
+    sub_r->add_use(LirOperand::vreg(dst, 4));
+    sub_r->add_use(LirOperand::vreg(prod, 4));
+    sub_r->mir_origin = &inst;
+    lir_bb.append_inst(std::move(sub_r));
+}
+
+void X64ISel::lower_unsigned_div_magic64(const Instruction& inst, LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor) {
+    const uint64_t d = static_cast<uint64_t>(divisor.val);
+    const UnsignedDivMagic64 mg = unsigned_div_magic64(d);
+    VReg dst = get_vreg(inst.result());
+    VReg n = get_vreg(inst.operand(0));
+
+    auto mov_m = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_m->add_def(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+    mov_m->add_use(LirOperand::imm(static_cast<int64_t>(mg.multiplier), 8));
+    lir_bb.append_inst(std::move(mov_m));
+
+    auto mulh = std::make_unique<LirInst>(LirOpcode::Umulh);
+    mulh->add_def(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+    mulh->add_def(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+    mulh->add_use(LirOperand::preg_gpr(GPR::RAX, 8), FixedConstraint::gpr(GPR::RAX));
+    mulh->add_use(LirOperand::vreg(n, 8));
+    lir_bb.append_inst(std::move(mulh));
+
+    VReg hi = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mov_hi = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_hi->add_def(LirOperand::vreg(hi, 8));
+    mov_hi->add_use(LirOperand::preg_gpr(GPR::RDX, 8), FixedConstraint::gpr(GPR::RDX));
+    lir_bb.append_inst(std::move(mov_hi));
+
+    VReg q = hi;
+    if (!mg.needs_add) {
+        if (mg.shift > 0u) {
+            auto shr = std::make_unique<LirInst>(LirOpcode::Shr);
+            shr->add_def(LirOperand::vreg(q, 8));
+            shr->add_use(LirOperand::vreg(q, 8));
+            shr->add_use(LirOperand::imm(mg.shift, 1));
+            lir_bb.append_inst(std::move(shr));
+        }
+    } else {
+        VReg t = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+        auto mov_t = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_t->add_def(LirOperand::vreg(t, 8));
+        mov_t->add_use(LirOperand::vreg(n, 8));
+        lir_bb.append_inst(std::move(mov_t));
+        auto sub_t = std::make_unique<LirInst>(LirOpcode::Sub);
+        sub_t->add_def(LirOperand::vreg(t, 8));
+        sub_t->add_use(LirOperand::vreg(t, 8));
+        sub_t->add_use(LirOperand::vreg(hi, 8));
+        lir_bb.append_inst(std::move(sub_t));
+        auto shr_t = std::make_unique<LirInst>(LirOpcode::Shr);
+        shr_t->add_def(LirOperand::vreg(t, 8));
+        shr_t->add_use(LirOperand::vreg(t, 8));
+        shr_t->add_use(LirOperand::imm(1, 1));
+        lir_bb.append_inst(std::move(shr_t));
+        auto add_t = std::make_unique<LirInst>(LirOpcode::Add);
+        add_t->add_def(LirOperand::vreg(t, 8));
+        add_t->add_use(LirOperand::vreg(t, 8));
+        add_t->add_use(LirOperand::vreg(hi, 8));
+        lir_bb.append_inst(std::move(add_t));
+        if (mg.shift > 1u) {
+            auto shr_f = std::make_unique<LirInst>(LirOpcode::Shr);
+            shr_f->add_def(LirOperand::vreg(t, 8));
+            shr_f->add_use(LirOperand::vreg(t, 8));
+            shr_f->add_use(LirOperand::imm(mg.shift - 1u, 1));
+            lir_bb.append_inst(std::move(shr_f));
+        }
+        q = t;
+    }
+
+    if (!is_mod) {
+        auto mov_d = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_d->add_def(LirOperand::vreg(dst, 8));
+        mov_d->add_use(LirOperand::vreg(q, 8));
+        mov_d->mir_origin = &inst;
+        lir_bb.append_inst(std::move(mov_d));
+        return;
+    }
+
+    VReg prod = lir_fn_->allocate_vreg(RegClass::GPR, 8);
+    auto mul_d = std::make_unique<LirInst>(LirOpcode::Imul);
+    mul_d->add_def(LirOperand::vreg(prod, 8));
+    if (divisor.fits_i32) {
+        mul_d->add_use(LirOperand::vreg(q, 8));
+        mul_d->add_use(LirOperand::imm(divisor.val, 8));
+    } else {
+        auto mov_p = std::make_unique<LirInst>(LirOpcode::Mov);
+        mov_p->add_def(LirOperand::vreg(prod, 8));
+        mov_p->add_use(LirOperand::vreg(q, 8));
+        lir_bb.append_inst(std::move(mov_p));
+        mul_d->add_use(LirOperand::vreg(prod, 8));
+        mul_d->add_use(LirOperand::vreg(get_vreg(inst.operand(1)), 8));
+    }
+    lir_bb.append_inst(std::move(mul_d));
+
+    auto mov_r = std::make_unique<LirInst>(LirOpcode::Mov);
+    mov_r->add_def(LirOperand::vreg(dst, 8));
+    mov_r->add_use(LirOperand::vreg(n, 8));
+    lir_bb.append_inst(std::move(mov_r));
+    auto sub_r = std::make_unique<LirInst>(LirOpcode::Sub);
+    sub_r->add_def(LirOperand::vreg(dst, 8));
+    sub_r->add_use(LirOperand::vreg(dst, 8));
+    sub_r->add_use(LirOperand::vreg(prod, 8));
+    sub_r->mir_origin = &inst;
+    lir_bb.append_inst(std::move(sub_r));
+}
+
 bool X64ISel::divisor_folds(const ImmIntInfo& divisor, bool is_mod) noexcept {
     if (!divisor.is_imm || divisor.val <= 0) return false;
     const uint64_t c = static_cast<uint64_t>(divisor.val);
@@ -119,12 +420,17 @@ bool X64ISel::divisor_folds(const ImmIntInfo& divisor, bool is_mod) noexcept {
 bool X64ISel::divisor_unread(const Instruction& inst) const {
     const Opcode op = inst.opcode();
     const bool is_mod = op == Opcode::umod || op == Opcode::smod;
+    const bool is_signed = op == Opcode::sdiv || op == Opcode::smod;
     const ImmIntInfo dv = get_imm_int_info(inst.operand(1));
-    // lower_div_mod's first choice: the magic-number lowering reads the
-    // divisor only for a remainder, and then as an immediate when it fits.
-    const bool magic = (op == Opcode::sdiv || op == Opcode::smod) && inst.type() == Type::i64() && dv.is_imm &&
-                       takes_signed_div_magic(dv.val);
-    if (magic) return !is_mod || dv.fits_i32;
+    if (dv.is_imm) {
+        if (inst.type() == Type::i64()) {
+            if (is_signed && takes_signed_div_magic(dv.val)) return !is_mod || dv.fits_i32;
+            if (!is_signed && takes_unsigned_div_magic64(static_cast<uint64_t>(dv.val))) return !is_mod || dv.fits_i32;
+        } else if (inst.type() == Type::i32()) {
+            if (is_signed && takes_signed_div_magic32(static_cast<int32_t>(dv.val))) return true;
+            if (!is_signed && takes_unsigned_div_magic32(static_cast<uint32_t>(dv.val))) return true;
+        }
+    }
     return divisor_folds(dv, is_mod);
 }
 
@@ -148,9 +454,26 @@ void X64ISel::lower_div_mod(
     uint8_t sz = dst.size;
 
     ImmIntInfo imm1 = get_imm_int_info(op1_val);
-    if (is_signed && sz == 8 && imm1.is_imm && takes_signed_div_magic(imm1.val)) {
-        lower_signed_div_magic(inst, lir_bb, is_mod, imm1);
-        return;
+    if (imm1.is_imm) {
+        if (inst.type() == Type::i64() && sz == 8) {
+            if (is_signed && takes_signed_div_magic(imm1.val)) {
+                lower_signed_div_magic(inst, lir_bb, is_mod, imm1);
+                return;
+            }
+            if (!is_signed && takes_unsigned_div_magic64(static_cast<uint64_t>(imm1.val))) {
+                lower_unsigned_div_magic64(inst, lir_bb, is_mod, imm1);
+                return;
+            }
+        } else if (inst.type() == Type::i32() && sz == 4) {
+            if (is_signed && takes_signed_div_magic32(static_cast<int32_t>(imm1.val))) {
+                lower_signed_div_magic32(inst, lir_bb, is_mod, imm1);
+                return;
+            }
+            if (!is_signed && takes_unsigned_div_magic32(static_cast<uint32_t>(imm1.val))) {
+                lower_unsigned_div_magic32(inst, lir_bb, is_mod, imm1);
+                return;
+            }
+        }
     }
     if (divisor_folds(imm1, is_mod)) {
         uint64_t C = static_cast<uint64_t>(imm1.val);

@@ -18,6 +18,16 @@ struct GpuBufferSpec {
     int32_t length_param_index = -1;    // >= 0 when capacity is param[length_param_index] * elem_bytes
     uint32_t elem_bytes = 4;            // element byte size for length_param_index scaling
     uint32_t base_alignment = 16;       // guaranteed alignment of the buffer base pointer
+    int32_t length_param_index2 = -1;   // >= 0 for 2D product: dim0 * dim1
+    int32_t length_param_index3 = -1;   // >= 0 for 3D product: dim0 * dim1 * dim2
+    uint32_t elem_scale = 1;            // constant multiplier on element count
+};
+
+struct GpuParamConstraint {
+    uint32_t param_index = 0;
+    uint32_t rhs_param_index = UINT32_MAX; // if != UINT32_MAX: param[param_index] <= param[rhs_param_index] (unsigned)
+    uint64_t min_val = 0;                  // if > 0: param[param_index] >= min_val (unsigned)
+    uint64_t max_val = 0;                  // if > 0: param[param_index] <= max_val (unsigned)
 };
 
 struct GpuProverOptions {
@@ -32,6 +42,7 @@ struct GpuProverOptions {
     uint32_t max_sat_conflicts = 10000;
     bool check_global_bounds = true;
     std::vector<GpuBufferSpec> buffers;
+    std::vector<GpuParamConstraint> param_constraints;
 };
 
 struct GpuAccessViolation {
@@ -177,6 +188,7 @@ using verify::BarrierUniformityResult;
 using verify::GpuAccessViolation;
 using verify::GpuBufferSpec;
 using verify::GpuMemorySafetyResult;
+using verify::GpuParamConstraint;
 using verify::GpuProverOptions;
 using verify::TileBoundsProofResult;
 using verify::eliminate_interior_tile_bounds;

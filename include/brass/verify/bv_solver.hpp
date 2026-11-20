@@ -194,6 +194,7 @@ private:
     std::vector<BVInterval> intervals_;
     std::vector<BVVarInfo> vars_;
     std::unordered_map<BVNode, BVNodeId, BVNodeHasher> memo_;
+    std::unordered_map<uint64_t, BVNodeId> extract_memo_;
     mutable BVCone scratch_cone_;
 };
 

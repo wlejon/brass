@@ -194,3 +194,133 @@ TEST_CASE("Div magic - JIT quotient and remainder match / and % over the int64 e
         }
     }
 }
+
+TEST_CASE("Div magic 32-bit signed & unsigned + 64-bit unsigned - selector and JIT") {
+    // 1. Signed 32-bit constant div/mod via X64ISel & JIT (zero Idiv32)
+    const int32_t sdivisors32[] = {3, 5, 6, 7, 9, 10, 13, 25, 255, 1000, 65535, 0x3FFFFFFF, 0x7FFFFFFE, 0x7FFFFFFF};
+    for (int32_t d : sdivisors32) {
+        REQUIRE(takes_signed_div_magic32(d));
+        Module mod("sdiv32_magic");
+        Builder b(mod);
+        for (bool is_mod : {false, true}) {
+            Function* fn = mod.create_function(is_mod ? "rem" : "quo", Type::i32(), {Type::i32()});
+            b.set_function(fn);
+            BasicBlock* e = b.append_block("entry");
+            Value* n = b.add_block_param(e, Type::i32());
+            b.position_at_end(e);
+            Value* dc = b.build_iconst_i32(d);
+            b.build_ret(is_mod ? b.build_smod(n, dc) : b.build_sdiv(n, dc));
+            fn->rebuild_cfg_predecessors();
+
+            x64::X64ISel isel(Target::x64_linux(), CallingConvention::sysv64());
+            auto lir = isel.lower(*fn);
+            REQUIRE(lir != nullptr);
+            size_t smulh = 0, divs = 0;
+            count_ops(*lir, smulh, divs);
+            CHECK_EQ(divs, size_t(0));
+        }
+
+        JitExecutionEngine jit;
+        REQUIRE(jit.compile_and_load(mod));
+        auto quo = jit.get_function_ptr<int32_t (*)(int32_t)>("quo");
+        auto rem = jit.get_function_ptr<int32_t (*)(int32_t)>("rem");
+        const int32_t samples[] = {
+            0, 1, -1, 2, -2, d - 1, -(d - 1), d, -d,
+            INT32_MIN, INT32_MIN + 1, INT32_MAX - 1, INT32_MAX,
+            -123456789, 987654321
+        };
+        for (int32_t n : samples) {
+            CHECK_EQ(quo(n), n / d);
+            CHECK_EQ(rem(n), n % d);
+        }
+    }
+
+    // 2. Unsigned 32-bit constant div/mod via X64ISel & JIT (zero Div32)
+    const uint32_t udivisors32[] = {3u, 5u, 6u, 7u, 10u, 14u, 255u, 641u, 0x7FFFFFFFu, 0x80000001u, 0xFFFFFFFEu, 0xFFFFFFFFu};
+    for (uint32_t d : udivisors32) {
+        REQUIRE(takes_unsigned_div_magic32(d));
+        Module mod("udiv32_magic");
+        Builder b(mod);
+        for (bool is_mod : {false, true}) {
+            Function* fn = mod.create_function(is_mod ? "rem" : "quo", Type::i32(), {Type::i32()});
+            b.set_function(fn);
+            BasicBlock* e = b.append_block("entry");
+            Value* n = b.add_block_param(e, Type::i32());
+            b.position_at_end(e);
+            Value* dc = b.build_iconst_i32(static_cast<int32_t>(d));
+            b.build_ret(is_mod ? b.build_umod(n, dc) : b.build_udiv(n, dc));
+            fn->rebuild_cfg_predecessors();
+
+            x64::X64ISel isel(Target::x64_linux(), CallingConvention::sysv64());
+            auto lir = isel.lower(*fn);
+            REQUIRE(lir != nullptr);
+            size_t divs = 0;
+            for (const auto& bb : lir->blocks) {
+                for (const auto& inst : bb->instructions) {
+                    if (inst->opcode == LirOpcode::Div32 || inst->opcode == LirOpcode::Idiv32) ++divs;
+                }
+            }
+            CHECK_EQ(divs, size_t(0));
+        }
+
+        JitExecutionEngine jit;
+        REQUIRE(jit.compile_and_load(mod));
+        auto quo = jit.get_function_ptr<uint32_t (*)(uint32_t)>("quo");
+        auto rem = jit.get_function_ptr<uint32_t (*)(uint32_t)>("rem");
+        const uint32_t samples[] = {
+            0u, 1u, 2u, d - 1u, d, d + 1u, 0x7FFFFFFFu, 0x80000000u, 0x80000001u, 0xFFFFFFFEu, 0xFFFFFFFFu
+        };
+        for (uint32_t n : samples) {
+            CHECK_EQ(quo(n), n / d);
+            CHECK_EQ(rem(n), n % d);
+        }
+    }
+
+    // 3. Unsigned 64-bit constant div/mod via X64ISel & JIT (Umulh, zero Div)
+    const uint64_t udivisors64[] = {
+        3ULL, 5ULL, 6ULL, 7ULL, 10ULL, 255ULL, 641ULL, 0xFFFFFFFFULL,
+        (uint64_t{1} << 32) + 1ULL, (uint64_t{1} << 63) + 1ULL, UINT64_MAX - 1ULL, UINT64_MAX
+    };
+    for (uint64_t d : udivisors64) {
+        REQUIRE(takes_unsigned_div_magic64(d));
+        Module mod("udiv64_magic");
+        Builder b(mod);
+        for (bool is_mod : {false, true}) {
+            Function* fn = mod.create_function(is_mod ? "rem" : "quo", Type::i64(), {Type::i64()});
+            b.set_function(fn);
+            BasicBlock* e = b.append_block("entry");
+            Value* n = b.add_block_param(e, Type::i64());
+            b.position_at_end(e);
+            Value* dc = b.build_iconst_i64(static_cast<int64_t>(d));
+            b.build_ret(is_mod ? b.build_umod(n, dc) : b.build_udiv(n, dc));
+            fn->rebuild_cfg_predecessors();
+
+            x64::X64ISel isel(Target::x64_linux(), CallingConvention::sysv64());
+            auto lir = isel.lower(*fn);
+            REQUIRE(lir != nullptr);
+            size_t umulh = 0, divs = 0;
+            for (const auto& bb : lir->blocks) {
+                for (const auto& inst : bb->instructions) {
+                    if (inst->opcode == LirOpcode::Umulh) ++umulh;
+                    if (inst->opcode == LirOpcode::Div || inst->opcode == LirOpcode::Idiv) ++divs;
+                }
+            }
+            CHECK_EQ(umulh, size_t(1));
+            CHECK_EQ(divs, size_t(0));
+        }
+
+        JitExecutionEngine jit;
+        REQUIRE(jit.compile_and_load(mod));
+        auto quo = jit.get_function_ptr<uint64_t (*)(uint64_t)>("quo");
+        auto rem = jit.get_function_ptr<uint64_t (*)(uint64_t)>("rem");
+        const uint64_t samples[] = {
+            0ULL, 1ULL, 2ULL, d - 1ULL, d, d + 1ULL,
+            0xFFFFFFFFULL, (uint64_t{1} << 32), (uint64_t{1} << 63) - 1ULL, (uint64_t{1} << 63),
+            UINT64_MAX - 1ULL, UINT64_MAX
+        };
+        for (uint64_t n : samples) {
+            CHECK_EQ(quo(n), n / d);
+            CHECK_EQ(rem(n), n % d);
+        }
+    }
+}

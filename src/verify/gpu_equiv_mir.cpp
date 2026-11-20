@@ -2,6 +2,7 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <bit>
 #include <cstring>
 #include <unordered_map>
 
@@ -172,6 +173,20 @@ GpuExecTrace execute_gpu_mir(
                     BVOp bv_op = (op == Opcode::sdiv) ? BVOp::SDiv
                                : (op == Opcode::udiv) ? BVOp::UDiv
                                : (op == Opcode::smod) ? BVOp::SRem : BVOp::URem;
+                    if (rw == 32 && (bv_op == BVOp::SDiv || bv_op == BVOp::SRem)) {
+                        const BVNode& cb = bv_node(ctx, b);
+                        if (cb.op == BVOp::Const) {
+                            const uint32_t u_d = static_cast<uint32_t>(cb.imm & 0xFFFFFFFFULL);
+                            const int32_t sd = static_cast<int32_t>(u_d);
+                            if (sd > 1 && !std::has_single_bit(u_d)) {
+                                BVNodeId neg_a = bv_bin(ctx, BVOp::Slt, 1, a, bv_const(ctx, 32, 0));
+                                BVNodeId bad = bv_bin(ctx, BVOp::And, 1, cur.cond, neg_a);
+                                if (solve_nonzero(ctx, bad, 500).status == SolveOutcome::Unsat) {
+                                    bv_op = (bv_op == BVOp::SDiv) ? BVOp::UDiv : BVOp::URem;
+                                }
+                            }
+                        }
+                    }
                     res = bv_bin(ctx, bv_op, rw, a, b);
                 }
                 break;

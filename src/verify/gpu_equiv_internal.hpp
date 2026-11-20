@@ -197,4 +197,11 @@ EquivResult compare_gpu_traces(
     std::string* err_out,
     const EquivOptions& opts);
 
+GpuMemorySafetyResult check_trace_memory_safety(
+    BVContext& ctx,
+    const GpuSymEnv& env,
+    const GpuExecTrace& trace,
+    const GpuProverOptions& opts,
+    bool has_static_shared = true);
+
 } // namespace brass::verify

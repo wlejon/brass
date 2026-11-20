@@ -186,6 +186,9 @@ private:
     bool lower_three_operand_float(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode alu_op);
     void lower_div_mod(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_signed, bool is_mod);
     void lower_signed_div_magic(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor);
+    void lower_signed_div_magic32(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor);
+    void lower_unsigned_div_magic32(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor);
+    void lower_unsigned_div_magic64(const Instruction& inst, codegen::LirBlock& lir_bb, bool is_mod, const ImmIntInfo& divisor);
     void lower_shift(const Instruction& inst, codegen::LirBlock& lir_bb, codegen::LirOpcode op32, codegen::LirOpcode op64);
     void lower_comparison(const Instruction& inst, codegen::LirBlock& lir_bb, Condition cond, Condition float_cond);
     void lower_select(const Instruction& inst, codegen::LirBlock& lir_bb);
