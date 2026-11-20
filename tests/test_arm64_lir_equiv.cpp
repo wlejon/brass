@@ -1,6 +1,7 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
 #include <brass/verify/arm64_lir_equiv.hpp>
+#include <brass/verify/bv_solver.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/codegen/peephole.hpp>
 #include <brass/codegen/ml_fusion.hpp>
@@ -752,6 +753,22 @@ TEST_CASE("ARM64 LIR Equiv - 128-Bit VRegs, 16-Byte Spills, Scalar/Vector FMA, a
                      EquivStatus::ProvenEquivalent);
         }
     }
+}
+
+TEST_CASE("ARM64 LIR Equiv - BVContext::make_extract Memoizes Shared Diamond DAGs") {
+    BVContext ctx;
+    BVNodeId cond = ctx.make_var("cond", 1);
+    BVNodeId x = ctx.make_var("x", 64);
+    BVNodeId one = ctx.make_const(1, 64);
+    for (int i = 0; i < 48; ++i) {
+        BVNodeId inc = ctx.make_binary(BVOp::Add, x, one, 64);
+        x = ctx.make_ite(cond, x, inc);
+    }
+    BVNodeId e1 = ctx.make_extract(x, 31, 0);
+    BVNodeId e2 = ctx.make_extract(x, 31, 0);
+    CHECK_EQ(ctx.width(e1), 32u);
+    CHECK_EQ(e1, e2);
+    CHECK_EQ(solve_nonzero(ctx, ctx.make_binary(BVOp::Ne, e1, e2, 1)).status, SolveOutcome::Unsat);
 }
 
 #ifdef BRASS_STANDALONE_TEST
