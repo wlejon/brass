@@ -507,6 +507,38 @@ TEST_CASE("SMT Equiv - Soundness: Truncated Loops, INT_MIN/-1 Traps, TLS, Statef
         EquivOptions pure_opts;
         pure_opts.assume_calls_pure = true;
         CHECK_EQ(verify_mir_equivalence(*f1, *f2, pure_opts).status, EquivStatus::ProvenEquivalent);
+
+        // Pure Brass math intrinsics (e.g. ptx_fmax, ptx_fabs) prove equivalent even when assume_calls_pure == false
+        auto make_math = [&](const char* name) -> Function* {
+            Function* fn = mod.create_function(name, Type::f32(), {Type::f32(), Type::f32()});
+            b.set_function(fn);
+            BasicBlock* e = b.append_block("entry");
+            Value* x = b.add_block_param(e, Type::f32());
+            Value* y = b.add_block_param(e, Type::f32());
+            b.position_at_end(e);
+            Value* ax = b.build_call("ptx_fabs", Type::f32(), {x});
+            Value* m = b.build_call("ptx_fmax", Type::f32(), {ax, y});
+            b.build_ret(m);
+            fn->rebuild_cfg_predecessors();
+            return fn;
+        };
+        Function* m1 = make_math("math1");
+        Function* m2 = make_math("math2");
+        CHECK_EQ(verify_mir_equivalence(*m1, *m2).status, EquivStatus::ProvenEquivalent);
+
+        auto make_unk = [&](const char* name) -> Function* {
+            Function* fn = mod.create_function(name, Type::f32(), {Type::f32()});
+            b.set_function(fn);
+            BasicBlock* e = b.append_block("entry");
+            Value* x = b.add_block_param(e, Type::f32());
+            b.position_at_end(e);
+            b.build_ret(b.build_call("unknown_stateful_fn", Type::f32(), {x}));
+            fn->rebuild_cfg_predecessors();
+            return fn;
+        };
+        Function* u1 = make_unk("unk1");
+        Function* u2 = make_unk("unk2");
+        CHECK_EQ(verify_mir_equivalence(*u1, *u2).status, EquivStatus::Unsupported);
     }
 
     // 4. LIR equivalence: catches 128-bit XMM.hi mismatch, PF flag mismatch, and propagates Unsupported

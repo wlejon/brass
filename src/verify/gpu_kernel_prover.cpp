@@ -12,11 +12,37 @@ namespace brass::verify {
 
 namespace {
 
+bool spirv_has_workgroup_storage(const spirv::Module& mod) {
+    for (const auto& inst : mod.globals) {
+        if (inst.op == spv::OpVariable && !inst.operands.empty() &&
+            inst.operands[0].value == spv::StorageClassWorkgroup) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool spirv_has_barriers_or_collectives(const spirv::Module& mod) {
+    for (const auto& fn : mod.functions) {
+        for (const auto& blk : fn.blocks) {
+            for (const auto& inst : blk.insts) {
+                if (inst.op == spv::OpControlBarrier ||
+                    (inst.op >= spv::OpGroupAsyncCopy && inst.op <= spv::OpGroupSMax) ||
+                    (inst.op >= spv::OpGroupNonUniformElect && inst.op <= spv::OpGroupNonUniformQuadSwap)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 GpuMemorySafetyResult check_trace_memory_safety(
     BVContext& ctx,
     const GpuSymEnv& env,
     const GpuExecTrace& trace,
-    const GpuProverOptions& opts) {
+    const GpuProverOptions& opts,
+    bool has_static_shared = true) {
     GpuMemorySafetyResult res;
     if (!trace.supported) {
         res.status = EquivStatus::Unsupported;
@@ -49,6 +75,9 @@ GpuMemorySafetyResult check_trace_memory_safety(
     };
 
     for (const auto& acc : trace.accesses) {
+        if (!acc.is_shared && !opts.check_global_bounds) {
+            continue;
+        }
         BVNodeId active = bv_bin(ctx, BVOp::And, 1, domain, acc.guard);
         if (bv_node(ctx, active).op == BVOp::Const && bv_node(ctx, active).imm == 0) {
             continue;
@@ -222,7 +251,8 @@ GpuMemorySafetyResult check_trace_memory_safety(
         }
     }
 
-    if (res.status == EquivStatus::ProvenEquivalent &&
+    if ((opts.check_global_bounds || has_static_shared) &&
+        res.status == EquivStatus::ProvenEquivalent &&
         !(bv_node(ctx, trace.completed).op == BVOp::Const && bv_node(ctx, trace.completed).imm == 1)) {
         BVNodeId trunc = bv_bin(ctx, BVOp::And, 1, env.coord_bounds,
             bv_bin(ctx, BVOp::And, 1, trace.domain_assumption,
@@ -310,7 +340,8 @@ BarrierUniformityResult check_traces_barrier_uniformity(
     const GpuExecTrace& trace_b,
     BVNodeId same_subgroup,
     bool compare_barrier_id,
-    const GpuProverOptions& opts) {
+    const GpuProverOptions& opts,
+    bool has_static_barriers = true) {
     BarrierUniformityResult res;
     if (!trace_a.supported || !trace_b.supported) {
         res.status = EquivStatus::Unsupported;
@@ -367,7 +398,7 @@ BarrierUniformityResult check_traces_barrier_uniformity(
         }
     }
 
-    if (res.status == EquivStatus::ProvenEquivalent) {
+    if (has_static_barriers && res.status == EquivStatus::ProvenEquivalent) {
         BVNodeId both_done = bv_bin(ctx, BVOp::And, 1, trace_a.completed, trace_b.completed);
         if (!(bv_node(ctx, both_done).op == BVOp::Const && bv_node(ctx, both_done).imm == 1)) {
             BVNodeId trunc = bv_bin(ctx, BVOp::And, 1,
@@ -458,7 +489,7 @@ GpuMemorySafetyResult verify_spirv_memory_safety(
         }
         return res;
     }
-    return check_trace_memory_safety(ctx, env, trace, opts);
+    return check_trace_memory_safety(ctx, env, trace, opts, spirv_has_workgroup_storage(spv_mod));
 }
 
 GpuMemorySafetyResult verify_ptx_memory_safety(
@@ -548,7 +579,8 @@ BarrierUniformityResult verify_spirv_barrier_uniformity(
     env_b.global_init_bytes = env_a.global_init_bytes;
     env_b.shared_init_bytes = env_a.shared_init_bytes;
     GpuExecTrace trace_b = execute_gpu_spirv(ctx, spv_mod, env_b, eq_opts);
-    return check_traces_barrier_uniformity(ctx, env_a, env_b, trace_a, trace_b, same_sg, false, opts);
+    return check_traces_barrier_uniformity(ctx, env_a, env_b, trace_a, trace_b, same_sg, false, opts,
+                                           spirv_has_barriers_or_collectives(spv_mod));
 }
 
 BarrierUniformityResult verify_ptx_barrier_uniformity(

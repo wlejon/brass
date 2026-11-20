@@ -756,6 +756,68 @@ TEST_CASE("GPU Prover - Soundness: Missing Buffer Spec -> Unknown, Shared Alignm
         opts.loop_unroll_bound = 2;
         CHECK_EQ(verify_gpu_barrier_uniformity(*fn, opts).status, EquivStatus::Unknown);
     }
+
+    // 4. SPIR-V shader with unbounded loop & no Workgroup storage / barriers proves safe & uniform
+    //    when check_global_bounds == false, whereas adding Workgroup storage + barrier returns Unknown.
+    {
+        Module mod("spv_unbounded_pure");
+        Function* fn = mod.create_function("pure_loop", Type::void_type(), {Type::i32(), Type::ptr()});
+        KernelBuilder kb(mod, fn);
+        Builder& b = kb.builder();
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hdr = b.append_block("hdr");
+        BasicBlock* body = b.append_block("body");
+        BasicBlock* exit = b.append_block("exit");
+        Value* n = b.add_block_param(entry, Type::i32());
+        Value* out_ptr = b.add_block_param(entry, Type::ptr());
+        Value* iv = b.add_block_param(hdr, Type::i32());
+        b.position_at_end(entry);
+        b.build_br(hdr, {kb.const_i32(0)});
+        b.position_at_end(hdr);
+        b.build_br_if(b.build_slt(iv, n), body, {}, exit, {});
+        b.position_at_end(body);
+        kb.store_i32_indexed(out_ptr, iv, iv);
+        b.build_br(hdr, {b.build_add(iv, kb.const_i32(1))});
+        b.position_at_end(exit);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        auto spv = lower_spirv(*fn);
+        GpuProverOptions opts;
+        opts.loop_unroll_bound = 2;
+        opts.check_global_bounds = false;
+        CHECK(verify_spirv_memory_safety(spv, opts).is_safe());
+        CHECK(verify_spirv_barrier_uniformity(spv, opts).is_uniform());
+
+        Module mod_sh("spv_unbounded_shared_bar");
+        Function* fn_sh = mod_sh.create_function("sh_loop", Type::void_type(), {Type::i32(), Type::ptr()});
+        KernelBuilder kb2(mod_sh, fn_sh);
+        Builder& b2 = kb2.builder();
+        BasicBlock* e2 = b2.append_block("entry");
+        BasicBlock* h2 = b2.append_block("hdr");
+        BasicBlock* bd2 = b2.append_block("body");
+        BasicBlock* ex2 = b2.append_block("exit");
+        Value* n2 = b2.add_block_param(e2, Type::i32());
+        Value* out2 = b2.add_block_param(e2, Type::ptr());
+        Value* iv2 = b2.add_block_param(h2, Type::i32());
+        b2.position_at_end(e2);
+        Value* smem = kb2.shared_alloc_i32(256);
+        kb2.shared_store_i32_indexed(smem, kb2.tid_x(), kb2.const_i32(1));
+        kb2.sync();
+        b2.build_br(h2, {kb2.const_i32(0)});
+        b2.position_at_end(h2);
+        b2.build_br_if(b2.build_slt(iv2, n2), bd2, {}, ex2, {});
+        b2.position_at_end(bd2);
+        kb2.store_i32_indexed(out2, iv2, iv2);
+        b2.build_br(h2, {b2.build_add(iv2, kb2.const_i32(1))});
+        b2.position_at_end(ex2);
+        b2.build_ret_void();
+        fn_sh->rebuild_cfg_predecessors();
+
+        auto spv_sh = lower_spirv(*fn_sh);
+        CHECK_EQ(verify_spirv_memory_safety(spv_sh, opts).status, EquivStatus::Unknown);
+        CHECK_EQ(verify_spirv_barrier_uniformity(spv_sh, opts).status, EquivStatus::Unknown);
+    }
 }
 
 TEST_CASE("GPU Opt - optimize_gpu_function Preserves Stores/Loads Across Barriers") {

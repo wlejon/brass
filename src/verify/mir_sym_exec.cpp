@@ -127,6 +127,28 @@ BVNodeId coerce_width(BVContext& ctx, BVNodeId node, uint32_t target_w, bool sig
     return sign_ext ? ctx.make_sext(node, target_w - w) : ctx.make_zext(node, target_w - w);
 }
 
+bool is_pure_math_intrinsic(std::string_view sym) {
+    static constexpr std::string_view kPure[] = {
+        "ptx_rcp",      "ptx_rcp_approx", "ptx_div_approx", "ptx_ex2",       "ptx_lg2",
+        "ptx_exp",      "ptx_log",        "ptx_rsqrt",      "ptx_sqrt",      "ptx_sqrt_rn",
+        "ptx_fabs",     "ptx_fmin",       "ptx_fmax",       "ptx_sin",       "ptx_cos",
+        "ptx_tanh",     "ptx_clamp",      "ptx_mix",        "ptx_smoothstep","ptx_step",
+        "ptx_fma",      "ptx_selp",       "ptx_f16_to_f32", "ptx_f32_to_f16","ptx_i32_to_f32",
+        "ptx_i64_to_f32","ptx_u32_to_f32","ptx_u64_to_f32", "ptx_f32_to_i32","ptx_f32_to_u32",
+        "ptx_f32_to_f64","ptx_f64_to_f32",
+        "rsqrtf", "rsqrt", "sqrtf", "sqrt", "sinf", "sin", "cosf", "cos", "tanf", "tan",
+        "tanhf", "tanh", "expf", "exp", "ex2f", "ex2", "exp2f", "exp2", "logf", "log",
+        "lg2f", "lg2", "log2f", "log2", "fabsf", "fabs", "fminf", "fmin", "fmaxf", "fmax",
+        "floorf", "floor", "ceilf", "ceil", "roundf", "round", "truncf", "trunc",
+        "fmaf", "fma", "powf", "pow", "clampf", "mixf", "smoothstepf", "stepf",
+        "i32_to_f32", "f32_to_i32",
+    };
+    for (std::string_view k : kPure) {
+        if (sym == k) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 SymExecOutput symbolically_execute_mir_region(
@@ -630,7 +652,7 @@ SymExecOutput symbolically_execute_mir_region(
                              sym == "ptx_nctaid_x" || sym == "ptx_nctaid_y" || sym == "ptx_nctaid_z" ||
                              sym == "ptx_laneid" || sym == "ptx_lane_id" ||
                              sym == "ptx_global_tid_x" || sym == "ptx_global_id_x");
-                        if (gpu_v != UINT32_MAX || is_ro_coord || opts.assume_calls_pure) {
+                        if (gpu_v != UINT32_MAX || is_ro_coord || is_pure_math_intrinsic(sym) || opts.assume_calls_pure) {
                             if (inst->result() && !inst->type().is_void()) {
                                 set_res(init_mem.eval_uninterpreted_call(ctx, sym, call_args, inst->type()));
                             }
