@@ -21,7 +21,9 @@
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/tiering.hpp>
 #include <brass/vm/fast_interpreter.hpp>
+#include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -252,6 +254,90 @@ TEST_CASE("Sweep31 - the second guard of a function unwinds with stack arguments
 TEST_CASE("Sweep31 - a guard exit larger than a page unwinds while its exit stub runs") {
     run_guard_exit(700, "main", false);
     run_guard_exit(700, "main2", true);
+}
+
+#endif
+
+#if defined(S31_WIN64_WALK)
+
+// A guard region's entry once chained an allocation to the prologue's codes.
+// The Windows unwinder reads a frame's saves relative to the RSP it finds
+// there, through the chain too, so inside the region every callee-saved
+// register was restored from `bytes` below its slot: the RSP chain stayed
+// right and a C++ exception landed in its catch with the caller's registers
+// garbage (bronze's array_push_spec, a frozen array's push throwing from a
+// speculated function's guard exit). Each entry of a function whose guard
+// exits take stack arguments and that keeps values in callee-saved registers
+// is unwound over a stack whose every word holds its own address: a
+// restored register names the slot it came from, which must be one of the
+// frame's own (rbp - 8 downward), as the primary entry's are.
+TEST_CASE("Sweep31 - a guard region's unwind restores callee-saved registers from their slots") {
+    for (int nstate : {5, 10}) {
+        std::string params, state;
+        for (int i = 0; i < nstate - 1; ++i) {
+            params += "%a" + std::to_string(i) + ": i64, ";
+            state += "%x, ";
+        }
+        std::string s = "module @s31r\n";
+        s += "func @gs(" + params + "%p: ptr) -> i64 {\nb0:\n  %r = call_indirect.i64 %p(%a0)\n  ret %r\n}\n";
+        s += "func @h(%x: i64, %p: ptr) -> i64 {\nb0:\n"
+             "  %k3 = iconst.i64 3\n  %a = mul.i64 %x, %k3\n  %k5 = iconst.i64 5\n  %b = mul.i64 %x, %k5\n"
+             "  %k7 = iconst.i64 7\n  %c = mul.i64 %x, %k7\n  %k9 = iconst.i64 9\n  %d = mul.i64 %x, %k9\n"
+             "  %lim = iconst.i64 1000\n  %ok = slt.i64 %x, %lim\n"
+             "  guard %ok, @gs, [" + state + "%p]\n"
+             "  %t = call_indirect.i64 %p(%x)\n"
+             "  %s1 = add.i64 %a, %b\n  %s2 = add.i64 %s1, %c\n  %s3 = add.i64 %s2, %d\n  %s4 = add.i64 %s3, %t\n"
+             "  ret %s4\n}\n";
+        auto mod = parse_ok(s);
+        HostEngine eng;
+        auto cm = eng.compile(*mod);
+        REQUIRE(cm != nullptr);
+        const auto h = reinterpret_cast<DWORD64>(cm->get_symbol_address("h"));
+        REQUIRE(h != 0);
+
+        std::vector<uint64_t> stack(1u << 17);
+        constexpr DWORD64 kMarker = 0x5151515151515151ull;
+        int primaries = 0, regions = 0;
+        DWORD64 pc = h;
+        for (int guard = 0; guard < 64; ++guard) {
+            DWORD64 base = 0;
+            PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(pc, &base, nullptr);
+            if (!fe) break;  // past @h, the module's last function
+            const auto* info = reinterpret_cast<const uint8_t*>(base + fe->UnwindData);
+            const bool chained = (info[0] >> 3) & 0x4;
+            const uint8_t prolog = info[1];
+            const bool primary = base + fe->BeginAddress == h;
+            if (!primary && !chained && prolog != 0) break;  // the next function
+            const DWORD64 next = base + fe->EndAddress;
+            if (primary) ++primaries;
+            if (!primary && info[2] != 0) ++regions;  // codes of its own: a guard region's entry
+            {
+                for (size_t i = 0; i < stack.size(); ++i) stack[i] = reinterpret_cast<uint64_t>(&stack[i]);
+                CONTEXT ctx{};
+                ctx.Rsp = reinterpret_cast<DWORD64>(&stack[stack.size() / 2]);
+                ctx.Rip = base + fe->BeginAddress + prolog;
+                ctx.Rbx = ctx.Rsi = ctx.Rdi = ctx.Rbp = kMarker;
+                ctx.R12 = ctx.R13 = ctx.R14 = ctx.R15 = kMarker;
+                PVOID hd = nullptr;
+                DWORD64 est = 0;
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, ctx.Rip, fe, &ctx, &hd, &est, nullptr);
+                const DWORD64 frame_rbp = ctx.Rsp - 16;  // the return address, then the pushed rbp
+                CHECK_EQ(ctx.Rbp, frame_rbp);
+                std::vector<DWORD64> restored;
+                for (DWORD64 r : {ctx.Rbx, ctx.Rsi, ctx.Rdi, ctx.R12, ctx.R13, ctx.R14, ctx.R15}) {
+                    if (r != kMarker) restored.push_back(r);
+                }
+                CHECK(!restored.empty());
+                std::sort(restored.begin(), restored.end(), std::greater<DWORD64>());
+                for (size_t i = 0; i < restored.size(); ++i) {
+                    CHECK_EQ(restored[i], frame_rbp - 8 * (i + 1));
+                }
+            }
+            pc = next;
+        }
+        CHECK_EQ(primaries, 1);
+        CHECK(regions >= 1);
+    }
 }
 
 #endif
