@@ -1,5 +1,6 @@
 #include <brass/target/ptx/ptx_printer.hpp>
 
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -191,7 +192,41 @@ std::string print_header(const target::PtxOptions& opts) {
     return ss.str();
 }
 
+namespace {
+
+// tanh.approx.f32 is sm_75 and later.
+bool has_native_tanh(const std::string& sm_arch) {
+    if (sm_arch.rfind("sm_", 0) != 0) return true;
+    return std::atoi(sm_arch.c_str() + 3) >= 75;
+}
+
+// tanh(x) on a target without tanh.approx: 1 - 2 / (2^(2x log2 e) + 1), from
+// ex2.approx and rcp.approx (sm_20 and later), in a block of its own so the
+// temporaries need no declaration in the function. It saturates as tanh does:
+// a large x gives 2^inf = inf, 1 - 2/inf = 1; a large -x gives 1 - 2/1 = -1.
+void print_tanh_expansion(std::ostringstream& ss, const Inst& inst) {
+    std::string guard;
+    if (inst.has_guard) guard = "@" + std::string(inst.guard_negated ? "!" : "") + to_string(inst.guard_reg) + " ";
+    const std::string ftz = inst.is_ftz ? ".ftz" : "";
+    const std::string dst = to_string(inst.dsts[0]);
+    const std::string src = to_string(inst.srcs[0]);
+    ss << "    {\n"
+       << "    .reg .f32 %tanh_t<2>;\n"
+       << "    " << guard << "mul" << ftz << ".f32 %tanh_t0, " << src << ", 0f4038AA3B;\n"   // 2 log2(e)
+       << "    " << guard << "ex2.approx" << ftz << ".f32 %tanh_t0, %tanh_t0;\n"
+       << "    " << guard << "add" << ftz << ".f32 %tanh_t0, %tanh_t0, 0f3F800000;\n"
+       << "    " << guard << "rcp.approx" << ftz << ".f32 %tanh_t1, %tanh_t0;\n"
+       << "    " << guard << "fma.rn" << ftz << ".f32 " << dst << ", %tanh_t1, 0fC0000000, 0f3F800000;\n"
+       << "    }\n";
+}
+
+} // namespace
+
 std::string print_body(const Function& fn) {
+    return print_body(fn, true);
+}
+
+std::string print_body(const Function& fn, bool native_tanh) {
     std::ostringstream ss;
 
     ss << ".visible " << (fn.is_entry ? ".entry " : ".func ") << fn.name << "(";
@@ -217,6 +252,10 @@ std::string print_body(const Function& fn) {
     for (const auto& block : fn.blocks) {
         ss << block->label << ":\n";
         for (const auto& inst : block->insts) {
+            if (inst.op == Opcode::tanh && !native_tanh) {
+                print_tanh_expansion(ss, inst);
+                continue;
+            }
             ss << "    " << to_string(inst) << "\n";
         }
     }
@@ -226,14 +265,14 @@ std::string print_body(const Function& fn) {
 }
 
 std::string print(const Function& fn, const target::PtxOptions& opts) {
-    return print_header(opts) + print_body(fn);
+    return print_header(opts) + print_body(fn, has_native_tanh(opts.sm_arch));
 }
 
 std::string print_module(const std::vector<const Function*>& fns, const target::PtxOptions& opts) {
     std::string out = print_header(opts);
     for (size_t i = 0; i < fns.size(); ++i) {
         if (i) out += "\n";
-        out += print_body(*fns[i]);
+        out += print_body(*fns[i], has_native_tanh(opts.sm_arch));
     }
     return out;
 }

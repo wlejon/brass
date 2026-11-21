@@ -634,8 +634,19 @@ TEST_CASE("PTX intrinsics - tanh_approx, f32_to_bf16, mul_hi_u32 via KernelBuild
     });
     b.build_ret_void();
 
+    // sm_70 (the default) has no tanh.approx: tanh is ex2/rcp arithmetic,
+    // which assembles there.
     std::string ptx = emit_checked(*f);
-    CHECK(ptx.find("tanh.approx.f32") != std::string::npos);
+    CHECK(ptx.find("tanh.approx") == std::string::npos);
+    CHECK(ptx.find("ex2.approx.f32") != std::string::npos);
+    CHECK(ptx.find("rcp.approx.f32") != std::string::npos);
     CHECK(ptx.find("mul.hi.u32") != std::string::npos);
     CHECK(ptx.find("selp.b32") != std::string::npos);
+
+    // sm_75 and later: the instruction itself.
+    target::PtxOptions sm75;
+    sm75.sm_arch = "sm_75";
+    std::string native = target::PtxTarget::emit_function(*f, sm75);
+    CHECK(native.find("tanh.approx.f32") != std::string::npos);
+    if (ptxas_available()) CHECK(ptxas_assembles(native, "sm_75"));
 }

@@ -27,8 +27,10 @@ std::string to_string(const Inst& inst);   // "@%p1 add.f32 %f0, %f1, %f2;" (no 
 // ".version / .target / .address_size" preamble.
 std::string print_header(const target::PtxOptions& opts);
 
-// Function body only: signature, declarations, blocks.
+// Function body only: signature, declarations, blocks. `native_tanh` false
+// (a target before sm_75) prints tanh as ex2/rcp arithmetic.
 std::string print_body(const Function& fn);
+std::string print_body(const Function& fn, bool native_tanh);
 
 // Header + one function.
 std::string print(const Function& fn, const target::PtxOptions& opts = {});
