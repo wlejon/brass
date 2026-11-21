@@ -321,6 +321,12 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                 if ((eop == GLSLstd450FClamp || eop == GLSLstd450NClamp) && d.operands.size() >= 5) {
                     return self(self, d.operands[3].value, depth + 1);
                 }
+                // fma(a, a, c): a square plus c, the contracted form of a
+                // sum of squares (length() after FMA contraction).
+                if (eop == GLSLstd450Fma && d.operands.size() >= 5 &&
+                    d.operands[2].value == d.operands[3].value) {
+                    return self(self, d.operands[4].value, depth + 1);
+                }
             }
             if (d.op == spv::OpFMul && d.operands.size() >= 2 &&
                 d.operands[0].value == d.operands[1].value) {
@@ -347,6 +353,10 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                 }
                 if ((eop == GLSLstd450FClamp || eop == GLSLstd450NClamp) && d.operands.size() >= 5) {
                     return self(self, d.operands[3].value, depth + 1);
+                }
+                if (eop == GLSLstd450Fma && d.operands.size() >= 5 &&
+                    d.operands[2].value == d.operands[3].value) {
+                    return self(self, d.operands[4].value, depth + 1);
                 }
             }
             if (d.op == spv::OpFAdd && d.operands.size() >= 2) {
@@ -537,6 +547,26 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                                        dit->second->operands.size() >= 5 && cpos(dit->second->operands[3].value)) {
                                 safe = true;
                                 reason = "positive integer lower bound via clamp";
+                            }
+                        }
+                        // The divisor under its block's path condition: a
+                        // runtime size the branch above it already bounds
+                        // (`idx <u w*h*d` makes every factor non-zero).
+                        if (!safe) {
+                            verify::BVContext ctx;
+                            verify::BVNodeId pc = 0;
+                            SymbolicBuilder sb = make_bv_prover(bi, ctx, pc);
+                            verify::BVNodeId dv = sb.build(opd);
+                            if (ctx.width(dv) < 32) dv = ctx.make_zext(dv, 32 - ctx.width(dv));
+                            for (verify::BVNodeId ec : sb.extra_constraints) {
+                                pc = ctx.make_binary(verify::BVOp::And, pc, ec, 1);
+                            }
+                            verify::BVNodeId zero = ctx.make_binary(
+                                verify::BVOp::And, pc,
+                                ctx.make_binary(verify::BVOp::Eq, dv, ctx.make_const(0, ctx.width(dv)), 1), 1);
+                            if (verify::solve_nonzero(ctx, zero, 4000).status == verify::SolveOutcome::Unsat) {
+                                safe = true;
+                                reason = "non-zero under its path condition (BVSolver)";
                             }
                         }
                     }
