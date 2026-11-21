@@ -5,6 +5,8 @@
 
 #include "cache/artifact_format.hpp"
 
+#include <brass/core/env.hpp>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -253,7 +255,7 @@ std::filesystem::path default_cache_dir(
     std::string_view env_override) {
     if (!env_override.empty()) {
         std::string env_key(env_override);
-        if (const char* override_dir = std::getenv(env_key.c_str()); override_dir && override_dir[0] != '\0') {
+        if (std::string override_dir = env_value(env_key.c_str()); !override_dir.empty()) {
             return std::filesystem::path(override_dir);
         }
     }
@@ -261,10 +263,10 @@ std::filesystem::path default_cache_dir(
         ? std::filesystem::path(app_name)
         : (std::filesystem::path(app_name) / std::filesystem::path(sub_dir));
 #if defined(_WIN32)
-    if (const char* local_app = std::getenv("LOCALAPPDATA"); local_app && local_app[0] != '\0') {
+    if (std::string local_app = env_value("LOCALAPPDATA"); !local_app.empty()) {
         return std::filesystem::path(local_app) / app_rel;
     }
-    if (const char* user_prof = std::getenv("USERPROFILE"); user_prof && user_prof[0] != '\0') {
+    if (std::string user_prof = env_value("USERPROFILE"); !user_prof.empty()) {
         return std::filesystem::path(user_prof) / ".cache" / app_rel;
     }
 #else

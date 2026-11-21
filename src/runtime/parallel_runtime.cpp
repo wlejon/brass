@@ -1,5 +1,6 @@
 #include <brass/runtime/parallel_runtime.hpp>
 #include <brass/gc/native_frames.hpp>
+#include <brass/core/env.hpp>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -36,7 +37,8 @@ double get_initial_reduction_f64(ReductionKind kind) noexcept {
 }
 
 uint32_t default_parallel_workers() noexcept {
-    if (const char* env = std::getenv("BRASS_PARALLEL_WORKERS"); env && env[0] != '\0') {
+    if (const std::string text = env_value("BRASS_PARALLEL_WORKERS"); !text.empty()) {
+        const char* env = text.c_str();
         char* end = nullptr;
         unsigned long val = std::strtoul(env, &end, 10);
         if (end != env && *end == '\0' && val > 0ul) {
