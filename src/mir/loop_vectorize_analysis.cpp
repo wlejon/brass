@@ -122,6 +122,7 @@ bool vector_op_lowerable(Opcode op, Type elem, Type vec, bool allow_fp, const In
                    shift_amt >= 0 && shift_amt < static_cast<int64_t>(elem.size_in_bytes() * 8);
         }
         case Opcode::neg:
+            return true;
         case Opcode::not_:
             return !vec.is_v256();
         default:

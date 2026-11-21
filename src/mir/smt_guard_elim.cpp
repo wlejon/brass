@@ -724,6 +724,7 @@ bool run_smt_guard_elimination(
                         b.set_function(&fn);
                         b.position_before(cur);
                         Value* one = b.build_iconst_i32(1);
+                        fn.retarget_guard_elim_witness(cur->result(), nullptr);
                         replace_all_uses(fn, cur->result(), one);
                         if (opts.stats) opts.stats->comparisons_proven_true++;
                         changed = true;
@@ -733,6 +734,7 @@ bool run_smt_guard_elimination(
                         b.set_function(&fn);
                         b.position_before(cur);
                         Value* zero = b.build_iconst_i32(0);
+                        fn.retarget_guard_elim_witness(cur->result(), nullptr);
                         replace_all_uses(fn, cur->result(), zero);
                         if (opts.stats) opts.stats->comparisons_proven_false++;
                         changed = true;
@@ -797,6 +799,7 @@ bool run_smt_guard_elimination(
                 }
             }
         }
+        fn.reconcile_guard_elim_certs();
     }
 
     return changed;

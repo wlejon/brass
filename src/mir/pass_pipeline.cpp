@@ -37,6 +37,16 @@ Pipeline pass_pipeline(const PassPipelineOptions& options) {
     if (options.enable_loop_unswitch && loops.enable_f64_demote) loops.enable_loop_unswitch = true;
     if (options.enable_jump_threading && loops.enable_f64_demote) loops.enable_jump_threading = true;
     p.append(loop_pipeline(loops));
+    if (options.enable_smt_guard_elim) {
+        SmtGuardElimOptions smt_opts;
+        smt_opts.max_sat_conflicts = options.superopt_max_sat_conflicts;
+        p.add(passes::smt_guard_elim(smt_opts, options.smt_guard_max_func_insts));
+    }
+    if (options.enable_superopt) {
+        SuperoptOptions so_opts;
+        so_opts.max_sat_conflicts = options.superopt_max_sat_conflicts;
+        p.add(passes::mir_superopt(so_opts, options.superopt_max_func_insts));
+    }
     // After the loop stage, whose f64 demotion turns a proven-integral
     // `frem` into an `smod` the expansion would only get in the way of.
     if (options.enable_float_rem_inline) p.add(passes::float_rem_inline());

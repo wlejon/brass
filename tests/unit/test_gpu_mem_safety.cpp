@@ -8,6 +8,7 @@
 #include <brass/target/spirv/spirv_isel.hpp>
 #include <brass/verify/bv_solver.hpp>
 #include <brass/verify/gpu_kernel_prover.hpp>
+#include <spirv/unified1/GLSL.std.450.h>
 
 using namespace brass;
 using namespace brass::codegen;
@@ -368,6 +369,249 @@ TEST_CASE("GPU Mem Safety - BVContext make_extract Memoizes Reconvergent ITE Dia
     verify::BVNodeId d_lo = ctx.make_extract(dcur, 7, 0);
     verify::BVNodeId bad = ctx.make_binary(verify::BVOp::Ugt, d_lo, ctx.make_const(32, 8), 1);
     CHECK_EQ(verify::solve_nonzero(ctx, bad, 2000).status, verify::SolveOutcome::Unsat);
+}
+
+TEST_CASE("GPU Mem Safety - SPIR-V CHK Dominators Multi-Exit and Loop Control Dependence") {
+    auto build_cfg_shader = [](bool divergent_barrier) {
+        spirv::Module m;
+        m.add_capability(spv::CapabilityShader);
+        m.set_memory_model(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+
+        spirv::Id void_t = m.t_void();
+        spirv::Id bool_t = m.t_bool();
+        spirv::Id u32_t = m.t_int(32, 0);
+        spirv::Id uvec3_t = m.t_vector(u32_t, 3);
+        spirv::Id ptr_in_uvec3 = m.t_pointer(spv::StorageClassInput, uvec3_t);
+        spirv::Id ptr_in_u32 = m.t_pointer(spv::StorageClassInput, u32_t);
+        spirv::Id lid_var = m.variable(ptr_in_uvec3, spv::StorageClassInput);
+        m.decorate(lid_var, spv::DecorationBuiltIn, {static_cast<uint32_t>(spv::BuiltInLocalInvocationId)});
+
+        spirv::Id arr_t = m.t_array(u32_t, 32);
+        spirv::Id ptr_wg_arr = m.t_pointer(spv::StorageClassWorkgroup, arr_t);
+        spirv::Id ptr_wg_u32 = m.t_pointer(spv::StorageClassWorkgroup, u32_t);
+        spirv::Id sh_var = m.variable(ptr_wg_arr, spv::StorageClassWorkgroup);
+
+        spirv::Function& fn = m.add_function("main", void_t, m.t_function(void_t, {}));
+        m.add_entry_point(spv::ExecutionModelGLCompute, fn.id, "main", {lid_var, sh_var});
+        m.add_execution_mode(fn.id, spv::ExecutionModeLocalSize, {32, 1, 1});
+
+        spirv::Id b_entry = m.new_id(), b_early = m.new_id(), b_div_hdr = m.new_id(),
+                  b_then = m.new_id(), b_loop_hdr = m.new_id(), b_loop_body = m.new_id(),
+                  b_loop_cont = m.new_id(), b_after = m.new_id(), b_inf = m.new_id(),
+                  b_exit2 = m.new_id();
+
+        spirv::Block entry{b_entry, {}};
+        spirv::Id ac_x = m.new_id(), lx = m.new_id(), c_unif_entry = m.new_id(), c_div = m.new_id();
+        entry.insts.push_back(spirv::Inst(spv::OpAccessChain, ptr_in_u32, ac_x).id(lid_var).id(m.c_u32(0)));
+        entry.insts.push_back(spirv::Inst(spv::OpLoad, u32_t, lx).id(ac_x));
+        entry.insts.push_back(spirv::Inst(spv::OpIEqual, bool_t, c_unif_entry).id(m.c_u32(0)).id(m.c_u32(0)));
+        entry.insts.push_back(spirv::Inst(spv::OpBranchConditional, 0, 0).id(c_unif_entry).id(b_div_hdr).id(b_early));
+
+        spirv::Block early_blk{b_early, {}};
+        early_blk.insts.push_back(spirv::Inst(spv::OpReturn, 0, 0));
+
+        spirv::Block div_hdr{b_div_hdr, {}};
+        div_hdr.insts.push_back(spirv::Inst(spv::OpULessThan, bool_t, c_div).id(lx).id(m.c_u32(16)));
+        div_hdr.insts.push_back(spirv::Inst(spv::OpBranchConditional, 0, 0).id(c_div).id(b_then).id(b_loop_hdr));
+
+        // Divergent diamond arm reconverges cleanly at b_after
+        spirv::Block then_blk{b_then, {}};
+        if (divergent_barrier) {
+            then_blk.insts.push_back(
+                spirv::Inst(spv::OpControlBarrier, 0, 0).id(m.c_u32(2)).id(m.c_u32(2)).id(m.c_u32(0x108)));
+        }
+        then_blk.insts.push_back(spirv::Inst(spv::OpBranch, 0, 0).id(b_after));
+
+        // Loop arm with shared store, also reconverging at b_after
+        spirv::Block hdr_blk{b_loop_hdr, {}};
+        spirv::Id c_unif = m.new_id();
+        hdr_blk.insts.push_back(spirv::Inst(spv::OpULessThan, bool_t, c_unif).id(m.c_u32(1)).id(m.c_u32(0)));
+        hdr_blk.insts.push_back(spirv::Inst(spv::OpBranchConditional, 0, 0).id(c_unif).id(b_loop_body).id(b_after));
+
+        spirv::Block lbody_blk{b_loop_body, {}};
+        spirv::Id ac_s = m.new_id();
+        lbody_blk.insts.push_back(spirv::Inst(spv::OpAccessChain, ptr_wg_u32, ac_s).id(sh_var).id(lx));
+        lbody_blk.insts.push_back(spirv::Inst(spv::OpStore, 0, 0).id(ac_s).id(lx));
+        lbody_blk.insts.push_back(spirv::Inst(spv::OpBranch, 0, 0).id(b_loop_cont));
+
+        spirv::Block lcont_blk{b_loop_cont, {}};
+        lcont_blk.insts.push_back(spirv::Inst(spv::OpBranch, 0, 0).id(b_loop_hdr));
+
+        spirv::Block after_blk{b_after, {}};
+        if (!divergent_barrier) {
+            after_blk.insts.push_back(
+                spirv::Inst(spv::OpControlBarrier, 0, 0).id(m.c_u32(2)).id(m.c_u32(2)).id(m.c_u32(0x108)));
+        }
+        spirv::Id c_never = m.new_id();
+        after_blk.insts.push_back(spirv::Inst(spv::OpIEqual, bool_t, c_never).id(m.c_u32(1)).id(m.c_u32(0)));
+        after_blk.insts.push_back(spirv::Inst(spv::OpBranchConditional, 0, 0).id(c_never).id(b_inf).id(b_exit2));
+
+        spirv::Block inf_blk{b_inf, {}};
+        inf_blk.insts.push_back(spirv::Inst(spv::OpBranch, 0, 0).id(b_inf));
+
+        spirv::Block exit2_blk{b_exit2, {}};
+        exit2_blk.insts.push_back(spirv::Inst(spv::OpReturn, 0, 0));
+
+        fn.blocks = {entry, early_blk, div_hdr, then_blk, hdr_blk, lbody_blk, lcont_blk, after_blk, inf_blk, exit2_blk};
+        return m;
+    };
+
+    const auto safe_rep = brass::verify::prove_spirv_shader_safety(build_cfg_shader(false));
+    CHECK(safe_rep.barriers_uniform);
+    CHECK(safe_rep.dominance_ok);
+    CHECK(safe_rep.ok());
+    CHECK(safe_rep.num_blocks >= 9u);
+
+    const auto bad_rep = brass::verify::prove_spirv_shader_safety(build_cfg_shader(true));
+    CHECK(!bad_rep.barriers_uniform);
+    CHECK(!bad_rep.ok());
+}
+
+TEST_CASE("GPU Mem Safety - SPIR-V Local Array SClamp and OpFunctionCall Out-Param") {
+    spirv::Module m;
+    m.add_capability(spv::CapabilityShader);
+    m.set_memory_model(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+
+    spirv::Id void_t = m.t_void();
+    spirv::Id u32_t = m.t_int(32, 0);
+    spirv::Id s32_t = m.t_int(32, 1);
+    spirv::Id f32_t = m.t_float(32);
+    spirv::Id uvec3_t = m.t_vector(u32_t, 3);
+    spirv::Id ptr_in_uvec3 = m.t_pointer(spv::StorageClassInput, uvec3_t);
+    spirv::Id ptr_in_u32 = m.t_pointer(spv::StorageClassInput, u32_t);
+    spirv::Id gid_var = m.variable(ptr_in_uvec3, spv::StorageClassInput);
+    m.decorate(gid_var, spv::DecorationBuiltIn, {static_cast<uint32_t>(spv::BuiltInGlobalInvocationId)});
+
+    spirv::Id sh_arr_t = m.t_array(f32_t, 4);
+    spirv::Id ptr_wg_arr = m.t_pointer(spv::StorageClassWorkgroup, sh_arr_t);
+    spirv::Id ptr_wg_f32 = m.t_pointer(spv::StorageClassWorkgroup, f32_t);
+    spirv::Id sh_var = m.variable(ptr_wg_arr, spv::StorageClassWorkgroup);
+
+    spirv::Id fn_arr_t = m.t_array(f32_t, 4);
+    spirv::Id ptr_fn_arr = m.t_pointer(spv::StorageClassFunction, fn_arr_t);
+    spirv::Id ptr_fn_f32 = m.t_pointer(spv::StorageClassFunction, f32_t);
+    spirv::Id ptr_fn_u32 = m.t_pointer(spv::StorageClassFunction, u32_t);
+
+    // Pure helper: clamp_idx(u32 raw) -> u32 in [0, 3]
+    spirv::Id p_raw = m.new_id();
+    spirv::Function& f_clamp = m.add_function("clamp_idx", u32_t, m.t_function(u32_t, {u32_t}));
+    const spirv::Id f_clamp_id = f_clamp.id;
+    f_clamp.params.push_back(spirv::Inst(spv::OpFunctionParameter, u32_t, p_raw));
+    {
+        spirv::Block b{m.new_id(), {}};
+        spirv::Id sraw = m.new_id(), sclamped = m.new_id(), uclamped = m.new_id();
+        b.insts.push_back(spirv::Inst(spv::OpBitcast, s32_t, sraw).id(p_raw));
+        b.insts.push_back(spirv::Inst(spv::OpExtInst, s32_t, sclamped)
+                              .id(m.glsl_std_450()).lit(GLSLstd450SClamp)
+                              .id(sraw).id(m.c_sint(32, 0)).id(m.c_sint(32, 3)));
+        b.insts.push_back(spirv::Inst(spv::OpBitcast, u32_t, uclamped).id(sclamped));
+        b.insts.push_back(spirv::Inst(spv::OpReturnValue, 0, 0).id(uclamped));
+        f_clamp.blocks.push_back(b);
+    }
+
+    // Out-param helper: write_slot(ptr Function u32 out, u32 val)
+    spirv::Id p_out = m.new_id(), p_val = m.new_id();
+    spirv::Function& f_write = m.add_function("write_slot", void_t, m.t_function(void_t, {ptr_fn_u32, u32_t}));
+    const spirv::Id f_write_id = f_write.id;
+    f_write.params.push_back(spirv::Inst(spv::OpFunctionParameter, ptr_fn_u32, p_out));
+    f_write.params.push_back(spirv::Inst(spv::OpFunctionParameter, u32_t, p_val));
+    {
+        spirv::Block b{m.new_id(), {}};
+        b.insts.push_back(spirv::Inst(spv::OpStore, 0, 0).id(p_out).id(p_val));
+        b.insts.push_back(spirv::Inst(spv::OpReturn, 0, 0));
+        f_write.blocks.push_back(b);
+    }
+
+    spirv::Function& main_fn = m.add_function("main", void_t, m.t_function(void_t, {}));
+    m.add_entry_point(spv::ExecutionModelGLCompute, main_fn.id, "main", {gid_var, sh_var});
+    m.add_execution_mode(main_fn.id, spv::ExecutionModeLocalSize, {64, 1, 1});
+    {
+        spirv::Block b{m.new_id(), {}};
+        spirv::Id local_arr = m.new_id(), out_slot = m.new_id();
+        b.insts.push_back(spirv::Inst(spv::OpVariable, ptr_fn_arr, local_arr).lit(spv::StorageClassFunction));
+        b.insts.push_back(spirv::Inst(spv::OpVariable, ptr_fn_u32, out_slot).lit(spv::StorageClassFunction));
+
+        spirv::Id ac_gx = m.new_id(), gx = m.new_id(), cidx = m.new_id(), call_void = m.new_id(), loaded_idx = m.new_id();
+        b.insts.push_back(spirv::Inst(spv::OpAccessChain, ptr_in_u32, ac_gx).id(gid_var).id(m.c_u32(0)));
+        b.insts.push_back(spirv::Inst(spv::OpLoad, u32_t, gx).id(ac_gx));
+        b.insts.push_back(spirv::Inst(spv::OpFunctionCall, u32_t, cidx).id(f_clamp_id).id(gx));
+        b.insts.push_back(spirv::Inst(spv::OpFunctionCall, void_t, call_void).id(f_write_id).id(out_slot).id(cidx));
+        b.insts.push_back(spirv::Inst(spv::OpLoad, u32_t, loaded_idx).id(out_slot));
+
+        spirv::Id ac_loc = m.new_id(), loc_v = m.new_id(), ac_sh = m.new_id();
+        b.insts.push_back(spirv::Inst(spv::OpAccessChain, ptr_fn_f32, ac_loc).id(local_arr).id(loaded_idx));
+        b.insts.push_back(spirv::Inst(spv::OpStore, 0, 0).id(ac_loc).id(m.c_f32(2.5f)));
+        b.insts.push_back(spirv::Inst(spv::OpLoad, f32_t, loc_v).id(ac_loc));
+        b.insts.push_back(spirv::Inst(spv::OpAccessChain, ptr_wg_f32, ac_sh).id(sh_var).id(loaded_idx));
+        b.insts.push_back(spirv::Inst(spv::OpStore, 0, 0).id(ac_sh).id(loc_v));
+        b.insts.push_back(spirv::Inst(spv::OpReturn, 0, 0));
+        main_fn.blocks.push_back(b);
+    }
+
+    GpuProverOptions opts;
+    opts.local_size_x = 64;
+    opts.grid_size_x = 4;
+    opts.check_global_bounds = false;
+    GpuMemorySafetyResult r = verify_spirv_memory_safety(m, opts);
+    CHECK(r.is_safe());
+    CHECK_EQ(r.shared_accesses_proven, 1u);
+}
+
+TEST_CASE("GPU Mem Safety - Divisibility ParamConstraint Proves GLU-Style Indexing") {
+    Module mod("gpu_div_constraint");
+    Function* fn = mod.create_function(
+        "glu_write", Type::void_type(), {Type::ptr(), Type::i32(), Type::i32()});
+    {
+        KernelBuilder kb(mod, fn);
+        Builder& b = kb.builder();
+        BasicBlock* entry = b.append_block("entry");
+        Value* y = b.add_block_param(entry, Type::ptr());
+        Value* n = b.add_block_param(entry, Type::i32());
+        Value* d = b.add_block_param(entry, Type::i32());
+        b.position_at_end(entry);
+
+        Value* i = kb.global_tid_x();
+        kb.if_then(b.build_ult(i, n), [&] {
+            Value* blk = b.build_udiv(i, d);
+            Value* off = b.build_umod(i, d);
+            Value* two_d = b.build_mul(b.build_iconst_i32(2), d);
+            Value* idx = b.build_add(b.build_add(b.build_mul(blk, two_d), off), d);
+            kb.store_f32_indexed(y, idx, b.build_fconst_f32(1.0f));
+        });
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+    }
+
+    target::SpirvOptions spv_opts;
+    spv_opts.local_size_x = 64;
+    spirv::Module spv_mod = lower_spirv(*fn, spv_opts);
+
+    GpuProverOptions opts;
+    opts.local_size_x = 64;
+    opts.grid_size_x = 8;
+    opts.buffers = {GpuBufferSpec{0, 0, 1, 4, 16, -1, -1, 2}}; // y holds 2 * n floats
+
+    GpuParamConstraint d_pos;
+    d_pos.param_index = 2;
+    d_pos.min_val = 1;
+    opts.param_constraints = {d_pos};
+    // Without n % d == 0, last partial block pushes (n/d)*2*d + d past 2*n
+    CHECK(verify_spirv_memory_safety(spv_mod, opts).is_counterexample());
+
+    GpuParamConstraint n_div_d;
+    n_div_d.param_index = 1;
+    n_div_d.divisor_param = 2;
+    opts.param_constraints.push_back(n_div_d);
+    GpuMemorySafetyResult r_safe = verify_spirv_memory_safety(spv_mod, opts);
+    CHECK(r_safe.is_safe());
+    CHECK_EQ(r_safe.global_accesses_proven, 1u);
+
+    // Also check constant divisibility (divisor_const = 4 on d -> 4 | d also keeps 2*n safe with n % d == 0)
+    GpuParamConstraint n_div_4;
+    n_div_4.param_index = 1;
+    n_div_4.divisor_const = 4;
+    opts.param_constraints.push_back(n_div_4);
+    CHECK(verify_spirv_memory_safety(spv_mod, opts).is_safe());
 }
 
 #ifdef BRASS_STANDALONE_TEST

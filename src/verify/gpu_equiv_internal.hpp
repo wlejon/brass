@@ -89,6 +89,7 @@ struct GpuSymEnv {
         BVNodeId ret_val = 0;
     };
     std::vector<UfEntry> uf_calls;
+    bool abstract_uf = false;
 
     BVNodeId read_init_byte(BVContext& ctx, std::vector<ByteEntry>& table, std::string_view prefix, BVNodeId byte_addr);
     BVNodeId read_mem(BVContext& ctx, bool is_shared, const std::vector<GpuSymStore>& stores, BVNodeId addr, uint32_t num_bytes);

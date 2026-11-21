@@ -142,9 +142,11 @@ FunctionCFG build_cfg(const Function& fn) {
     }
     cfg.succs.resize(cfg.num_blocks);
     cfg.preds.resize(cfg.num_blocks);
+    cfg.branch_cond.assign(cfg.num_blocks, 0);
 
     std::vector<Id> tmp_succ;
     std::vector<size_t> exits;
+    std::vector<uint8_t> is_exit(cfg.num_blocks, 0);
     for (size_t i = 0; i < cfg.num_blocks; ++i) {
         const Block& b = fn.blocks[i];
         if (b.insts.empty()) continue;
@@ -155,6 +157,7 @@ FunctionCFG build_cfg(const Function& fn) {
         if (term.op == spv::OpReturn || term.op == spv::OpReturnValue ||
             term.op == spv::OpKill || term.op == spv::OpTerminateInvocation) {
             exits.push_back(i);
+            is_exit[i] = 1;
         }
         block_successors(term, tmp_succ);
         for (Id sid : tmp_succ) {
@@ -167,86 +170,186 @@ FunctionCFG build_cfg(const Function& fn) {
         }
     }
 
+    // 1. Forward RPO traversal & Cooper-Harvey-Kennedy immediate dominators.
     cfg.reachable.assign(cfg.num_blocks, 0);
-    std::vector<size_t> stack{0};
-    cfg.reachable[0] = 1;
-    while (!stack.empty()) {
-        size_t u = stack.back();
-        stack.pop_back();
-        for (size_t v : cfg.succs[u]) if (!cfg.reachable[v]) { cfg.reachable[v] = 1; stack.push_back(v); }
+    std::vector<size_t> postorder;
+    postorder.reserve(cfg.num_blocks);
+    {
+        struct Frame { size_t u; size_t next; };
+        std::vector<Frame> dfs;
+        cfg.reachable[0] = 1;
+        dfs.push_back({0, 0});
+        while (!dfs.empty()) {
+            Frame& top = dfs.back();
+            if (top.next < cfg.succs[top.u].size()) {
+                size_t v = cfg.succs[top.u][top.next++];
+                if (!cfg.reachable[v]) {
+                    cfg.reachable[v] = 1;
+                    dfs.push_back({v, 0});
+                }
+            } else {
+                postorder.push_back(top.u);
+                dfs.pop_back();
+            }
+        }
     }
 
-    auto intersect_sets = [](std::unordered_set<size_t>& dst, const std::unordered_set<size_t>& src) {
-        for (auto it = dst.begin(); it != dst.end();) it = src.count(*it) ? std::next(it) : dst.erase(it);
+    std::vector<size_t> rpo(postorder.rbegin(), postorder.rend());
+    std::vector<size_t> rpo_rank(cfg.num_blocks, FunctionCFG::kNoBlock);
+    for (size_t idx = 0; idx < rpo.size(); ++idx) rpo_rank[rpo[idx]] = idx;
+
+    cfg.idom.assign(cfg.num_blocks, FunctionCFG::kNoBlock);
+    cfg.idom[0] = 0;
+    auto intersect_dom = [&](size_t b1, size_t b2) noexcept -> size_t {
+        while (b1 != b2) {
+            while (rpo_rank[b1] > rpo_rank[b2]) b1 = cfg.idom[b1];
+            while (rpo_rank[b2] > rpo_rank[b1]) b2 = cfg.idom[b2];
+        }
+        return b1;
     };
-
-    cfg.dom.resize(cfg.num_blocks);
-    std::unordered_set<size_t> all_reach;
-    for (size_t i = 0; i < cfg.num_blocks; ++i) if (cfg.reachable[i]) all_reach.insert(i);
-
-    for (size_t i : all_reach) cfg.dom[i] = (i == 0) ? std::unordered_set<size_t>{0} : all_reach;
     for (bool changed = true; changed;) {
         changed = false;
-        for (size_t i : all_reach) {
-            if (i == 0) continue;
-            std::unordered_set<size_t> nd;
-            bool first = true;
-            for (size_t p : cfg.preds[i]) {
-                if (!cfg.reachable[p]) continue;
-                if (first) { nd = cfg.dom[p]; first = false; }
-                else intersect_sets(nd, cfg.dom[p]);
+        for (size_t ri = 1; ri < rpo.size(); ++ri) {
+            size_t b = rpo[ri];
+            size_t new_idom = FunctionCFG::kNoBlock;
+            for (size_t p : cfg.preds[b]) {
+                if (!cfg.reachable[p] || cfg.idom[p] == FunctionCFG::kNoBlock) continue;
+                if (new_idom == FunctionCFG::kNoBlock) new_idom = p;
+                else new_idom = intersect_dom(p, new_idom);
             }
-            nd.insert(i);
-            if (nd != cfg.dom[i]) { cfg.dom[i] = std::move(nd); changed = true; }
-        }
-    }
-
-    cfg.pdom.resize(cfg.num_blocks);
-    std::unordered_set<size_t> rev_reach;
-    stack.clear();
-    for (size_t e : exits) if (cfg.reachable[e]) { rev_reach.insert(e); stack.push_back(e); }
-    while (!stack.empty()) {
-        size_t u = stack.back();
-        stack.pop_back();
-        for (size_t p : cfg.preds[u]) {
-            if (cfg.reachable[p] && rev_reach.insert(p).second) stack.push_back(p);
-        }
-    }
-
-    std::unordered_set<size_t> exit_set(exits.begin(), exits.end());
-    for (size_t i : rev_reach) cfg.pdom[i] = exit_set.count(i) ? std::unordered_set<size_t>{i} : rev_reach;
-    for (bool changed = true; changed;) {
-        changed = false;
-        for (size_t i : rev_reach) {
-            if (exit_set.count(i)) continue;
-            std::unordered_set<size_t> npd;
-            bool first = true;
-            for (size_t s : cfg.succs[i]) {
-                if (!rev_reach.count(s)) continue;
-                if (first) { npd = cfg.pdom[s]; first = false; }
-                else intersect_sets(npd, cfg.pdom[s]);
+            if (new_idom != FunctionCFG::kNoBlock && cfg.idom[b] != new_idom) {
+                cfg.idom[b] = new_idom;
+                changed = true;
             }
-            npd.insert(i);
-            if (npd != cfg.pdom[i]) { cfg.pdom[i] = std::move(npd); changed = true; }
         }
     }
 
-    for (const auto& [h, cond_id] : cfg.branch_cond) {
-        (void)cond_id;
-        if (!cfg.reachable[h]) continue;
-        std::unordered_set<size_t> region;
-        for (size_t b : all_reach) {
-            if (b == h || !cfg.dom[b].count(h)) continue;
-            bool reconverged = false;
-            for (size_t m : cfg.pdom[h]) {
-                if (m != h && cfg.dom[m].count(h) && cfg.dom[b].count(m)) {
-                    reconverged = true;
-                    break;
+    // Build dominator tree and assign Euler-tour intervals [tin, tout] for O(1) dominance checks.
+    std::vector<std::vector<size_t>> dom_children(cfg.num_blocks);
+    for (size_t b : rpo) {
+        if (b != 0 && cfg.idom[b] < cfg.num_blocks && cfg.idom[b] != b) {
+            dom_children[cfg.idom[b]].push_back(b);
+        }
+    }
+    cfg.dom_tin.assign(cfg.num_blocks, 0);
+    cfg.dom_tout.assign(cfg.num_blocks, 0);
+    {
+        struct Frame { size_t u; size_t next; };
+        std::vector<Frame> dfs;
+        uint32_t timer = 0;
+        dfs.push_back({0, 0});
+        cfg.dom_tin[0] = ++timer;
+        while (!dfs.empty()) {
+            Frame& top = dfs.back();
+            if (top.next < dom_children[top.u].size()) {
+                size_t c = dom_children[top.u][top.next++];
+                cfg.dom_tin[c] = ++timer;
+                dfs.push_back({c, 0});
+            } else {
+                cfg.dom_tout[top.u] = timer;
+                dfs.pop_back();
+            }
+        }
+    }
+
+    // 2. Reverse CFG post-dominators via virtual super-exit V = num_blocks.
+    const size_t super_exit = cfg.num_blocks;
+    cfg.ipdom.assign(cfg.num_blocks, FunctionCFG::kNoBlock);
+    std::vector<size_t> exit_nodes;
+    for (size_t e : exits) {
+        if (cfg.reachable[e]) exit_nodes.push_back(e);
+    }
+    if (!exit_nodes.empty()) {
+        std::vector<uint8_t> rev_reach(cfg.num_blocks + 1, 0);
+        std::vector<size_t> rev_post;
+        rev_post.reserve(cfg.num_blocks + 1);
+        {
+            struct Frame { size_t u; size_t next; };
+            std::vector<Frame> dfs;
+            rev_reach[super_exit] = 1;
+            dfs.push_back({super_exit, 0});
+            while (!dfs.empty()) {
+                Frame& top = dfs.back();
+                const auto& edges = (top.u == super_exit) ? exit_nodes : cfg.preds[top.u];
+                bool pushed = false;
+                while (top.next < edges.size()) {
+                    size_t v = edges[top.next++];
+                    if (cfg.reachable[v] && !rev_reach[v] &&
+                        (top.u == super_exit || !is_exit[v])) {
+                        rev_reach[v] = 1;
+                        dfs.push_back({v, 0});
+                        pushed = true;
+                        break;
+                    }
+                }
+                if (!pushed) {
+                    rev_post.push_back(top.u);
+                    dfs.pop_back();
                 }
             }
-            if (!reconverged) region.insert(b);
         }
-        cfg.control_dep_region[h] = std::move(region);
+
+        std::vector<size_t> rev_rpo(rev_post.rbegin(), rev_post.rend());
+        std::vector<size_t> rev_rank(cfg.num_blocks + 1, FunctionCFG::kNoBlock);
+        for (size_t idx = 0; idx < rev_rpo.size(); ++idx) rev_rank[rev_rpo[idx]] = idx;
+
+        std::vector<size_t> full_ipdom(cfg.num_blocks + 1, FunctionCFG::kNoBlock);
+        full_ipdom[super_exit] = super_exit;
+        auto intersect_pdom = [&](size_t b1, size_t b2) noexcept -> size_t {
+            while (b1 != b2) {
+                while (rev_rank[b1] > rev_rank[b2]) b1 = full_ipdom[b1];
+                while (rev_rank[b2] > rev_rank[b1]) b2 = full_ipdom[b2];
+            }
+            return b1;
+        };
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (size_t ri = 1; ri < rev_rpo.size(); ++ri) {
+                size_t b = rev_rpo[ri];
+                size_t new_ipdom = FunctionCFG::kNoBlock;
+                if (is_exit[b]) {
+                    new_ipdom = super_exit;
+                } else {
+                    for (size_t s : cfg.succs[b]) {
+                        if (!rev_reach[s] || full_ipdom[s] == FunctionCFG::kNoBlock) continue;
+                        if (new_ipdom == FunctionCFG::kNoBlock) new_ipdom = s;
+                        else new_ipdom = intersect_pdom(s, new_ipdom);
+                    }
+                }
+                if (new_ipdom != FunctionCFG::kNoBlock && full_ipdom[b] != new_ipdom) {
+                    full_ipdom[b] = new_ipdom;
+                    changed = true;
+                }
+            }
+        }
+        for (size_t i = 0; i < cfg.num_blocks; ++i) {
+            if (full_ipdom[i] < cfg.num_blocks) cfg.ipdom[i] = full_ipdom[i];
+        }
+    }
+
+    // 3. Build sorted control-dependence header lists via dominator-tree pruning.
+    cfg.control_dep_headers.resize(cfg.num_blocks);
+    std::vector<uint32_t> reconv_stamp(cfg.num_blocks, 0);
+    std::vector<size_t> dfs_stack;
+    uint32_t cur_stamp = 0;
+    for (size_t h = 0; h < cfg.num_blocks; ++h) {
+        if (cfg.branch_cond[h] == 0 || !cfg.reachable[h]) continue;
+        ++cur_stamp;
+        size_t m = cfg.ipdom[h];
+        for (size_t steps = 0; m < cfg.num_blocks && steps < cfg.num_blocks; ++steps) {
+            if (m != h && cfg.dominates(h, m)) reconv_stamp[m] = cur_stamp;
+            if (cfg.ipdom[m] == m) break;
+            m = cfg.ipdom[m];
+        }
+        dfs_stack.clear();
+        for (size_t c : dom_children[h]) dfs_stack.push_back(c);
+        while (!dfs_stack.empty()) {
+            size_t b = dfs_stack.back();
+            dfs_stack.pop_back();
+            if (reconv_stamp[b] == cur_stamp) continue;
+            cfg.control_dep_headers[b].push_back(h);
+            for (size_t c : dom_children[b]) dfs_stack.push_back(c);
+        }
     }
 
     return cfg;
@@ -302,7 +405,7 @@ verify::BVNodeId SymbolicBuilder::build(Id val_id, int depth) {
                     if (pterm.op == spv::OpBranchConditional && pterm.operands.size() >= 3) {
                         Id cond_id = pterm.operands[0].value;
                         auto tit = cfg.block_index.find(pterm.operands[1].value);
-                        bool other_in_true = (tit != cfg.block_index.end() && cfg.dom[po_it->second].count(tit->second));
+                        bool other_in_true = (tit != cfg.block_index.end() && cfg.dominates(tit->second, po_it->second));
                         bool is_and = (c_it != mc.int_consts.end() && c_it->second == 0) ||
                                       (v_const == cond_id && other_in_true);
                         bool is_or = (c_it != mc.int_consts.end() && c_it->second != 0) ||

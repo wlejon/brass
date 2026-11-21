@@ -203,6 +203,7 @@ GpuMemorySafetyResult verify_gpu_memory_safety(
         std::max(1u, opts.grid_size_y),
         std::max(1u, opts.grid_size_z)};
     init_gpu_sym_env(ctx, env, mir_fn.param_types(), "", fixed_ntid, fixed_ntid, max_cta);
+    env.abstract_uf = true;
 
     EquivOptions eq_opts;
     eq_opts.loop_unroll_bound = opts.loop_unroll_bound;
@@ -225,6 +226,7 @@ GpuMemorySafetyResult verify_spirv_memory_safety(
         std::max(1u, opts.grid_size_y),
         std::max(1u, opts.grid_size_z)};
     init_gpu_sym_env(ctx, env, {}, "", fixed_ntid, fixed_ntid, max_cta);
+    env.abstract_uf = true;
 
     EquivOptions eq_opts;
     eq_opts.loop_unroll_bound = opts.loop_unroll_bound;
@@ -274,6 +276,7 @@ GpuMemorySafetyResult verify_ptx_memory_safety(
         std::max(1u, opts.grid_size_y),
         std::max(1u, opts.grid_size_z)};
     init_gpu_sym_env(ctx, env, {}, "", fixed_ntid, fixed_ntid, max_cta);
+    env.abstract_uf = true;
 
     EquivOptions eq_opts;
     eq_opts.loop_unroll_bound = opts.loop_unroll_bound;

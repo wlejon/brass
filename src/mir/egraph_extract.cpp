@@ -512,6 +512,7 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
                         Builder b(mod); b.set_function(&fn); b.position_before(cur);
                         if (Value* repl = materialize_extracted_mir(b, best_expr, cur, var_map, available_ssa)) {
                             enc.cache[repl] = cand_bv;
+                            fn.retarget_guard_elim_witness(res_v, repl);
                             replace_all_uses(fn, res_v, repl);
                             available_ssa[cid] = repl;
                             dominating_vals.insert(repl);
@@ -534,7 +535,10 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
         }
     }
 
-    if (changed) remove_dead_pure_insts(fn);
+    if (changed) {
+        remove_dead_pure_insts(fn);
+        fn.reconcile_guard_elim_certs();
+    }
     return changed;
 }
 

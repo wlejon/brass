@@ -39,9 +39,11 @@ BVNodeId GpuSymEnv::read_init_byte(
     }
     std::string vname = std::string(prefix) + "_" + std::to_string(table.size());
     BVNodeId fresh = ctx.make_var(vname, 8);
-    for (const auto& entry : table) {
-        BVNodeId same = bv_bin(ctx, BVOp::Eq, 1, byte_addr, entry.addr);
-        fresh = bv_ite(ctx, 8, same, entry.val, fresh);
+    if (!abstract_uf) {
+        for (const auto& entry : table) {
+            BVNodeId same = bv_bin(ctx, BVOp::Eq, 1, byte_addr, entry.addr);
+            fresh = bv_ite(ctx, 8, same, entry.val, fresh);
+        }
     }
     table.push_back({byte_addr, fresh});
     return fresh;
@@ -115,20 +117,22 @@ BVNodeId GpuSymEnv::eval_uf(
     }
     std::string vname = "uf_" + std::string(sym) + "_" + std::to_string(uf_calls.size());
     BVNodeId res = ctx.make_var(vname, ret_width);
-    for (const auto& entry : uf_calls) {
-        if (entry.sym != sym || entry.args.size() != args.size() || ctx.width(entry.ret_val) != ret_width) {
-            continue;
-        }
-        BVNodeId args_eq = bv_true(ctx);
-        for (size_t i = 0; i < args.size(); ++i) {
-            if (ctx.width(args[i]) != ctx.width(entry.args[i])) {
-                args_eq = bv_false(ctx);
-                break;
+    if (!abstract_uf) {
+        for (const auto& entry : uf_calls) {
+            if (entry.sym != sym || entry.args.size() != args.size() || ctx.width(entry.ret_val) != ret_width) {
+                continue;
             }
-            BVNodeId eq_i = bv_bin(ctx, BVOp::Eq, 1, args[i], entry.args[i]);
-            args_eq = bv_bin(ctx, BVOp::And, 1, args_eq, eq_i);
+            BVNodeId args_eq = bv_true(ctx);
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (ctx.width(args[i]) != ctx.width(entry.args[i])) {
+                    args_eq = bv_false(ctx);
+                    break;
+                }
+                BVNodeId eq_i = bv_bin(ctx, BVOp::Eq, 1, args[i], entry.args[i]);
+                args_eq = bv_bin(ctx, BVOp::And, 1, args_eq, eq_i);
+            }
+            res = bv_ite(ctx, ret_width, args_eq, entry.ret_val, res);
         }
-        res = bv_ite(ctx, ret_width, args_eq, entry.ret_val, res);
     }
     uf_calls.push_back({std::string(sym), args, res});
     return res;

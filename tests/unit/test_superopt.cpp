@@ -1,5 +1,6 @@
 #include "test_framework.hpp"
 #include <brass/brass.hpp>
+#include <brass/mir/pass_pipeline.hpp>
 #include <brass/mir/superopt.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/verify/smt_equiv.hpp>
@@ -433,6 +434,47 @@ TEST_CASE("Superopt - General i32 Constant Magic Division & Modulo") {
         CHECK_EQ(verify::verify_mir_equivalence(*g_before->get_function("guarded_sdiv_smod"), *gfn).status,
                  verify::EquivStatus::ProvenEquivalent);
     }
+}
+
+TEST_CASE("PassPipeline - SMT Guard Elim and MIR Superopt Preserve GuardElimCert and VerifyModule") {
+    Module mod("pipeline_smt_so_cert");
+    Builder b(mod);
+    Function* fn = mod.create_function("check_and_mask", Type::i32(), {Type::i32()});
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* join = b.append_block("join");
+    Value* x = b.add_block_param(entry, Type::i32());
+
+    b.position_at_end(entry);
+    Value* zero = b.build_iconst_i32(0);
+    Value* hi = b.build_iconst_i32(256);
+    Value* mask = b.build_iconst_i32(0xFF);
+    b.build_guard(b.build_sge(x, zero), "deopt");
+    b.build_guard(b.build_slt(x, hi), "deopt");
+    Value* masked = b.build_and(x, mask);
+    b.build_br(join);
+
+    b.position_at_end(join);
+    Value* implied_ge = b.build_sge(masked, zero);
+    b.build_guard(implied_ge, "deopt");
+    b.build_ret(masked);
+    fn->rebuild_cfg_predecessors();
+
+    GuardElimCert cert;
+    cert.block_id = join->id();
+    cert.reason = GuardElimCert::Reason::NonNegativeMask;
+    cert.witness_inst_or_val_id = masked->id();
+    cert.check_op = Opcode::guard;
+    cert.bound_max = 255;
+    fn->add_guard_elim_cert(cert);
+
+    PassPipelineOptions popts;
+    popts.enable_smt_guard_elim = true;
+    popts.enable_superopt = true;
+    CHECK(run_pass_pipeline(mod, popts));
+    CHECK(verify_module(mod));
+    CHECK(verify_module_certificates(mod));
+    CHECK_EQ(count_opcode(*fn, Opcode::and_), 0u);
 }
 
 #ifdef BRASS_STANDALONE_TEST

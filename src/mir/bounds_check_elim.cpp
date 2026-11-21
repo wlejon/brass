@@ -944,35 +944,6 @@ void remove_dead_pure_instructions(Function& fn) {
     }
 }
 
-void reconcile_guard_elim_certs(Function& fn) {
-    if (fn.guard_elim_certs().empty()) return;
-    std::unordered_map<uint32_t, const Value*> live_vals;
-    for (const BasicBlock* bb : fn.blocks()) {
-        if (!bb) continue;
-        for (size_t i = 0; i < bb->param_count(); ++i) {
-            if (bb->param(i)) live_vals[bb->param(i)->id()] = bb->param(i);
-        }
-        for (const Instruction* inst : *bb) {
-            if (inst && inst->result()) live_vals[inst->result()->id()] = inst->result();
-        }
-    }
-    auto& certs = fn.guard_elim_certs();
-    certs.erase(
-        std::remove_if(certs.begin(), certs.end(), [&](GuardElimCert& c) {
-            const BasicBlock* bb = fn.get_block_by_id(c.block_id);
-            if (!bb) return true; // Block itself was unreachable and removed
-            if (c.witness_inst_or_val_id != 0 && live_vals.find(c.witness_inst_or_val_id) == live_vals.end()) {
-                c.witness_inst_or_val_id = 0;
-                if (c.reason == GuardElimCert::Reason::DominatedSameCond ||
-                    c.reason == GuardElimCert::Reason::NonNegativeMask) {
-                    return true;
-                }
-            }
-            return false;
-        }),
-        certs.end());
-}
-
 } // namespace
 
 bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysisOptions& opts) {
@@ -1052,7 +1023,7 @@ bool run_bounds_check_elimination(Function& fn, Module& mod, const RangeAnalysis
         }
     }
 
-    reconcile_guard_elim_certs(fn);
+    fn.reconcile_guard_elim_certs();
     return any_changed;
 }
 

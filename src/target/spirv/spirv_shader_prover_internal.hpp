@@ -6,7 +6,9 @@
 
 #include "verify/bv_solver.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -38,15 +40,33 @@ struct ModuleConstants {
 ModuleConstants collect_module_constants(const Module& mod);
 
 struct FunctionCFG {
+    static constexpr size_t kNoBlock = SIZE_MAX;
+
     size_t num_blocks = 0;
     std::unordered_map<Id, size_t> block_index;
     std::vector<std::vector<size_t>> succs;
     std::vector<std::vector<size_t>> preds;
     std::vector<uint8_t> reachable;
-    std::vector<std::unordered_set<size_t>> dom;
-    std::vector<std::unordered_set<size_t>> pdom;
-    std::unordered_map<size_t, Id> branch_cond;
-    std::unordered_map<size_t, std::unordered_set<size_t>> control_dep_region;
+    std::vector<size_t> idom;
+    std::vector<size_t> ipdom;
+    std::vector<uint32_t> dom_tin;
+    std::vector<uint32_t> dom_tout;
+    std::vector<Id> branch_cond;
+    // Per block `b`, sorted list of conditional branch headers `h` on which `b` is control-dependent.
+    std::vector<std::vector<size_t>> control_dep_headers;
+
+    bool dominates(size_t dom_blk, size_t sub_blk) const noexcept {
+        return dom_blk < num_blocks && sub_blk < num_blocks &&
+               reachable[dom_blk] && reachable[sub_blk] &&
+               dom_tin[dom_blk] <= dom_tin[sub_blk] &&
+               dom_tout[sub_blk] <= dom_tout[dom_blk];
+    }
+
+    bool is_control_dep_on(size_t blk, size_t header) const noexcept {
+        if (blk >= control_dep_headers.size()) return false;
+        const auto& hs = control_dep_headers[blk];
+        return std::binary_search(hs.begin(), hs.end(), header);
+    }
 };
 
 FunctionCFG build_cfg(const Function& fn);

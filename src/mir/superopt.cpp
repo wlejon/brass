@@ -434,6 +434,7 @@ bool run_mir_superopt(
                 bool is_c1 = get_const_imm(op1, c1);
                 if (!is_c0 && (orig_bv == b0 || (op1 && (op1->is_instruction() || !assumptions.empty())))) {
                     if (check_equal(path_cond, orig_bv, b0)) {
+                        fn.retarget_guard_elim_witness(cur->result(), op0);
                         replace_all_uses(fn, cur->result(), op0);
                         if (opts.stats) opts.stats->masks_elided++;
                         changed = true;
@@ -443,6 +444,7 @@ bool run_mir_superopt(
                 }
                 if (!is_c1 && (orig_bv == b1 || (op0 && (op0->is_instruction() || !assumptions.empty())))) {
                     if (check_equal(path_cond, orig_bv, b1)) {
+                        fn.retarget_guard_elim_witness(cur->result(), op1);
                         replace_all_uses(fn, cur->result(), op1);
                         if (opts.stats) opts.stats->masks_elided++;
                         changed = true;
@@ -464,6 +466,7 @@ bool run_mir_superopt(
                         if (src && src->type() == res_t) {
                             BVNodeId src_bv = enc.encode(src);
                             if (check_equal(path_cond, orig_bv, src_bv)) {
+                                fn.retarget_guard_elim_witness(cur->result(), src);
                                 replace_all_uses(fn, cur->result(), src);
                                 if (opts.stats) opts.stats->extensions_elided++;
                                 changed = true;
@@ -522,6 +525,7 @@ bool run_mir_superopt(
                         continue;
                     }
                     if (check_equal(path_cond, orig_bv, cand_bv) && div_trap_safe(path_cond)) {
+                        fn.retarget_guard_elim_witness(cur->result(), cand_v);
                         replace_all_uses(fn, cur->result(), cand_v);
                         if (opts.stats) opts.stats->dags_synthesized++;
                         changed = true;
@@ -555,6 +559,7 @@ bool run_mir_superopt(
                                 Value* sh_v = build_typed_const(b, res_t, sh);
                                 Value* repl = b.build_lshr(lhs, sh_v);
                                 enc.cache[repl] = cand_bv;
+                                fn.retarget_guard_elim_witness(cur->result(), repl);
                                 replace_all_uses(fn, cur->result(), repl);
                                 if (opts.stats) opts.stats->dags_synthesized++;
                                 changed = true;
@@ -571,6 +576,7 @@ bool run_mir_superopt(
                                 Value* mask_v = build_typed_const(b, res_t, mask_bits);
                                 Value* repl = b.build_and(lhs, mask_v);
                                 enc.cache[repl] = cand_bv;
+                                fn.retarget_guard_elim_witness(cur->result(), repl);
                                 replace_all_uses(fn, cur->result(), repl);
                                 if (opts.stats) opts.stats->dags_synthesized++;
                                 changed = true;
@@ -591,6 +597,7 @@ bool run_mir_superopt(
                         };
                         if (Value* repl = detail::try_lower_const_div_i32_mir(
                                 mod, fn, cur, lhs, op, div_imm, prove_non_neg)) {
+                            fn.retarget_guard_elim_witness(cur->result(), repl);
                             replace_all_uses(fn, cur->result(), repl);
                             if (opts.stats) {
                                 opts.stats->magic_divs_reduced++;
@@ -636,6 +643,7 @@ bool run_mir_superopt(
                                     : (op == Opcode::or_)  ? b.build_or(x, cv)
                                     : (op == Opcode::xor_) ? b.build_xor(x, cv) : b.build_add(x, cv);
                         enc.cache[repl] = cand_bv;
+                        fn.retarget_guard_elim_witness(cur->result(), repl);
                         replace_all_uses(fn, cur->result(), repl);
                         if (opts.stats) opts.stats->dags_synthesized++;
                         changed = true;
@@ -689,6 +697,7 @@ bool run_mir_superopt(
                                                                          : b.build_mul(shared, comb_v);
                                 enc.cache[comb_v] = comb_bv;
                                 enc.cache[repl] = cand_bv;
+                                fn.retarget_guard_elim_witness(cur->result(), repl);
                                 replace_all_uses(fn, cur->result(), repl);
                                 if (opts.stats) opts.stats->dags_synthesized++;
                                 changed = true;
@@ -715,6 +724,7 @@ bool run_mir_superopt(
                         Value* repl = b.build_not(inner_v);
                         enc.cache[inner_v] = inner_bv;
                         enc.cache[repl] = cand_bv;
+                        fn.retarget_guard_elim_witness(cur->result(), repl);
                         replace_all_uses(fn, cur->result(), repl);
                         if (opts.stats) opts.stats->dags_synthesized++;
                         changed = true;
@@ -733,6 +743,9 @@ bool run_mir_superopt(
     }
     if (opts.enable_gpu_superopt) {
         changed |= run_gpu_mir_superopt(fn, mod, opts);
+    }
+    if (changed) {
+        fn.reconcile_guard_elim_certs();
     }
     return changed;
 }

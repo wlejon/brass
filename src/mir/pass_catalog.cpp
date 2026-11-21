@@ -100,6 +100,14 @@ std::function<bool(Function&)> cfg_cleanup(bool enabled) {
     return [](Function& fn) { return cfg_simplify_function(fn, CfgSimplifyOptions{}); };
 }
 
+size_t count_fn_instructions(const Function& fn) noexcept {
+    size_t total = 0;
+    for (const BasicBlock* bb : fn.blocks()) {
+        if (bb) total += bb->instruction_count();
+    }
+    return total;
+}
+
 // With a profile for `fn`, true when some loop header runs at least
 // `min_header_count` times and (for `min_iterations` > 0) averages that many
 // iterations per entry. Without one, true: no profile means no gate.
@@ -460,6 +468,36 @@ PassStep write_barrier_elim(bool dump_stats, std::ostream* report, WbeStats* sta
                            if (report) wbe.dump_stats(*report);
                            return changed;
                        }));
+}
+
+PassStep smt_guard_elim(const SmtGuardElimOptions& opts, size_t max_func_insts, FunctionFilter filter) {
+    return serial_when(opts.stats != nullptr,
+                       function_step("smt_guard_elim", filter,
+                                     [opts, max_func_insts](Function& fn) {
+                                         if (!fn.parent()) return false;
+                                         if (max_func_insts > 0 && count_fn_instructions(fn) > max_func_insts) {
+                                             return false;
+                                         }
+                                         return run_smt_guard_elimination(fn, *fn.parent(), opts);
+                                     },
+                                     [](Function& fn) { return scalar_cleanup(fn); }));
+}
+
+PassStep mir_superopt(const SuperoptOptions& opts, size_t max_func_insts, FunctionFilter filter) {
+    return serial_when(opts.stats != nullptr,
+                       function_step("mir_superopt", filter,
+                                     [opts, max_func_insts](Function& fn) {
+                                         if (!fn.parent()) return false;
+                                         if (max_func_insts > 0 && count_fn_instructions(fn) > max_func_insts) {
+                                             return false;
+                                         }
+                                         return run_mir_superopt(fn, *fn.parent(), opts);
+                                     },
+                                     [](Function& fn) {
+                                         bool c = gvn_function(fn, GvnOptions{});
+                                         c |= scalar_cleanup(fn);
+                                         return c;
+                                     }));
 }
 
 PassStep devirtualize() {

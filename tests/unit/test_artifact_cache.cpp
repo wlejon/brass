@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -434,6 +435,46 @@ TEST_CASE("artifact_cache: several processes writing and reading one key") {
     CHECK_EQ(a->text("payload").size(), 30000u);
 }
 #endif
+
+TEST_CASE("ArtifactCache - default_cache_dir Env Precedence and Fallbacks") {
+#if !defined(_WIN32)
+    struct EnvRestore {
+        const char* name;
+        bool had_val = false;
+        std::string prev;
+        explicit EnvRestore(const char* n) : name(n) {
+            if (const char* v = std::getenv(n)) {
+                had_val = true;
+                prev = v;
+            }
+        }
+        ~EnvRestore() {
+            if (had_val) setenv(name, prev.c_str(), 1);
+            else unsetenv(name);
+        }
+    };
+    EnvRestore save_custom("BRASS_TEST_CACHE_DIR");
+    EnvRestore save_xdg("XDG_CACHE_HOME");
+    EnvRestore save_home("HOME");
+
+    setenv("HOME", "/tmp/brass_home_cache_test", 1);
+    unsetenv("XDG_CACHE_HOME");
+    unsetenv("BRASS_TEST_CACHE_DIR");
+
+    CHECK_EQ(default_cache_dir("bro_app", "jit", "BRASS_TEST_CACHE_DIR"),
+             std::filesystem::path("/tmp/brass_home_cache_test/.cache/bro_app/jit"));
+    CHECK_EQ(default_cache_dir("bro_app", "", "BRASS_TEST_CACHE_DIR"),
+             std::filesystem::path("/tmp/brass_home_cache_test/.cache/bro_app"));
+
+    setenv("XDG_CACHE_HOME", "/tmp/brass_xdg_cache_test", 1);
+    CHECK_EQ(default_cache_dir("bro_app", "jit", "BRASS_TEST_CACHE_DIR"),
+             std::filesystem::path("/tmp/brass_xdg_cache_test/bro_app/jit"));
+
+    setenv("BRASS_TEST_CACHE_DIR", "/tmp/brass_override_dir", 1);
+    CHECK_EQ(default_cache_dir("bro_app", "jit", "BRASS_TEST_CACHE_DIR"),
+             std::filesystem::path("/tmp/brass_override_dir"));
+#endif
+}
 
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()

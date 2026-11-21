@@ -28,6 +28,8 @@ struct GpuParamConstraint {
     uint32_t rhs_param_index = UINT32_MAX; // if != UINT32_MAX: param[param_index] <= param[rhs_param_index] (unsigned)
     uint64_t min_val = 0;                  // if > 0: param[param_index] >= min_val (unsigned)
     uint64_t max_val = 0;                  // if > 0: param[param_index] <= max_val (unsigned)
+    uint32_t divisor_param = UINT32_MAX;   // if != UINT32_MAX: param[param_index] % param[divisor_param] == 0
+    uint32_t divisor_const = 0;            // if > 0: param[param_index] % divisor_const == 0
 };
 
 struct GpuProverOptions {

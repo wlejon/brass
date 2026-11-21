@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <system_error>
 
@@ -244,6 +245,42 @@ uint64_t ArtifactCache::walk() {
     walked_ = true;
     stats_.evictions += evicted;
     return total;
+}
+
+std::filesystem::path default_cache_dir(
+    std::string_view app_name,
+    std::string_view sub_dir,
+    std::string_view env_override) {
+    if (!env_override.empty()) {
+        std::string env_key(env_override);
+        if (const char* override_dir = std::getenv(env_key.c_str()); override_dir && override_dir[0] != '\0') {
+            return std::filesystem::path(override_dir);
+        }
+    }
+    const std::filesystem::path app_rel = sub_dir.empty()
+        ? std::filesystem::path(app_name)
+        : (std::filesystem::path(app_name) / std::filesystem::path(sub_dir));
+#if defined(_WIN32)
+    if (const char* local_app = std::getenv("LOCALAPPDATA"); local_app && local_app[0] != '\0') {
+        return std::filesystem::path(local_app) / app_rel;
+    }
+    if (const char* user_prof = std::getenv("USERPROFILE"); user_prof && user_prof[0] != '\0') {
+        return std::filesystem::path(user_prof) / ".cache" / app_rel;
+    }
+#else
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && xdg[0] != '\0') {
+        return std::filesystem::path(xdg) / app_rel;
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+        return std::filesystem::path(home) / ".cache" / app_rel;
+    }
+#endif
+    std::error_code ec;
+    std::filesystem::path tmp = std::filesystem::temp_directory_path(ec);
+    if (!ec && !tmp.empty()) {
+        return tmp / app_rel;
+    }
+    return std::filesystem::path(".cache") / app_rel;
 }
 
 } // namespace brass::cache

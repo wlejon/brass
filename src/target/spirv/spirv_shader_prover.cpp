@@ -106,7 +106,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                         auto pit = cfg.block_index.find(pred_label);
                         if (dit != def_loc.end() && pit != cfg.block_index.end() && cfg.reachable[pit->second]) {
                             size_t def_b = dit->second.first;
-                            if (!cfg.dom[pit->second].count(def_b)) {
+                            if (!cfg.dominates(def_b, pit->second)) {
                                 report.dominance_ok = false;
                                 report.hazards.push_back(ShaderHazard{
                                     HazardKind::StructuralOrDominance, fn.name, b.label, inst.result, inst.op,
@@ -121,7 +121,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                         auto dit = def_loc.find(opd.value);
                         if (dit != def_loc.end()) {
                             auto [def_b, def_i] = dit->second;
-                            if (!cfg.dom[bi].count(def_b) || (def_b == bi && def_i >= ii)) {
+                            if (!cfg.dominates(def_b, bi) || (def_b == bi && def_i >= ii)) {
                                 report.dominance_ok = false;
                                 report.hazards.push_back(ShaderHazard{
                                     HazardKind::StructuralOrDominance, fn.name, b.label, inst.result, inst.op,
@@ -164,12 +164,10 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                 if (!cfg.reachable[bi]) continue;
                 bool blk_wg_div = false;
                 bool blk_sg_div = false;
-                for (const auto& [h, reg] : cfg.control_dep_region) {
-                    if (reg.count(bi)) {
-                        Id c = cfg.branch_cond[h];
-                        if (wg_div.count(c)) blk_wg_div = true;
-                        if (sg_div.count(c)) blk_sg_div = true;
-                    }
+                for (size_t h : cfg.control_dep_headers[bi]) {
+                    Id c = cfg.branch_cond[h];
+                    if (wg_div.count(c)) blk_wg_div = true;
+                    if (sg_div.count(c)) blk_sg_div = true;
                 }
                 for (const Inst& inst : fn.blocks[bi].insts) {
                     if (inst.op == spv::OpAccessChain || inst.op == spv::OpInBoundsAccessChain) {
@@ -224,8 +222,8 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                             if (sg_div.count(val)) add_sg(inst.result);
                             auto pit = cfg.block_index.find(plab);
                             if (pit != cfg.block_index.end()) {
-                                for (const auto& [h, reg] : cfg.control_dep_region) {
-                                    if (reg.count(pit->second) && !reg.count(bi)) {
+                                for (size_t h : cfg.control_dep_headers[pit->second]) {
+                                    if (!cfg.is_control_dep_on(bi, h)) {
                                         Id c = cfg.branch_cond[h];
                                         if (wg_div.count(c)) add_wg(inst.result);
                                         if (sg_div.count(c)) add_sg(inst.result);
@@ -279,15 +277,14 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                                  ctx.make_binary(verify::BVOp::Ult, bvars[5], ctx.make_const(max_sg, 32), 1), 1);
 
             SymbolicBuilder sb{mod, fn, cfg, mc, def_inst, lid_comp, single_store_val, ctx, bvars, {}, {}};
-            for (const auto& [h, reg] : cfg.control_dep_region) {
-                if (!reg.count(bi)) continue;
+            for (size_t h : cfg.control_dep_headers[bi]) {
                 const Inst& hterm = fn.blocks[h].insts.back();
                 if (hterm.op == spv::OpBranchConditional && hterm.operands.size() >= 3) {
                     Id cond_id = hterm.operands[0].value;
                     auto tit = cfg.block_index.find(hterm.operands[1].value);
                     auto fit = cfg.block_index.find(hterm.operands[2].value);
-                    bool in_t = (tit != cfg.block_index.end() && cfg.dom[bi].count(tit->second));
-                    bool in_f = (fit != cfg.block_index.end() && cfg.dom[bi].count(fit->second));
+                    bool in_t = (tit != cfg.block_index.end() && cfg.dominates(tit->second, bi));
+                    bool in_f = (fit != cfg.block_index.end() && cfg.dominates(fit->second, bi));
                     if (in_t != in_f) {
                         verify::BVNodeId cnode = sb.build(cond_id);
                         if (ctx.width(cnode) != 1) {
@@ -378,8 +375,7 @@ ComputeShaderAuditReport audit_compute_shader(const Module& mod) {
                     bool divergent = false;
                     bool unknown_uniformity = false;
                     Id div_cond = 0;
-                    for (const auto& [h, reg] : cfg.control_dep_region) {
-                        if (!reg.count(bi)) continue;
+                    for (size_t h : cfg.control_dep_headers[bi]) {
                         Id c = cfg.branch_cond[h];
                         if (is_wg ? wg_div.count(c) : sg_div.count(c)) {
                             if (!is_wg && inst.op != spv::OpControlBarrier && inst.operands.size() >= 4 &&

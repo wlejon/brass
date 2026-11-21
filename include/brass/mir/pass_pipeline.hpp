@@ -35,6 +35,12 @@ struct PassPipelineOptions {
     bool enable_float_rem_inline = true;
     // A float division by a power of two as a multiplication (fdiv_pow2.hpp).
     bool enable_fdiv_pow2 = true;
+    // Post-loop solver-backed relational guard elimination and MIR superoptimizer.
+    bool enable_smt_guard_elim = false;
+    bool enable_superopt = false;
+    uint32_t superopt_max_sat_conflicts = 2000;
+    size_t superopt_max_func_insts = 1200;
+    size_t smt_guard_max_func_insts = 2000;
     bool dump_wbe_stats = false;
     bool dump_range_stats = false;
     GvnPreStats* pre_stats = nullptr;

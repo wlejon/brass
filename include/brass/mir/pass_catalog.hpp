@@ -3,6 +3,8 @@
 #include <brass/mir/pass_manager.hpp>
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/inliner.hpp>
+#include <brass/mir/smt_guard_elim.hpp>
+#include <brass/mir/superopt.hpp>
 #include <cstddef>
 #include <iosfwd>
 #include <string>
@@ -72,6 +74,10 @@ PassStep fp_load();
 // Every function: a float division by a power of two as the multiplication
 // by its reciprocal (fdiv_pow2.hpp).
 PassStep fdiv_pow2();
+PassStep smt_guard_elim(const SmtGuardElimOptions& opts = {}, size_t max_func_insts = 2000,
+                        FunctionFilter filter = FunctionFilter::NonWrapper);
+PassStep mir_superopt(const SuperoptOptions& opts = {}, size_t max_func_insts = 1200,
+                      FunctionFilter filter = FunctionFilter::NonWrapper);
 PassStep write_barrier_elim(bool dump_stats = false, std::ostream* report = nullptr, WbeStats* stats = nullptr);
 
 // --- Loop passes (FunctionFilter::LoopEligible) -------------------------

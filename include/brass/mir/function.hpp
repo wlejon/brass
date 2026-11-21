@@ -212,6 +212,7 @@ public:
     // (no witness of anything), keeps its claim without one, as
     // reconcile_guard_elim_certs leaves a certificate whose witness is gone.
     void retarget_guard_elim_witness(const Value* from, const Value* to);
+    void reconcile_guard_elim_certs();
 
     // A lowered coroutine body's frame shape, recorded by coroutine lowering
     // (compute_coro_frame_layout): the slot count and which slots hold

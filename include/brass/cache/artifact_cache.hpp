@@ -109,6 +109,14 @@ private:
 // measured once; empty when it cannot be found.
 const std::string& brass_binary_identity();
 
+// Resolves a per-application disk cache directory: checks `env_override` first
+// (when non-empty and set), then LOCALAPPDATA/USERPROFILE (Windows) or
+// XDG_CACHE_HOME/HOME (POSIX), falling back to temp_directory_path/.cache.
+std::filesystem::path default_cache_dir(
+    std::string_view app_name,
+    std::string_view sub_dir = "kernels",
+    std::string_view env_override = {});
+
 // ---------------------------------------------------------------------------
 // Artifacts
 // ---------------------------------------------------------------------------
