@@ -382,6 +382,11 @@ Instruction* KernelBuilder::set_frag_depth(Value* depth) {
     return b_.current_block()->tail();
 }
 
+Instruction* KernelBuilder::set_frag_depth_less(Value* depth) {
+    b_.build_call("spirv_set_frag_depth_less", Type::void_type(), {depth});
+    return b_.current_block()->tail();
+}
+
 Value* KernelBuilder::buffer_load(uint32_t set, uint32_t binding, uint32_t uniform_bytes, Value* offset, Type type) {
     int32_t desc = uniform_bytes ? static_cast<int32_t>(((uniform_bytes + 15) / 16) << 1) : 1;
     return b_.build_call("spirv_buffer_load", type,

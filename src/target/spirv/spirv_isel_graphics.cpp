@@ -655,6 +655,18 @@ void SpirvISel::Intrinsics::set_frag_depth(SpirvISel& isel, const brass::Instruc
     isel.emit(Inst(spv::OpStore).id(vid).id(isel.id_of(inst.operand(0), "depth")));
 }
 
+// spirv_set_frag_depth_less(depth): as set_frag_depth, the entry also
+// DepthLess (the value is never above the rasterized depth), so the depth
+// test can still reject a fragment before it runs.
+void SpirvISel::Intrinsics::set_frag_depth_less(SpirvISel& isel, const brass::Instruction& inst) {
+    set_frag_depth(isel, inst);
+    Id& mode = isel.m_.cached("mode.depth_less");
+    if (!mode) {
+        isel.m_.add_execution_mode(isel.fn().id, spv::ExecutionModeDepthLess, {});
+        mode = 1;
+    }
+}
+
 void SpirvISel::Intrinsics::set_vertex_position(SpirvISel& isel, const brass::Instruction& inst) {
     Module& m = isel.m_;
     Id v4 = m.t_vector(isel.t_f32(), 4);

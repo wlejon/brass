@@ -507,6 +507,9 @@ public:
     }
     Instruction* set_frag_color_vec4(uint32_t location, Value* rgba);
     Instruction* set_frag_depth(Value* depth);   // BuiltIn FragDepth
+    // FragDepth, promised never above the rasterized depth (DepthLess), so
+    // early depth tests still run.
+    Instruction* set_frag_depth_less(Value* depth);
 
     // A 32-bit word (`type` f32 or i32) of a buffer at a descriptor, at a
     // byte offset its layout gives: a uniform buffer (std140) of `uniform_bytes`,

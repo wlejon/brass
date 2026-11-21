@@ -361,6 +361,7 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "spirv_stage_in",            &stage_in },
         { "spirv_stage_out",           &stage_out },
         { "spirv_set_frag_depth",      &set_frag_depth },
+        { "spirv_set_frag_depth_less", &set_frag_depth_less },
         { "spirv_buffer_load",         &buffer_load },
         { "spirv_buffer_store",        &buffer_store },
         { "spirv_buffer_length",       &buffer_length },
