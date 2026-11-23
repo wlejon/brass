@@ -235,6 +235,7 @@ add_executable(brass_unit_tests
     unit/test_fma_opt.cpp
     differential/test_avx2_differential.cpp
     differential/test_avx2_isel_regressions.cpp
+    unit/test_stack_probes.cpp
     differential/test_vextract_spill.cpp
     differential/test_state_through_pointer.cpp
     unit/test_background_compiler.cpp

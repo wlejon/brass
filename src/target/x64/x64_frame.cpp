@@ -104,7 +104,6 @@ void X64FrameLayout::emit_prologue(
     const codegen::FrameInfo& frame,
     const CallingConvention& cc
 ) {
-    (void)cc;
     if (frame.is_leaf) {
         return;
     }
@@ -115,8 +114,10 @@ void X64FrameLayout::emit_prologue(
     // 2. mov rbp, rsp
     enc.mov(GPR::RBP, GPR::RSP);
 
-    // 3. sub rsp, total_frame_size (if > 0)
+    // 3. sub rsp, total_frame_size (if > 0), its pages touched first on
+    // Windows
     if (frame.total_frame_size > 0) {
+        if (cc.kind() == CallingConvKind::Win64) emit_stack_probes(enc, frame.total_frame_size);
         enc.sub(GPR::RSP, static_cast<int32_t>(frame.total_frame_size));
     }
 
@@ -131,6 +132,15 @@ void X64FrameLayout::emit_prologue(
     for (XMM x : saved_xmms) {
         enc.movups(callee_xmm_address(x, frame), x);
     }
+}
+
+void X64FrameLayout::emit_stack_probes(X64Encoder& enc, size_t bytes) {
+    constexpr size_t kPage = 4096;
+    if (bytes < kPage) return;  // (within the guard page)
+    for (size_t off = kPage; off < bytes; off += kPage) {
+        enc.mov(MemAddress::base_disp(GPR::RSP, -static_cast<int32_t>(off)), GPR::RAX);
+    }
+    enc.mov(MemAddress::base_disp(GPR::RSP, -static_cast<int32_t>(bytes)), GPR::RAX);
 }
 
 void X64FrameLayout::emit_epilogue(

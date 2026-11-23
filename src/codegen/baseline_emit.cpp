@@ -3,6 +3,7 @@
 #include <brass/codegen/unsupported_operation.hpp>
 #include <brass/target/aarch64/aarch64_baseline_emit.hpp>
 #include <brass/target/x64/x64_encoder.hpp>
+#include <brass/target/x64/x64_frame.hpp>
 #include <brass/target/calling_conv.hpp>
 #include <brass/gc/runtime_gc.hpp>
 #include <brass/runtime/tiering.hpp>
@@ -314,6 +315,7 @@ BaselineCompiledFunction BaselineJitCompiler::compile(const Function& fn, Target
     prologue.push_end = static_cast<uint32_t>(buffer.size());
     enc.mov(GPR::RBP, GPR::RSP);
     prologue.mov_end = static_cast<uint32_t>(buffer.size());
+    if (target.is_windows()) x64::X64FrameLayout::emit_stack_probes(enc, static_cast<size_t>(frame_size));
     enc.sub(GPR::RSP, frame_size);
     prologue.alloc_end = static_cast<uint32_t>(buffer.size());
     if (preserves_r13) {
