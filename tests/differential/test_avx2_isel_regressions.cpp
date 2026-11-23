@@ -14,9 +14,10 @@
 //    VPBROADCASTD/Q, whose source is an xmm: the lanes held whatever xmm had
 //    the GPR's number.
 //  - vneg, vnot and vsqrt on 256-bit values used 16-byte SSE instructions.
-//  - a 256-bit op with no 256-bit instruction (i64x4 vmul, integer vdiv)
-//    fell through to the 128-bit path with no opcode: the result was
-//    silently operand 0. It is now a compile error.
+//  - a 256-bit op with no 256-bit instruction (integer vdiv) fell through
+//    to the 128-bit path with no opcode: the result was silently operand 0.
+//    It is now a compile error. i64x4 vmul, which AVX2 lacks too, goes
+//    through 64-bit imul lane by lane, as i64x2's does.
 // They run on AArch64 too, where a 256-bit value is a pair of V registers;
 // there an f64 lane-0 insert was a scalar fmov that cleared lane 1.
 
@@ -175,11 +176,27 @@ TEST_CASE("AVX2 ISel regression - vneg / vnot / vsqrt act on all 256 bits") {
     assert_diff(mod, "f64x4_sqrt", {f64pos});
 }
 
+TEST_CASE("AVX2 ISel regression - i64x4 vmul multiplies all four lanes") {
+    if (skip_no_v256_backend()) return;
+    Module mod("avx2_i64x4_mul");
+    Function* fn = mod.create_function("i64x4_mul", Type::i64x4(), {Type::i64x4(), Type::i64x4()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* p0 = b.add_block_param(entry, Type::i64x4());
+    Value* p1 = b.add_block_param(entry, Type::i64x4());
+    b.build_ret(b.build_vmul(p0, p1));
+    fn->rebuild_cfg_predecessors();
+    REQUIRE(verify_function(*fn));
+    // Distinct lanes in the high half, products past 32 bits, and a wrap.
+    assert_diff(mod, "i64x4_mul", {RuntimeValue::from_i64x4(3, -7, 3000000000LL, 0x4000000000000001LL),
+                                   RuntimeValue::from_i64x4(5, 11, -4000000LL, 6)});
+}
+
 TEST_CASE("AVX2 ISel regression - a 256-bit op with no instruction is a compile error") {
     if (skip_no_v256_backend()) return;
     struct Case { const char* name; Type type; Opcode op; };
     const Case cases[] = {
-        {"i64x4_mul", Type::i64x4(), Opcode::vmul},
         {"i32x8_div", Type::i32x8(), Opcode::vdiv},
         {"i64x4_div", Type::i64x4(), Opcode::vdiv},
         {"i64x2_div", Type::i64x2(), Opcode::vdiv},

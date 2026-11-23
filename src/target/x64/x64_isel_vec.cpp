@@ -71,8 +71,10 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             VReg v1 = get_vreg(inst.operand(1));
             Type t = inst.type();
 
-            if (inst.opcode() == Opcode::vmul && t.kind() == TypeKind::I64x2) {
-                // Emulate i64x2 multiplication via 64-bit imul
+            // i64 lanes have no SSE/AVX2 multiply: each pair of lanes goes
+            // through 64-bit imul (a 256-bit vector as its two halves, put
+            // back together with VINSERTF128).
+            auto mul_i64x2 = [&](VReg dst, VReg v0, VReg v1) {
                 VReg r0 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
                 VReg r1 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
                 VReg s0 = lir_fn_->allocate_vreg(RegClass::GPR, 8);
@@ -126,6 +128,23 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 pinsr1->add_use(LirOperand::imm(1, 1));
                 pinsr1->mir_origin = &inst;
                 lir_bb.append_inst(std::move(pinsr1));
+            };
+            if (inst.opcode() == Opcode::vmul && t.kind() == TypeKind::I64x2) {
+                mul_i64x2(dst, v0, v1);
+                break;
+            }
+            if (inst.opcode() == Opcode::vmul && t.kind() == TypeKind::I64x4) {
+                VReg lo = lir_fn_->allocate_vreg(RegClass::XMM, 32);
+                VReg hi = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+                mul_i64x2(lo, v0, v1);
+                mul_i64x2(hi, extract_high_half(v0), extract_high_half(v1));
+                auto ins = std::make_unique<LirInst>(LirOpcode::Vinsertf128);
+                ins->add_def(LirOperand::vreg(dst, 32));
+                ins->add_use(LirOperand::vreg(lo, 32));
+                ins->add_use(LirOperand::vreg(hi, 16));
+                ins->add_use(LirOperand::imm(1, 1));
+                ins->mir_origin = &inst;
+                lir_bb.append_inst(std::move(ins));
                 break;
             }
 
@@ -157,8 +176,8 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     else if (t.kind() == TypeKind::F64x4) op = LirOpcode::Vmaxpd;
                     else if (t.kind() == TypeKind::I32x8) op = LirOpcode::Vpmaxsd;
                 }
-                // No 256-bit instruction for this op/type pair (i64x4 vmul,
-                // integer vdiv, ...): an error, never the 128-bit path, which
+                // No 256-bit instruction for this op/type pair (integer
+                // vdiv, i64x4 vmin, ...): an error, never the 128-bit path, which
                 // would compute on half the vector or not at all.
                 if (op == LirOpcode::Nop) {
                     codegen::throw_unsupported("x64 isel (vector)",
