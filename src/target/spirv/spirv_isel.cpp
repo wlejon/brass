@@ -184,7 +184,34 @@ void SpirvISel::lower_params(KernelLayout& layout) {
         members.push_back(scalar_type(t));
         offset += size;
     }
-    layout.push_constant_bytes = align_up(offset, 4);
+    const uint32_t param_bytes = align_up(offset, 4);
+    layout.param_buffer_bytes = param_bytes;
+    const bool spill = opts_.spill_overflow_params &&
+                       opts_.stage == target::SpirvStage::Compute &&
+                       param_bytes > opts_.max_push_constant_bytes;
+    layout.spilled_params = spill;
+    layout.push_constant_bytes = spill ? 8u : param_bytes;
+
+    bool entry_has_phis = cfg_->nodes[cfg_->edges[cfg_->nodes[0].out.at(0)].to].params != nullptr;
+    if (spill) {
+        Id ptr_u64_t = t_u64();
+        Id block_t = m_.t_struct({ptr_u64_t});
+        m_.decorate(block_t, spv::DecorationBlock);
+        m_.member_decorate(block_t, 0, spv::DecorationOffset, {0});
+        Id var = m_.variable(m_.t_pointer(spv::StorageClassPushConstant, block_t), spv::StorageClassPushConstant);
+        m_.set_name(var, std::string(mir_->name()) + "_param_ptr");
+        use_global(var);
+
+        Id base_ptr = op(spv::OpAccessChain, m_.t_pointer(spv::StorageClassPushConstant, ptr_u64_t), {var, m_.c_u32(0)});
+        Id base_u64 = op(spv::OpLoad, ptr_u64_t, {base_ptr});
+        for (size_t i = 0; i < members.size(); ++i) {
+            Id p_addr = address(base_u64, layout.params[i].offset);
+            Id value = load_global(p_addr, members[i], layout.params[i].size);
+            if (entry_has_phis) prologue_args_.push_back(value);
+            else define(entry->param(i), value);
+        }
+        return;
+    }
 
     Id block_t = m_.t_struct(members);
     m_.decorate(block_t, spv::DecorationBlock);
@@ -195,7 +222,6 @@ void SpirvISel::lower_params(KernelLayout& layout) {
     m_.set_name(var, std::string(mir_->name()) + "_params");
     use_global(var);
 
-    bool entry_has_phis = cfg_->nodes[cfg_->edges[cfg_->nodes[0].out.at(0)].to].params != nullptr;
     for (uint32_t i = 0; i < members.size(); ++i) {
         Id member_ptr = op(spv::OpAccessChain, m_.t_pointer(spv::StorageClassPushConstant, members[i]), {var, m_.c_u32(i)});
         Id value = op(spv::OpLoad, members[i], {member_ptr});

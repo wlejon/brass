@@ -39,6 +39,8 @@ struct KernelLayout {
     std::vector<target::SpirvParam> params;
     std::vector<target::SpirvDescriptorBinding> descriptors;
     uint32_t push_constant_bytes = 0;
+    uint32_t param_buffer_bytes = 0;
+    bool spilled_params = false;
     uint32_t shared_bytes = 0;
 };
 

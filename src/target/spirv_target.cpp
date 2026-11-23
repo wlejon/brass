@@ -53,6 +53,8 @@ SpirvKernel SpirvTarget::compile(const Function& fn, const SpirvOptions& opts) {
     k.params = std::move(layout.params);
     k.descriptors = std::move(layout.descriptors);
     k.push_constant_bytes = layout.push_constant_bytes;
+    k.param_buffer_bytes = layout.param_buffer_bytes;
+    k.spilled_params = layout.spilled_params;
     k.shared_bytes = layout.shared_bytes;
     if (opts.stage == SpirvStage::Compute) {
         k.local_size[0] = opts.local_size_x;

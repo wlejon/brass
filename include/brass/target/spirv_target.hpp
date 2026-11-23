@@ -93,11 +93,16 @@ struct SpirvOptions {
     // store to the same address: a kernel that read a value and then
     // overwrote it otherwise read what it wrote.
     bool loads_through_variable = false;
+    // Compute parameter blocks larger than this automatically spill into a
+    // device-address buffer passed via a single 8-byte PhysicalStorageBuffer
+    // push constant so kernels are never capped at Vulkan's 128B floor.
+    bool spill_overflow_params = true;
+    uint32_t max_push_constant_bytes = 128;
 };
 
 struct SpirvParam {
     Type type;           // MIR parameter type (ptr is a 64-bit device address)
-    uint32_t offset = 0; // byte offset in the push-constant block
+    uint32_t offset = 0; // byte offset in the push-constant (or spilled param) block
     uint32_t size = 0;
 };
 
@@ -106,9 +111,11 @@ struct SpirvKernel {
     std::string entry;                     // OpEntryPoint name (the MIR function name)
     SpirvStage stage = SpirvStage::Compute;
     std::vector<uint32_t> words;           // the SPIR-V binary
-    std::vector<SpirvParam> params;        // push-constant layout, in parameter order
+    std::vector<SpirvParam> params;        // parameter layout, in parameter order
     std::vector<SpirvDescriptorBinding> descriptors; // descriptor-bound images/samplers
     uint32_t push_constant_bytes = 0;
+    uint32_t param_buffer_bytes = 0;       // aligned byte size of param struct (matches push_constant_bytes unless spilled)
+    bool spilled_params = false;           // true when push constants hold only a 64-bit param buffer BDA
     uint32_t shared_bytes = 0;             // total Workgroup storage
     uint32_t local_size[3] = {1, 1, 1};       // the LocalSize default
     bool local_size_spec_constants = true;    // SpecId 0..2 override local_size

@@ -510,3 +510,47 @@ TEST_CASE("SPIR-V exec - 32-bit bitcasts: f32 bits as i32, bf16 widened through 
         CHECK_EQ(wide[i], want);
     }
 }
+
+TEST_CASE("SPIR-V exec - spilled parameter block (>256B) reaches kernel on Vulkan") {
+    if (!vk_ready()) return;
+    // 1 output ptr (8B) + 32 x i64 (256B) + 4 x f32 (16B) = 280B > 128B/256B push constant limit
+    std::vector<Type> ptypes;
+    ptypes.push_back(Type::ptr());
+    for (int i = 0; i < 32; ++i) ptypes.push_back(Type::i64());
+    for (int i = 0; i < 4; ++i) ptypes.push_back(Type::f32());
+
+    spvtest::Kernel k(ptypes, "exec_spilled_280");
+    Builder& b = k.b;
+    for (int i = 0; i < 32; ++i) {
+        b.build_store(Type::i64(), k.p(0), i * 8, k.p(1 + i));
+    }
+    Value* fsum = k.p(33);
+    for (int i = 1; i < 4; ++i) fsum = b.build_add(fsum, k.p(33 + i));
+    b.build_store(Type::f32(), k.p(0), 32 * 8, fsum);
+    b.build_ret_void();
+
+    target::SpirvKernel sk = spvtest::compile_checked(*k.fn);
+    REQUIRE(sk.spilled_params);
+    CHECK_EQ(sk.push_constant_bytes, 8u);
+    CHECK_EQ(sk.param_buffer_bytes, 280u);
+
+    VulkanModule m = load_kernel(sk);
+    VulkanBuffer out = zeros<uint64_t>(33);
+    std::vector<VulkanArg> args;
+    args.emplace_back(out);
+    for (int i = 0; i < 32; ++i) args.emplace_back(int64_t{1000000000000LL + i * 17});
+    args.emplace_back(1.25f);
+    args.emplace_back(2.5f);
+    args.emplace_back(3.75f);
+    args.emplace_back(4.5f);
+
+    launch(m, 1, 1, args);
+    std::vector<uint64_t> got = download<uint64_t>(out, 33);
+    for (int i = 0; i < 32; ++i) {
+        CHECK_EQ(static_cast<int64_t>(got[i]), 1000000000000LL + i * 17);
+    }
+    float fgot = 0.0f;
+    uint32_t fbits = static_cast<uint32_t>(got[32]);
+    std::memcpy(&fgot, &fbits, 4);
+    CHECK_EQ(fgot, 12.0f);
+}

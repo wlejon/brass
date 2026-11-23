@@ -28,7 +28,8 @@ std::string pack_push_constants(const brass::target::SpirvKernel& k, const std::
     if (args.size() != k.params.size())
         return "kernel '" + k.entry + "' takes " + std::to_string(k.params.size()) + " arguments, got " +
                std::to_string(args.size());
-    block.assign(k.push_constant_bytes, 0);
+    const uint32_t total = k.spilled_params ? k.param_buffer_bytes : k.push_constant_bytes;
+    block.assign(total, 0);
     for (size_t i = 0; i < args.size(); ++i) {
         const brass::target::SpirvParam& p = k.params[i];
         VulkanArg::Kind want;
@@ -258,6 +259,14 @@ bool VulkanModule::launch(const VulkanDispatch& d, const std::vector<VulkanArg>&
 
     std::vector<uint8_t> block;
     if (std::string bad = pack_push_constants(k, args, block); !bad.empty()) return fail(bad);
+    VulkanBuffer param_buf;
+    if (k.spilled_params) {
+        param_buf = VulkanBuffer::alloc(block.size());
+        if (!param_buf.valid() || !param_buf.upload(block.data(), block.size())) return fail(vk::last_error());
+        uint64_t param_addr = param_buf.device_address();
+        block.resize(8);
+        std::memcpy(block.data(), &param_addr, 8);
+    }
     std::string err;
     VkPipeline pipe = s_->pipeline(*r, d.block, err);
     if (!pipe) return fail(err);

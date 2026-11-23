@@ -174,4 +174,23 @@ TEST_CASE("SPIR-V Target - the ten fused ML kernels lower and validate unchanged
     }
 }
 
+TEST_CASE("SPIR-V Target - parameters exceeding 128B spill into a BDA parameter struct") {
+    std::vector<Type> ptypes;
+    ptypes.push_back(Type::ptr()); // output pointer (8B)
+    for (int i = 0; i < 64; ++i) ptypes.push_back(Type::i32()); // +256B => 264B total
+    Kernel k(ptypes, "spilled_264");
+    Builder& b = k.b;
+    Value* sum = k.p(1);
+    for (int i = 2; i < 65; ++i) sum = b.build_add(sum, k.p(i));
+    b.build_store(Type::i32(), k.p(0), 0, sum);
+    b.build_ret_void();
+
+    target::SpirvKernel kern = compile_checked(*k.fn);
+    CHECK(kern.spilled_params);
+    CHECK_EQ(kern.push_constant_bytes, 8u);
+    CHECK_EQ(kern.param_buffer_bytes, 264u);
+    CHECK_EQ(kern.params.size(), 65u);
+    CHECK_EQ(kern.params.back().offset, 260u);
+}
+
 } // namespace

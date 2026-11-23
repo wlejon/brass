@@ -7,7 +7,7 @@ namespace brass::target {
 namespace {
 
 constexpr uint8_t kMagic[4] = {'B', 'S', 'P', 'K'};
-constexpr uint32_t kFormatVersion = 1;
+constexpr uint32_t kFormatVersion = 2;
 
 void write_u8(std::vector<uint8_t>& out, uint8_t v) {
     out.push_back(v);
@@ -141,6 +141,8 @@ std::vector<uint8_t> serialize_spirv_kernel(const SpirvKernel& kernel) {
     }
 
     write_u32(out, kernel.push_constant_bytes);
+    write_u32(out, kernel.param_buffer_bytes);
+    write_u8(out, kernel.spilled_params ? 1u : 0u);
     write_u32(out, kernel.shared_bytes);
     for (uint32_t l : kernel.local_size) {
         write_u32(out, l);
@@ -168,7 +170,7 @@ bool deserialize_spirv_kernel(std::span<const uint8_t> bytes,
         return false;
     }
     uint32_t version = r.u32();
-    if (!r.ok() || version != kFormatVersion) {
+    if (!r.ok() || (version != 1 && version != kFormatVersion)) {
         r.set_err("unsupported SpirvKernel format version");
         return false;
     }
@@ -226,6 +228,13 @@ bool deserialize_spirv_kernel(std::span<const uint8_t> bytes,
     }
 
     parsed.push_constant_bytes = r.u32();
+    if (version >= 2) {
+        parsed.param_buffer_bytes = r.u32();
+        parsed.spilled_params = r.boolean();
+    } else {
+        parsed.param_buffer_bytes = parsed.push_constant_bytes;
+        parsed.spilled_params = false;
+    }
     parsed.shared_bytes = r.u32();
     for (uint32_t& l : parsed.local_size) {
         l = r.u32();

@@ -553,7 +553,9 @@ TEST_CASE("SpirvKernel Serialization - Round-Trip and Corrupt Input Rejection") 
         {1u, 3u, brass::target::SpirvDescriptorKind::CombinedImageSampler, brass::target::SpirvImageDim::D2, true, true,
          brass::target::SpirvImageScalar::U32, 0x20u, 0u},
     };
-    src.push_constant_bytes = 16u;
+    src.push_constant_bytes = 8u;
+    src.param_buffer_bytes = 256u;
+    src.spilled_params = true;
     src.shared_bytes = 2048u;
     src.local_size[0] = 64u;
     src.local_size[1] = 2u;
@@ -579,6 +581,8 @@ TEST_CASE("SpirvKernel Serialization - Round-Trip and Corrupt Input Rejection") 
     }
     CHECK(dst.descriptors == src.descriptors);
     CHECK_EQ(dst.push_constant_bytes, src.push_constant_bytes);
+    CHECK_EQ(dst.param_buffer_bytes, src.param_buffer_bytes);
+    CHECK_EQ(dst.spilled_params, src.spilled_params);
     CHECK_EQ(dst.shared_bytes, src.shared_bytes);
     CHECK_EQ(dst.local_size[0], src.local_size[0]);
     CHECK_EQ(dst.local_size[1], src.local_size[1]);
