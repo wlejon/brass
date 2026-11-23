@@ -51,11 +51,6 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     const Value* true_val = inst.operand(1);
     const Value* false_val = inst.operand(2);
 
-    VReg dst = get_vreg(inst.result());
-    bool is_float = dst.is_xmm();
-    uint8_t sz = dst.size;
-    if (sz == 0) sz = 8;
-
     auto emit_cmp_for_select = [&]() -> LirCond {
         const Instruction* cmp_inst = cond_val ? cond_val->defining_instruction() : nullptr;
         if (fused_into(cmp_inst, inst)) {
@@ -70,6 +65,63 @@ void AArch64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
         lir_bb.append_inst(std::move(test_inst));
         return LirCond::NE;
     };
+
+    // A vector on a scalar condition (an if/else diamond on a uniform branch
+    // folded to a select): fcsel moves 64 bits, so the condition picks an
+    // all-ones or zero mask instead, duplicated to every lane, and BSL
+    // blends the vectors (each half of a 256-bit pair).
+    if (inst.type().is_vector()) {
+        VReg zero = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+        VReg ones = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+        auto z = std::make_unique<LirInst>(LirOpcode::Xor32);
+        z->add_def(LirOperand::vreg(zero, 4));
+        z->add_use(LirOperand::vreg(zero, 4));
+        z->add_use(LirOperand::vreg(zero, 4));
+        lir_bb.append_inst(std::move(z));
+        auto o = std::make_unique<LirInst>(LirOpcode::Mov32);
+        o->add_def(LirOperand::vreg(ones, 4));
+        o->add_use(LirOperand::imm(-1, 4));
+        lir_bb.append_inst(std::move(o));
+        const LirCond select_cond = emit_cmp_for_select();
+        VReg m = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+        auto pick = std::make_unique<LirInst>(LirOpcode::Cmovcc);
+        pick->condition = select_cond;
+        pick->add_def(LirOperand::vreg(m, 4));
+        pick->add_use(LirOperand::vreg(zero, 4));
+        pick->add_use(LirOperand::vreg(ones, 4));
+        lir_bb.append_inst(std::move(pick));
+        VReg mask = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+        auto dup = std::make_unique<LirInst>(LirOpcode::Vpbroadcastd);
+        dup->add_def(LirOperand::vreg(mask, 16));
+        dup->add_use(LirOperand::vreg(m, 4));
+        lir_bb.append_inst(std::move(dup));
+        const LirOpcode bop = inst.type().element_type().size_in_bytes() == 8 ? LirOpcode::Vblendvpd
+                                                                              : LirOpcode::Vblendvps;
+        auto blend = [&](VReg d, VReg t, VReg f) {
+            auto i = std::make_unique<LirInst>(bop);
+            i->add_def(LirOperand::vreg(d, 16));
+            i->add_use(LirOperand::vreg(f, 16));
+            i->add_use(LirOperand::vreg(t, 16));
+            i->add_use(LirOperand::vreg(mask, 16));
+            i->mir_origin = &inst;
+            lir_bb.append_inst(std::move(i));
+        };
+        if (inst.type().is_v256()) {
+            const VRegPair d = get_vreg_pair(inst.result());
+            const VRegPair t = get_vreg_pair(true_val);
+            const VRegPair f = get_vreg_pair(false_val);
+            blend(d.lo, t.lo, f.lo);
+            blend(d.hi, t.hi, f.hi);
+        } else {
+            blend(get_vreg(inst.result()), get_vreg(true_val), get_vreg(false_val));
+        }
+        return;
+    }
+
+    VReg dst = get_vreg(inst.result());
+    bool is_float = dst.is_xmm();
+    uint8_t sz = dst.size;
+    if (sz == 0) sz = 8;
 
     if (is_float) {
         LirCond select_cond = emit_cmp_for_select();
