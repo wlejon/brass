@@ -99,13 +99,31 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     }
     uint8_t sz = dst.size;
     if (sz == 0) sz = 8;
+    // A vector on a scalar condition (an if/else diamond on a uniform branch
+    // folded to a select): the cmov picks an all-ones or zero mask, which is
+    // broadcast to every lane and blends the two vectors. Moved through a
+    // GPR, the vectors themselves would keep their low eight bytes alone.
+    const bool is_vector = is_float && sz > 8;
 
     // 1. Prepare false value into target register (or GPR for float)
     VReg target_reg = dst;
     VReg g_false{};
     VReg g_true{};
 
-    if (is_float) {
+    if (is_vector) {
+        g_false = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+        g_true = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+        target_reg = g_false;
+        auto zero = std::make_unique<LirInst>(LirOpcode::Xor32);
+        zero->add_def(LirOperand::vreg(g_false, 4));
+        zero->add_use(LirOperand::vreg(g_false, 4));
+        zero->add_use(LirOperand::vreg(g_false, 4));
+        lir_bb.append_inst(std::move(zero));
+        auto ones = std::make_unique<LirInst>(LirOpcode::Mov32);
+        ones->add_def(LirOperand::vreg(g_true, 4));
+        ones->add_use(LirOperand::imm(-1, 4));
+        lir_bb.append_inst(std::move(ones));
+    } else if (is_float) {
         uint8_t gsz = (sz == 4) ? 4 : 8;
         g_false = lir_fn_->allocate_vreg(RegClass::GPR, gsz);
         g_true = lir_fn_->allocate_vreg(RegClass::GPR, gsz);
@@ -294,7 +312,7 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     }
 
     // 4. Emit cmovcc
-    uint8_t op_sz = is_float ? (sz == 4 ? 4 : 8) : sz;
+    uint8_t op_sz = is_vector ? 4 : is_float ? (sz == 4 ? 4 : 8) : sz;
     auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
     cmov->condition = inverted ? invert(select_cond) : select_cond;
     cmov->add_def(LirOperand::vreg(target_reg, op_sz));
@@ -303,8 +321,28 @@ void X64ISel::lower_select(const Instruction& inst, LirBlock& lir_bb) {
     cmov->mir_origin = &inst;
     lir_bb.append_inst(std::move(cmov));
 
-    // 5. If float, move result back to dst XMM
-    if (is_float) {
+    // 5. A vector: the mask to every lane, and the blend (the true value
+    // where the mask is set). Otherwise, if float, the result back to dst.
+    if (is_vector) {
+        VReg x = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+        auto movd = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+        movd->add_def(LirOperand::vreg(x, 16));
+        movd->add_use(LirOperand::vreg(g_false, 4));
+        lir_bb.append_inst(std::move(movd));
+        VReg mask = lir_fn_->allocate_vreg(RegClass::XMM, sz);
+        auto bcast = std::make_unique<LirInst>(LirOpcode::Vpbroadcastd);
+        bcast->add_def(LirOperand::vreg(mask, sz));
+        bcast->add_use(LirOperand::vreg(x, 16));
+        lir_bb.append_inst(std::move(bcast));
+        auto blend = std::make_unique<LirInst>(inst.type().element_type().size_in_bytes() == 8 ? LirOpcode::Vblendvpd
+                                                                                               : LirOpcode::Vblendvps);
+        blend->add_def(LirOperand::vreg(dst, sz));
+        blend->add_use(LirOperand::vreg(get_vreg(false_val), sz));
+        blend->add_use(LirOperand::vreg(get_vreg(true_val), sz));
+        blend->add_use(LirOperand::vreg(mask, sz));
+        blend->mir_origin = &inst;
+        lir_bb.append_inst(std::move(blend));
+    } else if (is_float) {
         LirOpcode mov_to_x = (sz == 4) ? LirOpcode::Movd_xg : LirOpcode::Movq_xg;
         auto mq_res = std::make_unique<LirInst>(mov_to_x);
         mq_res->add_def(LirOperand::vreg(dst, sz));

@@ -193,6 +193,54 @@ TEST_CASE("AVX2 ISel regression - i64x4 vmul multiplies all four lanes") {
                                    RuntimeValue::from_i64x4(5, 11, -4000000LL, 6)});
 }
 
+// fn(c, a, b) = select(c != 0, a, b), on a scalar condition: what an if/else
+// diamond on a uniform branch folds to. It went through a GPR with movq and
+// cmov, which kept the low eight bytes of the chosen vector and zeroed the
+// rest.
+TEST_CASE("AVX2 ISel regression - a vector select on a scalar condition keeps every lane") {
+    if (skip_no_v256_backend()) return;
+    Module mod("avx2_scalar_select");
+    for (Type t : {Type::f32x8(), Type::f64x4(), Type::i32x8(), Type::i64x4(), Type::f32x4(), Type::i32x4()}) {
+        const std::string name = "sel_" + brass::to_string(t);
+        // (A 256-bit function is invoked with 256-bit arguments only: its
+        // condition comes in lane 0 of one.)
+        const Type ct = t.is_v256() ? Type::i32x8() : Type::i32();
+        Function* fn = mod.create_function(name, t, {t, t, ct});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* x = b.add_block_param(entry, t);
+        Value* y = b.add_block_param(entry, t);
+        Value* c = b.add_block_param(entry, ct);
+        if (t.is_v256()) c = b.build_vextract_lane(c, 0);
+        b.build_ret(b.build_select(b.build_ne(c, b.build_iconst_i32(0)), x, y));
+        fn->rebuild_cfg_predecessors();
+        REQUIRE(verify_function(*fn));
+    }
+    const RuntimeValue f32a = RuntimeValue::from_f32x8(1, 2, 3, 4, 5, 6, 7, 8);
+    const RuntimeValue f32b = RuntimeValue::from_f32x8(-1, -2, -3, -4, -5, -6, -7, -8);
+    const RuntimeValue f64a = RuntimeValue::from_f64x4(1.5, 2.5, 3.5, 4.5);
+    const RuntimeValue f64b = RuntimeValue::from_f64x4(-1.5, -2.5, -3.5, -4.5);
+    const RuntimeValue i32a = RuntimeValue::from_i32x8(10, 11, 12, 13, 14, 15, 16, 17);
+    const RuntimeValue i32b = RuntimeValue::from_i32x8(-10, -11, -12, -13, -14, -15, -16, -17);
+    const RuntimeValue i64a = RuntimeValue::from_i64x4(10, 11, 3000000000000LL, 13);
+    const RuntimeValue i64b = RuntimeValue::from_i64x4(-10, -11, -12, -4000000000000LL);
+    const RuntimeValue f4a = RuntimeValue::from_f32x4(1, 2, 3, 4);
+    const RuntimeValue f4b = RuntimeValue::from_f32x4(-1, -2, -3, -4);
+    const RuntimeValue i4a = RuntimeValue::from_i32x4(1, 2, 3, 4);
+    const RuntimeValue i4b = RuntimeValue::from_i32x4(-1, -2, -3, -4);
+    for (int32_t c : {0, 1, -7}) {
+        const RuntimeValue cv = RuntimeValue::from_i32(c);
+        const RuntimeValue cw = RuntimeValue::from_i32x8(c, 0, 0, 0, 0, 0, 0, 0);
+        assert_diff(mod, "sel_f32x8", {f32a, f32b, cw});
+        assert_diff(mod, "sel_f64x4", {f64a, f64b, cw});
+        assert_diff(mod, "sel_i32x8", {i32a, i32b, cw});
+        assert_diff(mod, "sel_i64x4", {i64a, i64b, cw});
+        assert_diff(mod, "sel_f32x4", {f4a, f4b, cv});
+        assert_diff(mod, "sel_i32x4", {i4a, i4b, cv});
+    }
+}
+
 TEST_CASE("AVX2 ISel regression - a 256-bit op with no instruction is a compile error") {
     if (skip_no_v256_backend()) return;
     struct Case { const char* name; Type type; Opcode op; };
