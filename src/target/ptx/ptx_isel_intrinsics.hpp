@@ -66,9 +66,11 @@ struct PtxISel::Intrinsics {
     static void f64_to_f32(PtxISel& isel, const brass::Instruction& inst);
 
     // ---- barriers, shuffles, atomics, mul.wide/mad (ptx_isel_intrinsics_warp.cpp)
+    static void subgroup_id(PtxISel& isel, const brass::Instruction& inst);
     static void bar_sync(PtxISel& isel, const brass::Instruction& inst);
     static void bar_sync_id(PtxISel& isel, const brass::Instruction& inst);
     static void bar_sync_count(PtxISel& isel, const brass::Instruction& inst);
+    static void subgroup_barrier(PtxISel& isel, const brass::Instruction& inst);
     static void shfl_down_sync_f32(PtxISel& isel, const brass::Instruction& inst);
     template <ShflMode M>
     static void shfl(PtxISel& isel, const brass::Instruction& inst);
@@ -90,6 +92,10 @@ struct PtxISel::Intrinsics {
     static void shared_store(PtxISel& isel, const brass::Instruction& inst);
     template <Type T>
     static void shared_store_indexed(PtxISel& isel, const brass::Instruction& inst);
+    static void shared_alloc_i32x4(PtxISel& isel, const brass::Instruction& inst);
+    static void shared_load_i32x4_indexed(PtxISel& isel, const brass::Instruction& inst);
+    static void shared_store_i32x4_indexed(PtxISel& isel, const brass::Instruction& inst);
+    static void shared_load_f32_from_v4(PtxISel& isel, const brass::Instruction& inst);
     template <Type T>
     static void load_narrow(PtxISel& isel, const brass::Instruction& inst);
     template <Type T>

@@ -35,6 +35,7 @@ Value* KernelBuilder::nctaid_y() { return b_.build_call("ptx_nctaid_y", Type::i3
 Value* KernelBuilder::nctaid_z() { return b_.build_call("ptx_nctaid_z", Type::i32()); }
 Value* KernelBuilder::lane_id()  { return b_.build_call("ptx_laneid", Type::i32()); }
 Value* KernelBuilder::warp_id()  { return b_.build_lshr(tid_x(), const_i32(5)); }
+Value* KernelBuilder::subgroup_id() { return b_.build_call("ptx_subgroup_id", Type::i32()); }
 Value* KernelBuilder::global_tid_x() { return b_.build_call("ptx_global_tid_x", Type::i32()); }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,11 @@ Instruction* KernelBuilder::sync() {
 
 Instruction* KernelBuilder::bar_sync(uint32_t id) {
     b_.build_call("ptx_bar_sync", Type::void_type(), {const_i32(static_cast<int32_t>(id))});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::subgroup_barrier() {
+    b_.build_call("ptx_subgroup_barrier", Type::void_type());
     return b_.current_block()->tail();
 }
 
@@ -138,6 +144,29 @@ Instruction* KernelBuilder::shared_store_i32(Value* smem, Value* val, int32_t by
 }
 Instruction* KernelBuilder::shared_store_i32_indexed(Value* smem, Value* index, Value* val) {
     b_.build_call("ptx_shared_store_i32_indexed", Type::void_type(), {smem, index, val});
+    return b_.current_block()->tail();
+}
+Value* KernelBuilder::shared_alloc_i32x4(uint32_t count) {
+    return b_.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {const_i32(static_cast<int32_t>(count))});
+}
+Value* KernelBuilder::shared_load_i32x4_indexed(Value* smem, Value* index) {
+    return b_.build_call("ptx_shared_load_i32x4_indexed", Type::i32x4(), {smem, index});
+}
+Instruction* KernelBuilder::shared_store_i32x4_indexed(Value* smem, Value* index, Value* val) {
+    b_.build_call("ptx_shared_store_i32x4_indexed", Type::void_type(), {smem, index, val});
+    return b_.current_block()->tail();
+}
+Value* KernelBuilder::shared_load_f32_from_v4(Value* smem, Value* f32_index) {
+    return b_.build_call("ptx_shared_load_f32_from_v4", Type::f32(), {smem, f32_index});
+}
+Value* KernelBuilder::shared_alloc_u16(uint32_t count) {
+    return b_.build_call("ptx_shared_alloc_u16", Type::ptr(), {const_i32(static_cast<int32_t>(count))});
+}
+Value* KernelBuilder::shared_load_u16_indexed(Value* smem, Value* index) {
+    return b_.build_call("ptx_shared_load_u16_indexed", Type::i32(), {smem, index});
+}
+Instruction* KernelBuilder::shared_store_u16_indexed(Value* smem, Value* index, Value* val) {
+    b_.build_call("ptx_shared_store_u16_indexed", Type::void_type(), {smem, index, val});
     return b_.current_block()->tail();
 }
 

@@ -57,6 +57,8 @@ enum class Sig {
     shared_ldx_f32, shared_ldx_i32, shared_ldx_f64, shared_ldx_i64, // (ptr, index) -> T
     shared_st_f32, shared_st_i32, shared_st_f64, shared_st_i64,     // (ptr, T[, off]) -> void
     shared_stx_f32, shared_stx_i32, shared_stx_f64, shared_stx_i64, // (ptr, index, T) -> void
+    shared_alloc_v4, shared_ldx_v4, shared_stx_v4, shared_ldf_v4,
+    shared_alloc_u16, shared_ldx_u16, shared_stx_u16,
     load_narrow,     // (ptr[, off]) -> i32
     store_narrow,    // (ptr, i32[, off]) -> void
 };
@@ -67,7 +69,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_ctaid_x", Sig::void_i32}, {"ptx_ctaid_y", Sig::void_i32}, {"ptx_ctaid_z", Sig::void_i32},
         {"ptx_ntid_x", Sig::void_i32}, {"ptx_ntid_y", Sig::void_i32}, {"ptx_ntid_z", Sig::void_i32},
         {"ptx_nctaid_x", Sig::void_i32}, {"ptx_nctaid_y", Sig::void_i32}, {"ptx_nctaid_z", Sig::void_i32},
-        {"ptx_laneid", Sig::void_i32}, {"ptx_lane_id", Sig::void_i32}, {"ptx_warpid", Sig::void_i32},
+        {"ptx_laneid", Sig::void_i32}, {"ptx_lane_id", Sig::void_i32}, {"ptx_subgroup_id", Sig::void_i32}, {"ptx_warpid", Sig::void_i32},
         {"ptx_warp_id", Sig::void_i32}, {"ptx_nwarpid", Sig::void_i32}, {"ptx_smid", Sig::void_i32},
         {"ptx_nsmid", Sig::void_i32}, {"ptx_clock", Sig::void_i32}, {"ptx_global_tid_x", Sig::void_i32},
         {"ptx_global_id_x", Sig::void_i32}, {"ptx_clock64", Sig::void_i64}, {"ptx_globaltimer", Sig::void_i64},
@@ -96,7 +98,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
 
         {"bar.sync", Sig::bar}, {"ptx_sync", Sig::bar}, {"ptx_bar_sync", Sig::bar_id},
-        {"ptx_bar_sync_count", Sig::bar_id_count},
+        {"ptx_bar_sync_count", Sig::bar_id_count}, {"ptx_subgroup_barrier", Sig::bar},
 
         {"ptx_shfl_down_sync_f32", Sig::shfl_sync_f32}, {"shfl_down_sync_f32", Sig::shfl_sync_f32},
         {"ptx_shfl_down_f32", Sig::shfl_f32}, {"ptx_shfl_up_f32", Sig::shfl_f32},
@@ -136,6 +138,13 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_shared_store_f64", Sig::shared_st_f64}, {"ptx_shared_store_i64", Sig::shared_st_i64},
         {"ptx_shared_store_f32_indexed", Sig::shared_stx_f32}, {"ptx_shared_store_i32_indexed", Sig::shared_stx_i32},
         {"ptx_shared_store_f64_indexed", Sig::shared_stx_f64}, {"ptx_shared_store_i64_indexed", Sig::shared_stx_i64},
+        {"ptx_shared_alloc_i32x4", Sig::shared_alloc_v4},
+        {"ptx_shared_load_i32x4_indexed", Sig::shared_ldx_v4},
+        {"ptx_shared_store_i32x4_indexed", Sig::shared_stx_v4},
+        {"ptx_shared_load_f32_from_v4", Sig::shared_ldf_v4},
+        {"ptx_shared_alloc_u16", Sig::shared_alloc_u16},
+        {"ptx_shared_load_u16_indexed", Sig::shared_ldx_u16},
+        {"ptx_shared_store_u16_indexed", Sig::shared_stx_u16},
 
         {"ptx_load_u8", Sig::load_narrow}, {"ptx_load_s8", Sig::load_narrow},
         {"ptx_load_u16", Sig::load_narrow}, {"ptx_load_s16", Sig::load_narrow},
@@ -207,11 +216,40 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
         case Sig::shared_stx_i32: b.build_call(name, Type::void_type(), {smem, c4, i}); break;
         case Sig::shared_stx_f64: b.build_call(name, Type::void_type(), {smem, l, d}); break;
         case Sig::shared_stx_i64: b.build_call(name, Type::void_type(), {smem, i, l}); break;
+        case Sig::shared_alloc_v4: r = b.build_call(name, Type::ptr(), {b.build_iconst_i32(16)}); break;
+        case Sig::shared_ldx_v4: {
+            Value* smem_v4 = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(16)});
+            r = b.build_call(name, Type::i32x4(), {smem_v4, i});
+            break;
+        }
+        case Sig::shared_stx_v4: {
+            Value* smem_v4 = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(16)});
+            Value* v = b.build_vload(Type::i32x4(), p, 0);
+            b.build_call(name, Type::void_type(), {smem_v4, i, v});
+            break;
+        }
+        case Sig::shared_ldf_v4: {
+            Value* smem_v4 = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(16)});
+            r = b.build_call(name, Type::f32(), {smem_v4, i});
+            break;
+        }
+        case Sig::shared_alloc_u16: r = b.build_call(name, Type::ptr(), {b.build_iconst_i32(16)}); break;
+        case Sig::shared_ldx_u16: {
+            Value* smem_u16 = b.build_call("ptx_shared_alloc_u16", Type::ptr(), {b.build_iconst_i32(16)});
+            r = b.build_call(name, Type::i32(), {smem_u16, i});
+            break;
+        }
+        case Sig::shared_stx_u16: {
+            Value* smem_u16 = b.build_call("ptx_shared_alloc_u16", Type::ptr(), {b.build_iconst_i32(16)});
+            b.build_call(name, Type::void_type(), {smem_u16, i, i});
+            break;
+        }
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, c4}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
     }
     if (r) {
         if (r->type() == Type::ptr()) b.build_store(Type::i64(), p, 0, r);
+        else if (r->type().is_vector()) b.build_vstore(r->type(), p, 0, r);
         else b.build_store(r->type(), p, 0, r);
     }
     b.build_ret_void();

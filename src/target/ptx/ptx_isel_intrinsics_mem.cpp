@@ -144,6 +144,20 @@ template void PtxISel::Intrinsics::shared_alloc<Type::f32>(PtxISel&, const brass
 template void PtxISel::Intrinsics::shared_alloc<Type::u32>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_alloc<Type::f64>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_alloc<Type::u64>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::shared_alloc<Type::u16>(PtxISel&, const brass::Instruction&);
+
+void PtxISel::Intrinsics::shared_alloc_i32x4(PtxISel& isel, const brass::Instruction& inst) {
+    int64_t count = 0;
+    if (!isel.const_int(inst.operand(0), &count) || count <= 0 ||
+        count * 4 > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("PtxISel: ptx_shared_alloc_i32x4 requires a positive compile-time constant element count");
+    }
+    Reg dst = isel.result_reg(inst);
+    if (dst.cls != RegClass::B64) isel.malformed(inst, "shared array address must be a ptr/i64 result");
+    std::string name = "smem_" + std::to_string(isel.fn_->shared.size());
+    isel.fn_->add_shared(Type::b32, name, static_cast<uint32_t>(count * 4), kSharedAlign);
+    isel.emit(Inst::make(Opcode::mov, Type::u64).dst(dst).src(Operand::symbol(name)));
+}
 
 // ptx_shared_load_<T>(ptr[, byte_offset]) -> T:   ld.shared.<T> d, [ptr + off]
 template <Type T>
@@ -173,6 +187,23 @@ template void PtxISel::Intrinsics::shared_load_indexed<Type::f32>(PtxISel&, cons
 template void PtxISel::Intrinsics::shared_load_indexed<Type::u32>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_load_indexed<Type::f64>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_load_indexed<Type::u64>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::shared_load_indexed<Type::u16>(PtxISel&, const brass::Instruction&);
+
+void PtxISel::Intrinsics::shared_load_i32x4_indexed(PtxISel& isel, const brass::Instruction& inst) {
+    if (!inst.operand(1)) isel.malformed(inst, "missing index");
+    const std::vector<Reg>& dsts = isel.result_regs(inst);
+    if (dsts.size() != 4) isel.malformed(inst, "ptx_shared_load_i32x4_indexed requires i32x4 result");
+    Operand addr = isel.indexed_operand(inst.operand(0), inst.operand(1), 16, "shared pointer");
+    isel.emit(Inst::make(Opcode::ld, Type::u32).space(StateSpace::shared).vec(VecWidth::v4)
+                  .dst(Operand::vec(dsts)).src(addr));
+}
+
+void PtxISel::Intrinsics::shared_load_f32_from_v4(PtxISel& isel, const brass::Instruction& inst) {
+    if (!inst.operand(1)) isel.malformed(inst, "missing f32 index");
+    Reg dst = isel.result_reg(inst);
+    Operand addr = isel.indexed_operand(inst.operand(0), inst.operand(1), 4, "shared pointer");
+    isel.emit(Inst::make(Opcode::ld, Type::f32).space(StateSpace::shared).dst(dst).src(addr));
+}
 
 // ptx_shared_store_<T>(ptr, value[, byte_offset]):   st.shared.<T> [ptr + off], value
 template <Type T>
@@ -202,6 +233,16 @@ template void PtxISel::Intrinsics::shared_store_indexed<Type::f32>(PtxISel&, con
 template void PtxISel::Intrinsics::shared_store_indexed<Type::u32>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_store_indexed<Type::f64>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::shared_store_indexed<Type::u64>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::shared_store_indexed<Type::u16>(PtxISel&, const brass::Instruction&);
+
+void PtxISel::Intrinsics::shared_store_i32x4_indexed(PtxISel& isel, const brass::Instruction& inst) {
+    if (!inst.operand(1) || !inst.operand(2)) isel.malformed(inst, "missing argument");
+    const std::vector<Reg>& vals = isel.regs_of(inst.operand(2), "value");
+    if (vals.size() != 4) isel.malformed(inst, "ptx_shared_store_i32x4_indexed requires i32x4 value");
+    Operand addr = isel.indexed_operand(inst.operand(0), inst.operand(1), 16, "shared pointer");
+    isel.emit(Inst::make(Opcode::st, Type::u32).space(StateSpace::shared).vec(VecWidth::v4)
+                  .src(addr).src(Operand::vec(vals)));
+}
 
 // ---------------------------------------------------------------------------
 // Narrow global loads/stores. PTX zero-extends .u8/.u16 and sign-extends

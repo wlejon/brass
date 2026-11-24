@@ -241,6 +241,7 @@ struct Inst {
     bool is_ftz = false;
     bool is_sat = false;
     bool is_sync = false;         // shfl.sync / bar.sync
+    bool is_warp = false;         // bar.warp.sync
     bool is_uni = false;          // bra.uni / ret.uni
     StateSpace state_space = StateSpace::none;
     VecWidth vec_width = VecWidth::v1;
@@ -275,6 +276,7 @@ struct Inst {
     Inst& ftz() { is_ftz = true; return *this; }
     Inst& sat() { is_sat = true; return *this; }
     Inst& sync() { is_sync = true; return *this; }
+    Inst& warp() { is_warp = true; return *this; }
     Inst& uni() { is_uni = true; return *this; }
     Inst& space(StateSpace s) { state_space = s; return *this; }
     Inst& vec(VecWidth w) { vec_width = w; return *this; }

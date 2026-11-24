@@ -38,6 +38,14 @@ void SpirvISel::Intrinsics::bar_sync_id(SpirvISel& isel, const brass::Instructio
     barrier(isel);
 }
 
+void SpirvISel::Intrinsics::subgroup_barrier(SpirvISel& isel, const brass::Instruction&) {
+    Module& m = isel.m_;
+    Id sg = m.c_u32(spv::ScopeSubgroup);
+    Id sem = m.c_u32(spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsWorkgroupMemoryMask |
+                     spv::MemorySemanticsUniformMemoryMask);
+    isel.emit(Inst(spv::OpControlBarrier).id(sg).id(sg).id(sem));
+}
+
 // ---------------------------------------------------------------------------
 // Shuffles. PTX semantics on 32-lane segments of the subgroup: the source
 // lane is computed from the lane within the segment, and a source outside
@@ -241,7 +249,7 @@ void SpirvISel::Intrinsics::shared_alloc(SpirvISel& isel, const brass::Instructi
     }
     Module& m = isel.m_;
     Type elem(K);
-    Id array = m.t_array(isel.scalar_type(elem), static_cast<uint32_t>(count));
+    Id array = m.t_array(isel.shared_storage_type(elem), static_cast<uint32_t>(count));
     Id var = m.variable(m.t_pointer(spv::StorageClassWorkgroup, array), spv::StorageClassWorkgroup);
     m.set_name(var, "smem_" + std::to_string(var));
     isel.use_global(var);
@@ -252,6 +260,8 @@ template void SpirvISel::Intrinsics::shared_alloc<TypeKind::F32>(SpirvISel&, con
 template void SpirvISel::Intrinsics::shared_alloc<TypeKind::I32>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::shared_alloc<TypeKind::F64>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::shared_alloc<TypeKind::I64>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::shared_alloc<TypeKind::I32x4>(SpirvISel&, const brass::Instruction&);
+template void SpirvISel::Intrinsics::shared_alloc<TypeKind::I16>(SpirvISel&, const brass::Instruction&);
 
 // (ptr[, byte offset]) or, indexed, (ptr, element index)
 template <TypeKind K, bool Indexed>
@@ -268,11 +278,22 @@ template <TypeKind K, bool Indexed>
 void SpirvISel::Intrinsics::shared_store(SpirvISel& isel, const brass::Instruction& inst) {
     const Value* value = Indexed ? inst.operand(2) : inst.operand(1);
     const Value* extra = Indexed ? inst.operand(1) : inst.operand(2);
-    if (!value || value->type().size_in_bytes() != Type(K).size_in_bytes()) {
-        isel.malformed(inst, "value type does not match the intrinsic's element type");
+    if (!value) isel.malformed(inst, "missing value");
+    if constexpr (K != TypeKind::I16) {
+        if (value->type().size_in_bytes() != Type(K).size_in_bytes()) {
+            isel.malformed(inst, "value type does not match the intrinsic's element type");
+        }
+    } else if (!value->type().is_i32()) {
+        isel.malformed(inst, "ptx_shared_store_u16_indexed requires an i32 value");
     }
     const SharedRef& ref = isel.shared_ref(inst.operand(0), "shared store pointer");
     isel.shared_store(ref, extra, Indexed, value);
+}
+
+void SpirvISel::Intrinsics::shared_load_f32_from_v4(SpirvISel& isel, const brass::Instruction& inst) {
+    if (!inst.operand(1)) isel.malformed(inst, "missing f32 index");
+    const SharedRef& ref = isel.shared_ref(inst.operand(0), "shared load pointer");
+    isel.define(inst.result(), isel.shared_load_f32_from_v4(ref, inst.operand(1)));
 }
 
 #define BRASS_SPIRV_SHARED_ACCESS(K)                                                                        \
@@ -284,6 +305,8 @@ BRASS_SPIRV_SHARED_ACCESS(TypeKind::F32)
 BRASS_SPIRV_SHARED_ACCESS(TypeKind::I32)
 BRASS_SPIRV_SHARED_ACCESS(TypeKind::F64)
 BRASS_SPIRV_SHARED_ACCESS(TypeKind::I64)
+BRASS_SPIRV_SHARED_ACCESS(TypeKind::I32x4)
+BRASS_SPIRV_SHARED_ACCESS(TypeKind::I16)
 #undef BRASS_SPIRV_SHARED_ACCESS
 
 // ---------------------------------------------------------------------------

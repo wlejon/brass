@@ -170,6 +170,7 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_nctaid_z",      &special<SpecialReg::nctaid_z> },
         { "ptx_laneid",        &special<SpecialReg::laneid> },
         { "ptx_lane_id",       &special<SpecialReg::laneid> },
+        { "ptx_subgroup_id",   &subgroup_id },
         { "ptx_warpid",        &special<SpecialReg::warpid> },
         { "ptx_warp_id",       &special<SpecialReg::warpid> },
         { "ptx_nwarpid",       &special<SpecialReg::nwarpid> },
@@ -239,10 +240,11 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_f64_to_f32",   &f64_to_f32 },   // (f64) -> f32   cvt.rn.f32.f64
 
         // Barriers                                                   -> void
-        { "bar.sync",            &bar_sync },        // ()          bar.sync 0
-        { "ptx_sync",            &bar_sync },
-        { "ptx_bar_sync",        &bar_sync_id },     // (i32 id)    bar.sync id
-        { "ptx_bar_sync_count",  &bar_sync_count },  // (i32 id, i32 nthreads)
+        { "bar.sync",             &bar_sync },        // ()          bar.sync 0
+        { "ptx_sync",             &bar_sync },
+        { "ptx_bar_sync",         &bar_sync_id },     // (i32 id)    bar.sync id
+        { "ptx_bar_sync_count",   &bar_sync_count },  // (i32 id, i32 nthreads)
+        { "ptx_subgroup_barrier", &subgroup_barrier }, // ()          bar.warp.sync 0xffffffff
 
         // Warp shuffles (value, lane delta / source lane) -> same type as value
         { "ptx_shfl_down_sync_f32", &shfl_down_sync_f32 }, // (i32 mask, f32, i32)
@@ -308,6 +310,8 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_shared_alloc_i32", &shared_alloc<Type::u32> },
         { "ptx_shared_alloc_f64", &shared_alloc<Type::f64> },
         { "ptx_shared_alloc_i64", &shared_alloc<Type::u64> },
+        { "ptx_shared_alloc_i32x4", &shared_alloc_i32x4 },
+        { "ptx_shared_alloc_u16",   &shared_alloc<Type::u16> },
         { "ptx_shared_load_f32",  &shared_load<Type::f32> },    // (ptr[, i32/i64 byte offset]) -> f32
         { "ptx_shared_load_i32",  &shared_load<Type::u32> },
         { "ptx_shared_load_f64",  &shared_load<Type::f64> },
@@ -316,6 +320,9 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_shared_load_i32_indexed", &shared_load_indexed<Type::u32> },
         { "ptx_shared_load_f64_indexed", &shared_load_indexed<Type::f64> },
         { "ptx_shared_load_i64_indexed", &shared_load_indexed<Type::u64> },
+        { "ptx_shared_load_i32x4_indexed", &shared_load_i32x4_indexed },
+        { "ptx_shared_load_u16_indexed",   &shared_load_indexed<Type::u16> },
+        { "ptx_shared_load_f32_from_v4",   &shared_load_f32_from_v4 },
         { "ptx_shared_store_f32", &shared_store<Type::f32> },   // (ptr, value[, byte offset]) -> void
         { "ptx_shared_store_i32", &shared_store<Type::u32> },
         { "ptx_shared_store_f64", &shared_store<Type::f64> },
@@ -324,6 +331,8 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_shared_store_i32_indexed", &shared_store_indexed<Type::u32> },
         { "ptx_shared_store_f64_indexed", &shared_store_indexed<Type::f64> },
         { "ptx_shared_store_i64_indexed", &shared_store_indexed<Type::u64> },
+        { "ptx_shared_store_i32x4_indexed", &shared_store_i32x4_indexed },
+        { "ptx_shared_store_u16_indexed",   &shared_store_indexed<Type::u16> },
 
         // Narrow global loads/stores (ptr[, byte offset]) -> i32 / (ptr, i32 value[, byte offset])
         { "ptx_load_u8",   &load_narrow<Type::u8> },

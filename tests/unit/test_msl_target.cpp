@@ -199,6 +199,45 @@ TEST_CASE("MSL Target - Intrinsics Lowering and BF16 Helper") {
     CHECK(has(k.source, "mulhi("));
 }
 
+TEST_CASE("MSL Target - 128-bit and 16-bit Shared Memory, Subgroup Barrier and ID") {
+    Module mod("msl_shared_ext");
+    Function* fn = mod.create_function("shared_ext", Type::void_type(), {Type::ptr(), Type::ptr(), Type::i32()});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* out = b.add_block_param(entry, Type::ptr());
+    Value* in = b.add_block_param(entry, Type::ptr());
+    Value* idx = b.add_block_param(entry, Type::i32());
+
+    KernelBuilder kb(b);
+    Value* sg = kb.subgroup_id();
+    Value* sm_v4 = kb.shared_alloc_i32x4(16);
+    Value* sm_u16 = kb.shared_alloc_u16(32);
+    Value* vec = kb.vload(Type::i32x4(), in);
+    kb.shared_store_i32x4_indexed(sm_v4, sg, vec);
+    kb.shared_store_u16_indexed(sm_u16, idx, sg);
+    kb.subgroup_barrier();
+    Value* loaded_v4 = kb.shared_load_i32x4_indexed(sm_v4, sg);
+    Value* loaded_f = kb.shared_load_f32_from_v4(sm_v4, idx);
+    Value* loaded_u16 = kb.shared_load_u16_indexed(sm_u16, idx);
+    kb.vstore(Type::i32x4(), out, loaded_v4);
+    kb.store_f32(kb.add(out, kb.const_i64(16)), loaded_f);
+    kb.store_i32(kb.add(out, kb.const_i64(20)), loaded_u16);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    MslKernel k = MslTarget::compile(*fn);
+    CHECK(k.uses_shared_memory);
+    CHECK_EQ(k.shared_memory_bytes, 16u * 16u + 32u * 2u);
+    CHECK(has(k.source, "[[simdgroup_index_in_threadgroup]]"));
+    CHECK(has(k.source, "simdgroup_barrier(mem_flags::mem_threadgroup);"));
+    CHECK(has(k.source, "threadgroup int4 _smem_0[16];"));
+    CHECK(has(k.source, "threadgroup uint16_t _smem_1[32];"));
+    CHECK(has(k.source, "reinterpret_cast<const threadgroup float*>"));
+}
+
 TEST_CASE("MSL Target - Multi-Kernel Module Emission") {
     Module mod("msl_multi");
     build_vec4_saxpy(mod, "kernel_one");

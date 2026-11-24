@@ -41,6 +41,11 @@ void SpirvISel::Intrinsics::laneid(SpirvISel& isel, const brass::Instruction& in
     isel.define(inst.result(), lane_id(isel));
 }
 
+void SpirvISel::Intrinsics::subgroup_id(SpirvISel& isel, const brass::Instruction& inst) {
+    isel.m_.add_capability(spv::CapabilityGroupNonUniform);
+    isel.define(inst.result(), isel.builtin_scalar(spv::BuiltInSubgroupId));
+}
+
 void SpirvISel::Intrinsics::global_tid_x(SpirvISel& isel, const brass::Instruction& inst) {
     isel.define(inst.result(), isel.builtin_component(spv::BuiltInGlobalInvocationId, 0));
 }
@@ -159,6 +164,7 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_ntid_z",       &ntid<2> },
         { "ptx_laneid",       &laneid },
         { "ptx_lane_id",      &laneid },
+        { "ptx_subgroup_id",  &subgroup_id },
         { "ptx_global_tid_x", &global_tid_x },
         { "ptx_global_id_x",  &global_tid_x },
         { "ptx_clock",        &clock<false> },
@@ -240,9 +246,10 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_f32_to_bf16", &f32_to_bf16 },
 
         // Barriers                                                     -> void
-        { "bar.sync",       &bar_sync },
-        { "ptx_sync",       &bar_sync },
-        { "ptx_bar_sync",   &bar_sync_id },
+        { "bar.sync",             &bar_sync },
+        { "ptx_sync",             &bar_sync },
+        { "ptx_bar_sync",         &bar_sync_id },
+        { "ptx_subgroup_barrier", &subgroup_barrier },
 
         // Shuffles (32-lane segments of the subgroup)
         { "ptx_shfl_down_sync_f32", &shfl_down_sync_f32 },
@@ -308,6 +315,8 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_shared_alloc_i32", &shared_alloc<TypeKind::I32> },
         { "ptx_shared_alloc_f64", &shared_alloc<TypeKind::F64> },
         { "ptx_shared_alloc_i64", &shared_alloc<TypeKind::I64> },
+        { "ptx_shared_alloc_i32x4", &shared_alloc<TypeKind::I32x4> },
+        { "ptx_shared_alloc_u16",   &shared_alloc<TypeKind::I16> },
         { "ptx_shared_load_f32",  &shared_load<TypeKind::F32, false> },
         { "ptx_shared_load_i32",  &shared_load<TypeKind::I32, false> },
         { "ptx_shared_load_f64",  &shared_load<TypeKind::F64, false> },
@@ -316,6 +325,9 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_shared_load_i32_indexed", &shared_load<TypeKind::I32, true> },
         { "ptx_shared_load_f64_indexed", &shared_load<TypeKind::F64, true> },
         { "ptx_shared_load_i64_indexed", &shared_load<TypeKind::I64, true> },
+        { "ptx_shared_load_i32x4_indexed", &shared_load<TypeKind::I32x4, true> },
+        { "ptx_shared_load_u16_indexed",   &shared_load<TypeKind::I16, true> },
+        { "ptx_shared_load_f32_from_v4",   &shared_load_f32_from_v4 },
         { "ptx_shared_store_f32", &shared_store<TypeKind::F32, false> },
         { "ptx_shared_store_i32", &shared_store<TypeKind::I32, false> },
         { "ptx_shared_store_f64", &shared_store<TypeKind::F64, false> },
@@ -324,6 +336,8 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_shared_store_i32_indexed", &shared_store<TypeKind::I32, true> },
         { "ptx_shared_store_f64_indexed", &shared_store<TypeKind::F64, true> },
         { "ptx_shared_store_i64_indexed", &shared_store<TypeKind::I64, true> },
+        { "ptx_shared_store_i32x4_indexed", &shared_store<TypeKind::I32x4, true> },
+        { "ptx_shared_store_u16_indexed",   &shared_store<TypeKind::I16, true> },
 
         // Narrow global access (8/16-bit storage)
         { "ptx_load_u8",   &load_narrow<8, false> },

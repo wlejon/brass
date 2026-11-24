@@ -380,6 +380,15 @@ const SpirvISel::SharedRef& SpirvISel::shared_ref(const Value* v, const char* wh
     return it->second;
 }
 
+Id SpirvISel::shared_storage_type(Type elem) {
+    if (elem == Type::i32x4()) return m_.t_vector(t_u32(), 4);
+    if (elem.is_i16()) {
+        m_.add_capability(spv::CapabilityInt16);
+        return m_.t_int(16);
+    }
+    return scalar_type(elem);
+}
+
 // Pointer to element (ref + extra) of the Workgroup array. `extra` is a
 // byte offset, or an element index when `extra_is_index`; either may be
 // null. The access must have the array's element size (an i32 access of an
@@ -413,24 +422,60 @@ Id SpirvISel::shared_element_pointer(const SharedRef& ref, const Value* extra, b
     }
     Id index = m_.c_u32(static_cast<uint32_t>(const_index));
     if (dyn) index = const_index ? op(spv::OpIAdd, t_u32(), {dyn, index}) : dyn;
-    return op(spv::OpAccessChain, m_.t_pointer(spv::StorageClassWorkgroup, scalar_type(ref.elem)), {ref.var, index});
+    return op(spv::OpAccessChain, m_.t_pointer(spv::StorageClassWorkgroup, shared_storage_type(ref.elem)), {ref.var, index});
 }
 
 Id SpirvISel::shared_load(const SharedRef& ref, const Value* extra, bool extra_is_index, Type access) {
+    if (ref.elem.is_i16()) {
+        Id p = shared_element_pointer(ref, extra, extra_is_index, Type::i16());
+        Id v = op(spv::OpLoad, shared_storage_type(ref.elem), {p});
+        return op(spv::OpUConvert, t_u32(), {v});
+    }
     Id p = shared_element_pointer(ref, extra, extra_is_index, access);
-    Id elem_t = scalar_type(ref.elem);
+    Id elem_t = shared_storage_type(ref.elem);
     Id v = op(spv::OpLoad, elem_t, {p});
-    Id want = scalar_type(access);
+    Id want = (access == Type::i32x4()) ? elem_t : scalar_type(access);
     return want == elem_t ? v : op(spv::OpBitcast, want, {v});
 }
 
 void SpirvISel::shared_store(const SharedRef& ref, const Value* extra, bool extra_is_index, const Value* value) {
     if (!value) fail("shared store without a value");
+    if (ref.elem.is_i16()) {
+        Id p = shared_element_pointer(ref, extra, extra_is_index, Type::i16());
+        Id elem_t = shared_storage_type(ref.elem);
+        Id v = op(spv::OpUConvert, elem_t, {as_u32(value, "shared store value")});
+        emit(Inst(spv::OpStore).id(p).id(v));
+        return;
+    }
     Id p = shared_element_pointer(ref, extra, extra_is_index, value->type());
-    Id elem_t = scalar_type(ref.elem);
+    Id elem_t = shared_storage_type(ref.elem);
     Id v = id_of(value, "shared store value");
-    if (scalar_type(value->type()) != elem_t) v = op(spv::OpBitcast, elem_t, {v});
+    if (value->type() != Type::i32x4() && scalar_type(value->type()) != elem_t) {
+        v = op(spv::OpBitcast, elem_t, {v});
+    }
     emit(Inst(spv::OpStore).id(p).id(v));
+}
+
+Id SpirvISel::shared_load_f32_from_v4(const SharedRef& ref, const Value* f32_index) {
+    if (ref.elem != Type::i32x4()) {
+        fail("ptx_shared_load_f32_from_v4 requires a ptx_shared_alloc_i32x4 pointer");
+    }
+    if ((ref.const_off % 4) != 0) {
+        fail("ptx_shared_load_f32_from_v4 base offset must be 4-byte aligned");
+    }
+    Id idx = as_u32(f32_index, "f32 index");
+    if (ref.const_off != 0) {
+        idx = op(spv::OpIAdd, t_u32(), {idx, m_.c_u32(static_cast<uint32_t>(ref.const_off / 4))});
+    }
+    if (ref.dyn_off) {
+        Id d4 = op(spv::OpShiftRightLogical, t_u32(), {ref.dyn_off, m_.c_u32(2)});
+        idx = op(spv::OpIAdd, t_u32(), {idx, d4});
+    }
+    Id v4_idx = op(spv::OpShiftRightLogical, t_u32(), {idx, m_.c_u32(2)});
+    Id lane = op(spv::OpBitwiseAnd, t_u32(), {idx, m_.c_u32(3)});
+    Id p = op(spv::OpAccessChain, m_.t_pointer(spv::StorageClassWorkgroup, t_u32()), {ref.var, v4_idx, lane});
+    Id bits = op(spv::OpLoad, t_u32(), {p});
+    return op(spv::OpBitcast, t_f32(), {bits});
 }
 
 } // namespace brass::spirv

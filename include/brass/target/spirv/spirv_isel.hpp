@@ -192,9 +192,11 @@ private:
     void lower_store_indexed(const brass::Instruction& inst);
     // Shared (Workgroup) memory through SharedRef provenance.
     const SharedRef& shared_ref(const Value* v, const char* what) const;
+    Id shared_storage_type(Type elem);
     Id shared_element_pointer(const SharedRef& ref, const Value* extra, bool extra_is_index, Type access);
     Id shared_load(const SharedRef& ref, const Value* extra, bool extra_is_index, Type access);
     void shared_store(const SharedRef& ref, const Value* extra, bool extra_is_index, const Value* value);
+    Id shared_load_f32_from_v4(const SharedRef& ref, const Value* f32_index);
 
     // ---- vectors (spirv_isel_vec.cpp) ------------------------------------------------
     void lower_vector_binary(const brass::Instruction& inst, spv::Op int_op, spv::Op float_op);

@@ -1,23 +1,13 @@
-#include "msl_isel.hpp"
-#include <brass/mir/opcodes.hpp>
+#include "msl_builder.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <iomanip>
 #include <set>
-#include <stdexcept>
 
 namespace brass::msl {
 
-using brass::spirv::CfgNode;
-using brass::spirv::kNoNode;
-using brass::spirv::StructuredCfg;
-
 namespace {
-
-[[noreturn]] void fail_msl(const Function& fn, const std::string& msg) {
-    throw std::runtime_error("MslTarget: kernel '" + std::string(fn.name()) + "': " + msg);
-}
 
 std::string hex_u32(uint32_t v) {
     std::ostringstream os;
@@ -51,12 +41,9 @@ std::string sanitize_ident(std::string_view sv) {
     return out;
 }
 
-class MslFnBuilder {
-public:
-    MslFnBuilder(const Function& fn, const target::MslOptions& opts)
-        : fn_(fn), opts_(opts) {}
+} // namespace
 
-    MslEmitter::KernelResult run() {
+MslEmitter::KernelResult MslFnBuilder::run() {
         if (!fn_.return_type().is_void()) {
             fail_msl(fn_, "compute kernel must return void");
         }
@@ -126,7 +113,8 @@ public:
                     uint32_t count = const_i32_arg(inst->operand(0), *inst);
                     Type et = shared_elem_type(inst->symbol());
                     std::string sname = "_smem_" + std::to_string(shared_count_++);
-                    decls << "    threadgroup " << msl_type(et) << " " << sname << "[" << count << "];\n";
+                    decls << "    threadgroup " << shared_decl_elem_type(inst->symbol(), *this)
+                          << " " << sname << "[" << count << "];\n";
                     val_names_[inst->result()] = "((threadgroup uint8_t*)" + sname + ")";
                     shared_ptrs_.insert(inst->result());
                     res_.uses_shared_memory = true;
@@ -166,7 +154,7 @@ public:
         for (size_t i = 0; i < param_decls.size(); ++i) {
             fn_ss << "    " << param_decls[i];
             if (i + 1 < param_decls.size() || need_tid_ || need_ntid_ || need_ctaid_ ||
-                need_nctaid_ || need_lane_) {
+                need_nctaid_ || need_lane_ || need_sg_) {
                 fn_ss << ",";
             }
             fn_ss << "\n";
@@ -177,6 +165,7 @@ public:
         if (need_ctaid_)  builtins.push_back("uint3 _ctaid [[threadgroup_position_in_grid]]");
         if (need_nctaid_) builtins.push_back("uint3 _nctaid [[threadgroups_per_grid]]");
         if (need_lane_)   builtins.push_back("uint _lane [[thread_index_in_simdgroup]]");
+        if (need_sg_)     builtins.push_back("uint _sg [[simdgroup_index_in_threadgroup]]");
         for (size_t i = 0; i < builtins.size(); ++i) {
             fn_ss << "    " << builtins[i] << (i + 1 < builtins.size() ? "," : "") << "\n";
         }
@@ -185,78 +174,42 @@ public:
         return res_;
     }
 
-private:
-    const Function& fn_;
-    const target::MslOptions& opts_;
-    const StructuredCfg* cfg_ = nullptr;
-    MslEmitter::KernelResult res_;
-    std::ostringstream body_;
-    std::unordered_map<const Value*, std::string> val_names_;
-    std::unordered_set<const Value*> shared_ptrs_;
-    uint32_t shared_count_ = 0;
-    uint32_t tmp_seq_ = 0;
-    bool need_tid_ = false;
-    bool need_ntid_ = false;
-    bool need_ctaid_ = false;
-    bool need_nctaid_ = false;
-    bool need_lane_ = false;
-
-    void indent_line(int d) {
-        for (int i = 0; i < d; ++i) body_ << "    ";
+uint32_t MslFnBuilder::const_i32_arg(const Value* v, const Instruction& inst) const {
+    if (!v || !v->is_instruction()) fail_msl(fn_, "shared alloc count must be constant");
+    const auto* ci = v->defining_instruction();
+    if (ci->opcode() != Opcode::iconst_i32 || ci->imm_i32() <= 0) {
+        fail_msl(fn_, "shared alloc count must be positive constant in " + std::string(inst.symbol()));
     }
+    return static_cast<uint32_t>(ci->imm_i32());
+}
 
-    static bool is_shared_alloc(std::string_view sym) {
-        return sym == "ptx_shared_alloc_f32" || sym == "ptx_shared_alloc_i32" ||
-               sym == "ptx_shared_alloc_f64" || sym == "ptx_shared_alloc_i64";
-    }
-
-    static Type shared_elem_type(std::string_view sym) {
-        if (sym == "ptx_shared_alloc_i32") return Type::i32();
-        if (sym == "ptx_shared_alloc_f64") return Type::f64();
-        if (sym == "ptx_shared_alloc_i64") return Type::i64();
-        return Type::f32();
-    }
-
-    uint32_t const_i32_arg(const Value* v, const Instruction& inst) const {
-        if (!v || !v->is_instruction()) fail_msl(fn_, "shared alloc count must be constant");
-        const auto* ci = v->defining_instruction();
-        if (ci->opcode() != Opcode::iconst_i32 || ci->imm_i32() <= 0) {
-            fail_msl(fn_, "shared alloc count must be positive constant in " + std::string(inst.symbol()));
-        }
-        return static_cast<uint32_t>(ci->imm_i32());
-    }
-
-    void find_shared_allocs() {
-        for (const auto* bb : fn_.blocks()) {
-            for (const auto* inst : *bb) {
-                if (inst->opcode() == Opcode::call && inst->result() && is_shared_alloc(inst->symbol())) {
-                    shared_ptrs_.insert(inst->result());
-                }
+void MslFnBuilder::find_shared_allocs() {
+    for (const auto* bb : fn_.blocks()) {
+        for (const auto* inst : *bb) {
+            if (inst->opcode() == Opcode::call && inst->result() && is_shared_alloc(inst->symbol())) {
+                shared_ptrs_.insert(inst->result());
             }
         }
-        bool changed = true;
-        while (changed) {
-            changed = false;
-            for (const auto* bb : fn_.blocks()) {
-                for (const auto* inst : *bb) {
-                    if (!inst->result() || !inst->type().is_pointer() || shared_ptrs_.count(inst->result())) continue;
-                    for (size_t i = 0; i < inst->operand_count(); ++i) {
-                        if (shared_ptrs_.count(inst->operand(i))) {
-                            shared_ptrs_.insert(inst->result());
-                            changed = true;
-                            break;
-                        }
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto* bb : fn_.blocks()) {
+            for (const auto* inst : *bb) {
+                if (!inst->result() || !inst->type().is_pointer() || shared_ptrs_.count(inst->result())) continue;
+                for (size_t i = 0; i < inst->operand_count(); ++i) {
+                    if (shared_ptrs_.count(inst->operand(i))) {
+                        shared_ptrs_.insert(inst->result());
+                        changed = true;
+                        break;
                     }
                 }
             }
         }
     }
+}
 
-    std::string phi_name(size_t node_idx, size_t param_idx) const {
-        return "_phi_" + std::to_string(node_idx) + "_" + std::to_string(param_idx);
-    }
-
-    std::string msl_type(Type t) const {
+std::string MslFnBuilder::msl_type(Type t) const {
         switch (t.kind()) {
             case TypeKind::I8:     return "int8_t";
             case TypeKind::I16:    return "int16_t";
@@ -281,58 +234,54 @@ private:
         }
     }
 
-    std::string msl_utype(Type t) const {
-        switch (t.kind()) {
-            case TypeKind::I8:    return "uint8_t";
-            case TypeKind::I16:   return "uint16_t";
-            case TypeKind::I32:   return "uint32_t";
-            case TypeKind::I64:   return "uint64_t";
-            case TypeKind::I32x4: return "uint4";
-            case TypeKind::I64x2: return "ulong2";
-            default:              return msl_type(t);
-        }
+std::string MslFnBuilder::msl_utype(Type t) const {
+    switch (t.kind()) {
+        case TypeKind::I8:    return "uint8_t";
+        case TypeKind::I16:   return "uint16_t";
+        case TypeKind::I32:   return "uint32_t";
+        case TypeKind::I64:   return "uint64_t";
+        case TypeKind::I32x4: return "uint4";
+        case TypeKind::I64x2: return "ulong2";
+        default:              return msl_type(t);
     }
+}
 
-    std::string msl_param_type(Type t) const {
-        if (t == Type::i64()) return "int64_t";
-        if (t == Type::f32()) return "float";
-        return "int32_t";
+std::string MslFnBuilder::msl_param_type(Type t) const {
+    if (t == Type::i64()) return "int64_t";
+    if (t == Type::f32()) return "float";
+    return "int32_t";
+}
+
+uint32_t MslFnBuilder::scalar_param_size(Type t) const {
+    if (t == Type::i64()) return 8;
+    if (t == Type::i32() || t == Type::f32() || t == Type::i8() || t == Type::i16()) return 4;
+    fail_msl(fn_, "unsupported scalar parameter type: " + std::string(t.name()));
+}
+
+std::string MslFnBuilder::msl_val_type(Type t, const Value* v) const {
+    if (t.is_pointer()) return shared_ptrs_.count(v) ? "threadgroup uint8_t*" : "device uint8_t*";
+    return msl_type(t);
+}
+
+std::string MslFnBuilder::zero_init(Type t, const Value* v) const {
+    if (t.is_pointer()) return "nullptr";
+    switch (t.kind()) {
+        case TypeKind::F32:   return "0.0f";
+        case TypeKind::F32x4: return "float4(0.0f)";
+        case TypeKind::I32x4: return "int4(0)";
+        case TypeKind::I64x2: return "long2(0)";
+        case TypeKind::I64:   return "0LL";
+        default:              return "0";
     }
+}
 
-    uint32_t scalar_param_size(Type t) const {
-        if (t == Type::i64()) return 8;
-        if (t == Type::i32() || t == Type::f32() || t == Type::i8() || t == Type::i16()) return 4;
-        fail_msl(fn_, "unsupported scalar parameter type: " + std::string(t.name()));
-    }
+std::string MslFnBuilder::val_expr(const Value* v) const {
+    auto it = val_names_.find(v);
+    if (it == val_names_.end()) fail_msl(fn_, "use of undefined value %" + std::to_string(v ? v->id() : 0));
+    return it->second;
+}
 
-    std::string msl_val_type(Type t, const Value* v) const {
-        if (t.is_pointer()) return shared_ptrs_.count(v) ? "threadgroup uint8_t*" : "device uint8_t*";
-        return msl_type(t);
-    }
-
-    std::string zero_init(Type t, const Value* v) const {
-        if (t.is_pointer()) return "nullptr";
-        switch (t.kind()) {
-            case TypeKind::F32:   return "0.0f";
-            case TypeKind::F32x4: return "float4(0.0f)";
-            case TypeKind::I32x4: return "int4(0)";
-            case TypeKind::I64x2: return "long2(0)";
-            case TypeKind::I64:   return "0LL";
-            default:              return "0";
-        }
-    }
-
-    std::string val_expr(const Value* v) const {
-        auto it = val_names_.find(v);
-        if (it == val_names_.end()) fail_msl(fn_, "use of undefined value %" + std::to_string(v ? v->id() : 0));
-        return it->second;
-    }
-
-    std::string ptr_space(const Value* ptr) const {
-        return shared_ptrs_.count(ptr) ? "threadgroup" : "device";
-    }
-
-    void emit_edge_args(size_t edge_idx, int d) {
+void MslFnBuilder::emit_edge_args(size_t edge_idx, int d) {
         const auto& e = cfg_->edges[edge_idx];
         const auto& dst = cfg_->nodes[e.to];
         if (!dst.params || dst.params->param_count() == 0) return;
@@ -367,7 +316,7 @@ private:
         }
     }
 
-    void emit_node(size_t n, size_t stop_node, size_t loop_merge, size_t loop_cont, int d) {
+void MslFnBuilder::emit_node(size_t n, size_t stop_node, size_t loop_merge, size_t loop_cont, int d) {
         if (n == kNoNode) return;
         if (n == loop_cont) {
             if (!cfg_->nodes[n].out.empty()) emit_edge_args(cfg_->nodes[n].out[0], d);
@@ -481,17 +430,17 @@ private:
         }
     }
 
-    void emit_assign(const Instruction& inst, const std::string& expr, int d) {
-        if (!inst.result() || inst.type().is_void()) {
-            indent_line(d);
-            body_ << expr << ";\n";
-            return;
-        }
+void MslFnBuilder::emit_assign(const Instruction& inst, const std::string& expr, int d) {
+    if (!inst.result() || inst.type().is_void()) {
         indent_line(d);
-        body_ << val_expr(inst.result()) << " = " << expr << ";\n";
+        body_ << expr << ";\n";
+        return;
     }
+    indent_line(d);
+    body_ << val_expr(inst.result()) << " = " << expr << ";\n";
+}
 
-    void lower_inst(const Instruction& inst, int d) {
+void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
         const Opcode op = inst.opcode();
         auto arg = [&](size_t i) { return val_expr(inst.operand(i)); };
         auto t = inst.type();
@@ -678,172 +627,14 @@ private:
             case Opcode::vxor:  emit_assign(inst, "(" + arg(0) + " ^ " + arg(1) + ")", d); return;
             case Opcode::vnot:  emit_assign(inst, "(~" + arg(0) + ")", d); return;
 
-            case Opcode::call:
-                lower_call(inst, d);
-                return;
+        case Opcode::call:
+            lower_call(inst, d);
+            return;
 
-            default:
-                fail_msl(fn_, "unsupported opcode '" + std::string(opcode_name(op)) + "'");
-        }
+        default:
+            fail_msl(fn_, "unsupported opcode '" + std::string(opcode_name(op)) + "'");
     }
-
-    void lower_call(const Instruction& inst, int d) {
-        std::string_view sym = inst.symbol();
-        if (is_shared_alloc(sym)) return;
-
-        auto arg = [&](size_t i) { return val_expr(inst.operand(i)); };
-
-        if (sym == "ptx_tid_x" || sym == "ptx_tid_y" || sym == "ptx_tid_z") {
-            need_tid_ = true;
-            char ax = sym.back();
-            emit_assign(inst, std::string("static_cast<int32_t>(_tid.") + ax + ")", d);
-            return;
-        }
-        if (sym == "ptx_ntid_x" || sym == "ptx_ntid_y" || sym == "ptx_ntid_z") {
-            need_ntid_ = true;
-            char ax = sym.back();
-            emit_assign(inst, std::string("static_cast<int32_t>(_ntid.") + ax + ")", d);
-            return;
-        }
-        if (sym == "ptx_ctaid_x" || sym == "ptx_ctaid_y" || sym == "ptx_ctaid_z") {
-            need_ctaid_ = true;
-            char ax = sym.back();
-            emit_assign(inst, std::string("static_cast<int32_t>(_ctaid.") + ax + ")", d);
-            return;
-        }
-        if (sym == "ptx_nctaid_x" || sym == "ptx_nctaid_y" || sym == "ptx_nctaid_z") {
-            need_nctaid_ = true;
-            char ax = sym.back();
-            emit_assign(inst, std::string("static_cast<int32_t>(_nctaid.") + ax + ")", d);
-            return;
-        }
-        if (sym == "ptx_global_tid_x" || sym == "ptx_global_id_x") {
-            need_ctaid_ = need_ntid_ = need_tid_ = true;
-            emit_assign(inst, "static_cast<int32_t>(_ctaid.x * _ntid.x + _tid.x)", d);
-            return;
-        }
-        if (sym == "ptx_laneid" || sym == "ptx_lane_id") {
-            need_lane_ = true;
-            emit_assign(inst, "static_cast<int32_t>(_lane)", d);
-            return;
-        }
-
-        if (sym == "bar.sync" || sym == "ptx_sync" || sym == "ptx_bar_sync" || sym == "ptx_bar_sync_count") {
-            indent_line(d);
-            body_ << "threadgroup_barrier(mem_flags::mem_threadgroup);\n";
-            return;
-        }
-
-        if (sym == "ptx_shfl_xor_f32" || sym == "ptx_shfl_bfly_f32" ||
-            sym == "ptx_shfl_xor_i32" || sym == "ptx_shfl_bfly_i32") {
-            emit_assign(inst, "simd_shuffle_xor(" + arg(0) + ", static_cast<uint16_t>(" + arg(1) + "))", d);
-            return;
-        }
-        if (sym == "ptx_shfl_down_f32" || sym == "ptx_shfl_down_i32") {
-            emit_assign(inst, "simd_shuffle_down(" + arg(0) + ", static_cast<uint16_t>(" + arg(1) + "))", d);
-            return;
-        }
-        if (sym == "ptx_shfl_up_f32" || sym == "ptx_shfl_up_i32") {
-            emit_assign(inst, "simd_shuffle_up(" + arg(0) + ", static_cast<uint16_t>(" + arg(1) + "))", d);
-            return;
-        }
-        if (sym == "ptx_shfl_idx_f32" || sym == "ptx_shfl_idx_i32") {
-            emit_assign(inst, "simd_shuffle(" + arg(0) + ", static_cast<uint16_t>(" + arg(1) + "))", d);
-            return;
-        }
-
-        if (sym == "ptx_shared_load_f32" || sym == "ptx_shared_load_i32") {
-            std::string mt = (sym == "ptx_shared_load_i32") ? "int32_t" : "float";
-            emit_assign(inst, "(*reinterpret_cast<const threadgroup " + mt + "*>(" + arg(0) + "))", d);
-            return;
-        }
-        if (sym == "ptx_shared_load_f32_indexed" || sym == "ptx_shared_load_i32_indexed") {
-            std::string mt = (sym == "ptx_shared_load_i32_indexed") ? "int32_t" : "float";
-            emit_assign(inst, "(reinterpret_cast<const threadgroup " + mt + "*>(" + arg(0) + ")[" + arg(1) + "])", d);
-            return;
-        }
-        if (sym == "ptx_shared_store_f32" || sym == "ptx_shared_store_i32") {
-            std::string mt = (sym == "ptx_shared_store_i32") ? "int32_t" : "float";
-            indent_line(d);
-            body_ << "*reinterpret_cast<threadgroup " << mt << "*>(" << arg(0) << ") = " << arg(1) << ";\n";
-            return;
-        }
-        if (sym == "ptx_shared_store_f32_indexed" || sym == "ptx_shared_store_i32_indexed") {
-            std::string mt = (sym == "ptx_shared_store_i32_indexed") ? "int32_t" : "float";
-            indent_line(d);
-            body_ << "reinterpret_cast<threadgroup " << mt << "*>(" << arg(0) << ")[" << arg(1) << "] = " << arg(2) << ";\n";
-            return;
-        }
-
-        if (sym == "ptx_load_u8")  { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device uint8_t*>(" + arg(0) + "))", d); return; }
-        if (sym == "ptx_load_s8")  { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device int8_t*>(" + arg(0) + "))", d); return; }
-        if (sym == "ptx_load_u16") { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device uint16_t*>(" + arg(0) + "))", d); return; }
-        if (sym == "ptx_load_s16") { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device int16_t*>(" + arg(0) + "))", d); return; }
-        if (sym == "ptx_store_u8") { indent_line(d); body_ << "*reinterpret_cast<device uint8_t*>(" << arg(0) << ") = static_cast<uint8_t>(" << arg(1) << ");\n"; return; }
-        if (sym == "ptx_store_u16") { indent_line(d); body_ << "*reinterpret_cast<device uint16_t*>(" << arg(0) << ") = static_cast<uint16_t>(" << arg(1) << ");\n"; return; }
-
-        if (sym == "ptx_mul_hi_u32") {
-            emit_assign(inst, "as_type<int32_t>(mulhi(as_type<uint32_t>(" + arg(0) + "), as_type<uint32_t>(" + arg(1) + ")))", d);
-            return;
-        }
-        if (sym == "ptx_mul_wide_u32") {
-            emit_assign(inst, "static_cast<int64_t>(static_cast<uint64_t>(as_type<uint32_t>(" + arg(0) + ")) * static_cast<uint64_t>(as_type<uint32_t>(" + arg(1) + ")))", d);
-            return;
-        }
-        if (sym == "ptx_mul_wide_s32") {
-            emit_assign(inst, "(static_cast<int64_t>(" + arg(0) + ") * static_cast<int64_t>(" + arg(1) + "))", d);
-            return;
-        }
-        if (sym == "ptx_mad_lo_u32") {
-            emit_assign(inst, "as_type<int32_t>(as_type<uint32_t>(" + arg(0) + ") * as_type<uint32_t>(" + arg(1) + ") + as_type<uint32_t>(" + arg(2) + "))", d);
-            return;
-        }
-
-        if (sym == "rsqrtf" || sym == "rsqrt" || sym == "ptx_rsqrt") { emit_assign(inst, "rsqrt(" + arg(0) + ")", d); return; }
-        if (sym == "sqrtf" || sym == "sqrt" || sym == "ptx_sqrt" || sym == "ptx_sqrt_rn") { emit_assign(inst, "sqrt(" + arg(0) + ")", d); return; }
-        if (sym == "sinf" || sym == "sin" || sym == "ptx_sin") { emit_assign(inst, "sin(" + arg(0) + ")", d); return; }
-        if (sym == "cosf" || sym == "cos" || sym == "ptx_cos") { emit_assign(inst, "cos(" + arg(0) + ")", d); return; }
-        if (sym == "tanhf" || sym == "ptx_tanh") { emit_assign(inst, "tanh(" + arg(0) + ")", d); return; }
-        if (sym == "ex2f" || sym == "ex2" || sym == "ptx_ex2") { emit_assign(inst, "exp2(" + arg(0) + ")", d); return; }
-        if (sym == "lg2f" || sym == "ptx_lg2") { emit_assign(inst, "log2(" + arg(0) + ")", d); return; }
-        if (sym == "expf" || sym == "exp" || sym == "ptx_exp") { emit_assign(inst, "exp(" + arg(0) + ")", d); return; }
-        if (sym == "logf" || sym == "log" || sym == "ptx_log") { emit_assign(inst, "log(" + arg(0) + ")", d); return; }
-        if (sym == "ptx_rcp" || sym == "ptx_rcp_approx") { emit_assign(inst, "(1.0f / " + arg(0) + ")", d); return; }
-        if (sym == "ptx_div_approx") { emit_assign(inst, "(" + arg(0) + " / " + arg(1) + ")", d); return; }
-        if (sym == "fabsf" || sym == "fabs" || sym == "ptx_fabs") { emit_assign(inst, "fabs(" + arg(0) + ")", d); return; }
-        if (sym == "fminf" || sym == "fmin" || sym == "ptx_fmin") { emit_assign(inst, "fmin(" + arg(0) + ", " + arg(1) + ")", d); return; }
-        if (sym == "fmaxf" || sym == "fmax" || sym == "ptx_fmax") { emit_assign(inst, "fmax(" + arg(0) + ", " + arg(1) + ")", d); return; }
-        if (sym == "clampf" || sym == "ptx_clamp") { emit_assign(inst, "clamp(" + arg(0) + ", " + arg(1) + ", " + arg(2) + ")", d); return; }
-        if (sym == "mixf" || sym == "ptx_mix") { emit_assign(inst, "mix(" + arg(0) + ", " + arg(1) + ", " + arg(2) + ")", d); return; }
-        if (sym == "ptx_fma") { emit_assign(inst, "fma(" + arg(0) + ", " + arg(1) + ", " + arg(2) + ")", d); return; }
-
-        if (sym == "i32_to_f32" || sym == "ptx_i32_to_f32") { emit_assign(inst, "static_cast<float>(" + arg(0) + ")", d); return; }
-        if (sym == "ptx_u32_to_f32") { emit_assign(inst, "static_cast<float>(as_type<uint32_t>(" + arg(0) + "))", d); return; }
-        if (sym == "ptx_f32_to_i32") { emit_assign(inst, "static_cast<int32_t>(" + arg(0) + ")", d); return; }
-        if (sym == "ptx_f32_to_u32") { emit_assign(inst, "as_type<int32_t>(static_cast<uint32_t>(" + arg(0) + "))", d); return; }
-        if (sym == "ptx_f16_to_f32") {
-            emit_assign(inst, "static_cast<float>(as_type<half>(static_cast<uint16_t>(as_type<uint32_t>(" + arg(0) + ") & 0xFFFFu)))", d);
-            return;
-        }
-        if (sym == "ptx_f32_to_f16") {
-            emit_assign(inst, "static_cast<int32_t>(static_cast<uint32_t>(as_type<uint16_t>(static_cast<half>(" + arg(0) + "))))", d);
-            return;
-        }
-        if (sym == "ptx_f32_to_bf16") {
-            res_.needs_bf16_helper = true;
-            emit_assign(inst, "_brass_f32_to_bf16(" + arg(0) + ")", d);
-            return;
-        }
-        if (sym == "ptx_bf16_to_f32") {
-            emit_assign(inst, "as_type<float>(as_type<uint32_t>(" + arg(0) + ") << 16u)", d);
-            return;
-        }
-
-        fail_msl(fn_, "unsupported intrinsic '" + std::string(sym) + "'");
-    }
-};
-
-} // namespace
+}
 
 MslEmitter::KernelResult MslEmitter::lower(const Function& fn, const target::MslOptions& opts) {
     MslFnBuilder builder(fn, opts);

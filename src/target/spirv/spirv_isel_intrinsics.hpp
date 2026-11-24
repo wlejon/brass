@@ -36,6 +36,7 @@ struct SpirvISel::Intrinsics {
     static Id lane_id(SpirvISel& isel);         // SubgroupLocalInvocationId & 31
     static Id raw_subgroup_lane(SpirvISel& isel);
     static void laneid(SpirvISel& isel, const brass::Instruction& inst);
+    static void subgroup_id(SpirvISel& isel, const brass::Instruction& inst);
     static void global_tid_x(SpirvISel& isel, const brass::Instruction& inst);
     template <bool Wide>
     static void clock(SpirvISel& isel, const brass::Instruction& inst);
@@ -57,6 +58,7 @@ struct SpirvISel::Intrinsics {
     static void barrier(SpirvISel& isel);
     static void bar_sync(SpirvISel& isel, const brass::Instruction& inst);
     static void bar_sync_id(SpirvISel& isel, const brass::Instruction& inst);
+    static void subgroup_barrier(SpirvISel& isel, const brass::Instruction& inst);
     enum class Shfl { down, up, bfly, idx };
     static Id shuffle(SpirvISel& isel, const brass::Instruction& inst, Shfl mode, const Value* value, const Value* delta);
     template <Shfl M>
@@ -75,6 +77,7 @@ struct SpirvISel::Intrinsics {
     static void shared_load(SpirvISel& isel, const brass::Instruction& inst);
     template <TypeKind K, bool Indexed>
     static void shared_store(SpirvISel& isel, const brass::Instruction& inst);
+    static void shared_load_f32_from_v4(SpirvISel& isel, const brass::Instruction& inst);
     template <uint32_t Bits, bool Signed>
     static void load_narrow(SpirvISel& isel, const brass::Instruction& inst);
     template <uint32_t Bits>

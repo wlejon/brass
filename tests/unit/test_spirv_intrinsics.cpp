@@ -24,6 +24,8 @@ enum class Sig {
     atom_shared_f32, atom_shared_i32, atom_shared_cas_i32,
     i32i32_i64, i32i32_i32, i32x3_i32, shared_alloc,
     shared_ld, shared_ldx, shared_st, shared_stx, // element type from the name's suffix
+    shared_alloc_v4, shared_ldx_v4, shared_stx_v4, shared_ldf_v4,
+    shared_alloc_u16, shared_ldx_u16, shared_stx_u16,
     load_narrow, store_narrow,
     // textures and images (a 2D image unless named; KernelBuilder::ImageRef)
     tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
@@ -41,6 +43,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_ntid_x", Sig::void_i32}, {"ptx_ntid_y", Sig::void_i32}, {"ptx_ntid_z", Sig::void_i32},
         {"ptx_nctaid_x", Sig::void_i32}, {"ptx_nctaid_y", Sig::void_i32}, {"ptx_nctaid_z", Sig::void_i32},
         {"ptx_laneid", Sig::void_i32}, {"ptx_lane_id", Sig::void_i32},
+        {"ptx_subgroup_id", Sig::void_i32},
         {"ptx_global_tid_x", Sig::void_i32}, {"ptx_global_id_x", Sig::void_i32},
         {"ptx_clock", Sig::void_i32}, {"ptx_clock64", Sig::void_i64},
 
@@ -74,6 +77,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
 
         {"bar.sync", Sig::bar}, {"ptx_sync", Sig::bar}, {"ptx_bar_sync", Sig::bar_id},
+        {"ptx_subgroup_barrier", Sig::bar},
 
         {"ptx_shfl_down_sync_f32", Sig::shfl_sync_f32}, {"shfl_down_sync_f32", Sig::shfl_sync_f32},
         {"ptx_shfl_down_f32", Sig::shfl_f32}, {"ptx_shfl_up_f32", Sig::shfl_f32},
@@ -113,6 +117,13 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_shared_store_f64", Sig::shared_st}, {"ptx_shared_store_i64", Sig::shared_st},
         {"ptx_shared_store_f32_indexed", Sig::shared_stx}, {"ptx_shared_store_i32_indexed", Sig::shared_stx},
         {"ptx_shared_store_f64_indexed", Sig::shared_stx}, {"ptx_shared_store_i64_indexed", Sig::shared_stx},
+        {"ptx_shared_alloc_i32x4", Sig::shared_alloc_v4},
+        {"ptx_shared_load_i32x4_indexed", Sig::shared_ldx_v4},
+        {"ptx_shared_store_i32x4_indexed", Sig::shared_stx_v4},
+        {"ptx_shared_load_f32_from_v4", Sig::shared_ldf_v4},
+        {"ptx_shared_alloc_u16", Sig::shared_alloc_u16},
+        {"ptx_shared_load_u16_indexed", Sig::shared_ldx_u16},
+        {"ptx_shared_store_u16_indexed", Sig::shared_stx_u16},
 
         {"ptx_load_u8", Sig::load_narrow}, {"ptx_load_s8", Sig::load_narrow},
         {"ptx_load_u16", Sig::load_narrow}, {"ptx_load_s16", Sig::load_narrow},
@@ -148,6 +159,7 @@ const std::map<std::string, Sig>& signatures() {
         {"spirv_stage_in", Sig::stage_in},
         {"spirv_stage_out", Sig::stage_out},
         {"spirv_set_frag_depth", Sig::frag_depth},
+        {"spirv_set_frag_depth_less", Sig::frag_depth},
         {"spirv_buffer_load", Sig::buf_load},
         {"spirv_buffer_store", Sig::buf_store},
         {"spirv_buffer_length", Sig::buf_len},
@@ -262,6 +274,45 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         case Sig::shared_ldx: r = b.build_call(name, st, {alloc(st), i}); break;            // register index
         case Sig::shared_st: b.build_call(name, Type::void_type(), {alloc(st), sval, l}); break; // register byte offset
         case Sig::shared_stx: b.build_call(name, Type::void_type(), {alloc(st), c8, sval}); break;
+        case Sig::shared_alloc_v4: {
+            Value* s = b.build_call(name, Type::ptr(), {b.build_iconst_i32(16)});
+            Value* v = b.build_vload(Type::i32x4(), p, 0);
+            b.build_call("ptx_shared_store_i32x4_indexed", Type::void_type(), {s, i, v});
+            r = b.build_call("ptx_shared_load_i32x4_indexed", Type::i32x4(), {s, i});
+            break;
+        }
+        case Sig::shared_ldx_v4: {
+            Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(16)});
+            r = b.build_call(name, Type::i32x4(), {s, i});
+            break;
+        }
+        case Sig::shared_stx_v4: {
+            Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(16)});
+            Value* v = b.build_vload(Type::i32x4(), p, 0);
+            b.build_call(name, Type::void_type(), {s, i, v});
+            break;
+        }
+        case Sig::shared_ldf_v4: {
+            Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(16)});
+            r = b.build_call(name, Type::f32(), {s, i});
+            break;
+        }
+        case Sig::shared_alloc_u16: {
+            Value* s = b.build_call(name, Type::ptr(), {b.build_iconst_i32(16)});
+            b.build_call("ptx_shared_store_u16_indexed", Type::void_type(), {s, c8, i});
+            r = b.build_call("ptx_shared_load_u16_indexed", Type::i32(), {s, c8});
+            break;
+        }
+        case Sig::shared_ldx_u16: {
+            Value* s = b.build_call("ptx_shared_alloc_u16", Type::ptr(), {b.build_iconst_i32(16)});
+            r = b.build_call(name, Type::i32(), {s, i});
+            break;
+        }
+        case Sig::shared_stx_u16: {
+            Value* s = b.build_call("ptx_shared_alloc_u16", Type::ptr(), {b.build_iconst_i32(16)});
+            b.build_call(name, Type::void_type(), {s, i, i});
+            break;
+        }
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, b.build_iconst_i32(3)}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
         case Sig::tex_sample: r = b.build_call(name, Type::f32x4(), img(1, {x, x})); break;

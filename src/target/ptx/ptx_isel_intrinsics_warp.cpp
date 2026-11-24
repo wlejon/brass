@@ -9,6 +9,12 @@ namespace brass::ptx {
 // Barriers
 // ---------------------------------------------------------------------------
 
+// subgroup_id -> tid.x >> 5
+void PtxISel::Intrinsics::subgroup_id(PtxISel& isel, const brass::Instruction& inst) {
+    Reg tid = isel.special_register(SpecialReg::tid_x);
+    isel.emit(Inst::make(Opcode::shr, Type::u32).dst(isel.result_reg(inst)).src(tid).src(Operand::imm(5)));
+}
+
 // bar.sync 0
 void PtxISel::Intrinsics::bar_sync(PtxISel& isel, const brass::Instruction&) {
     isel.emit(Inst::make(Opcode::bar).sync().src(Operand::imm(0)));
@@ -24,6 +30,11 @@ void PtxISel::Intrinsics::bar_sync_count(PtxISel& isel, const brass::Instruction
     isel.emit(Inst::make(Opcode::bar).sync()
                   .src(isel.lane_operand(inst.operand(0), "barrier id"))
                   .src(isel.lane_operand(inst.operand(1), "barrier thread count")));
+}
+
+// bar.warp.sync 0xffffffff
+void PtxISel::Intrinsics::subgroup_barrier(PtxISel& isel, const brass::Instruction&) {
+    isel.emit(Inst::make(Opcode::bar).warp().sync().src(Operand::imm(0xffffffffLL)));
 }
 
 // ---------------------------------------------------------------------------

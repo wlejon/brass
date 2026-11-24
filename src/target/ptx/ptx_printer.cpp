@@ -101,6 +101,7 @@ std::string mnemonic(const Inst& inst) {
             suffix(to_string(inst.shfl_mode));
             break;
         case Opcode::bar:
+            if (inst.is_warp) suffix("warp");
             if (inst.is_sync) suffix("sync");
             break;
         case Opcode::bra:

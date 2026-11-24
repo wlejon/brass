@@ -325,6 +325,9 @@ public:
     // Barriers
     Instruction* sync();                 // bar.sync 0
     Instruction* bar_sync(uint32_t id);  // bar.sync <id>
+    Instruction* subgroup_barrier();     // bar.warp.sync / subgroupBarrier
+
+    Value* subgroup_id();                // subgroup index within workgroup / tid_x >> 5
 
     // Warp shuffles: 32-bit values (f32 or i32); delta/lane may be a constant.
     Value* shfl_down_f32(Value* v, uint32_t delta);
@@ -359,6 +362,13 @@ public:
     Value* shared_load_i32_indexed(Value* smem, Value* index);
     Instruction* shared_store_i32(Value* smem, Value* val, int32_t byte_offset = 0);
     Instruction* shared_store_i32_indexed(Value* smem, Value* index, Value* val);
+    Value* shared_alloc_i32x4(uint32_t count);
+    Value* shared_load_i32x4_indexed(Value* smem, Value* index);
+    Instruction* shared_store_i32x4_indexed(Value* smem, Value* index, Value* val);
+    Value* shared_load_f32_from_v4(Value* smem, Value* f32_index);
+    Value* shared_alloc_u16(uint32_t count);
+    Value* shared_load_u16_indexed(Value* smem, Value* index);
+    Instruction* shared_store_u16_indexed(Value* smem, Value* index, Value* val);
 
     // Fast math (f32)
     Value* rcp_approx(Value* x);
