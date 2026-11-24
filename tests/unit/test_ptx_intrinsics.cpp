@@ -776,3 +776,211 @@ TEST_CASE("PTX intrinsics - tanh_approx, f32_to_bf16, mul_hi_u32 via KernelBuild
     CHECK(native.find("tanh.approx.f32") != std::string::npos);
     if (ptxas_available()) CHECK(ptxas_assembles(native, "sm_75"));
 }
+
+// ---------------------------------------------------------------------------
+// Piece 1-3 intrinsics on device (sdot4, pack_f16x2, f16_hi, ldexp, shared v4/u16, WMMA)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PTX intrinsics - sdot4, pack_f16x2, f16_hi_to_f32, ldexp_f32 on device") {
+    {
+        std::vector<int32_t> as(64), bs(64);
+        for (int i = 0; i < 64; ++i) {
+            uint32_t ua = ((uint32_t(uint8_t(i - 30)) << 0) |
+                           (uint32_t(uint8_t((i * 3) - 60)) << 8) |
+                           (uint32_t(uint8_t(127 - i)) << 16) |
+                           (uint32_t(uint8_t(-128 + i)) << 24));
+            uint32_t ub = ((uint32_t(uint8_t(5 - i)) << 0) |
+                           (uint32_t(uint8_t((i * 5) & 0xFF)) << 8) |
+                           (uint32_t(uint8_t(-17 + i)) << 16) |
+                           (uint32_t(uint8_t(42 - i)) << 24));
+            as[i] = static_cast<int32_t>(ua);
+            bs[i] = static_cast<int32_t>(ub);
+        }
+        auto got = run_map<int32_t, int32_t, int32_t>(
+            [](KernelBuilder& kb, Value* a, Value* b) { return kb.sdot4(a, b, kb.const_i32(17)); },
+            as, bs);
+        if (got.empty()) return;
+        for (size_t i = 0; i < as.size(); ++i) {
+            int32_t want = 17;
+            for (int lane = 0; lane < 4; ++lane) {
+                int8_t sa = static_cast<int8_t>((static_cast<uint32_t>(as[i]) >> (lane * 8)) & 0xFF);
+                int8_t sb = static_cast<int8_t>((static_cast<uint32_t>(bs[i]) >> (lane * 8)) & 0xFF);
+                want += static_cast<int32_t>(sa) * static_cast<int32_t>(sb);
+            }
+            CHECK_EQ(got[i], want);
+        }
+    }
+
+    {
+        std::vector<float> lo(64), hi(64);
+        for (int i = 0; i < 64; ++i) {
+            lo[i] = -12.5f + static_cast<float>(i) * 0.375f;
+            hi[i] = 23.25f - static_cast<float>(i) * 0.625f;
+        }
+        auto packed = run_map<float, float, int32_t>(
+            [](KernelBuilder& kb, Value* a, Value* b) { return kb.pack_f16x2(a, b); },
+            lo, hi);
+        if (packed.empty()) return;
+        auto got_lo = run_map<int32_t, int32_t, float>(
+            [](KernelBuilder& kb, Value* p, Value*) { return kb.f16_to_f32(p); },
+            packed, packed);
+        auto got_hi = run_map<int32_t, int32_t, float>(
+            [](KernelBuilder& kb, Value* p, Value*) { return kb.f16_hi_to_f32(p); },
+            packed, packed);
+        for (size_t i = 0; i < lo.size(); ++i) {
+            CHECK_EQ(got_lo[i], f16_to_f32_host(f32_to_f16_host(lo[i])));
+            CHECK_EQ(got_hi[i], f16_to_f32_host(f32_to_f16_host(hi[i])));
+        }
+    }
+
+    {
+        std::vector<float> xs(64);
+        std::vector<int32_t> exps(64);
+        for (int i = 0; i < 64; ++i) {
+            xs[i] = ((i % 2) ? -1.0f : 1.0f) * (0.375f + static_cast<float>(i) * 0.125f);
+            exps[i] = (i - 32) / 3;
+        }
+        auto got = run_map<float, int32_t, float>(
+            [](KernelBuilder& kb, Value* x, Value* e) { return kb.ldexp_f32(x, e); },
+            xs, exps);
+        if (got.empty()) return;
+        for (size_t i = 0; i < xs.size(); ++i) {
+            CHECK(near(got[i], std::ldexp(xs[i], exps[i]), 1e-6f));
+        }
+    }
+}
+
+TEST_CASE("PTX intrinsics - shared i32x4, shared u16, subgroup_id and subgroup_barrier on device") {
+    Module mod("shared_v4_u16");
+    Function* f = mod.create_function("shared_v4_u16_k", Type::void_type(), {Type::ptr(), Type::ptr()});
+    KernelBuilder kb(mod, f);
+    Builder& b = kb.builder();
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* out_f32 = b.add_block_param(e, Type::ptr());
+    Value* out_i32 = b.add_block_param(e, Type::ptr());
+
+    Value* sm_v4 = kb.shared_alloc_i32x4(64);
+    Value* sm_u16 = kb.shared_alloc_u16(64);
+    Value* tid = kb.tid_x();
+    Value* sg = kb.subgroup_id();
+
+    Value* v = kb.vzero(Type::i32x4());
+    for (int k = 0; k < 4; ++k) {
+        Value* fv = b.build_bitcast_i32_f32(b.build_sitofp_f32_i32(b.build_add(b.build_mul(tid, kb.const_i32(4)), kb.const_i32(k))));
+        v = b.build_vinsert_lane(v, fv, static_cast<uint32_t>(k));
+    }
+    kb.shared_store_i32x4_indexed(sm_v4, tid, v);
+    kb.shared_store_u16_indexed(sm_u16, tid, b.build_add(b.build_mul(sg, kb.const_i32(1000)), tid));
+    kb.subgroup_barrier();
+
+    Value* peer = b.build_xor(tid, kb.const_i32(1));
+    Value* lv4 = kb.shared_load_i32x4_indexed(sm_v4, peer);
+    Value* lane2_f = b.build_bitcast_f32_i32(b.build_vextract_lane(lv4, 2));
+    Value* scalar_f = kb.shared_load_f32_from_v4(sm_v4, b.build_add(b.build_mul(peer, kb.const_i32(4)), kb.const_i32(3)));
+    kb.store_f32_indexed(out_f32, tid, b.build_add(lane2_f, scalar_f));
+
+    Value* u16v = kb.shared_load_u16_indexed(sm_u16, peer);
+    kb.store_i32_indexed(out_i32, tid, u16v);
+    b.build_ret_void();
+
+    std::string ptx = emit_checked(*f);
+    CHECK(ptx.find("ld.shared.v4.u32") != std::string::npos);
+    CHECK(ptx.find("st.shared.v4.u32") != std::string::npos);
+    CHECK(ptx.find("ld.shared.u16") != std::string::npos);
+    CHECK(ptx.find("st.shared.u16") != std::string::npos);
+    CHECK(ptx.find("bar.warp.sync") != std::string::npos);
+    if (!gpu_ready()) return;
+
+    CudaBuffer df = CudaBuffer::alloc(64 * 4);
+    CudaBuffer di = CudaBuffer::alloc(64 * 4);
+    REQUIRE(df.valid() && df.zero() && di.valid() && di.zero());
+    void* pf = df.device_ptr();
+    void* pi = di.device_ptr();
+    launch(ptx, "shared_v4_u16_k", 1, 64, {&pf, &pi});
+    auto got_f = download<float>(df, 64);
+    auto got_i = download<int32_t>(di, 64);
+    for (int t = 0; t < 64; ++t) {
+        int p = t ^ 1;
+        CHECK_EQ(got_f[t], static_cast<float>(p * 4 + 2 + p * 4 + 3));
+        CHECK_EQ(got_i[t], (p >> 5) * 1000 + p);
+    }
+}
+
+TEST_CASE("PTX intrinsics - 16x16x16 coop_mma WMMA on device") {
+    Module mod("coop_wmma");
+    Function* f = mod.create_function("coop_wmma_k", Type::void_type(),
+                                      {Type::ptr(), Type::ptr(), Type::ptr(), Type::ptr()});
+    KernelBuilder kb(mod, f);
+    Builder& b = kb.builder();
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* A = b.add_block_param(e, Type::ptr());
+    Value* B = b.add_block_param(e, Type::ptr());
+    Value* C32 = b.add_block_param(e, Type::ptr());
+    Value* C16 = b.add_block_param(e, Type::ptr());
+
+    Value* sA = kb.shared_alloc_i32x4(16 * 2);
+    Value* sB = kb.shared_alloc_i32x4(16 * 2);
+    Value* tid = kb.tid_x();
+    Value* t64 = b.build_sext_i64(tid);
+    Value* va = kb.vload(Type::i32x4(), b.build_add(A, b.build_shl(t64, kb.const_i64(4))));
+    Value* vb = kb.vload(Type::i32x4(), b.build_add(B, b.build_shl(t64, kb.const_i64(4))));
+    kb.shared_store_i32x4_indexed(sA, tid, va);
+    kb.shared_store_i32x4_indexed(sB, tid, vb);
+    kb.sync();
+
+    Value* fa = kb.coop_alloc_a();
+    Value* fb = kb.coop_alloc_b();
+    Value* acc = kb.coop_alloc_acc();
+    Value* acc2 = kb.coop_alloc_acc();
+    kb.coop_fill_acc(acc, kb.const_f32(0.0f));
+    kb.coop_fill_acc(acc2, kb.const_f32(1.5f));
+    kb.coop_load_a(fa, sA, kb.const_i32(16), false);
+    kb.coop_load_b(fb, sB, kb.const_i32(16), true);
+    kb.coop_mma(acc, fa, fb);
+    kb.coop_scale_acc(acc, kb.const_f32(0.5f));
+    kb.coop_add_acc(acc, acc2);
+    kb.coop_store_acc(acc, C32, kb.const_i32(16), false, false);
+    kb.coop_store_acc(acc, C16, kb.const_i32(16), false, true);
+    b.build_ret_void();
+
+    std::string ptx = emit_checked(*f);
+    CHECK(ptx.find("wmma.load.a.sync.aligned.row.m16n16k16.shared.f16") != std::string::npos);
+    CHECK(ptx.find("wmma.load.b.sync.aligned.col.m16n16k16.shared.f16") != std::string::npos);
+    CHECK(ptx.find("wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32") != std::string::npos);
+    CHECK(ptx.find("wmma.store.d.sync.aligned.row.m16n16k16.global.f32") != std::string::npos);
+    CHECK(ptx.find("wmma.store.d.sync.aligned.row.m16n16k16.global.f16") != std::string::npos);
+    if (!gpu_ready()) return;
+
+    std::vector<uint16_t> hA(256), hB(256);
+    std::vector<float> fA(256), fB(256);
+    for (int i = 0; i < 256; ++i) {
+        fA[i] = static_cast<float>((i % 13) - 6) * 0.25f;
+        fB[i] = static_cast<float>(((i * 7) % 11) - 5) * 0.25f;
+        hA[i] = f32_to_f16_host(fA[i]);
+        hB[i] = f32_to_f16_host(fB[i]);
+        fA[i] = f16_to_f32_host(hA[i]);
+        fB[i] = f16_to_f32_host(hB[i]);
+    }
+    CudaBuffer dA = upload(hA);
+    CudaBuffer dB = upload(hB);
+    CudaBuffer dC32 = CudaBuffer::alloc(256 * sizeof(float));
+    CudaBuffer dC16 = CudaBuffer::alloc(256 * sizeof(uint16_t));
+    REQUIRE(dC32.valid() && dC32.zero() && dC16.valid() && dC16.zero());
+    void* pA = dA.device_ptr(); void* pB = dB.device_ptr();
+    void* pC32 = dC32.device_ptr(); void* pC16 = dC16.device_ptr();
+    launch(ptx, "coop_wmma_k", 1, 32, {&pA, &pB, &pC32, &pC16});
+
+    auto got32 = download<float>(dC32, 256);
+    auto got16 = download<uint16_t>(dC16, 256);
+    for (int r = 0; r < 16; ++r) {
+        for (int c = 0; c < 16; ++c) {
+            float ref = 0.0f;
+            for (int k = 0; k < 16; ++k) ref += fA[r * 16 + k] * fB[c * 16 + k];
+            ref = ref * 0.5f + 1.5f;
+            CHECK(near(got32[r * 16 + c], ref, 1e-4f));
+            CHECK(near(f16_to_f32_host(got16[r * 16 + c]), f16_to_f32_host(f32_to_f16_host(ref)), 1e-3f));
+        }
+    }
+}

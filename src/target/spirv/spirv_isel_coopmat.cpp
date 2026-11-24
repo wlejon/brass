@@ -105,9 +105,11 @@ void SpirvISel::Intrinsics::coop_load(SpirvISel& isel, const brass::Instruction&
         isel.fail("coop_load layout must be a compile-time constant");
     }
     int64_t src_is_f16 = 0;
-    if (Use == spv::CooperativeMatrixUseMatrixAccumulatorKHR && inst.operand(4)) {
-        if (!isel.const_int(inst.operand(4), &src_is_f16)) {
-            isel.fail("coop_load_acc src_is_f16 must be a compile-time constant");
+    if constexpr (Use == spv::CooperativeMatrixUseMatrixAccumulatorKHR) {
+        if (inst.operand(4)) {
+            if (!isel.const_int(inst.operand(4), &src_is_f16)) {
+                isel.fail("coop_load_acc src_is_f16 must be a compile-time constant");
+            }
         }
     }
     const bool is_f16_mem = (Use != spv::CooperativeMatrixUseMatrixAccumulatorKHR) || (src_is_f16 != 0);

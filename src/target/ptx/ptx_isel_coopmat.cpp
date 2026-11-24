@@ -41,9 +41,11 @@ void PtxISel::Intrinsics::coop_load(PtxISel& isel, const brass::Instruction& ins
         isel.malformed(inst, "coop_load layout must be a compile-time constant");
     }
     int64_t src_is_f16 = 0;
-    if (Use == 2 && inst.operand(4)) {
-        if (!isel.const_int(inst.operand(4), &src_is_f16)) {
-            isel.malformed(inst, "coop_load_acc src_is_f16 must be a compile-time constant");
+    if constexpr (Use == 2) {
+        if (inst.operand(4)) {
+            if (!isel.const_int(inst.operand(4), &src_is_f16)) {
+                isel.malformed(inst, "coop_load_acc src_is_f16 must be a compile-time constant");
+            }
         }
     }
     WmmaLayout lay = col_major ? WmmaLayout::col : WmmaLayout::row;
@@ -53,19 +55,21 @@ void PtxISel::Intrinsics::coop_load(PtxISel& isel, const brass::Instruction& ins
     Operand addr = Operand::addr(isel.reg_of(inst.operand(1), "coop ptr"), 0);
     Operand stride = isel.lane_operand(inst.operand(2), "coop stride");
 
-    if (Use == 2 && src_is_f16) {
-        std::vector<Reg> f16_regs = isel.fn_->new_regs(RegClass::B32, 4);
-        isel.emit(Inst::make(Opcode::wmma_load, Type::f16).matrix(mat).layout(lay).space(sp)
-                      .dst(Operand::vec(f16_regs)).src(addr).src(stride));
-        for (size_t k = 0; k < 4; ++k) {
-            isel.emit(Inst::make(Opcode::cvt, Type::f32).from(Type::f16)
-                          .dst(it->second.regs[2 * k]).src(f16_regs[k]));
-            Reg hi = isel.fn_->new_b32();
-            isel.emit(Inst::make(Opcode::shr, Type::u32).dst(hi).src(f16_regs[k]).src(Operand::imm(16)));
-            isel.emit(Inst::make(Opcode::cvt, Type::f32).from(Type::f16)
-                          .dst(it->second.regs[2 * k + 1]).src(hi));
+    if constexpr (Use == 2) {
+        if (src_is_f16) {
+            std::vector<Reg> f16_regs = isel.fn_->new_regs(RegClass::B32, 4);
+            isel.emit(Inst::make(Opcode::wmma_load, Type::f16).matrix(mat).layout(lay).space(sp)
+                          .dst(Operand::vec(f16_regs)).src(addr).src(stride));
+            for (size_t k = 0; k < 4; ++k) {
+                isel.emit(Inst::make(Opcode::cvt, Type::f32).from(Type::f16)
+                              .dst(it->second.regs[2 * k]).src(f16_regs[k]));
+                Reg hi = isel.fn_->new_b32();
+                isel.emit(Inst::make(Opcode::shr, Type::u32).dst(hi).src(f16_regs[k]).src(Operand::imm(16)));
+                isel.emit(Inst::make(Opcode::cvt, Type::f32).from(Type::f16)
+                              .dst(it->second.regs[2 * k + 1]).src(hi));
+            }
+            return;
         }
-        return;
     }
 
     Type ld_t = (Use == 2) ? Type::f32 : Type::f16;
