@@ -30,6 +30,7 @@ enum class Sig {
     void_i64,        // () -> i64
     f32_f32,         // (f32) -> f32
     f32f32_f32,      // (f32, f32) -> f32
+    f32x3_f32,       // (f32, f32, f32) -> f32
     f64_f64,         // (f64) -> f64          (fabs/fmin/fmax pick the type from the argument)
     i32_f32,         // (i32) -> f32
     i64_f32,         // (i64) -> f32
@@ -91,6 +92,7 @@ const std::map<std::string, Sig>& signatures() {
         {"fabsf", Sig::f32_f32}, {"fabs", Sig::f64_f64}, {"ptx_fabs", Sig::f32_f32},
         {"fminf", Sig::f32f32_f32}, {"fmin", Sig::f32f32_f32}, {"ptx_fmin", Sig::f32f32_f32},
         {"fmaxf", Sig::f32f32_f32}, {"fmax", Sig::f32f32_f32}, {"ptx_fmax", Sig::f32f32_f32},
+        {"clampf", Sig::f32x3_f32}, {"ptx_clamp", Sig::f32x3_f32},
         {"ptx_div_approx", Sig::f32f32_f32},
 
         {"i32_to_f32", Sig::i32_f32}, {"ptx_i32_to_f32", Sig::i32_f32}, {"ptx_u32_to_f32", Sig::i32_f32},
@@ -194,6 +196,7 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
         case Sig::void_i64: r = b.build_call(name, Type::i64()); break;
         case Sig::f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
         case Sig::f32f32_f32: r = b.build_call(name, Type::f32(), {x, x}); break;
+        case Sig::f32x3_f32: r = b.build_call(name, Type::f32(), {x, x, x}); break;
         case Sig::f64_f64: r = b.build_call(name, Type::f64(), {d}); break;
         case Sig::i32_f32: r = b.build_call(name, Type::f32(), {i}); break;
         case Sig::i64_f32: r = b.build_call(name, Type::f32(), {l}); break;

@@ -46,6 +46,7 @@ struct PtxISel::Intrinsics {
     }
     template <Opcode Op>
     static void binary_float(PtxISel& isel, const brass::Instruction& inst); // min/max, type from arg 0
+    static void clamp_float(PtxISel& isel, const brass::Instruction& inst);  // clamp(x, lo, hi) -> min(max(x, lo), hi)
     static void global_tid_x(PtxISel& isel, const brass::Instruction& inst);
     static void exp_f32(PtxISel& isel, const brass::Instruction& inst);
     static void log_f32(PtxISel& isel, const brass::Instruction& inst);

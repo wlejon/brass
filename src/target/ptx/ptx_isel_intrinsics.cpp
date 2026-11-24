@@ -50,6 +50,21 @@ void PtxISel::Intrinsics::binary_float(PtxISel& isel, const brass::Instruction& 
 template void PtxISel::Intrinsics::binary_float<Opcode::min>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::binary_float<Opcode::max>(PtxISel&, const brass::Instruction&);
 
+// clamp(x, lo, hi) = min(max(x, lo), hi) for f32 / f64.
+void PtxISel::Intrinsics::clamp_float(PtxISel& isel, const brass::Instruction& inst) {
+    const Value* a = inst.operand(0);
+    if (!a) isel.malformed(inst, "missing argument 0");
+    Type t = type_for(a->type());
+    if (!is_float(t)) isel.malformed(inst, "argument 0 is not a float");
+    Reg tmp = (t == Type::f64) ? isel.fn_->new_f64() : isel.fn_->new_f32();
+    isel.emit(Inst::make(Opcode::max, t).dst(tmp)
+                  .src(isel.operand_of(a, Opcode::max, 0, t, "argument 0"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::max, 1, t, "lo")));
+    isel.emit(Inst::make(Opcode::min, t).dst(isel.result_reg(inst))
+                  .src(tmp)
+                  .src(isel.operand_of(inst.operand(2), Opcode::min, 1, t, "hi")));
+}
+
 // e^x = 2^(x * log2(e)); log2(e) = 1.44269504f.
 void PtxISel::Intrinsics::exp_f32(PtxISel& isel, const brass::Instruction& inst) {
     Reg scaled = isel.fn_->new_f32();
@@ -273,6 +288,8 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "fmaxf",            &binary_float<Opcode::max> },
         { "fmax",             &binary_float<Opcode::max> },
         { "ptx_fmax",         &binary_float<Opcode::max> },
+        { "clampf",           &clamp_float },
+        { "ptx_clamp",        &clamp_float },
         { "ptx_div_approx",   &div_approx_f32 },            // (f32, f32) -> f32
 
         // Conversions
