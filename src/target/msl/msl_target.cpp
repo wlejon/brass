@@ -6,7 +6,7 @@ namespace brass::target {
 
 namespace {
 
-std::string msl_preamble(bool needs_bf16) {
+std::string msl_preamble(bool needs_bf16, bool needs_sdot4) {
     std::ostringstream ss;
     ss << "#include <metal_stdlib>\n"
        << "using namespace metal;\n\n";
@@ -17,6 +17,16 @@ std::string msl_preamble(bool needs_bf16) {
            << "    uint32_t rnd = (u + 0x7FFFu + (hi & 1u)) >> 16;\n"
            << "    bool is_nan = ((u & 0x7F800000u) == 0x7F800000u) && ((u & 0x007FFFFFu) != 0u);\n"
            << "    return as_type<int32_t>(is_nan ? (hi | 0x40u) : rnd);\n"
+           << "}\n\n";
+    }
+    if (needs_sdot4) {
+        ss << "inline int32_t _brass_sdot4(int32_t a, int32_t b, int32_t acc) {\n"
+           << "    char4 va = as_type<char4>(a);\n"
+           << "    char4 vb = as_type<char4>(b);\n"
+           << "    return static_cast<int32_t>(va.x) * static_cast<int32_t>(vb.x) +\n"
+           << "           static_cast<int32_t>(va.y) * static_cast<int32_t>(vb.y) +\n"
+           << "           static_cast<int32_t>(va.z) * static_cast<int32_t>(vb.z) +\n"
+           << "           static_cast<int32_t>(va.w) * static_cast<int32_t>(vb.w) + acc;\n"
            << "}\n\n";
     }
     return ss.str();
@@ -36,7 +46,7 @@ MslKernel MslTarget::compile(const Function& fn, const MslOptions& opts) {
     k.workgroup_z = opts.workgroup_z;
     k.uses_shared_memory = lowered.uses_shared_memory;
     k.shared_memory_bytes = lowered.shared_memory_bytes;
-    k.source = msl_preamble(lowered.needs_bf16_helper) +
+    k.source = msl_preamble(lowered.needs_bf16_helper, lowered.needs_sdot4_helper) +
                lowered.params_struct_code +
                (lowered.params_struct_code.empty() ? "" : "\n") +
                lowered.function_code;
@@ -46,14 +56,16 @@ MslKernel MslTarget::compile(const Function& fn, const MslOptions& opts) {
 std::string MslTarget::compile_module(const Module& mod, const MslOptions& opts) {
     std::vector<msl::MslEmitter::KernelResult> kernels;
     bool needs_bf16 = false;
+    bool needs_sdot4 = false;
     for (const auto* fn : mod.functions()) {
         if (!fn || fn->blocks().empty()) continue;
         auto kr = msl::MslEmitter::lower(*fn, opts);
         needs_bf16 |= kr.needs_bf16_helper;
+        needs_sdot4 |= kr.needs_sdot4_helper;
         kernels.push_back(std::move(kr));
     }
     std::ostringstream ss;
-    ss << msl_preamble(needs_bf16);
+    ss << msl_preamble(needs_bf16, needs_sdot4);
     for (size_t i = 0; i < kernels.size(); ++i) {
         if (i) ss << "\n";
         if (!kernels[i].params_struct_code.empty()) {

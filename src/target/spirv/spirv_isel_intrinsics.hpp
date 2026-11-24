@@ -51,8 +51,12 @@ struct SpirvISel::Intrinsics {
     template <spv::Op O, uint32_t Bits, bool Float>
     static void convert(SpirvISel& isel, const brass::Instruction& inst);
     static void f16_to_f32(SpirvISel& isel, const brass::Instruction& inst);
+    static void f16_hi_to_f32(SpirvISel& isel, const brass::Instruction& inst);
     static void f32_to_f16(SpirvISel& isel, const brass::Instruction& inst);
+    static void pack_f16x2(SpirvISel& isel, const brass::Instruction& inst);
     static void f32_to_bf16(SpirvISel& isel, const brass::Instruction& inst);
+    static void ldexp_f32(SpirvISel& isel, const brass::Instruction& inst);
+    static void sdot4(SpirvISel& isel, const brass::Instruction& inst);
 
     // ---- barriers, shuffles, atomics, multiplies, memory (spirv_isel_intrinsics_mem.cpp)
     static void barrier(SpirvISel& isel);

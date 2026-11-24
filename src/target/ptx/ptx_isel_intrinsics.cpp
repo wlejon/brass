@@ -113,7 +113,57 @@ void PtxISel::Intrinsics::i64_to_f32(PtxISel& isel, const brass::Instruction& in
 void PtxISel::Intrinsics::f32_to_i32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::s32, Type::f32, Rounding::rzi); }
 void PtxISel::Intrinsics::f32_to_u32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::u32, Type::f32, Rounding::rzi); }
 void PtxISel::Intrinsics::f16_to_f32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f32, Type::f16, Rounding::none); }
+void PtxISel::Intrinsics::f16_hi_to_f32(PtxISel& isel, const brass::Instruction& inst) {
+    Reg hi = isel.fn_->new_b32();
+    isel.emit(Inst::make(Opcode::shr, Type::u32).dst(hi)
+                  .src(isel.reg_of(inst.operand(0), "argument 0"))
+                  .src(Operand::imm(16)));
+    isel.emit(Inst::make(Opcode::cvt, Type::f32).from(Type::f16).dst(isel.result_reg(inst)).src(hi));
+}
 void PtxISel::Intrinsics::f32_to_f16(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f16, Type::f32, Rounding::rn); }
+void PtxISel::Intrinsics::pack_f16x2(PtxISel& isel, const brass::Instruction& inst) {
+    Reg h0 = isel.fn_->new_b32();
+    Reg h1 = isel.fn_->new_b32();
+    Reg h0_lo = isel.fn_->new_b32();
+    Reg h1_hi = isel.fn_->new_b32();
+    isel.emit(Inst::make(Opcode::cvt, Type::f16).from(Type::f32).rnd(Rounding::rn)
+                  .dst(h0).src(isel.reg_of(inst.operand(0), "lo")));
+    isel.emit(Inst::make(Opcode::cvt, Type::f16).from(Type::f32).rnd(Rounding::rn)
+                  .dst(h1).src(isel.reg_of(inst.operand(1), "hi")));
+    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(h0_lo).src(h0).src(Operand::imm(0xFFFF)));
+    isel.emit(Inst::make(Opcode::shl, Type::b32).dst(h1_hi).src(h1).src(Operand::imm(16)));
+    isel.emit(Inst::make(Opcode::or_, Type::b32).dst(isel.result_reg(inst)).src(h0_lo).src(h1_hi));
+}
+void PtxISel::Intrinsics::ldexp_f32(PtxISel& isel, const brass::Instruction& inst) {
+    Reg x = isel.reg_of(inst.operand(0), "x");
+    Reg e = isel.reg_of(inst.operand(1), "exp");
+    Reg e1 = isel.fn_->new_b32();
+    Reg e2 = isel.fn_->new_b32();
+    Reg b1 = isel.fn_->new_b32();
+    Reg b2 = isel.fn_->new_b32();
+    Reg s1i = isel.fn_->new_b32();
+    Reg s2i = isel.fn_->new_b32();
+    Reg s1 = isel.fn_->new_f32();
+    Reg s2 = isel.fn_->new_f32();
+    Reg tmp = isel.fn_->new_f32();
+    isel.emit(Inst::make(Opcode::shr, Type::s32).dst(e1).src(e).src(Operand::imm(1)));
+    isel.emit(Inst::make(Opcode::sub, Type::s32).dst(e2).src(e).src(e1));
+    isel.emit(Inst::make(Opcode::add, Type::s32).dst(b1).src(e1).src(Operand::imm(127)));
+    isel.emit(Inst::make(Opcode::add, Type::s32).dst(b2).src(e2).src(Operand::imm(127)));
+    isel.emit(Inst::make(Opcode::shl, Type::b32).dst(s1i).src(b1).src(Operand::imm(23)));
+    isel.emit(Inst::make(Opcode::shl, Type::b32).dst(s2i).src(b2).src(Operand::imm(23)));
+    isel.emit(Inst::make(Opcode::mov, Type::b32).dst(s1).src(s1i));
+    isel.emit(Inst::make(Opcode::mov, Type::b32).dst(s2).src(s2i));
+    isel.emit(Inst::make(Opcode::mul, Type::f32).dst(tmp).src(x).src(s1));
+    isel.emit(Inst::make(Opcode::mul, Type::f32).dst(isel.result_reg(inst)).src(tmp).src(s2));
+}
+void PtxISel::Intrinsics::sdot4(PtxISel& isel, const brass::Instruction& inst) {
+    isel.emit(Inst::make(Opcode::dp4a, Type::s32).from(Type::s32)
+                  .dst(isel.result_reg(inst))
+                  .src(isel.reg_of(inst.operand(0), "a"))
+                  .src(isel.operand_of(inst.operand(1), Opcode::dp4a, 1, Type::s32, "b"))
+                  .src(isel.operand_of(inst.operand(2), Opcode::dp4a, 2, Type::s32, "acc")));
+}
 
 // Round-to-nearest-even + quiet-NaN f32 -> bf16 bits in low 16 bits of b32,
 // valid across all SM targets without requiring sm_80+ cvt.rn.bf16.f32.
@@ -233,9 +283,13 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_i64_to_f32",   &i64_to_f32 },   // (i64) -> f32   cvt.rn.f32.s64
         { "ptx_f32_to_i32",   &f32_to_i32 },   // (f32) -> i32   cvt.rzi.s32.f32
         { "ptx_f32_to_u32",   &f32_to_u32 },   // (f32) -> i32   cvt.rzi.u32.f32
-        { "ptx_f16_to_f32",   &f16_to_f32 },   // (i32 bits) -> f32   cvt.f32.f16
-        { "ptx_f32_to_f16",   &f32_to_f16 },   // (f32) -> i32 bits   cvt.rn.f16.f32
-        { "ptx_f32_to_bf16",  &f32_to_bf16 },  // (f32) -> i32 bits   RNE + qNaN bf16
+        { "ptx_f16_to_f32",    &f16_to_f32 },   // (i32 bits) -> f32   cvt.f32.f16
+        { "ptx_f16_hi_to_f32", &f16_hi_to_f32 }, // (i32 bits) -> f32
+        { "ptx_f32_to_f16",    &f32_to_f16 },   // (f32) -> i32 bits   cvt.rn.f16.f32
+        { "ptx_pack_f16x2",    &pack_f16x2 },    // (f32 lo, f32 hi) -> i32 packed f16x2
+        { "ptx_f32_to_bf16",   &f32_to_bf16 },  // (f32) -> i32 bits   RNE + qNaN bf16
+        { "ptx_ldexp_f32",     &ldexp_f32 },     // (f32, i32) -> f32
+        { "ptx_sdot4",         &sdot4 },         // (i32, i32, i32) -> i32 dp4a.s32.s32
         { "ptx_f32_to_f64",   &f32_to_f64 },   // (f32) -> f64   cvt.f64.f32
         { "ptx_f64_to_f32",   &f64_to_f32 },   // (f64) -> f32   cvt.rn.f32.f64
 

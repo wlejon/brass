@@ -100,7 +100,7 @@ RegClass reg_class_for(brass::Type t) noexcept;
 
 enum class Opcode : uint8_t {
     ld, st, mov, cvt,
-    add, sub, mul, mad, fma, div, rem, neg, abs, min, max,
+    add, sub, mul, mad, fma, dp4a, div, rem, neg, abs, min, max,
     and_, or_, xor_, not_, shl, shr,
     setp, selp,
     bra, ret, call, trap, exit,

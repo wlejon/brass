@@ -400,6 +400,10 @@ public:
     Value* i32_to_f32(Value* x);
     Value* f32_to_u32(Value* x);
     Value* f32_to_i32(Value* x);
+    Value* sdot4(Value* a_i32, Value* b_i32, Value* acc_i32);
+    Value* pack_f16x2(Value* lo_f32, Value* hi_f32);
+    Value* f16_hi_to_f32(Value* bits_i32);
+    Value* ldexp_f32(Value* x_f32, Value* exp_i32);
 
     // Narrow global loads/stores (result/value in i32, zero- or sign-extended)
     Value* load_u8(Value* ptr, int32_t byte_offset = 0);

@@ -238,6 +238,36 @@ TEST_CASE("MSL Target - 128-bit and 16-bit Shared Memory, Subgroup Barrier and I
     CHECK(has(k.source, "reinterpret_cast<const threadgroup float*>"));
 }
 
+TEST_CASE("MSL Target - Packed Dot, Half2 Pack/Hi, and Ldexp") {
+    Module mod("msl_quant_stage");
+    Function* fn = mod.create_function("quant_stage", Type::void_type(),
+                                       {Type::ptr(), Type::i32(), Type::i32(), Type::f32()});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* out = b.add_block_param(entry, Type::ptr());
+    Value* qa = b.add_block_param(entry, Type::i32());
+    Value* qb = b.add_block_param(entry, Type::i32());
+    Value* xf = b.add_block_param(entry, Type::f32());
+
+    KernelBuilder kb(b);
+    Value* dot = kb.sdot4(qa, qb, kb.const_i32(0));
+    Value* packed = kb.pack_f16x2(xf, kb.ldexp_f32(xf, kb.const_i32(-2)));
+    Value* hi = kb.f16_hi_to_f32(packed);
+    kb.store_i32(out, dot);
+    kb.store_f32(kb.add(out, kb.const_i64(4)), hi);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    MslKernel k = MslTarget::compile(*fn);
+    CHECK(has(k.source, "_brass_sdot4("));
+    CHECK(has(k.source, "half2("));
+    CHECK(has(k.source, ".y"));
+    CHECK(has(k.source, "ldexp("));
+}
+
 TEST_CASE("MSL Target - Multi-Kernel Module Emission") {
     Module mod("msl_multi");
     build_vec4_saxpy(mod, "kernel_one");

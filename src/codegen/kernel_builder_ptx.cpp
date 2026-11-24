@@ -214,6 +214,18 @@ Value* KernelBuilder::u32_to_f32(Value* x)    { return b_.build_call("ptx_u32_to
 Value* KernelBuilder::i32_to_f32(Value* x)    { return b_.build_call("ptx_i32_to_f32", Type::f32(), {x}); }
 Value* KernelBuilder::f32_to_u32(Value* x)    { return b_.build_call("ptx_f32_to_u32", Type::i32(), {x}); }
 Value* KernelBuilder::f32_to_i32(Value* x)    { return b_.build_call("ptx_f32_to_i32", Type::i32(), {x}); }
+Value* KernelBuilder::sdot4(Value* a, Value* b, Value* acc) {
+    return b_.build_call("ptx_sdot4", Type::i32(), {a, b, acc});
+}
+Value* KernelBuilder::pack_f16x2(Value* lo, Value* hi) {
+    return b_.build_call("ptx_pack_f16x2", Type::i32(), {lo, hi});
+}
+Value* KernelBuilder::f16_hi_to_f32(Value* bits) {
+    return b_.build_call("ptx_f16_hi_to_f32", Type::f32(), {bits});
+}
+Value* KernelBuilder::ldexp_f32(Value* x, Value* exp) {
+    return b_.build_call("ptx_ldexp_f32", Type::f32(), {x, exp});
+}
 
 // ---------------------------------------------------------------------------
 // Narrow loads/stores and atomics

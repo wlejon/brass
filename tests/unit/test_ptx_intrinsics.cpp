@@ -59,6 +59,7 @@ enum class Sig {
     shared_stx_f32, shared_stx_i32, shared_stx_f64, shared_stx_i64, // (ptr, index, T) -> void
     shared_alloc_v4, shared_ldx_v4, shared_stx_v4, shared_ldf_v4,
     shared_alloc_u16, shared_ldx_u16, shared_stx_u16,
+    f32i32_f32, f32f32_i32,
     load_narrow,     // (ptr[, off]) -> i32
     store_narrow,    // (ptr, i32[, off]) -> void
 };
@@ -93,8 +94,11 @@ const std::map<std::string, Sig>& signatures() {
         {"i32_to_f32", Sig::i32_f32}, {"ptx_i32_to_f32", Sig::i32_f32}, {"ptx_u32_to_f32", Sig::i32_f32},
         {"ptx_u64_to_f32", Sig::i64_f32}, {"ptx_i64_to_f32", Sig::i64_f32},
         {"ptx_f32_to_i32", Sig::f32_i32}, {"ptx_f32_to_u32", Sig::f32_i32},
-        {"ptx_f16_to_f32", Sig::i32_f32}, {"ptx_f32_to_f16", Sig::f32_i32},
+        {"ptx_f16_to_f32", Sig::i32_f32}, {"ptx_f16_hi_to_f32", Sig::i32_f32},
+        {"ptx_f32_to_f16", Sig::f32_i32}, {"ptx_pack_f16x2", Sig::f32f32_i32},
         {"ptx_f32_to_bf16", Sig::f32_i32},
+        {"ptx_ldexp_f32", Sig::f32i32_f32},
+        {"ptx_sdot4", Sig::i32x3_i32},
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
 
         {"bar.sync", Sig::bar}, {"ptx_sync", Sig::bar}, {"ptx_bar_sync", Sig::bar_id},
@@ -244,6 +248,8 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
             b.build_call(name, Type::void_type(), {smem_u16, i, i});
             break;
         }
+        case Sig::f32i32_f32: r = b.build_call(name, Type::f32(), {x, i}); break;
+        case Sig::f32f32_i32: r = b.build_call(name, Type::i32(), {x, x}); break;
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, c4}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
     }

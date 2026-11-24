@@ -160,6 +160,7 @@ std::string_view to_string(Opcode op) noexcept {
         case Opcode::mul:   return "mul";
         case Opcode::mad:   return "mad";
         case Opcode::fma:   return "fma";
+        case Opcode::dp4a:  return "dp4a";
         case Opcode::div:   return "div";
         case Opcode::rem:   return "rem";
         case Opcode::neg:   return "neg";
@@ -357,6 +358,8 @@ bool allows_immediate(Opcode op, size_t src_index) noexcept {
             return src_index <= 1;
         case Opcode::mad: case Opcode::fma:
             return src_index <= 2;
+        case Opcode::dp4a:
+            return src_index == 1 || src_index == 2;
         case Opcode::setp:                       // second source only
             return src_index == 1;
         case Opcode::st:                         // the stored value

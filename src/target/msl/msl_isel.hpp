@@ -26,6 +26,7 @@ public:
         bool uses_shared_memory = false;
         uint32_t shared_memory_bytes = 0;
         bool needs_bf16_helper = false;
+        bool needs_sdot4_helper = false;
     };
 
     static KernelResult lower(const Function& fn, const target::MslOptions& opts);

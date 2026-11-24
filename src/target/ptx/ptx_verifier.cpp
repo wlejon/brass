@@ -359,8 +359,8 @@ private:
         } else if (I.type != Type::none) {
             error(std::string(to_string(I.op)) + " does not take a type suffix");
         }
-        if (I.op != Opcode::cvt && I.src_type != Type::none)
-            error("only cvt takes a second (source) type suffix");
+        if (I.op != Opcode::cvt && I.op != Opcode::dp4a && I.src_type != Type::none)
+            error("only cvt and dp4a take a second (source) type suffix");
         if (I.vec_width != VecWidth::v1 && I.op != Opcode::ld && I.op != Opcode::st)
             error("only ld/st take a .v2/.v4 modifier");
         if (I.mul_mode != MulMode::none && I.op != Opcode::mul && I.op != Opcode::mad)
@@ -377,6 +377,7 @@ private:
             case Opcode::cvt:   verify_cvt(); break;
             case Opcode::mad:   verify_mad(); break;
             case Opcode::fma:   verify_fma(); break;
+            case Opcode::dp4a:  verify_dp4a(); break;
             case Opcode::neg: case Opcode::abs: case Opcode::not_:
                 if (check_arity(1, 1, 1)) { expect_reg(I.dsts[0], I.type, "destination"); expect_value(I.srcs[0], I.type, "source 0"); }
                 break;
@@ -528,6 +529,19 @@ private:
         if (!check_arity(1, 3, 3)) return;
         expect_reg(I.dsts[0], I.type, "destination");
         for (size_t i = 0; i < 3; ++i) expect_value(I.srcs[i], I.type, slot("source", i));
+    }
+
+    void verify_dp4a() {
+        const Inst& I = *inst_;
+        if ((I.type != Type::s32 && I.type != Type::u32) ||
+            (I.src_type != Type::s32 && I.src_type != Type::u32)) {
+            error("dp4a requires .s32/.u32 destination and source types");
+        }
+        if (!check_arity(1, 3, 3)) return;
+        expect_reg(I.dsts[0], I.type, "destination");
+        expect_reg(I.srcs[0], I.src_type, "source 0");
+        expect_value(I.srcs[1], I.src_type, "source 1");
+        expect_value(I.srcs[2], I.type, "source 2");
     }
 
     void verify_shift() {

@@ -116,11 +116,43 @@ void SpirvISel::Intrinsics::f16_to_f32(SpirvISel& isel, const brass::Instruction
     isel.define(inst.result(), r);
 }
 
+// The high 16 bits of the i32 as an IEEE half (UnpackHalf2x16, component 1).
+void SpirvISel::Intrinsics::f16_hi_to_f32(SpirvISel& isel, const brass::Instruction& inst) {
+    Id v2 = isel.ext(GLSLstd450UnpackHalf2x16, isel.m_.t_vector(isel.t_f32(), 2), {isel.id_of(inst.operand(0), "argument 0")});
+    Id r = isel.m_.new_id();
+    isel.emit(Inst(spv::OpCompositeExtract, isel.t_f32(), r).id(v2).lit(1));
+    isel.define(inst.result(), r);
+}
+
 // The half in the low 16 bits, zeros above (PackHalf2x16 of (x, 0)).
 void SpirvISel::Intrinsics::f32_to_f16(SpirvISel& isel, const brass::Instruction& inst) {
     Id v2 = isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(isel.t_f32(), 2),
                     {isel.id_of(inst.operand(0), "argument 0"), isel.m_.c_f32(0.0f)});
     isel.define(inst.result(), isel.ext(GLSLstd450PackHalf2x16, isel.t_u32(), {v2}));
+}
+
+void SpirvISel::Intrinsics::pack_f16x2(SpirvISel& isel, const brass::Instruction& inst) {
+    Id v2 = isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(isel.t_f32(), 2),
+                    {isel.id_of(inst.operand(0), "lo"), isel.id_of(inst.operand(1), "hi")});
+    isel.define(inst.result(), isel.ext(GLSLstd450PackHalf2x16, isel.t_u32(), {v2}));
+}
+
+void SpirvISel::Intrinsics::ldexp_f32(SpirvISel& isel, const brass::Instruction& inst) {
+    isel.define(inst.result(), isel.ext(GLSLstd450Ldexp, isel.t_f32(),
+                                        {isel.id_of(inst.operand(0), "x"), isel.as_u32(inst.operand(1), "exp")}));
+}
+
+void SpirvISel::Intrinsics::sdot4(SpirvISel& isel, const brass::Instruction& inst) {
+    Module& m = isel.m_;
+    m.add_capability(spv::CapabilityDotProductKHR);
+    m.add_capability(spv::CapabilityDotProductInput4x8BitPackedKHR);
+    m.add_extension("SPV_KHR_integer_dot_product");
+    Id d = m.new_id();
+    isel.emit(Inst(spv::OpSDotKHR, isel.t_u32(), d)
+                  .id(isel.as_u32(inst.operand(0), "a"))
+                  .id(isel.as_u32(inst.operand(1), "b"))
+                  .lit(spv::PackedVectorFormatPackedVectorFormat4x8BitKHR));
+    isel.define(inst.result(), isel.op(spv::OpIAdd, isel.t_u32(), {d, isel.as_u32(inst.operand(2), "acc")}));
 }
 
 // Round-to-nearest-even + quiet-NaN f32 -> bf16 bits in low 16 bits of u32.
@@ -241,9 +273,13 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_f32_to_u32", &convert<spv::OpConvertFToU, 32, false> },
         { "ptx_f32_to_f64", &convert<spv::OpFConvert, 64, true> },
         { "ptx_f64_to_f32", &convert<spv::OpFConvert, 32, true> },
-        { "ptx_f16_to_f32", &f16_to_f32 },
-        { "ptx_f32_to_f16", &f32_to_f16 },
-        { "ptx_f32_to_bf16", &f32_to_bf16 },
+        { "ptx_f16_to_f32",    &f16_to_f32 },
+        { "ptx_f16_hi_to_f32", &f16_hi_to_f32 },
+        { "ptx_f32_to_f16",    &f32_to_f16 },
+        { "ptx_pack_f16x2",    &pack_f16x2 },
+        { "ptx_f32_to_bf16",   &f32_to_bf16 },
+        { "ptx_ldexp_f32",     &ldexp_f32 },
+        { "ptx_sdot4",         &sdot4 },
 
         // Barriers                                                     -> void
         { "bar.sync",             &bar_sync },

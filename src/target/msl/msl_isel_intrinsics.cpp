@@ -169,8 +169,16 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         emit_assign(inst, "static_cast<float>(as_type<half>(static_cast<uint16_t>(as_type<uint32_t>(" + arg(0) + ") & 0xFFFFu)))", d);
         return;
     }
+    if (sym == "ptx_f16_hi_to_f32") {
+        emit_assign(inst, "static_cast<float>(as_type<half2>(" + arg(0) + ").y)", d);
+        return;
+    }
     if (sym == "ptx_f32_to_f16") {
         emit_assign(inst, "static_cast<int32_t>(static_cast<uint32_t>(as_type<uint16_t>(static_cast<half>(" + arg(0) + "))))", d);
+        return;
+    }
+    if (sym == "ptx_pack_f16x2") {
+        emit_assign(inst, "as_type<int32_t>(half2(" + arg(0) + ", " + arg(1) + "))", d);
         return;
     }
     if (sym == "ptx_f32_to_bf16") {
@@ -180,6 +188,15 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
     }
     if (sym == "ptx_bf16_to_f32") {
         emit_assign(inst, "as_type<float>(as_type<uint32_t>(" + arg(0) + ") << 16u)", d);
+        return;
+    }
+    if (sym == "ptx_ldexp_f32") {
+        emit_assign(inst, "ldexp(" + arg(0) + ", " + arg(1) + ")", d);
+        return;
+    }
+    if (sym == "ptx_sdot4") {
+        res_.needs_sdot4_helper = true;
+        emit_assign(inst, "_brass_sdot4(" + arg(0) + ", " + arg(1) + ", " + arg(2) + ")", d);
         return;
     }
 
