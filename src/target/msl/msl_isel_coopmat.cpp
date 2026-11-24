@@ -25,7 +25,7 @@ void MslFnBuilder::lower_coop_call(const Instruction& inst, int d) {
         std::string val = arg(1);
         for (int k = 0; k < 4; ++k) {
             indent_line(d);
-            body_ << name << "[" << k << "].thread_elements() = float2(" << val << ");\n";
+            body_ << name << "[" << k << "] = make_filled_simdgroup_matrix<float, 8, 8>(" << val << ");\n";
         }
         return;
     }
@@ -50,7 +50,8 @@ void MslFnBuilder::lower_coop_call(const Instruction& inst, int d) {
                 if (want_use == 2 && is_f16) {
                     body_ << "{ simdgroup_half8x8 _cm_h; simdgroup_load(_cm_h, " << ptr_expr << ", " << stride
                           << ", ulong2(0, 0), " << (col_major ? "true" : "false") << "); "
-                          << name << "[" << idx << "].thread_elements() = float2(_cm_h.thread_elements()); }\n";
+                          << name << "[" << idx << "].thread_elements()[0] = float(_cm_h.thread_elements()[0]); "
+                          << name << "[" << idx << "].thread_elements()[1] = float(_cm_h.thread_elements()[1]); }\n";
                 } else {
                     body_ << "simdgroup_load(" << name << "[" << idx << "], " << ptr_expr << ", " << stride
                           << ", ulong2(0, 0), " << (col_major ? "true" : "false") << ");\n";
@@ -97,8 +98,9 @@ void MslFnBuilder::lower_coop_call(const Instruction& inst, int d) {
                 std::string ptr_expr = base + " + " + std::to_string(major) + "UL * " + stride + " + " + std::to_string(minor) + "UL";
                 indent_line(d);
                 if (is_f16) {
-                    body_ << "{ simdgroup_half8x8 _cm_h; _cm_h.thread_elements() = half2("
-                          << name << "[" << idx << "].thread_elements()); "
+                    body_ << "{ simdgroup_half8x8 _cm_h; "
+                          << "_cm_h.thread_elements()[0] = half(" << name << "[" << idx << "].thread_elements()[0]); "
+                          << "_cm_h.thread_elements()[1] = half(" << name << "[" << idx << "].thread_elements()[1]); "
                           << "simdgroup_store(_cm_h, " << ptr_expr << ", " << stride
                           << ", ulong2(0, 0), " << (col_major ? "true" : "false") << "); }\n";
                 } else {

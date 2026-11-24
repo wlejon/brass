@@ -299,10 +299,59 @@ TEST_CASE("MSL Target - 16x16x16 Cooperative Matrix GEMM via simdgroup_matrix") 
     CHECK(has(k.source, "#include <metal_simdgroup_matrix>"));
     CHECK(has(k.source, "simdgroup_half8x8"));
     CHECK(has(k.source, "simdgroup_float8x8"));
+    CHECK(has(k.source, "make_filled_simdgroup_matrix<float, 8, 8>("));
+    CHECK(!has(k.source, "thread_elements() = float2("));
+    CHECK(!has(k.source, "thread_elements() = half2("));
+    CHECK(has(k.source, "thread_elements()[0] = half("));
+    CHECK(has(k.source, "thread_elements()[1] = half("));
     CHECK(has(k.source, "simdgroup_load("));
     CHECK(has(k.source, "simdgroup_multiply_accumulate("));
     CHECK(has(k.source, "simdgroup_store("));
     CHECK(has(k.source, "true);"));
+}
+
+TEST_CASE("MSL Target - Narrow & Shared Byte Offsets and Threadgroup Phi Propagation") {
+    Module mod("msl_offsets_phi");
+    Function* fn = mod.create_function("offsets_phi", Type::void_type(),
+                                       {Type::ptr(), Type::ptr()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* in_buf  = b.add_block_param(entry, Type::ptr());
+    Value* out_buf = b.add_block_param(entry, Type::ptr());
+
+    KernelBuilder kb(b);
+    Value* u8v  = kb.load_u8(in_buf, 1);
+    Value* u16v = kb.load_u16(in_buf, 2);
+    kb.store_u8(out_buf, u8v, 3);
+    kb.store_u16(out_buf, u16v, 6);
+
+    Value* sm_f = kb.shared_alloc_f32(8);
+    kb.shared_store_f32(sm_f, kb.const_f32(1.0f), 16);
+    Value* sf = kb.shared_load_f32(sm_f, 16);
+    Value* su16 = kb.load_u16(sm_f, 4);
+
+    Value* sm_i = kb.shared_alloc_i32(8);
+    auto res = kb.for_range_reduce_n(
+        kb.const_i32(0), kb.const_i32(4), kb.const_i32(1),
+        {sm_i, kb.const_i32(0)},
+        [&](Value*, const std::vector<Value*>& st) -> std::vector<Value*> {
+            Value* v = kb.load_i32(st[0]);
+            return {kb.add(st[0], kb.const_i64(4)), kb.add(st[1], v)};
+        });
+    kb.store_f32(out_buf, sf, 8);
+    kb.store_i32(out_buf, kb.add(res[1], su16), 12);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    MslKernel k = MslTarget::compile(*fn);
+    // Byte offsets must be added to both narrow and non-indexed shared accesses.
+    CHECK(has(k.source, "static_cast<int64_t>("));
+    // Narrow load on shared pointer keeps threadgroup address space.
+    CHECK(has(k.source, "reinterpret_cast<const threadgroup uint16_t*>"));
+    // Loop-carried shared pointer phi keeps threadgroup address space.
+    CHECK(has(k.source, "threadgroup uint8_t* _phi_"));
 }
 
 TEST_CASE("MSL Target - Exhaustive Intrinsic Parity (Math, Sync Shuffle, Shared I64, Atomics)") {

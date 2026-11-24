@@ -212,6 +212,31 @@ void MslFnBuilder::find_shared_allocs() {
                     }
                 }
             }
+            if (const Instruction* term = bb->terminator()) {
+                auto prop = [&](const BranchTarget& tgt) {
+                    if (!tgt.block) return;
+                    const size_t n = std::min(tgt.args.size(), tgt.block->param_count());
+                    for (size_t k = 0; k < n; ++k) {
+                        const Value* pv = tgt.block->param(k);
+                        if (pv->type().is_pointer() && shared_ptrs_.count(tgt.args[k]) && !shared_ptrs_.count(pv)) {
+                            shared_ptrs_.insert(pv);
+                            changed = true;
+                        }
+                    }
+                };
+                switch (term->opcode()) {
+                    case Opcode::br: prop(term->branch_target()); break;
+                    case Opcode::br_if:
+                        prop(term->true_target());
+                        prop(term->false_target());
+                        break;
+                    case Opcode::switch_:
+                        for (const auto& sc : term->switch_cases()) prop(sc.target);
+                        prop(term->default_target());
+                        break;
+                    default: break;
+                }
+            }
         }
     }
 }
@@ -480,7 +505,7 @@ void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
                 if (t.is_pointer()) {
                     std::string idx = inst.operand(1)->type().is_pointer() ? arg(0) : arg(1);
                     std::string ptr = inst.operand(0)->type().is_pointer() ? arg(0) : arg(1);
-                    emit_assign(inst, "(" + ptr + " + static_cast<size_t>(" + idx + "))", d);
+                    emit_assign(inst, "(" + ptr + " + static_cast<int64_t>(" + idx + "))", d);
                     return;
                 }
                 if (t.is_integer()) {
@@ -492,7 +517,7 @@ void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
                 return;
             case Opcode::sub:
                 if (t.is_pointer()) {
-                    emit_assign(inst, "(" + arg(0) + " - static_cast<size_t>(" + arg(1) + "))", d);
+                    emit_assign(inst, "(" + arg(0) + " - static_cast<int64_t>(" + arg(1) + "))", d);
                 } else if (t.is_integer()) {
                     std::string ut = msl_utype(t);
                     emit_assign(inst, "as_type<" + msl_type(t) + ">(as_type<" + ut + ">(" + arg(0) + ") - as_type<" + ut + ">(" + arg(1) + "))", d);

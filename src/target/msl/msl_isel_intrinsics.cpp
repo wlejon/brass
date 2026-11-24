@@ -89,7 +89,9 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         std::string mt = (sym == "ptx_shared_load_i32") ? "int32_t"
                        : (sym == "ptx_shared_load_i64") ? "int64_t"
                                                         : "float";
-        emit_assign(inst, "(*reinterpret_cast<const threadgroup " + mt + "*>(" + arg(0) + "))", d);
+        std::string addr = arg(0);
+        if (inst.operand_count() > 1) addr = "(" + addr + " + static_cast<int64_t>(" + arg(1) + "))";
+        emit_assign(inst, "(*reinterpret_cast<const threadgroup " + mt + "*>(" + addr + "))", d);
         return;
     }
     if (sym == "ptx_shared_load_f32_indexed" || sym == "ptx_shared_load_i32_indexed" ||
@@ -113,8 +115,10 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         std::string mt = (sym == "ptx_shared_store_i32") ? "int32_t"
                        : (sym == "ptx_shared_store_i64") ? "int64_t"
                                                          : "float";
+        std::string addr = arg(0);
+        if (inst.operand_count() > 2) addr = "(" + addr + " + static_cast<int64_t>(" + arg(2) + "))";
         indent_line(d);
-        body_ << "*reinterpret_cast<threadgroup " << mt << "*>(" << arg(0) << ") = " << arg(1) << ";\n";
+        body_ << "*reinterpret_cast<threadgroup " << mt << "*>(" << addr << ") = " << arg(1) << ";\n";
         return;
     }
     if (sym == "ptx_shared_store_f32_indexed" || sym == "ptx_shared_store_i32_indexed" ||
@@ -133,12 +137,26 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         return;
     }
 
-    if (sym == "ptx_load_u8")  { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device uint8_t*>(" + arg(0) + "))", d); return; }
-    if (sym == "ptx_load_s8")  { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device int8_t*>(" + arg(0) + "))", d); return; }
-    if (sym == "ptx_load_u16") { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device uint16_t*>(" + arg(0) + "))", d); return; }
-    if (sym == "ptx_load_s16") { emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const device int16_t*>(" + arg(0) + "))", d); return; }
-    if (sym == "ptx_store_u8") { indent_line(d); body_ << "*reinterpret_cast<device uint8_t*>(" << arg(0) << ") = static_cast<uint8_t>(" << arg(1) << ");\n"; return; }
-    if (sym == "ptx_store_u16") { indent_line(d); body_ << "*reinterpret_cast<device uint16_t*>(" << arg(0) << ") = static_cast<uint16_t>(" << arg(1) << ");\n"; return; }
+    if (sym == "ptx_load_u8" || sym == "ptx_load_s8" || sym == "ptx_load_u16" || sym == "ptx_load_s16") {
+        std::string sp = ptr_space(inst.operand(0));
+        const char* mt = (sym == "ptx_load_u8")  ? "uint8_t"
+                       : (sym == "ptx_load_s8")  ? "int8_t"
+                       : (sym == "ptx_load_u16") ? "uint16_t"
+                                                 : "int16_t";
+        std::string addr = arg(0);
+        if (inst.operand_count() > 1) addr = "(" + addr + " + static_cast<int64_t>(" + arg(1) + "))";
+        emit_assign(inst, "static_cast<int32_t>(*reinterpret_cast<const " + sp + " " + mt + "*>(" + addr + "))", d);
+        return;
+    }
+    if (sym == "ptx_store_u8" || sym == "ptx_store_u16") {
+        std::string sp = ptr_space(inst.operand(0));
+        const char* mt = (sym == "ptx_store_u8") ? "uint8_t" : "uint16_t";
+        std::string addr = arg(0);
+        if (inst.operand_count() > 2) addr = "(" + addr + " + static_cast<int64_t>(" + arg(2) + "))";
+        indent_line(d);
+        body_ << "*reinterpret_cast<" << sp << " " << mt << "*>(" << addr << ") = static_cast<" << mt << ">(" << arg(1) << ");\n";
+        return;
+    }
 
     if (sym == "ptx_mul_hi_u32") {
         emit_assign(inst, "as_type<int32_t>(mulhi(as_type<uint32_t>(" + arg(0) + "), as_type<uint32_t>(" + arg(1) + ")))", d);
