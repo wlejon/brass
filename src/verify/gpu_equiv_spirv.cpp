@@ -541,9 +541,27 @@ bool execute_spirv_function_body(
             case spv::OpUConvert:
                 res = gpu_coerce_width(ctx, get_v(inst.operands[0].value), rw, false);
                 break;
-            case spv::OpBitcast:
-                res = gpu_coerce_width(ctx, get_v(inst.operands[0].value), rw, false);
+            case spv::OpBitcast: {
+                spirv::Id src_id = inst.operands[0].value;
+                if ((!rti || rti->op != spv::OpTypeVector) && rw == 32 &&
+                    cur.composites.count(src_id) && cur.composites[src_id].size() == 2) {
+                    const auto& sv = cur.composites[src_id];
+                    BVNodeId lo = gpu_coerce_width(ctx, sv[0], 32);
+                    BVNodeId hi = gpu_coerce_width(ctx, sv[1], 32);
+                    if (bv_node(ctx, hi).op == BVOp::Const && bv_node(ctx, hi).imm == 0) {
+                        res = lo;
+                    } else {
+                        BVNodeId lo16 = bv_bin(ctx, BVOp::And, 32, lo, bv_const(ctx, 32, 0xFFFFu));
+                        BVNodeId hi16 = bv_bin(ctx, BVOp::Shl, 32,
+                                               bv_bin(ctx, BVOp::And, 32, hi, bv_const(ctx, 32, 0xFFFFu)),
+                                               bv_const(ctx, 32, 16));
+                        res = bv_bin(ctx, BVOp::Or, 32, lo16, hi16);
+                    }
+                } else {
+                    res = gpu_coerce_width(ctx, get_v(src_id), rw, false);
+                }
                 break;
+            }
             case spv::OpConvertSToF:
                 res = env.eval_uf(ctx, "cvt_sitofp", {get_v(inst.operands[0].value)}, rw, true);
                 break;
@@ -557,7 +575,25 @@ bool execute_spirv_function_body(
                 res = env.eval_uf(ctx, "cvt_fptoui", {get_v(inst.operands[0].value)}, rw, false);
                 break;
             case spv::OpFConvert:
-                res = env.eval_uf(ctx, rw == 64 ? "cvt_fpext" : "cvt_fptrunc", {get_v(inst.operands[0].value)}, rw, true);
+                if (rti && rti->op == spv::OpTypeVector &&
+                    spirv_type_width(sc.mod, rti->elem, nullptr) == 16 &&
+                    cur.composites.count(inst.operands[0].value)) {
+                    const auto& sv = cur.composites[inst.operands[0].value];
+                    std::vector<BVNodeId> ov;
+                    ov.reserve(sv.size());
+                    for (BVNodeId el : sv) {
+                        if (bv_node(ctx, el).op == BVOp::Const && bv_node(ctx, el).imm == 0) {
+                            ov.push_back(bv_const(ctx, 32, 0));
+                        } else {
+                            ov.push_back(env.eval_uf(ctx, "gpu_f32_to_f16",
+                                                     {gpu_coerce_width(ctx, el, 32)}, 32, false));
+                        }
+                    }
+                    cur.composites[inst.result] = std::move(ov);
+                } else {
+                    res = env.eval_uf(ctx, rw == 64 ? "cvt_fpext" : "cvt_fptrunc",
+                                      {get_v(inst.operands[0].value)}, rw, true);
+                }
                 break;
             case spv::OpExtInst:
                 if (!handle_glsl_ext_inst(sc, cur, inst, rw, res)) {
