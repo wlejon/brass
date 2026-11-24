@@ -136,8 +136,10 @@ struct ThreadingState {
         if (!dom_) dom_ = std::make_unique<DominatorTree>(fn);
         return *dom_;
     }
-    void cfg_changed() {
+    void dom_changed() {
         dom_.reset();
+    }
+    void reset_outside() {
         if (outside_built) outside.clear();
         outside_built = false;
     }
@@ -366,7 +368,9 @@ bool try_thread_edge(ThreadingState& st, BasicBlock* B, BasicBlock* P) {
         std::unordered_map<const Value*, Value*> repl;
         BranchTarget& b_edge = (known_val == 1) ? b_term->true_target() : b_term->false_target();
         for (Value* v : escaping) {
-            repl[v] = ir::new_block_param(fn, dest, v->type());
+            Value* np = ir::new_block_param(fn, dest, v->type());
+            repl[v] = np;
+            if (st.outside_built) st.outside.mark(np);
             b_edge.args.push_back(v);
             auto it = thread_val_map.find(v);
             thread_dest_args.push_back(it != thread_val_map.end() ? it->second : v);
@@ -507,7 +511,8 @@ bool run_jump_threading(Function& fn, const JumpThreadingOptions& opts, JumpThre
     ThreadingState st(fn);
     for (size_t iter = 0; iter < opts.max_iterations; ++iter) {
         fn.rebuild_cfg_predecessors();
-        st.cfg_changed();
+        st.dom_changed();
+        st.reset_outside();
 
         bool iter_changed = false;
         std::vector<BasicBlock*> blocks = fn.blocks();
@@ -527,10 +532,9 @@ bool run_jump_threading(Function& fn, const JumpThreadingOptions& opts, JumpThre
                     if (!threaded && !try_duplicate_branch_block(st, B, P)) continue;
                     iter_changed = changed = progress = true;
                     if (stats && threaded) stats->edges_threaded++;
-                    // The CFG changed: what the next decision reads is
-                    // recomputed.
+                    // The CFG changed: dominators and predecessors are recomputed.
                     fn.rebuild_cfg_predecessors();
-                    st.cfg_changed();
+                    st.dom_changed();
                     break;
                 }
             }

@@ -115,6 +115,13 @@ uint32_t LinearScanAllocator::last_use_at_or_before(const AllocPiece& p, uint32_
 // and a move may empty a register another move fills).
 uint32_t LinearScanAllocator::first_intersection(const AllocPiece& a, const AllocPiece& b) const {
     if (a.end <= b.start || b.end <= a.start) return kNever;
+    if (a.base->segments.size() == 1 && b.base->segments.size() == 1) {
+        const auto& sa = a.base->segments[0];
+        const auto& sb = b.base->segments[0];
+        const uint32_t a1 = std::max(sa.start, a.from), a2 = std::min(sa.end, a.to);
+        const uint32_t b1 = std::max(sb.start, b.from), b2 = std::min(sb.end, b.to);
+        return (a1 < a2 && b1 < b2 && a1 < b2 && b1 < a2) ? std::max(a1, b1) : kNever;
+    }
     SegCursor x(a), y(b);
     while (x.valid() && y.valid()) {
         const uint32_t x1 = x.lo(), x2 = x.hi(), y1 = y.lo(), y2 = y.hi();
@@ -444,6 +451,7 @@ bool LinearScanAllocator::try_allocate_free(uint32_t idx, std::vector<uint32_t>&
     for (uint32_t a : active_) {
         const AllocPiece& other = pieces_[a];
         if (other.vreg().reg_class != v.reg_class || other.reg.code >= 32) continue;
+        if (other.start >= max_q[other.reg.code]) continue;
         const uint32_t c = first_intersection(other, p);
         if (c != kNever) max_q[other.reg.code] = std::min(max_q[other.reg.code], c);
     }
