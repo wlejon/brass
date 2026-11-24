@@ -124,17 +124,22 @@ void SpirvISel::Intrinsics::f16_hi_to_f32(SpirvISel& isel, const brass::Instruct
     isel.define(inst.result(), r);
 }
 
-// The half in the low 16 bits, zeros above (PackHalf2x16 of (x, 0)).
+// The half in the low 16 bits, zeros above: OpFConvert vec2<f32> -> vec2<f16>
+// rounds to nearest even (IEEE), unlike GLSL PackHalf2x16 which uses RTZ on RADV.
 void SpirvISel::Intrinsics::f32_to_f16(SpirvISel& isel, const brass::Instruction& inst) {
+    Id f16v2 = isel.m_.t_vector(isel.m_.t_float(16), 2);
     Id v2 = isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(isel.t_f32(), 2),
                     {isel.id_of(inst.operand(0), "argument 0"), isel.m_.c_f32(0.0f)});
-    isel.define(inst.result(), isel.ext(GLSLstd450PackHalf2x16, isel.t_u32(), {v2}));
+    Id h2 = isel.op(spv::OpFConvert, f16v2, {v2});
+    isel.define(inst.result(), isel.op(spv::OpBitcast, isel.t_u32(), {h2}));
 }
 
 void SpirvISel::Intrinsics::pack_f16x2(SpirvISel& isel, const brass::Instruction& inst) {
+    Id f16v2 = isel.m_.t_vector(isel.m_.t_float(16), 2);
     Id v2 = isel.op(spv::OpCompositeConstruct, isel.m_.t_vector(isel.t_f32(), 2),
                     {isel.id_of(inst.operand(0), "lo"), isel.id_of(inst.operand(1), "hi")});
-    isel.define(inst.result(), isel.ext(GLSLstd450PackHalf2x16, isel.t_u32(), {v2}));
+    Id h2 = isel.op(spv::OpFConvert, f16v2, {v2});
+    isel.define(inst.result(), isel.op(spv::OpBitcast, isel.t_u32(), {h2}));
 }
 
 void SpirvISel::Intrinsics::ldexp_f32(SpirvISel& isel, const brass::Instruction& inst) {

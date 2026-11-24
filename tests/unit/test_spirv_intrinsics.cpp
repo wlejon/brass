@@ -563,7 +563,7 @@ TEST_CASE("SPIR-V intrinsics - families lower to the expected SPIR-V (spirv-dis)
         {"ptx_u32_to_f32", {"OpConvertUToF"}},
         {"ptx_f32_to_i32", {"OpConvertFToS"}},
         {"ptx_f16_to_f32", {"UnpackHalf2x16"}},
-        {"ptx_f32_to_f16", {"PackHalf2x16"}},
+        {"ptx_f32_to_f16", {"OpFConvert"}},
         {"ptx_sync", {"OpControlBarrier"}},
         {"ptx_shfl_down_f32", {"OpGroupNonUniformShuffle ", "OpCapability GroupNonUniformShuffle"}},
         {"ptx_shfl_idx_i32", {"OpGroupNonUniformShuffle "}},
