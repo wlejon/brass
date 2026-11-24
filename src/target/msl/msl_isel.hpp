@@ -27,6 +27,8 @@ public:
         uint32_t shared_memory_bytes = 0;
         bool needs_bf16_helper = false;
         bool needs_sdot4_helper = false;
+        bool needs_atom_f32_helper = false;
+        bool needs_atom_cas_helper = false;
         bool uses_coopmat = false;
     };
 

@@ -305,6 +305,88 @@ TEST_CASE("MSL Target - 16x16x16 Cooperative Matrix GEMM via simdgroup_matrix") 
     CHECK(has(k.source, "true);"));
 }
 
+TEST_CASE("MSL Target - Exhaustive Intrinsic Parity (Math, Sync Shuffle, Shared I64, Atomics)") {
+    Module mod("msl_parity");
+    Function* fn = mod.create_function("parity_kernel", Type::void_type(),
+                                       {Type::ptr(), Type::ptr(), Type::f32(), Type::i64()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* out_i = b.add_block_param(entry, Type::ptr());
+    Value* out_f = b.add_block_param(entry, Type::ptr());
+    Value* xf = b.add_block_param(entry, Type::f32());
+    Value* i64v = b.add_block_param(entry, Type::i64());
+
+    KernelBuilder kb(b);
+    Value* smem_i64 = b.build_call("ptx_shared_alloc_i64", Type::ptr(), {kb.const_i32(4)});
+    Value* smem_i32 = kb.shared_alloc_i32(4);
+    Value* smem_f32 = kb.shared_alloc_f32(4);
+    b.build_call("ptx_shared_store_i64", Type::void_type(), {smem_i64, i64v});
+    b.build_call("ptx_shared_store_i64_indexed", Type::void_type(), {smem_i64, kb.const_i32(1), i64v});
+    Value* l0 = b.build_call("ptx_shared_load_i64", Type::i64(), {smem_i64});
+    Value* l1 = b.build_call("ptx_shared_load_i64_indexed", Type::i64(), {smem_i64, kb.const_i32(1)});
+    Value* f_u64 = b.build_call("ptx_u64_to_f32", Type::f32(), {l0});
+    Value* f_i64 = b.build_call("ptx_i64_to_f32", Type::f32(), {l1});
+
+    Value* yf = kb.add(f_u64, f_i64);
+    for (const char* ufn : {"tanf", "asinf", "acosf", "atanf", "sinhf", "coshf", "signf", "fractf"}) {
+        yf = kb.add(yf, b.build_call(ufn, Type::f32(), {xf}));
+    }
+    yf = kb.add(yf, b.build_call("atan2f", Type::f32(), {xf, kb.const_f32(1.0f)}));
+    yf = kb.add(yf, b.build_call("powf", Type::f32(), {xf, kb.const_f32(2.0f)}));
+    yf = kb.add(yf, b.build_call("stepf", Type::f32(), {kb.const_f32(0.5f), xf}));
+    yf = kb.add(yf, b.build_call("smoothstepf", Type::f32(), {kb.const_f32(0.0f), kb.const_f32(1.0f), xf}));
+    yf = kb.add(yf, b.build_call("ptx_shfl_down_sync_f32", Type::f32(), {kb.const_i32(-1), yf, kb.const_i32(4)}));
+
+    Value* a0 = b.build_call("ptx_atom_add_i32", Type::i32(), {out_i, kb.const_i32(1)});
+    Value* a1 = b.build_call("ptx_atom_min_u32", Type::i32(), {out_i, kb.const_i32(9)});
+    Value* a2 = b.build_call("ptx_atom_max_i32", Type::i32(), {out_i, kb.const_i32(2)});
+    Value* a3 = b.build_call("ptx_atom_and_u32", Type::i32(), {out_i, kb.const_i32(7)});
+    Value* a4 = b.build_call("ptx_atom_or_i32",  Type::i32(), {out_i, kb.const_i32(3)});
+    Value* a5 = b.build_call("ptx_atom_xor_u32", Type::i32(), {out_i, kb.const_i32(5)});
+    Value* a6 = b.build_call("ptx_atom_exch_i32",Type::i32(), {out_i, kb.const_i32(8)});
+    Value* a7 = b.build_call("ptx_atom_cas_u32", Type::i32(), {out_i, a0, kb.const_i32(4)});
+    Value* s0 = b.build_call("ptx_atom_shared_add_i32", Type::i32(), {smem_i32, kb.const_i32(1)});
+    Value* s1 = b.build_call("ptx_atom_shared_cas_i32", Type::i32(), {smem_i32, s0, kb.const_i32(2)});
+    Value* fa0 = b.build_call("ptx_atom_add_f32", Type::f32(), {out_f, yf});
+    Value* fa1 = b.build_call("ptx_atom_shared_add_f32", Type::f32(), {smem_f32, fa0});
+    Value* fa2 = b.build_call("ptx_atom_exch_f32", Type::f32(), {out_f, fa1});
+
+    Value* sum_i = kb.add(kb.add(kb.add(a1, a2), kb.add(a3, a4)), kb.add(kb.add(a5, a6), kb.add(a7, s1)));
+    kb.store_i32(out_i, sum_i);
+    kb.store_f32(out_f, fa2);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    MslKernel k = MslTarget::compile(*fn);
+    CHECK(has(k.source, "tan("));
+    CHECK(has(k.source, "atan2("));
+    CHECK(has(k.source, "smoothstep("));
+    CHECK(has(k.source, "simd_shuffle_down("));
+    CHECK(has(k.source, "threadgroup int64_t"));
+    CHECK(has(k.source, "atomic_fetch_add_explicit("));
+    CHECK(has(k.source, "atomic_fetch_min_explicit("));
+    CHECK(has(k.source, "_brass_atom_add_f32("));
+    CHECK(has(k.source, "_brass_atom_cas_i32("));
+
+    // 64-bit atomics are rejected cleanly on MSL rather than emitting invalid syntax.
+    Module mod64("msl_atom64");
+    Function* fn64 = mod64.create_function("bad64", Type::void_type(), {Type::ptr(), Type::i64()});
+    Builder b64(mod64);
+    b64.set_function(fn64);
+    BasicBlock* e64 = b64.append_block("entry");
+    b64.position_at_end(e64);
+    Value* p64 = b64.add_block_param(e64, Type::ptr());
+    Value* v64 = b64.add_block_param(e64, Type::i64());
+    b64.build_call("ptx_atom_add_i64", Type::i64(), {p64, v64});
+    b64.build_ret_void();
+    fn64->rebuild_cfg_predecessors();
+    bool threw64 = false;
+    try { (void)MslTarget::compile(*fn64); } catch (const std::runtime_error&) { threw64 = true; }
+    CHECK(threw64);
+}
+
 TEST_CASE("MSL Target - Multi-Kernel Module Emission") {
     Module mod("msl_multi");
     build_vec4_saxpy(mod, "kernel_one");

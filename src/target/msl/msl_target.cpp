@@ -6,7 +6,8 @@ namespace brass::target {
 
 namespace {
 
-std::string msl_preamble(bool needs_bf16, bool needs_sdot4, bool uses_coopmat) {
+std::string msl_preamble(bool needs_bf16, bool needs_sdot4, bool needs_atom_f32,
+                         bool needs_atom_cas, bool uses_coopmat) {
     std::ostringstream ss;
     ss << "#include <metal_stdlib>\n";
     if (uses_coopmat) ss << "#include <metal_simdgroup_matrix>\n";
@@ -30,6 +31,26 @@ std::string msl_preamble(bool needs_bf16, bool needs_sdot4, bool uses_coopmat) {
            << "           static_cast<int32_t>(va.w) * static_cast<int32_t>(vb.w) + acc;\n"
            << "}\n\n";
     }
+    if (needs_atom_f32) {
+        for (const char* sp : {"device", "threadgroup"}) {
+            ss << "inline float _brass_atom_add_f32(" << sp << " atomic_uint* p, float val) {\n"
+               << "    uint32_t old = atomic_load_explicit(p, memory_order_relaxed);\n"
+               << "    while (!atomic_compare_exchange_weak_explicit(p, &old, "
+               << "as_type<uint32_t>(as_type<float>(old) + val), memory_order_relaxed, memory_order_relaxed)) {}\n"
+               << "    return as_type<float>(old);\n"
+               << "}\n\n";
+        }
+    }
+    if (needs_atom_cas) {
+        for (const char* sp : {"device", "threadgroup"}) {
+            ss << "inline int32_t _brass_atom_cas_i32(" << sp << " atomic_int* p, int32_t cmp, int32_t val) {\n"
+               << "    int32_t expected = cmp;\n"
+               << "    while (!atomic_compare_exchange_weak_explicit(p, &expected, val, "
+               << "memory_order_relaxed, memory_order_relaxed) && expected == cmp) {}\n"
+               << "    return expected;\n"
+               << "}\n\n";
+        }
+    }
     return ss.str();
 }
 
@@ -47,7 +68,9 @@ MslKernel MslTarget::compile(const Function& fn, const MslOptions& opts) {
     k.workgroup_z = opts.workgroup_z;
     k.uses_shared_memory = lowered.uses_shared_memory;
     k.shared_memory_bytes = lowered.shared_memory_bytes;
-    k.source = msl_preamble(lowered.needs_bf16_helper, lowered.needs_sdot4_helper, lowered.uses_coopmat) +
+    k.source = msl_preamble(lowered.needs_bf16_helper, lowered.needs_sdot4_helper,
+                            lowered.needs_atom_f32_helper, lowered.needs_atom_cas_helper,
+                            lowered.uses_coopmat) +
                lowered.params_struct_code +
                (lowered.params_struct_code.empty() ? "" : "\n") +
                lowered.function_code;
@@ -58,17 +81,21 @@ std::string MslTarget::compile_module(const Module& mod, const MslOptions& opts)
     std::vector<msl::MslEmitter::KernelResult> kernels;
     bool needs_bf16 = false;
     bool needs_sdot4 = false;
+    bool needs_atom_f32 = false;
+    bool needs_atom_cas = false;
     bool uses_coopmat = false;
     for (const auto* fn : mod.functions()) {
         if (!fn || fn->blocks().empty()) continue;
         auto kr = msl::MslEmitter::lower(*fn, opts);
         needs_bf16 |= kr.needs_bf16_helper;
         needs_sdot4 |= kr.needs_sdot4_helper;
+        needs_atom_f32 |= kr.needs_atom_f32_helper;
+        needs_atom_cas |= kr.needs_atom_cas_helper;
         uses_coopmat |= kr.uses_coopmat;
         kernels.push_back(std::move(kr));
     }
     std::ostringstream ss;
-    ss << msl_preamble(needs_bf16, needs_sdot4, uses_coopmat);
+    ss << msl_preamble(needs_bf16, needs_sdot4, needs_atom_f32, needs_atom_cas, uses_coopmat);
     for (size_t i = 0; i < kernels.size(); ++i) {
         if (i) ss << "\n";
         if (!kernels[i].params_struct_code.empty()) {

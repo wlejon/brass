@@ -72,6 +72,10 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         emit_assign(inst, "simd_shuffle_down(" + arg(0) + ", static_cast<uint16_t>(" + arg(1) + "))", d);
         return;
     }
+    if (sym == "ptx_shfl_down_sync_f32" || sym == "shfl_down_sync_f32") {
+        emit_assign(inst, "simd_shuffle_down(" + arg(1) + ", static_cast<uint16_t>(" + arg(2) + "))", d);
+        return;
+    }
     if (sym == "ptx_shfl_up_f32" || sym == "ptx_shfl_up_i32") {
         emit_assign(inst, "simd_shuffle_up(" + arg(0) + ", static_cast<uint16_t>(" + arg(1) + "))", d);
         return;
@@ -81,16 +85,19 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         return;
     }
 
-    if (sym == "ptx_shared_load_f32" || sym == "ptx_shared_load_i32") {
-        std::string mt = (sym == "ptx_shared_load_i32") ? "int32_t" : "float";
+    if (sym == "ptx_shared_load_f32" || sym == "ptx_shared_load_i32" || sym == "ptx_shared_load_i64") {
+        std::string mt = (sym == "ptx_shared_load_i32") ? "int32_t"
+                       : (sym == "ptx_shared_load_i64") ? "int64_t"
+                                                        : "float";
         emit_assign(inst, "(*reinterpret_cast<const threadgroup " + mt + "*>(" + arg(0) + "))", d);
         return;
     }
     if (sym == "ptx_shared_load_f32_indexed" || sym == "ptx_shared_load_i32_indexed" ||
-        sym == "ptx_shared_load_i32x4_indexed") {
+        sym == "ptx_shared_load_i64_indexed" || sym == "ptx_shared_load_i32x4_indexed") {
         std::string mt = (sym == "ptx_shared_load_i32_indexed")   ? "int32_t"
+                       : (sym == "ptx_shared_load_i64_indexed")   ? "int64_t"
                        : (sym == "ptx_shared_load_i32x4_indexed") ? "int4"
-                                                                  : "float";
+                                                                   : "float";
         emit_assign(inst, "(reinterpret_cast<const threadgroup " + mt + "*>(" + arg(0) + ")[" + arg(1) + "])", d);
         return;
     }
@@ -102,15 +109,18 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         emit_assign(inst, "static_cast<int32_t>(reinterpret_cast<const threadgroup uint16_t*>(" + arg(0) + ")[" + arg(1) + "])", d);
         return;
     }
-    if (sym == "ptx_shared_store_f32" || sym == "ptx_shared_store_i32") {
-        std::string mt = (sym == "ptx_shared_store_i32") ? "int32_t" : "float";
+    if (sym == "ptx_shared_store_f32" || sym == "ptx_shared_store_i32" || sym == "ptx_shared_store_i64") {
+        std::string mt = (sym == "ptx_shared_store_i32") ? "int32_t"
+                       : (sym == "ptx_shared_store_i64") ? "int64_t"
+                                                         : "float";
         indent_line(d);
         body_ << "*reinterpret_cast<threadgroup " << mt << "*>(" << arg(0) << ") = " << arg(1) << ";\n";
         return;
     }
     if (sym == "ptx_shared_store_f32_indexed" || sym == "ptx_shared_store_i32_indexed" ||
-        sym == "ptx_shared_store_i32x4_indexed") {
+        sym == "ptx_shared_store_i64_indexed" || sym == "ptx_shared_store_i32x4_indexed") {
         std::string mt = (sym == "ptx_shared_store_i32_indexed")   ? "int32_t"
+                       : (sym == "ptx_shared_store_i64_indexed")   ? "int64_t"
                        : (sym == "ptx_shared_store_i32x4_indexed") ? "int4"
                                                                    : "float";
         indent_line(d);
@@ -151,7 +161,19 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
     if (sym == "sqrtf" || sym == "sqrt" || sym == "ptx_sqrt" || sym == "ptx_sqrt_rn") { emit_assign(inst, "sqrt(" + arg(0) + ")", d); return; }
     if (sym == "sinf" || sym == "sin" || sym == "ptx_sin") { emit_assign(inst, "sin(" + arg(0) + ")", d); return; }
     if (sym == "cosf" || sym == "cos" || sym == "ptx_cos") { emit_assign(inst, "cos(" + arg(0) + ")", d); return; }
+    if (sym == "tanf" || sym == "tan" || sym == "ptx_tan") { emit_assign(inst, "tan(" + arg(0) + ")", d); return; }
+    if (sym == "asinf" || sym == "asin" || sym == "ptx_asin") { emit_assign(inst, "asin(" + arg(0) + ")", d); return; }
+    if (sym == "acosf" || sym == "acos" || sym == "ptx_acos") { emit_assign(inst, "acos(" + arg(0) + ")", d); return; }
+    if (sym == "atanf" || sym == "atan" || sym == "ptx_atan") { emit_assign(inst, "atan(" + arg(0) + ")", d); return; }
+    if (sym == "sinhf" || sym == "sinh" || sym == "ptx_sinh") { emit_assign(inst, "sinh(" + arg(0) + ")", d); return; }
+    if (sym == "coshf" || sym == "cosh" || sym == "ptx_cosh") { emit_assign(inst, "cosh(" + arg(0) + ")", d); return; }
+    if (sym == "atan2f" || sym == "atan2" || sym == "ptx_atan2") { emit_assign(inst, "atan2(" + arg(0) + ", " + arg(1) + ")", d); return; }
+    if (sym == "powf" || sym == "pow" || sym == "ptx_pow") { emit_assign(inst, "pow(" + arg(0) + ", " + arg(1) + ")", d); return; }
     if (sym == "tanhf" || sym == "ptx_tanh") { emit_assign(inst, "tanh(" + arg(0) + ")", d); return; }
+    if (sym == "signf" || sym == "ptx_sign") { emit_assign(inst, "sign(" + arg(0) + ")", d); return; }
+    if (sym == "fractf" || sym == "ptx_fract") { emit_assign(inst, "fract(" + arg(0) + ")", d); return; }
+    if (sym == "stepf" || sym == "ptx_step") { emit_assign(inst, "step(" + arg(0) + ", " + arg(1) + ")", d); return; }
+    if (sym == "smoothstepf" || sym == "ptx_smoothstep") { emit_assign(inst, "smoothstep(" + arg(0) + ", " + arg(1) + ", " + arg(2) + ")", d); return; }
     if (sym == "ex2f" || sym == "ex2" || sym == "ptx_ex2") { emit_assign(inst, "exp2(" + arg(0) + ")", d); return; }
     if (sym == "lg2f" || sym == "ptx_lg2") { emit_assign(inst, "log2(" + arg(0) + ")", d); return; }
     if (sym == "expf" || sym == "exp" || sym == "ptx_exp") { emit_assign(inst, "exp(" + arg(0) + ")", d); return; }
@@ -167,6 +189,8 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
 
     if (sym == "i32_to_f32" || sym == "ptx_i32_to_f32") { emit_assign(inst, "static_cast<float>(" + arg(0) + ")", d); return; }
     if (sym == "ptx_u32_to_f32") { emit_assign(inst, "static_cast<float>(as_type<uint32_t>(" + arg(0) + "))", d); return; }
+    if (sym == "ptx_i64_to_f32") { emit_assign(inst, "static_cast<float>(" + arg(0) + ")", d); return; }
+    if (sym == "ptx_u64_to_f32") { emit_assign(inst, "static_cast<float>(as_type<uint64_t>(" + arg(0) + "))", d); return; }
     if (sym == "ptx_f32_to_i32") { emit_assign(inst, "static_cast<int32_t>(" + arg(0) + ")", d); return; }
     if (sym == "ptx_f32_to_u32") { emit_assign(inst, "as_type<int32_t>(static_cast<uint32_t>(" + arg(0) + "))", d); return; }
     if (sym == "ptx_f16_to_f32") {
@@ -202,6 +226,50 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         res_.needs_sdot4_helper = true;
         emit_assign(inst, "_brass_sdot4(" + arg(0) + ", " + arg(1) + ", " + arg(2) + ")", d);
         return;
+    }
+
+    if (sym.rfind("ptx_atom_", 0) == 0) {
+        const bool is_shared = sym.rfind("ptx_atom_shared_", 0) == 0;
+        const std::string_view op = sym.substr(is_shared ? 16 : 9);
+        const std::string sp = is_shared ? "threadgroup" : "device";
+        if (op == "add_i64") fail_msl(fn_, "64-bit atomic add is not supported in Metal MSL");
+        if (op == "add_f32") {
+            res_.needs_atom_f32_helper = true;
+            emit_assign(inst, "_brass_atom_add_f32(reinterpret_cast<" + sp + " atomic_uint*>(" + arg(0) + "), " + arg(1) + ")", d);
+            return;
+        }
+        if (op == "exch_f32") {
+            emit_assign(inst, "as_type<float>(atomic_exchange_explicit(reinterpret_cast<" + sp + " atomic_uint*>(" +
+                               arg(0) + "), as_type<uint32_t>(" + arg(1) + "), memory_order_relaxed))", d);
+            return;
+        }
+        if (op == "cas_i32" || op == "cas_u32") {
+            res_.needs_atom_cas_helper = true;
+            emit_assign(inst, "_brass_atom_cas_i32(reinterpret_cast<" + sp + " atomic_int*>(" +
+                               arg(0) + "), " + arg(1) + ", " + arg(2) + ")", d);
+            return;
+        }
+        if (op == "add_u32" || op == "min_u32" || op == "max_u32") {
+            const char* fn_name = (op == "add_u32") ? "atomic_fetch_add_explicit"
+                                : (op == "min_u32") ? "atomic_fetch_min_explicit"
+                                                    : "atomic_fetch_max_explicit";
+            emit_assign(inst, "as_type<int32_t>(" + std::string(fn_name) + "(reinterpret_cast<" + sp + " atomic_uint*>(" +
+                               arg(0) + "), as_type<uint32_t>(" + arg(1) + "), memory_order_relaxed))", d);
+            return;
+        }
+        const char* int_fn = (op == "add_i32")                    ? "atomic_fetch_add_explicit"
+                           : (op == "min_i32")                    ? "atomic_fetch_min_explicit"
+                           : (op == "max_i32")                    ? "atomic_fetch_max_explicit"
+                           : (op == "and_i32" || op == "and_u32") ? "atomic_fetch_and_explicit"
+                           : (op == "or_i32"  || op == "or_u32")  ? "atomic_fetch_or_explicit"
+                           : (op == "xor_i32" || op == "xor_u32") ? "atomic_fetch_xor_explicit"
+                           : (op == "exch_i32"|| op == "exch_u32")? "atomic_exchange_explicit"
+                                                                  : nullptr;
+        if (int_fn) {
+            emit_assign(inst, std::string(int_fn) + "(reinterpret_cast<" + sp + " atomic_int*>(" +
+                               arg(0) + "), " + arg(1) + ", memory_order_relaxed)", d);
+            return;
+        }
     }
 
     fail_msl(fn_, "unsupported intrinsic '" + std::string(sym) + "'");

@@ -621,8 +621,8 @@ TEST_CASE("PTX IR - verifier rejects vector, shift, immediate and modifier misus
     { Fixture x; x.reject(Inst::make(Opcode::mul, Type::f32).lo().dst(x.f).src(x.f1).src(x.f), "only valid for integer mul"); }
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).lo().dst(x.r).src(x.r1).src(x.r), "only mul/mad take .lo/.hi/.wide"); }
     { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).cmp(CmpOp::eq).dst(x.r).src(x.r1).src(x.r), "only setp takes a comparison"); }
-    { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).space(StateSpace::global).dst(x.r).src(x.r1).src(x.r), "only ld/st/atom take a state space"); }
-    { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).from(Type::u64).dst(x.r).src(x.r1).src(x.r), "only cvt takes a second"); }
+    { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).space(StateSpace::global).dst(x.r).src(x.r1).src(x.r), "only ld/st/atom/wmma take a state space"); }
+    { Fixture x; x.reject(Inst::make(Opcode::add, Type::u32).from(Type::u64).dst(x.r).src(x.r1).src(x.r), "only cvt and dp4a take a second"); }
     { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::f32).dst(x.f).src(x.r), "cvt requires a source type"); }
     { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::f32).from(Type::u32).dst(x.f).src(x.r), "integer -> float cvt requires a rounding"); }
     { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::s32).from(Type::f32).dst(x.r).src(x.f), "float -> integer cvt requires an integer rounding"); }
