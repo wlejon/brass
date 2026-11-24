@@ -395,6 +395,19 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_load_s16",  &load_narrow<Type::s16> },
         { "ptx_store_u8",  &store_narrow<Type::u8> },
         { "ptx_store_u16", &store_narrow<Type::u16> },
+
+        // Cooperative matrix 16x16x16 (wmma.sync.aligned.m16n16k16)
+        { "ptx_coop_alloc_a",   &coop_alloc<0> },
+        { "ptx_coop_alloc_b",   &coop_alloc<1> },
+        { "ptx_coop_alloc_acc", &coop_alloc<2> },
+        { "ptx_coop_fill_acc",  &coop_fill_acc },
+        { "ptx_coop_load_a",    &coop_load<0> },
+        { "ptx_coop_load_b",    &coop_load<1> },
+        { "ptx_coop_load_acc",  &coop_load<2> },
+        { "ptx_coop_mma",       &coop_mma },
+        { "ptx_coop_store_acc", &coop_store_acc },
+        { "ptx_coop_scale_acc", &coop_scale_acc },
+        { "ptx_coop_add_acc",   &coop_add_acc },
     };
     return kIntrinsics;
 }

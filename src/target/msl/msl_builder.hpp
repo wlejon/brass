@@ -35,7 +35,9 @@ private:
     std::ostringstream body_;
     std::unordered_map<const Value*, std::string> val_names_;
     std::unordered_set<const Value*> shared_ptrs_;
+    std::unordered_map<const Value*, std::pair<std::string, int>> coop_vars_; // name, use (0=A,1=B,2=Acc)
     uint32_t shared_count_ = 0;
+    uint32_t coop_count_ = 0;
     uint32_t tmp_seq_ = 0;
     bool need_tid_ = false;
     bool need_ntid_ = false;
@@ -52,6 +54,15 @@ private:
         return sym == "ptx_shared_alloc_f32" || sym == "ptx_shared_alloc_i32" ||
                sym == "ptx_shared_alloc_f64" || sym == "ptx_shared_alloc_i64" ||
                sym == "ptx_shared_alloc_i32x4" || sym == "ptx_shared_alloc_u16";
+    }
+
+    static bool is_coop_alloc(std::string_view sym) {
+        return sym == "ptx_coop_alloc_a" || sym == "ptx_coop_alloc_b" || sym == "ptx_coop_alloc_acc";
+    }
+    static int coop_use_kind(std::string_view sym) {
+        if (sym == "ptx_coop_alloc_a") return 0;
+        if (sym == "ptx_coop_alloc_b") return 1;
+        return 2;
     }
 
     static Type shared_elem_type(std::string_view sym) {
@@ -88,6 +99,7 @@ private:
     void emit_assign(const Instruction& inst, const std::string& expr, int d);
     void lower_inst(const Instruction& inst, int d);
     void lower_call(const Instruction& inst, int d);
+    void lower_coop_call(const Instruction& inst, int d);
 };
 
 } // namespace brass::msl

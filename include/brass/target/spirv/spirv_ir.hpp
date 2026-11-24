@@ -131,6 +131,7 @@ public:
                uint32_t sampled, spv::ImageFormat format);
     Id t_sampled_image(Id image_type);
     Id t_sampler();
+    Id t_coop_mat(Id elem_type, uint32_t scope, uint32_t rows, uint32_t cols, uint32_t use);
     Id t_function(Id ret, const std::vector<Id>& params);
     const TypeInfo* type_info(Id type) const; // nullptr when `type` is not a type
 

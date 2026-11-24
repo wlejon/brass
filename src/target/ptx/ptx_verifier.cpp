@@ -367,8 +367,9 @@ private:
             error("only mul/mad take .lo/.hi/.wide");
         if (I.cmp_op != CmpOp::none && I.op != Opcode::setp)
             error("only setp takes a comparison operator");
-        if (I.state_space != StateSpace::none && I.op != Opcode::ld && I.op != Opcode::st && I.op != Opcode::atom)
-            error("only ld/st/atom take a state space");
+        if (I.state_space != StateSpace::none && I.op != Opcode::ld && I.op != Opcode::st &&
+            I.op != Opcode::atom && I.op != Opcode::wmma_load && I.op != Opcode::wmma_store)
+            error("only ld/st/atom/wmma take a state space");
 
         switch (I.op) {
             case Opcode::ld:    verify_ld(); break;
@@ -397,6 +398,9 @@ private:
             case Opcode::atom:  verify_atom(); break;
             case Opcode::activemask: verify_activemask(); break;
             case Opcode::vote:       verify_vote(); break;
+            case Opcode::wmma_load:  verify_wmma_load(); break;
+            case Opcode::wmma_store: verify_wmma_store(); break;
+            case Opcode::wmma_mma:   verify_wmma_mma(); break;
             default:
                 if (is_binary_alu(I.op)) verify_binary();
                 else if (is_unary_math(I.op)) verify_unary_math();
@@ -649,6 +653,51 @@ private:
         if (!check_arity(1, 1, 1)) return;
         expect_reg(I.dsts[0], I.type, "destination");
         expect_value(I.srcs[0], I.type, "source 0");
+    }
+
+    void verify_wmma_tuple(const Operand& o, size_t count, Type elem_t, const std::string& what) {
+        if (!o.is_vec()) {
+            error(what + " must be a {..} fragment register tuple");
+            return;
+        }
+        if (o.elems.size() != count) {
+            error(what + " must have " + std::to_string(count) + " registers, got " + std::to_string(o.elems.size()));
+        }
+        for (size_t i = 0; i < o.elems.size(); ++i) {
+            if (!reg_compatible(o.elems[i].cls, elem_t)) {
+                error(what + " element " + std::to_string(i) + " is not compatible with ." +
+                      std::string(to_string(elem_t)));
+            }
+        }
+    }
+
+    void verify_wmma_load() {
+        const Inst& I = *inst_;
+        if (!check_arity(1, 2, 2)) return;
+        size_t nregs = (I.type == Type::f16 && I.wmma_matrix == WmmaMatrix::c) ? 4u : 8u;
+        Type elem_t = (I.type == Type::f16) ? Type::b32 : I.type;
+        verify_wmma_tuple(I.dsts[0], nregs, elem_t, "wmma.load destination");
+        expect_addr(I.srcs[0], "wmma.load address");
+        expect_b32_or_imm(I.srcs[1], "wmma.load stride");
+    }
+
+    void verify_wmma_store() {
+        const Inst& I = *inst_;
+        if (!check_arity(0, 3, 3)) return;
+        size_t nregs = (I.type == Type::f16) ? 4u : 8u;
+        Type elem_t = (I.type == Type::f16) ? Type::b32 : I.type;
+        expect_addr(I.srcs[0], "wmma.store address");
+        verify_wmma_tuple(I.srcs[1], nregs, elem_t, "wmma.store source");
+        expect_b32_or_imm(I.srcs[2], "wmma.store stride");
+    }
+
+    void verify_wmma_mma() {
+        const Inst& I = *inst_;
+        if (!check_arity(1, 3, 3)) return;
+        verify_wmma_tuple(I.dsts[0], 8u, I.type, "wmma.mma d");
+        verify_wmma_tuple(I.srcs[0], 8u, Type::b32, "wmma.mma a");
+        verify_wmma_tuple(I.srcs[1], 8u, Type::b32, "wmma.mma b");
+        verify_wmma_tuple(I.srcs[2], 8u, I.wmma_c_type, "wmma.mma c");
     }
 };
 

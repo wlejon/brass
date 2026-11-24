@@ -4,7 +4,11 @@ namespace brass::msl {
 
 void MslFnBuilder::lower_call(const Instruction& inst, int d) {
     std::string_view sym = inst.symbol();
-    if (is_shared_alloc(sym)) return;
+    if (is_shared_alloc(sym) || is_coop_alloc(sym)) return;
+    if (sym.rfind("ptx_coop_", 0) == 0) {
+        lower_coop_call(inst, d);
+        return;
+    }
 
     auto arg = [&](size_t i) { return val_expr(inst.operand(i)); };
 

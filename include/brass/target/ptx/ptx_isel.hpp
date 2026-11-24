@@ -16,6 +16,7 @@
 
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace brass::ptx {
@@ -46,6 +47,12 @@ private:
         Type type; // mov suffix (bit_type_for the element type)
     };
 
+    struct CoopSlot {
+        uint32_t use = 0; // 0=A, 1=B, 2=Acc
+        std::vector<Reg> regs;
+        WmmaLayout layout = WmmaLayout::row;
+    };
+
     // ---- state ------------------------------------------------------------
     Function* fn_ = nullptr;
     Block* bb_ = nullptr;
@@ -56,8 +63,11 @@ private:
     std::unordered_map<const BasicBlock*, Block*> blocks_;
     std::unordered_map<const Value*, uint32_t> value_uses_;        // uses other than as a br_if/select condition
     std::unordered_map<uint8_t, Reg> special_cache_;               // invariant SpecialReg -> register read in the prologue
+    std::unordered_set<const Value*> shared_ptrs_;
+    std::unordered_map<const Value*, CoopSlot> coop_;
 
     // ---- setup (ptx_isel.cpp) ---------------------------------------------
+    void find_shared_allocs(const brass::Function& mir_fn);
     void analyze_uses(const brass::Function& mir_fn);
     void allocate_registers(const brass::Function& mir_fn);
     void lower_params(const brass::Function& mir_fn);

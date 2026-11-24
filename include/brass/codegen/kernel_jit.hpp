@@ -405,6 +405,19 @@ public:
     Value* f16_hi_to_f32(Value* bits_i32);
     Value* ldexp_f32(Value* x_f32, Value* exp_i32);
 
+    // 16x16x16 subgroup cooperative matrix / tensor-core fragments (FP16 inputs, FP32 acc)
+    Value* coop_alloc_a();
+    Value* coop_alloc_b();
+    Value* coop_alloc_acc();
+    Instruction* coop_fill_acc(Value* acc, Value* val_f32);
+    Instruction* coop_load_a(Value* a, Value* ptr, Value* stride_elems, bool col_major);
+    Instruction* coop_load_b(Value* b, Value* ptr, Value* stride_elems, bool col_major);
+    Instruction* coop_load_acc(Value* acc, Value* ptr, Value* stride_elems, bool col_major, bool src_is_f16 = false);
+    Instruction* coop_mma(Value* acc, Value* a, Value* b);
+    Instruction* coop_store_acc(Value* acc, Value* ptr, Value* stride_elems, bool col_major, bool dst_is_f16 = false);
+    Instruction* coop_scale_acc(Value* acc, Value* scalar_f32);
+    Instruction* coop_add_acc(Value* dst_acc, Value* rhs_acc);
+
     // Narrow global loads/stores (result/value in i32, zero- or sign-extended)
     Value* load_u8(Value* ptr, int32_t byte_offset = 0);
     Value* load_s8(Value* ptr, int32_t byte_offset = 0);

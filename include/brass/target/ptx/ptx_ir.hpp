@@ -106,7 +106,8 @@ enum class Opcode : uint8_t {
     bra, ret, call, trap, exit,
     shfl, bar, atom,
     rsqrt, sqrt, sin, cos, ex2, lg2, rcp, tanh,
-    activemask, vote
+    activemask, vote,
+    wmma_load, wmma_mma, wmma_store
 };
 
 std::string_view to_string(Opcode op) noexcept; // mnemonic ("and", "or", ...)
@@ -123,6 +124,8 @@ enum class CmpOp : uint8_t {
 };
 enum class ShflMode : uint8_t { none, up, down, bfly, idx };
 enum class AtomOp : uint8_t { none, add, min, max, inc, dec, and_, or_, xor_, exch, cas };
+enum class WmmaMatrix : uint8_t { none, a, b, c, d };
+enum class WmmaLayout : uint8_t { row, col };
 
 std::string_view to_string(Rounding r) noexcept;
 std::string_view to_string(StateSpace s) noexcept;
@@ -131,6 +134,8 @@ std::string_view to_string(MulMode m) noexcept;
 std::string_view to_string(CmpOp c) noexcept;
 std::string_view to_string(ShflMode m) noexcept;
 std::string_view to_string(AtomOp a) noexcept;
+std::string_view to_string(WmmaMatrix m) noexcept;
+std::string_view to_string(WmmaLayout l) noexcept;
 
 // Special (read-only) registers. Printed as %tid.x, %ctaid.x, ...
 enum class SpecialReg : uint8_t {
@@ -249,6 +254,10 @@ struct Inst {
     CmpOp cmp_op = CmpOp::none;
     ShflMode shfl_mode = ShflMode::none;
     AtomOp atom_op = AtomOp::none;
+    WmmaMatrix wmma_matrix = WmmaMatrix::none;
+    WmmaLayout wmma_layout = WmmaLayout::row;
+    WmmaLayout wmma_layout_b = WmmaLayout::col;
+    Type wmma_c_type = Type::none;
 
     bool has_guard = false;
     bool guard_negated = false;
@@ -286,6 +295,10 @@ struct Inst {
     Inst& cmp(CmpOp c) { cmp_op = c; return *this; }
     Inst& shfl(ShflMode m) { shfl_mode = m; return *this; }
     Inst& atom(AtomOp a) { atom_op = a; return *this; }
+    Inst& matrix(WmmaMatrix m) { wmma_matrix = m; return *this; }
+    Inst& layout(WmmaLayout l) { wmma_layout = l; return *this; }
+    Inst& layout_b(WmmaLayout l) { wmma_layout_b = l; return *this; }
+    Inst& ctype(Type t) { wmma_c_type = t; return *this; }
     Inst& origin(const brass::Instruction* i) { mir_origin = i; return *this; }
 
     bool is_terminator() const noexcept {

@@ -85,6 +85,7 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     bools_.clear();
     shared_.clear();
     local_.clear();
+    coop_.clear();
     num_local_vars_ = 0;
     load_vars_.clear();
     value_uses_.clear();

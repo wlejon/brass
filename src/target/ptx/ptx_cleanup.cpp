@@ -236,6 +236,7 @@ bool has_side_effects(const Inst& I) {
         case Opcode::st: case Opcode::atom: case Opcode::bar: case Opcode::call:
         case Opcode::ret: case Opcode::bra: case Opcode::trap: case Opcode::exit:
         case Opcode::shfl: // warp-collective: keep even when the result is unused
+        case Opcode::wmma_load: case Opcode::wmma_mma: case Opcode::wmma_store:
             return true;
         case Opcode::mov:
             return I.srcs.size() == 1 && I.srcs[0].is_special() && !is_invariant(I.srcs[0].special_reg);

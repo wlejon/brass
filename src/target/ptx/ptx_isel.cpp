@@ -50,7 +50,10 @@ Function PtxISel::lower(const brass::Function& mir_fn) {
     blocks_.clear();
     value_uses_.clear();
     special_cache_.clear();
+    shared_ptrs_.clear();
+    coop_.clear();
 
+    find_shared_allocs(mir_fn);
     analyze_uses(mir_fn);
     allocate_registers(mir_fn);
 
@@ -72,6 +75,37 @@ Function PtxISel::lower(const brass::Function& mir_fn) {
 // ---------------------------------------------------------------------------
 // Analysis and register assignment
 // ---------------------------------------------------------------------------
+
+void PtxISel::find_shared_allocs(const brass::Function& mir_fn) {
+    auto is_sh_alloc = [](std::string_view s) {
+        return s == "ptx_shared_alloc_f32" || s == "ptx_shared_alloc_i32" ||
+               s == "ptx_shared_alloc_f64" || s == "ptx_shared_alloc_i64" ||
+               s == "ptx_shared_alloc_i32x4" || s == "ptx_shared_alloc_u16";
+    };
+    for (const BasicBlock* bb : mir_fn.blocks()) {
+        for (const brass::Instruction* inst : *bb) {
+            if (inst->opcode() == brass::Opcode::call && inst->result() && is_sh_alloc(inst->symbol())) {
+                shared_ptrs_.insert(inst->result());
+            }
+        }
+    }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const BasicBlock* bb : mir_fn.blocks()) {
+            for (const brass::Instruction* inst : *bb) {
+                if (!inst->result() || !inst->type().is_pointer() || shared_ptrs_.count(inst->result())) continue;
+                for (size_t i = 0; i < inst->operand_count(); ++i) {
+                    if (shared_ptrs_.count(inst->operand(i))) {
+                        shared_ptrs_.insert(inst->result());
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
 
 void PtxISel::analyze_uses(const brass::Function& mir_fn) {
     auto count = [&](const Value* v) { if (v) ++value_uses_[v]; };

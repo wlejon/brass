@@ -104,6 +104,17 @@ struct PtxISel::Intrinsics {
     static void load_narrow(PtxISel& isel, const brass::Instruction& inst);
     template <Type T>
     static void store_narrow(PtxISel& isel, const brass::Instruction& inst);
+
+    // ---- cooperative matrix 16x16x16 (ptx_isel_coopmat.cpp) ----------------
+    template <uint32_t Use>
+    static void coop_alloc(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_fill_acc(PtxISel& isel, const brass::Instruction& inst);
+    template <uint32_t Use>
+    static void coop_load(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_mma(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_store_acc(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_scale_acc(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_add_acc(PtxISel& isel, const brass::Instruction& inst);
 };
 
 } // namespace brass::ptx

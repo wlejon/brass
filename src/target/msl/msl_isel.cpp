@@ -119,6 +119,13 @@ MslEmitter::KernelResult MslFnBuilder::run() {
                     shared_ptrs_.insert(inst->result());
                     res_.uses_shared_memory = true;
                     res_.shared_memory_bytes += count * static_cast<uint32_t>(et.size_in_bytes());
+                } else if (inst->opcode() == Opcode::call && inst->result() && is_coop_alloc(inst->symbol())) {
+                    int use = coop_use_kind(inst->symbol());
+                    std::string cname = "_cm_" + std::to_string(coop_count_++);
+                    decls << "    " << (use == 2 ? "simdgroup_float8x8" : "simdgroup_half8x8")
+                          << " " << cname << "[4];\n";
+                    coop_vars_[inst->result()] = {cname, use};
+                    res_.uses_coopmat = true;
                 } else if (inst->result() && !inst->type().is_void()) {
                     std::string vn = "v_" + std::to_string(inst->result()->id());
                     val_names_[inst->result()] = vn;

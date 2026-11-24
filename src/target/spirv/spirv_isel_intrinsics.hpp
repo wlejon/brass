@@ -82,6 +82,20 @@ struct SpirvISel::Intrinsics {
     template <TypeKind K, bool Indexed>
     static void shared_store(SpirvISel& isel, const brass::Instruction& inst);
     static void shared_load_f32_from_v4(SpirvISel& isel, const brass::Instruction& inst);
+
+    // ---- cooperative matrix 16x16x16 (spirv_isel_coopmat.cpp) --------------
+    template <uint32_t Use>
+    static void coop_alloc(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_fill_acc(SpirvISel& isel, const brass::Instruction& inst);
+    template <uint32_t Use>
+    static void coop_load(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_mma(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_store_acc(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_scale_acc(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_add_acc(SpirvISel& isel, const brass::Instruction& inst);
+    static const SpirvISel::CoopRef& coop_ref(SpirvISel& isel, const Value* v, const char* what);
+    static Id coop_ptr_and_stride(SpirvISel& isel, const Value* ptr, const Value* stride_elems,
+                                  bool elem_is_f16, Id& out_stride, bool& out_is_psb, uint32_t& out_align);
     template <uint32_t Bits, bool Signed>
     static void load_narrow(SpirvISel& isel, const brass::Instruction& inst);
     template <uint32_t Bits>

@@ -95,6 +95,27 @@ std::string mnemonic(const Inst& inst) {
         if (!part.empty()) { s += '.'; s += part; }
     };
 
+    if (inst.op == Opcode::wmma_load || inst.op == Opcode::wmma_store) {
+        suffix(to_string(inst.wmma_matrix));
+        suffix("sync");
+        suffix("aligned");
+        suffix(to_string(inst.wmma_layout));
+        suffix("m16n16k16");
+        suffix(to_string(inst.state_space));
+        suffix(to_string(inst.type));
+        return s;
+    }
+    if (inst.op == Opcode::wmma_mma) {
+        suffix("sync");
+        suffix("aligned");
+        suffix(to_string(inst.wmma_layout));
+        suffix(to_string(inst.wmma_layout_b));
+        suffix("m16n16k16");
+        suffix(to_string(inst.type));
+        suffix(to_string(inst.wmma_c_type));
+        return s;
+    }
+
     switch (inst.op) {
         case Opcode::shfl:
             if (inst.is_sync) suffix("sync");

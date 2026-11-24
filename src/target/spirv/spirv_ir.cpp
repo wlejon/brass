@@ -161,6 +161,7 @@ Id Module::t_int(uint32_t width, uint32_t signedness) {
 }
 
 Id Module::t_float(uint32_t width) {
+    if (width == 16) add_capability(spv::CapabilityFloat16);
     if (width == 64) add_capability(spv::CapabilityFloat64);
     TypeInfo ti{spv::OpTypeFloat, width};
     return intern(Inst(spv::OpTypeFloat).lit(width), &ti);
@@ -233,6 +234,18 @@ Id Module::t_sampled_image(Id image_type) {
 Id Module::t_sampler() {
     TypeInfo ti{spv::OpTypeSampler, 0};
     return intern(Inst(spv::OpTypeSampler), &ti);
+}
+
+Id Module::t_coop_mat(Id elem_type, uint32_t scope, uint32_t rows, uint32_t cols, uint32_t use) {
+    add_capability(spv::CapabilityCooperativeMatrixKHR);
+    TypeInfo ti{spv::OpTypeCooperativeMatrixKHR, rows, elem_type};
+    return intern(Inst(spv::OpTypeCooperativeMatrixKHR)
+                      .id(elem_type)
+                      .id(c_u32(scope))
+                      .id(c_u32(rows))
+                      .id(c_u32(cols))
+                      .id(c_u32(use)),
+                  &ti);
 }
 
 Id Module::t_function(Id ret, const std::vector<Id>& params) {

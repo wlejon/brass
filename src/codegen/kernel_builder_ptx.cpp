@@ -227,6 +227,52 @@ Value* KernelBuilder::ldexp_f32(Value* x, Value* exp) {
     return b_.build_call("ptx_ldexp_f32", Type::f32(), {x, exp});
 }
 
+Value* KernelBuilder::coop_alloc_a()   { return b_.build_call("ptx_coop_alloc_a", Type::ptr()); }
+Value* KernelBuilder::coop_alloc_b()   { return b_.build_call("ptx_coop_alloc_b", Type::ptr()); }
+Value* KernelBuilder::coop_alloc_acc() { return b_.build_call("ptx_coop_alloc_acc", Type::ptr()); }
+
+Instruction* KernelBuilder::coop_fill_acc(Value* acc, Value* val_f32) {
+    b_.build_call("ptx_coop_fill_acc", Type::void_type(), {acc, val_f32});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_load_a(Value* a, Value* ptr, Value* stride_elems, bool col_major) {
+    b_.build_call("ptx_coop_load_a", Type::void_type(), {a, ptr, stride_elems, const_i32(col_major ? 1 : 0)});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_load_b(Value* b, Value* ptr, Value* stride_elems, bool col_major) {
+    b_.build_call("ptx_coop_load_b", Type::void_type(), {b, ptr, stride_elems, const_i32(col_major ? 1 : 0)});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_load_acc(Value* acc, Value* ptr, Value* stride_elems, bool col_major, bool src_is_f16) {
+    b_.build_call("ptx_coop_load_acc", Type::void_type(),
+                  {acc, ptr, stride_elems, const_i32(col_major ? 1 : 0), const_i32(src_is_f16 ? 1 : 0)});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_mma(Value* acc, Value* a, Value* b) {
+    b_.build_call("ptx_coop_mma", Type::void_type(), {acc, a, b});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_store_acc(Value* acc, Value* ptr, Value* stride_elems, bool col_major, bool dst_is_f16) {
+    b_.build_call("ptx_coop_store_acc", Type::void_type(),
+                  {acc, ptr, stride_elems, const_i32(col_major ? 1 : 0), const_i32(dst_is_f16 ? 1 : 0)});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_scale_acc(Value* acc, Value* scalar_f32) {
+    b_.build_call("ptx_coop_scale_acc", Type::void_type(), {acc, scalar_f32});
+    return b_.current_block()->tail();
+}
+
+Instruction* KernelBuilder::coop_add_acc(Value* dst_acc, Value* rhs_acc) {
+    b_.build_call("ptx_coop_add_acc", Type::void_type(), {dst_acc, rhs_acc});
+    return b_.current_block()->tail();
+}
+
 // ---------------------------------------------------------------------------
 // Narrow loads/stores and atomics
 // ---------------------------------------------------------------------------

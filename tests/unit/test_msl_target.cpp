@@ -268,6 +268,43 @@ TEST_CASE("MSL Target - Packed Dot, Half2 Pack/Hi, and Ldexp") {
     CHECK(has(k.source, "ldexp("));
 }
 
+TEST_CASE("MSL Target - 16x16x16 Cooperative Matrix GEMM via simdgroup_matrix") {
+    Module mod("msl_coop");
+    Function* fn = mod.create_function("coop_gemm_16", Type::void_type(),
+                                       {Type::ptr(), Type::ptr(), Type::ptr(), Type::i32()});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* pa = b.add_block_param(entry, Type::ptr());
+    Value* pb = b.add_block_param(entry, Type::ptr());
+    Value* pc = b.add_block_param(entry, Type::ptr());
+    Value* k_stride = b.add_block_param(entry, Type::i32());
+
+    KernelBuilder kb(b);
+    Value* a_mat = kb.coop_alloc_a();
+    Value* b_mat = kb.coop_alloc_b();
+    Value* acc   = kb.coop_alloc_acc();
+    kb.coop_fill_acc(acc, kb.const_f32(0.0f));
+    kb.coop_load_a(a_mat, pa, k_stride, false);
+    kb.coop_load_b(b_mat, pb, k_stride, true);
+    kb.coop_mma(acc, a_mat, b_mat);
+    kb.coop_scale_acc(acc, kb.const_f32(2.0f));
+    kb.coop_store_acc(acc, pc, kb.const_i32(16), false, true);
+    b.build_ret_void();
+    fn->rebuild_cfg_predecessors();
+
+    MslKernel k = MslTarget::compile(*fn);
+    CHECK(has(k.source, "#include <metal_simdgroup_matrix>"));
+    CHECK(has(k.source, "simdgroup_half8x8"));
+    CHECK(has(k.source, "simdgroup_float8x8"));
+    CHECK(has(k.source, "simdgroup_load("));
+    CHECK(has(k.source, "simdgroup_multiply_accumulate("));
+    CHECK(has(k.source, "simdgroup_store("));
+    CHECK(has(k.source, "true);"));
+}
+
 TEST_CASE("MSL Target - Multi-Kernel Module Emission") {
     Module mod("msl_multi");
     build_vec4_saxpy(mod, "kernel_one");

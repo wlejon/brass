@@ -375,6 +375,19 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_shared_store_i32x4_indexed", &shared_store<TypeKind::I32x4, true> },
         { "ptx_shared_store_u16_indexed",   &shared_store<TypeKind::I16, true> },
 
+        // Cooperative matrix 16x16x16 (SPV_KHR_cooperative_matrix)
+        { "ptx_coop_alloc_a",   &coop_alloc<spv::CooperativeMatrixUseMatrixAKHR> },
+        { "ptx_coop_alloc_b",   &coop_alloc<spv::CooperativeMatrixUseMatrixBKHR> },
+        { "ptx_coop_alloc_acc", &coop_alloc<spv::CooperativeMatrixUseMatrixAccumulatorKHR> },
+        { "ptx_coop_fill_acc",  &coop_fill_acc },
+        { "ptx_coop_load_a",    &coop_load<spv::CooperativeMatrixUseMatrixAKHR> },
+        { "ptx_coop_load_b",    &coop_load<spv::CooperativeMatrixUseMatrixBKHR> },
+        { "ptx_coop_load_acc",  &coop_load<spv::CooperativeMatrixUseMatrixAccumulatorKHR> },
+        { "ptx_coop_mma",       &coop_mma },
+        { "ptx_coop_store_acc", &coop_store_acc },
+        { "ptx_coop_scale_acc", &coop_scale_acc },
+        { "ptx_coop_add_acc",   &coop_add_acc },
+
         // Narrow global access (8/16-bit storage)
         { "ptx_load_u8",   &load_narrow<8, false> },
         { "ptx_load_s8",   &load_narrow<8, true> },

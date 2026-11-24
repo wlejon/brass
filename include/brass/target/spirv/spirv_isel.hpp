@@ -89,6 +89,12 @@ private:
         bool const_init = false;
     };
 
+    struct CoopRef {
+        Id var = 0;
+        uint32_t use = 0;
+        Id mat_type = 0;
+    };
+
     // ---- state -----------------------------------------------------------------
     Module& m_;
     target::SpirvOptions opts_;
@@ -101,6 +107,7 @@ private:
     std::unordered_map<const Value*, Id> bools_;              // comparison result -> bool id
     std::unordered_map<const Value*, SharedRef> shared_;
     std::unordered_map<const Value*, LocalRef> local_;
+    std::unordered_map<const Value*, CoopRef> coop_;
     size_t num_local_vars_ = 0;
     std::unordered_map<Id, Id> load_vars_;                    // pointee type -> its loads' pointer variable (loads_through_variable)
     std::unordered_map<const Value*, uint32_t> value_uses_;   // uses other than as a br_if/select condition

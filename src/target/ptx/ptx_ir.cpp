@@ -193,6 +193,9 @@ std::string_view to_string(Opcode op) noexcept {
         case Opcode::tanh:  return "tanh";
         case Opcode::activemask: return "activemask";
         case Opcode::vote:  return "vote";
+        case Opcode::wmma_load:  return "wmma.load";
+        case Opcode::wmma_mma:   return "wmma.mma";
+        case Opcode::wmma_store: return "wmma.store";
     }
     return "?";
 }
@@ -296,6 +299,25 @@ std::string_view to_string(AtomOp a) noexcept {
     return "?";
 }
 
+std::string_view to_string(WmmaMatrix m) noexcept {
+    switch (m) {
+        case WmmaMatrix::none: return "";
+        case WmmaMatrix::a:    return "a";
+        case WmmaMatrix::b:    return "b";
+        case WmmaMatrix::c:    return "c";
+        case WmmaMatrix::d:    return "d";
+    }
+    return "?";
+}
+
+std::string_view to_string(WmmaLayout l) noexcept {
+    switch (l) {
+        case WmmaLayout::row: return "row";
+        case WmmaLayout::col: return "col";
+    }
+    return "?";
+}
+
 std::string_view to_string(SpecialReg s) noexcept {
     switch (s) {
         case SpecialReg::tid_x:       return "%tid.x";
@@ -374,6 +396,11 @@ bool allows_immediate(Opcode op, size_t src_index) noexcept {
             return src_index >= 1;
         case Opcode::vote:                       // mask is source 1
             return src_index == 1;
+        case Opcode::wmma_load:                  // stride is source 1
+            return src_index == 1;
+        case Opcode::wmma_store:                 // stride is source 2
+            return src_index == 2;
+        case Opcode::wmma_mma:
         case Opcode::activemask:
         case Opcode::ld: case Opcode::cvt:
         case Opcode::bra: case Opcode::ret: case Opcode::trap: case Opcode::exit:
