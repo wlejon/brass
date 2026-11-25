@@ -482,6 +482,10 @@ private:
             error("float -> integer cvt requires an integer rounding modifier (.rni/.rzi/.rmi/.rpi)");
         if (I.type == Type::f32 && I.src_type == Type::f64 && I.rounding == Rounding::none)
             error("f64 -> f32 cvt requires a rounding modifier");
+        if (is_float(I.type) && is_float(I.src_type) && bit_width(I.type) > bit_width(I.src_type) &&
+            (I.rounding == Rounding::rn || I.rounding == Rounding::rz ||
+             I.rounding == Rounding::rm || I.rounding == Rounding::rp))
+            error("widening float -> float cvt forbids float rounding modifiers (.rn/.rz/.rm/.rp)");
     }
 
     void verify_binary() {

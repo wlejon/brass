@@ -770,3 +770,25 @@ TEST_CASE("PTX ISel - verifier failures surface as loud errors, unknown opcodes 
     }
     CHECK(threw);
 }
+
+TEST_CASE("PTX ISel - widening fpext_f64_f32 emits cvt.f64.f32 without rounding modifier") {
+    Module mod("fpext");
+    brass::Function* f = mod.create_function("fpext", Type::void_type(), {Type::f32(), Type::f64(), Type::ptr()});
+    Builder b(mod);
+    b.set_function(f);
+    BasicBlock* e = b.append_block("entry");
+    b.position_at_end(e);
+    Value* xf = b.add_block_param(e, Type::f32());
+    Value* xd = b.add_block_param(e, Type::f64());
+    Value* out = b.add_block_param(e, Type::ptr());
+    b.build_store(Type::f64(), out, 0, b.build_fpext_f64_f32(xf));
+    b.build_store(Type::f32(), out, 8, b.build_fptrunc_f32_f64(xd));
+    b.build_ret_void();
+
+    ptx::Function fn = lower_ok(*f);
+    std::string ptx = target::PtxTarget::emit_function(*f);
+    CHECK(ptx.find("cvt.f64.f32") != std::string::npos);
+    CHECK(ptx.find("cvt.rn.f64.f32") == std::string::npos);
+    CHECK(ptx.find("cvt.rn.f32.f64") != std::string::npos);
+    if (ptxas_available()) CHECK(ptxas_assembles(ptx, "sm_70"));
+}

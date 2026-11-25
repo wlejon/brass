@@ -310,7 +310,7 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::fptosi_i64:
         case Opcode::fptosi_i64_f32: lower_fptosi(inst, Type::s64); break;
         case Opcode::fptrunc_f32_f64: lower_cvt(inst, Type::f32, Type::f64, Rounding::rn); break;
-        case Opcode::fpext_f64_f32:   lower_cvt(inst, Type::f64, Type::f32, Rounding::rn); break;
+        case Opcode::fpext_f64_f32:   lower_cvt(inst, Type::f64, Type::f32); break;
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32:

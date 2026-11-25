@@ -627,6 +627,7 @@ TEST_CASE("PTX IR - verifier rejects vector, shift, immediate and modifier misus
     { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::f32).from(Type::u32).dst(x.f).src(x.r), "integer -> float cvt requires a rounding"); }
     { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::s32).from(Type::f32).dst(x.r).src(x.f), "float -> integer cvt requires an integer rounding"); }
     { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::u64).from(Type::u32).dst(x.rd).src(x.f), "source 0 is %f0"); }
+    { Fixture x; x.reject(Inst::make(Opcode::cvt, Type::f64).from(Type::f32).rnd(Rounding::rn).dst(x.fd).src(x.f), "widening float -> float cvt forbids float rounding"); }
     { Fixture x; x.reject(Inst::make(Opcode::div, Type::f32).dst(x.f).src(x.f1).src(x.f), "float div requires .approx or a rounding"); }
     { Fixture x; x.reject(Inst::make(Opcode::fma, Type::f32).dst(x.f).src(x.f1).src(x.f).src(x.f), "fma requires a rounding modifier"); }
     { Fixture x; x.reject(Inst::make(Opcode::and_, Type::u32).dst(x.r).src(x.r1).src(x.r), "and requires a bit type"); }
