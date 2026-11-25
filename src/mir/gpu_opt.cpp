@@ -113,6 +113,16 @@ bool is_pure_hoistable_gpu_op(Opcode op) noexcept {
     }
 }
 
+bool is_defined_outside_loop(const LoopInfo& loop, const Value* op) noexcept {
+    if (!op) return true;
+    if (op->is_block_param()) return !loop.contains(op->defining_block());
+    if (op->is_instruction()) {
+        const Instruction* def = op->defining_instruction();
+        return !def || !loop.contains(def->parent());
+    }
+    return true;
+}
+
 bool hoist_pure_gpu_loop_invariants(Function& fn) {
     if (!fn.entry_block() || fn.blocks().size() < 2) return false;
     fn.rebuild_cfg_predecessors();
@@ -131,20 +141,34 @@ bool hoist_pure_gpu_loop_invariants(Function& fn) {
         while (progress) {
             progress = false;
             for (BasicBlock* bb : loop->blocks()) {
-                if (!bb || !dom.is_reachable(bb)) continue;
+                if (!bb || bb == loop->preheader()) continue;
                 for (Instruction* inst : *bb) {
                     if (!inst || !inst->produces_value() || !is_pure_hoistable_gpu_op(inst->opcode())) continue;
                     if (invariant_defs.count(inst->result())) continue;
                     bool ops_invariant = true;
+                    std::vector<Instruction*> needed_consts;
                     for (size_t i = 0; i < inst->operand_count(); ++i) {
                         const Value* op = inst->operand(i);
-                        if (!op) continue;
-                        if (!loop->is_loop_invariant(op) && !invariant_defs.count(op)) {
-                            ops_invariant = false;
-                            break;
+                        if (!op || is_defined_outside_loop(*loop, op) || invariant_defs.count(op)) {
+                            continue;
                         }
+                        if (op->is_instruction()) {
+                            Instruction* def = op->defining_instruction();
+                            if (def && is_constant(def->opcode()) && def->parent() &&
+                                loop->contains(def->parent())) {
+                                needed_consts.push_back(def);
+                                continue;
+                            }
+                        }
+                        ops_invariant = false;
+                        break;
                     }
                     if (ops_invariant) {
+                        for (Instruction* cinst : needed_consts) {
+                            if (cinst->result() && invariant_defs.insert(cinst->result()).second) {
+                                to_hoist.push_back({cinst->parent(), cinst});
+                            }
+                        }
                         invariant_defs.insert(inst->result());
                         to_hoist.push_back({bb, inst});
                         progress = true;

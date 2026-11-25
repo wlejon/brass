@@ -190,3 +190,89 @@ TEST_CASE("GPU Opt - FMA Fusion and Pure Loop-Invariant Hoisting Lower Cleanly")
     msl_opts.workgroup_x = 32;
     CHECK(target::MslTarget::compile(*fn, msl_opts).source.find("fma(") != std::string::npos);
 }
+
+TEST_CASE("GPU Opt - LICM Hoists In-Loop Constant Operands Before Hoisted Users") {
+    Module mod("gpu_licm_consts");
+    Function* fn = mod.create_function("licm_consts", Type::void_type(),
+                                       {Type::ptr(), Type::f32(), Type::i32(), Type::i32()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* loop  = b.append_block("loop");
+    BasicBlock* body  = b.append_block("body");
+    BasicBlock* exit  = b.append_block("exit");
+
+    b.position_at_end(entry);
+    Value* out_ptr = b.add_block_param(entry, Type::ptr());
+    Value* a       = b.add_block_param(entry, Type::f32());
+    Value* row     = b.add_block_param(entry, Type::i32());
+    Value* n       = b.add_block_param(entry, Type::i32());
+    Value* c0      = b.build_iconst_i32(0);
+    Value* c1      = b.build_iconst_i32(1);
+    b.build_br(loop, {c0});
+
+    b.position_at_end(loop);
+    Value* iv = b.add_block_param(loop, Type::i32());
+    b.build_br_if(b.build_slt(iv, n), body, {}, exit, {});
+
+    b.position_at_end(body);
+    // Constants materialized inside the loop body and consumed by loop-invariant ops.
+    Value* c33      = b.build_iconst_i32(33);
+    Value* chalf    = b.build_fconst_f32(0.5f);
+    Value* base_idx = b.build_mul(row, c33);
+    Value* elem_idx = b.build_add(base_idx, iv);
+    Value* shifted  = b.build_add(a, chalf);
+    b.build_store_indexed(Type::f32(), out_ptr, elem_idx, 4, shifted);
+    b.build_br(loop, {b.build_add(iv, c1)});
+
+    b.position_at_end(exit);
+    b.build_ret_void();
+
+    GpuOptOptions opt;
+    opt.opt_level = 1;
+    CHECK(optimize_gpu_function(*fn, mod, opt));
+
+    DiagnosticReporter diag;
+    CHECK(verify_module(mod, &diag));
+
+    size_t body_muls = 0;
+    for (const Instruction* inst : *body) {
+        if (inst->opcode() == Opcode::mul) ++body_muls;
+    }
+    CHECK_EQ(body_muls, 0u);
+
+    // Every non-loop block's instructions must only use values defined outside the loop.
+    for (const BasicBlock* bb : fn->blocks()) {
+        if (bb == loop || bb == body) continue;
+        for (const Instruction* inst : *bb) {
+            for (size_t i = 0; i < inst->operand_count(); ++i) {
+                const Value* op = inst->operand(i);
+                if (op && op->is_instruction()) {
+                    const BasicBlock* def_bb = op->defining_instruction()->parent();
+                    CHECK(def_bb != loop);
+                    CHECK(def_bb != body);
+                }
+            }
+        }
+    }
+
+    target::MslOptions msl_opts;
+    msl_opts.workgroup_x = 32;
+    std::string msl_src = target::MslTarget::compile(*fn, msl_opts).source;
+    size_t pos_33 = msl_src.find("= 33;");
+    size_t pos_while = msl_src.find("while (true)");
+    CHECK(pos_33 != std::string::npos);
+    CHECK(pos_while != std::string::npos);
+    CHECK(pos_33 < pos_while);
+
+    // Constant 33 must appear before any preheader multiply that uses it.
+    size_t pos_mul = msl_src.find(" * ", pos_33);
+    CHECK(pos_mul != std::string::npos);
+    CHECK(pos_mul < pos_while);
+
+    CHECK(!target::PtxTarget::emit_function(*fn).empty());
+    target::SpirvOptions spv_opts;
+    spv_opts.stage = target::SpirvStage::Compute;
+    spv_opts.local_size_x = 32;
+    CHECK(!target::SpirvTarget::compile(*fn, spv_opts).words.empty());
+}
