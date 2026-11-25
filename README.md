@@ -115,4 +115,5 @@ otherwise, and the library itself has no link-time CUDA or Vulkan dependency.
 - [Host Engine & Heap Embedding Guide](docs/embedding.md)
 - [PTX Backend Design](docs/ptx_backend_design.md)
 - [Writing PTX Kernels with KernelBuilder](docs/ptx_kernel_authoring.md)
+- [GPU Portability & Backend-Neutral Intrinsics](docs/gpu_portability.md)
 - [SPIR-V Backend Design](docs/spirv_backend_design.md)

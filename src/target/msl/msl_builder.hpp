@@ -2,6 +2,7 @@
 
 #include "msl_isel.hpp"
 #include <brass/mir/opcodes.hpp>
+#include <brass/target/gpu_intrinsics.hpp>
 
 #include <sstream>
 #include <stdexcept>
@@ -50,22 +51,26 @@ private:
         for (int i = 0; i < d; ++i) body_ << "    ";
     }
 
-    static bool is_shared_alloc(std::string_view sym) {
+    static bool is_shared_alloc(std::string_view raw) {
+        std::string_view sym = target::canonical_gpu_intrinsic(raw);
         return sym == "ptx_shared_alloc_f32" || sym == "ptx_shared_alloc_i32" ||
                sym == "ptx_shared_alloc_f64" || sym == "ptx_shared_alloc_i64" ||
                sym == "ptx_shared_alloc_i32x4" || sym == "ptx_shared_alloc_u16";
     }
 
-    static bool is_coop_alloc(std::string_view sym) {
+    static bool is_coop_alloc(std::string_view raw) {
+        std::string_view sym = target::canonical_gpu_intrinsic(raw);
         return sym == "ptx_coop_alloc_a" || sym == "ptx_coop_alloc_b" || sym == "ptx_coop_alloc_acc";
     }
-    static int coop_use_kind(std::string_view sym) {
+    static int coop_use_kind(std::string_view raw) {
+        std::string_view sym = target::canonical_gpu_intrinsic(raw);
         if (sym == "ptx_coop_alloc_a") return 0;
         if (sym == "ptx_coop_alloc_b") return 1;
         return 2;
     }
 
-    static Type shared_elem_type(std::string_view sym) {
+    static Type shared_elem_type(std::string_view raw) {
+        std::string_view sym = target::canonical_gpu_intrinsic(raw);
         if (sym == "ptx_shared_alloc_i32") return Type::i32();
         if (sym == "ptx_shared_alloc_f64") return Type::f64();
         if (sym == "ptx_shared_alloc_i64") return Type::i64();
@@ -74,7 +79,8 @@ private:
         return Type::f32();
     }
 
-    static std::string shared_decl_elem_type(std::string_view sym, const MslFnBuilder& self) {
+    static std::string shared_decl_elem_type(std::string_view raw, const MslFnBuilder& self) {
+        std::string_view sym = target::canonical_gpu_intrinsic(raw);
         if (sym == "ptx_shared_alloc_u16") return "uint16_t";
         return self.msl_type(shared_elem_type(sym));
     }

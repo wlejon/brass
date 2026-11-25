@@ -3,6 +3,7 @@
 // ptx_isel_mem.cpp, ptx_isel_control.cpp and ptx_isel_intrinsics.cpp.
 
 #include <brass/target/ptx/ptx_isel.hpp>
+#include <brass/target/gpu_intrinsics.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/opcodes.hpp>
@@ -77,7 +78,8 @@ Function PtxISel::lower(const brass::Function& mir_fn) {
 // ---------------------------------------------------------------------------
 
 void PtxISel::find_shared_allocs(const brass::Function& mir_fn) {
-    auto is_sh_alloc = [](std::string_view s) {
+    auto is_sh_alloc = [](std::string_view raw) {
+        std::string_view s = target::canonical_gpu_intrinsic(raw);
         return s == "ptx_shared_alloc_f32" || s == "ptx_shared_alloc_i32" ||
                s == "ptx_shared_alloc_f64" || s == "ptx_shared_alloc_i64" ||
                s == "ptx_shared_alloc_i32x4" || s == "ptx_shared_alloc_u16";

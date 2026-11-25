@@ -3,7 +3,7 @@
 namespace brass::msl {
 
 void MslFnBuilder::lower_coop_call(const Instruction& inst, int d) {
-    std::string_view sym = inst.symbol();
+    std::string_view sym = target::canonical_gpu_intrinsic(inst.symbol());
     auto arg = [&](size_t i) { return val_expr(inst.operand(i)); };
     auto coop_slot = [&](const Value* v, const char* what) -> const std::pair<std::string, int>& {
         auto it = coop_vars_.find(v);

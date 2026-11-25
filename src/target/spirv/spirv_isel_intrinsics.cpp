@@ -10,6 +10,7 @@
 // docs/spirv_backend_design.md.
 
 #include "spirv_isel_intrinsics.hpp"
+#include <brass/target/gpu_intrinsics.hpp>
 
 #include <spirv/unified1/GLSL.std.450.h>
 
@@ -500,13 +501,13 @@ const std::unordered_map<std::string_view, const char*>& SpirvISel::Intrinsics::
 
 SpirvISel::IntrinsicLowering SpirvISel::find_intrinsic(std::string_view callee) noexcept {
     const auto& table = Intrinsics::table();
-    auto it = table.find(callee);
+    auto it = table.find(target::canonical_gpu_intrinsic(callee));
     return it == table.end() ? nullptr : it->second;
 }
 
 const char* SpirvISel::unsupported_reason(std::string_view callee) noexcept {
     const auto& u = Intrinsics::unsupported();
-    auto it = u.find(callee);
+    auto it = u.find(target::canonical_gpu_intrinsic(callee));
     return it == u.end() ? nullptr : it->second;
 }
 

@@ -9,8 +9,11 @@ new kernel. Nothing here involves PTX text; a kernel author never writes a
 mnemonic.
 
 The same kernels also lower to SPIR-V compute shaders for Vulkan
-(`target::SpirvTarget`, [spirv_backend_design.md](spirv_backend_design.md)),
-under the same intrinsic names. PTX-only, with a diagnostic on SPIR-V:
+(`target::SpirvTarget`, [spirv_backend_design.md](spirv_backend_design.md)) and Metal
+Shading Language (`target::MslTarget`), under either `ptx_*` or backend-neutral
+`gpu_*` aliases (see [gpu_portability.md](gpu_portability.md) for the subgroup,
+shared-memory, cooperative-matrix, and FP64 portability contract). PTX-only, with a
+diagnostic on SPIR-V/MSL:
 `ptx_warpid`/`ptx_warp_id`, `ptx_nwarpid`, `ptx_smid`, `ptx_nsmid`,
 `ptx_globaltimer` and `ptx_bar_sync_count`. Two restrictions apply there:
 a shared pointer may only be offset with `add` and passed to the

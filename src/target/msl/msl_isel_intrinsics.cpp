@@ -3,7 +3,7 @@
 namespace brass::msl {
 
 void MslFnBuilder::lower_call(const Instruction& inst, int d) {
-    std::string_view sym = inst.symbol();
+    std::string_view sym = target::canonical_gpu_intrinsic(inst.symbol());
     if (is_shared_alloc(sym) || is_coop_alloc(sym)) return;
     if (sym.rfind("ptx_coop_", 0) == 0) {
         lower_coop_call(inst, d);

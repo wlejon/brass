@@ -12,6 +12,7 @@
 // the rest.
 
 #include "ptx_isel_intrinsics.hpp"
+#include <brass/target/gpu_intrinsics.hpp>
 
 #include <algorithm>
 #include <string>
@@ -434,7 +435,7 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
 
 PtxISel::IntrinsicLowering PtxISel::find_intrinsic(std::string_view callee) noexcept {
     const auto& table = Intrinsics::table();
-    auto it = table.find(callee);
+    auto it = table.find(target::canonical_gpu_intrinsic(callee));
     return it == table.end() ? nullptr : it->second;
 }
 

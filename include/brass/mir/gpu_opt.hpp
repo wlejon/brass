@@ -17,6 +17,8 @@ struct GpuOptOptions {
     bool fold_branches = false; // preserve uniform control flow for GPU barriers
     bool enable_superopt = true;
     bool enable_gpu_superopt = true;
+    bool enable_licm = true;
+    bool enable_fma = true;
     bool enable_scalar_cleanup = true;
     uint32_t max_sat_conflicts = 1000;
     uint32_t gpu_max_ctaid = 65535;

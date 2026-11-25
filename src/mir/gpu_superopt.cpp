@@ -1,5 +1,6 @@
 #include <brass/mir/gpu_superopt.hpp>
 #include <brass/codegen/div_magic.hpp>
+#include <brass/target/gpu_intrinsics.hpp>
 #include <brass/mir/superopt.hpp>
 #include "../verify/bv_solver.hpp"
 #include <brass/mir/builder.hpp>
@@ -150,7 +151,8 @@ BVNodeId expand_const_div_rem_bv(BVContext& ctx, BVOp op, BVNodeId a, BVNodeId b
     return UINT32_MAX;
 }
 
-BVNodeId try_eval_gpu_call_bv(BVContext& ctx, std::string_view sym, const std::vector<BVNodeId>& args) {
+BVNodeId try_eval_gpu_call_bv(BVContext& ctx, std::string_view raw_sym, const std::vector<BVNodeId>& args) {
+    std::string_view sym = target::canonical_gpu_intrinsic(raw_sym);
     auto coerce = [&](BVNodeId n, uint32_t w, bool s) -> BVNodeId {
         uint32_t nw = ctx.width(n);
         if (nw == w) return n;
@@ -390,7 +392,7 @@ struct GpuSuperoptEncoder {
                 break;
             }
             case Opcode::call: {
-                std::string_view sym = inst->symbol();
+                std::string_view sym = target::canonical_gpu_intrinsic(inst->symbol());
                 if (sym == "ptx_tid_x" || sym == "ptx_tid_y" || sym == "ptx_tid_z") {
                     res = get_special_u32(sym, 0x3FFu, 0, 1023);
                     break;
@@ -464,16 +466,19 @@ void remove_dead_pure_insts(Function& fn) {
             Instruction* cur = bb->head();
             while (cur) {
                 Instruction* next = cur->next();
+                std::string_view csym = (cur->opcode() == Opcode::call)
+                    ? target::canonical_gpu_intrinsic(cur->symbol())
+                    : std::string_view{};
                 bool is_pure_gpu_call =
                     (cur->opcode() == Opcode::call &&
-                     (cur->symbol() == "ptx_mul_hi_u32" || cur->symbol() == "ptx_mul_wide_u32" ||
-                      cur->symbol() == "ptx_mul_wide_s32" || cur->symbol() == "ptx_mad_lo_u32" ||
-                      cur->symbol() == "ptx_tid_x" || cur->symbol() == "ptx_tid_y" || cur->symbol() == "ptx_tid_z" ||
-                      cur->symbol() == "ptx_ntid_x" || cur->symbol() == "ptx_ntid_y" || cur->symbol() == "ptx_ntid_z" ||
-                      cur->symbol() == "ptx_ctaid_x" || cur->symbol() == "ptx_ctaid_y" || cur->symbol() == "ptx_ctaid_z" ||
-                      cur->symbol() == "ptx_nctaid_x" || cur->symbol() == "ptx_nctaid_y" || cur->symbol() == "ptx_nctaid_z" ||
-                      cur->symbol() == "ptx_laneid" || cur->symbol() == "ptx_lane_id" ||
-                      cur->symbol() == "ptx_global_tid_x" || cur->symbol() == "ptx_global_id_x"));
+                     (csym == "ptx_mul_hi_u32" || csym == "ptx_mul_wide_u32" ||
+                      csym == "ptx_mul_wide_s32" || csym == "ptx_mad_lo_u32" ||
+                      csym == "ptx_tid_x" || csym == "ptx_tid_y" || csym == "ptx_tid_z" ||
+                      csym == "ptx_ntid_x" || csym == "ptx_ntid_y" || csym == "ptx_ntid_z" ||
+                      csym == "ptx_ctaid_x" || csym == "ptx_ctaid_y" || csym == "ptx_ctaid_z" ||
+                      csym == "ptx_nctaid_x" || csym == "ptx_nctaid_y" || csym == "ptx_nctaid_z" ||
+                      csym == "ptx_laneid" || csym == "ptx_lane_id" ||
+                      csym == "ptx_global_tid_x" || csym == "ptx_global_id_x"));
                 if ((!cur->has_side_effects() || is_pure_gpu_call) &&
                     cur->produces_value() && uses[cur->result()] == 0) {
                     bb->remove_instruction(cur);
