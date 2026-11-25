@@ -36,6 +36,27 @@ BRASS_API double log_f64(double x) noexcept;
 // answers 1, are the caller's.
 BRASS_API double pow_f64(double x, double y) noexcept;
 
+// The rest of Math's transcendentals as V8 computes them (fdlibm, as V8's
+// ieee754.cc ran it; fast_hyper.cpp), so a script's math gives the same
+// bits on every platform rather than each libm's: Math.expm1, log1p, log2,
+// log10, cbrt, sinh, cosh, tanh, asinh, acosh and atanh.
+BRASS_API double expm1_f64(double x) noexcept;
+BRASS_API double log1p_f64(double x) noexcept;
+BRASS_API double log2_f64(double x) noexcept;
+BRASS_API double log10_f64(double x) noexcept;
+BRASS_API double cbrt_f64(double x) noexcept;
+BRASS_API double sinh_f64(double x) noexcept;
+BRASS_API double cosh_f64(double x) noexcept;
+BRASS_API double tanh_f64(double x) noexcept;
+BRASS_API double asinh_f64(double x) noexcept;
+BRASS_API double acosh_f64(double x) noexcept;
+BRASS_API double atanh_f64(double x) noexcept;
+// Math.hypot as V8 computes it: an infinity over a NaN over the rest, else
+// each magnitude over the largest, squared and Kahan-summed in order, the
+// square root scaled back. hypot2_f64(a, b) is the two-value form.
+BRASS_API double hypot_f64(const double* values, unsigned count) noexcept;
+BRASS_API double hypot2_f64(double a, double b) noexcept;
+
 } // namespace brass::math
 
 extern "C" {
