@@ -11,14 +11,18 @@ with `KernelBuilder` lowers to PTX for NVIDIA and to SPIR-V for Vulkan. The
 PTX backend this one mirrors is described in
 [ptx_backend_design.md](ptx_backend_design.md).
 
-Stage 3 is done on the brotensor side: its trace JIT builds the elementwise
-and row-norm fusion plans as MIR through `KernelBuilder` and compiles them
-with `SpirvTarget::compile` (brotensor `src/jit/spirv_emit*.cpp`,
-`src/vulkan/vulkan_jit.cpp`), dispatched inside its own Vulkan runtime per
-the runtime contract below. Its BF16 unpack/round reinterprets f32 bits
-with `bitcast.i32` / `bitcast.f32` ([mir_reference.md](mir_reference.md)),
-which lower to `OpBitcast`; before that pair existed it round-tripped each
-value through a per-thread word of shared memory.
+Stage 3 is complete across `brotensor`, `brovisionml`, and `brodiffusion`:
+all of `brotensor`'s Vulkan production kernels (elementwise, reductions, norms,
+GEMM/GEMV/quantized GEMV, `VK_KHR_cooperative_matrix` GEMM, implicit-GEMM Conv2D,
+FlashAttention forward/backward, and FP64 DFT — zero production GLSL shaders)
+plus its trace JIT plans build MIR through `KernelBuilder`, compile with
+`SpirvTarget::compile`, and run on `brotensor`'s Vulkan runtime per the contract
+below, while `brovisionml` and `brodiffusion` lower their domain GPU kernels the
+same way via `brotensor::interop::dispatch_spirv`. Its BF16 unpack/round
+reinterprets f32 bits with `bitcast.i32` / `bitcast.f32`
+([mir_reference.md](mir_reference.md)), which lower to `OpBitcast`; before
+that pair existed it round-tripped each value through a per-thread word of
+shared memory.
 
 ## Pipeline
 
