@@ -62,7 +62,7 @@ enum class Sig {
     shared_alloc_u16, shared_ldx_u16, shared_stx_u16,
     f32i32_f32, f32f32_i32,
     coop_alloc_a, coop_alloc_b, coop_alloc_acc, coop_fill,
-    coop_load_a, coop_load_b, coop_load_acc, coop_mma, coop_store_acc, coop_scale, coop_add,
+    coop_load_a, coop_load_b, coop_load_acc, coop_mma, coop_store_acc, coop_scale, coop_add, coop_acc_len, coop_get_acc, coop_set_acc,
     load_narrow,     // (ptr[, off]) -> i32
     store_narrow,    // (ptr, i32[, off]) -> void
 };
@@ -168,6 +168,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_coop_store_acc", Sig::coop_store_acc},
         {"ptx_coop_scale_acc", Sig::coop_scale},
         {"ptx_coop_add_acc", Sig::coop_add},
+        {"ptx_coop_acc_len", Sig::coop_acc_len}, {"ptx_coop_get_acc", Sig::coop_get_acc}, {"ptx_coop_set_acc", Sig::coop_set_acc},
     };
     return kSigs;
 }
@@ -335,6 +336,9 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
             b.build_call(name, Type::void_type(), {c0, c1});
             break;
         }
+        case Sig::coop_acc_len: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); r = b.build_call(name, Type::i32(), {cc}); break; }
+        case Sig::coop_get_acc: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); r = b.build_call(name, Type::f32(), {cc, i}); break; }
+        case Sig::coop_set_acc: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); b.build_call(name, Type::void_type(), {cc, i, x}); b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)}); break; }
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, c4}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
     }

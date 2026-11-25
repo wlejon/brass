@@ -29,6 +29,7 @@ enum class Sig {
     f32i32_f32, f32f32_i32,
     coop_alloc_a, coop_alloc_b, coop_alloc_acc, coop_fill,
     coop_load_a, coop_load_b, coop_load_acc, coop_mma, coop_store_acc, coop_scale, coop_add,
+    coop_acc_len, coop_get_acc, coop_set_acc,
     load_narrow, store_narrow,
     // textures and images (a 2D image unless named; KernelBuilder::ImageRef)
     tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
@@ -141,6 +142,9 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_coop_store_acc", Sig::coop_store_acc},
         {"ptx_coop_scale_acc", Sig::coop_scale},
         {"ptx_coop_add_acc", Sig::coop_add},
+        {"ptx_coop_acc_len", Sig::coop_acc_len},
+        {"ptx_coop_get_acc", Sig::coop_get_acc},
+        {"ptx_coop_set_acc", Sig::coop_set_acc},
 
         {"ptx_load_u8", Sig::load_narrow}, {"ptx_load_s8", Sig::load_narrow},
         {"ptx_load_u16", Sig::load_narrow}, {"ptx_load_s16", Sig::load_narrow},
@@ -399,6 +403,24 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
             b.build_call("ptx_coop_fill_acc", Type::void_type(), {c0, x});
             b.build_call("ptx_coop_fill_acc", Type::void_type(), {c1, x});
             b.build_call(name, Type::void_type(), {c0, c1});
+            break;
+        }
+        case Sig::coop_acc_len: {
+            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
+            r = b.build_call(name, Type::i32(), {cc});
+            break;
+        }
+        case Sig::coop_get_acc: {
+            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
+            b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x});
+            r = b.build_call(name, Type::f32(), {cc, i});
+            break;
+        }
+        case Sig::coop_set_acc: {
+            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
+            b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x});
+            b.build_call(name, Type::void_type(), {cc, i, x});
+            b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)});
             break;
         }
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, b.build_iconst_i32(3)}); break;
