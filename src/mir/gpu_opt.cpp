@@ -1,5 +1,6 @@
 #include <brass/mir/gpu_opt.hpp>
 #include <brass/mir/dominators.hpp>
+#include <brass/mir/fdiv_pow2.hpp>
 #include <brass/mir/fma_opt.hpp>
 #include <brass/mir/gvn.hpp>
 #include <brass/mir/loop_analysis.hpp>
@@ -216,6 +217,9 @@ bool optimize_gpu_function(Function& fn, Module& mod, const GpuOptOptions& opts)
     }
     if (opts.enable_licm) {
         changed |= hoist_pure_gpu_loop_invariants(fn);
+    }
+    if (opts.enable_fdiv_pow2) {
+        changed |= (rewrite_fdiv_pow2(fn) > 0);
     }
     if (opts.enable_fma) {
         FmaOptOptions fma_opts;

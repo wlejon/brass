@@ -1,8 +1,6 @@
 name: CodeQL
 
-# Static analysis for brass's C++ codebase (core MIR, LIR, codegen, runtime, and tools).
-#
-# Build-mode: none (build-free extraction).
+# Static analysis for the brass compiler library (tests/tools/third_party excluded).
 
 on:
   push:
@@ -27,11 +25,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBRASS_BUILD_TESTS=OFF \
+            -DBRASS_BUILD_TOOLS=OFF \
+            -DBRASS_BUILD_SHARED=OFF
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: c-cpp
-          build-mode: none
+          build-mode: manual
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Build brass library (traced)
+        run: cmake --build build --target brass --parallel 4
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4

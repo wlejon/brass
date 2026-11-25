@@ -2,12 +2,16 @@
 
 #include <brass/mir/builder.hpp>
 #include <brass/mir/gpu_opt.hpp>
+#include <brass/mir/gpu_portability.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/mir/verifier.hpp>
 #include <brass/target/msl_target.hpp>
 #include <brass/target/ptx_target.hpp>
 #include <brass/target/spirv_target.hpp>
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 using namespace brass;
@@ -275,4 +279,285 @@ TEST_CASE("GPU Opt - LICM Hoists In-Loop Constant Operands Before Hoisted Users"
     spv_opts.stage = target::SpirvStage::Compute;
     spv_opts.local_size_x = 32;
     CHECK(!target::SpirvTarget::compile(*fn, spv_opts).words.empty());
+}
+
+TEST_CASE("GPU Opt - Pow2 Float Division Rewrites and Fuses Into FMA") {
+    Module mod("gpu_fdiv_pow2");
+    Function* fn = mod.create_function("fdiv_pow2_k", Type::void_type(),
+                                       {Type::ptr(), Type::f32(), Type::f32()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    b.position_at_end(entry);
+    Value* out = b.add_block_param(entry, Type::ptr());
+    Value* x   = b.add_block_param(entry, Type::f32());
+    Value* y   = b.add_block_param(entry, Type::f32());
+    Value* two = b.build_fconst_f32(2.0f);
+    Value* q   = b.build_sdiv(x, two);
+    Value* res = b.build_add(q, y);
+    b.build_store(Type::f32(), out, 0, res);
+    b.build_ret_void();
+
+    GpuOptOptions opt;
+    opt.opt_level = 1;
+    opt.enable_fdiv_pow2 = true;
+    opt.enable_fma = true;
+    CHECK(optimize_gpu_function(*fn, mod, opt));
+    CHECK(verify_gpu_portability(*fn));
+    CHECK_EQ(count_in_func(*fn, Opcode::sdiv), 0u);
+    CHECK_EQ(count_in_func(*fn, Opcode::fma_f32), 1u);
+}
+
+TEST_CASE("GPU Portability - Divergence, Barriers, Provenance, FP64, and i64 Atomics") {
+    GpuPortabilityOptions strict;
+
+    // 1. Portable kernel with uniform conditional barrier and shared memory passes.
+    {
+        Module mod("port_ok");
+        Function* fn = mod.create_function("port_ok", Type::void_type(), {Type::ptr(), Type::i32()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* then_b = b.append_block("then");
+        BasicBlock* merge = b.append_block("merge");
+        b.position_at_end(entry);
+        Value* ptr  = b.add_block_param(entry, Type::ptr());
+        Value* flag = b.add_block_param(entry, Type::i32());
+        Value* c0   = b.build_iconst_i32(0);
+        Value* c16  = b.build_iconst_i32(16);
+        Value* tid  = b.build_call("gpu_tid_x", Type::i32());
+        Value* smem = b.build_call("gpu_shared_alloc_f32", Type::ptr(), {c16});
+        Value* cond = b.build_ne(flag, c0);
+        b.build_br_if(cond, then_b, {}, merge, {});
+
+        b.position_at_end(then_b);
+        b.build_call("gpu_shared_store_f32_indexed", Type::void_type(), {smem, tid, b.build_fconst_f32(1.0f)});
+        b.build_call("gpu_sync", Type::void_type());
+        b.build_br(merge, {});
+
+        b.position_at_end(merge);
+        Value* v = b.build_call("gpu_shared_load_f32_indexed", Type::f32(), {smem, tid});
+        Value* sh = b.build_call("gpu_shfl_xor_f32", Type::f32(), {v, b.build_iconst_i32(1)});
+        b.build_store(Type::f32(), ptr, 0, sh);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        DiagnosticReporter diag;
+        CHECK(verify_gpu_portability(*fn, strict, &diag));
+        CHECK(!diag.has_errors());
+    }
+
+    // 2. Non-portable warp/timer intrinsics rejected.
+    {
+        Module mod("port_warpid");
+        Function* fn = mod.create_function("port_warpid", Type::void_type(), {Type::ptr()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        b.position_at_end(entry);
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* w = b.build_call("gpu_warpid", Type::i32());
+        b.build_store(Type::i32(), ptr, 0, w);
+        b.build_ret_void();
+
+        DiagnosticReporter diag;
+        CHECK(!verify_gpu_portability(*fn, strict, &diag));
+        CHECK(diag.has_errors());
+    }
+
+    // 3. FP64 rejected by default, allowed when allow_fp64=true.
+    {
+        Module mod("port_fp64");
+        Function* fn = mod.create_function("port_fp64", Type::void_type(), {Type::ptr(), Type::f32()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        b.position_at_end(entry);
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* x   = b.add_block_param(entry, Type::f32());
+        Value* d   = b.build_call("gpu_f32_to_f64", Type::f64(), {x});
+        b.build_store(Type::f64(), ptr, 0, d);
+        b.build_ret_void();
+
+        DiagnosticReporter diag_off;
+        CHECK(!verify_gpu_portability(*fn, strict, &diag_off));
+        GpuPortabilityOptions fp64_ok = strict;
+        fp64_ok.allow_fp64 = true;
+        DiagnosticReporter diag_on;
+        CHECK(verify_gpu_portability(*fn, fp64_ok, &diag_on));
+    }
+
+    // 4. i64 atomics rejected by default, allowed when allow_i64_atomics=true.
+    {
+        Module mod("port_i64_atom");
+        Function* fn = mod.create_function("port_i64_atom", Type::void_type(), {Type::ptr(), Type::i64()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        b.position_at_end(entry);
+        Value* ptr = b.add_block_param(entry, Type::ptr());
+        Value* v   = b.add_block_param(entry, Type::i64());
+        Value* old = b.build_call("gpu_atom_add_i64", Type::i64(), {ptr, v});
+        b.build_store(Type::i64(), ptr, 0, old);
+        b.build_ret_void();
+
+        DiagnosticReporter diag_off;
+        CHECK(!verify_gpu_portability(*fn, strict, &diag_off));
+        GpuPortabilityOptions i64_ok = strict;
+        i64_ok.allow_i64_atomics = true;
+        DiagnosticReporter diag_on;
+        CHECK(verify_gpu_portability(*fn, i64_ok, &diag_on));
+    }
+
+    // 5. Mixing global and shared pointers via select violates provenance.
+    {
+        Module mod("port_mix_ptr");
+        Function* fn = mod.create_function("port_mix_ptr", Type::void_type(), {Type::ptr(), Type::i32()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        b.position_at_end(entry);
+        Value* gptr = b.add_block_param(entry, Type::ptr());
+        Value* flag = b.add_block_param(entry, Type::i32());
+        Value* sptr = b.build_call("gpu_shared_alloc_f32", Type::ptr(), {b.build_iconst_i32(8)});
+        Value* c0   = b.build_iconst_i32(0);
+        Value* mixed = b.build_select(b.build_ne(flag, c0), gptr, sptr);
+        b.build_store(Type::f32(), mixed, 0, b.build_fconst_f32(1.0f));
+        b.build_ret_void();
+
+        DiagnosticReporter diag;
+        CHECK(!verify_gpu_portability(*fn, strict, &diag));
+        CHECK(diag.has_errors());
+    }
+
+    // 6. Barrier under thread-divergent branch violates barrier uniformity.
+    {
+        Module mod("port_div_bar");
+        Function* fn = mod.create_function("port_div_bar", Type::void_type(), {Type::ptr()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* then_b = b.append_block("then");
+        BasicBlock* merge = b.append_block("merge");
+        b.position_at_end(entry);
+        (void)b.add_block_param(entry, Type::ptr());
+        Value* tid = b.build_call("gpu_tid_x", Type::i32());
+        Value* cond = b.build_slt(tid, b.build_iconst_i32(16));
+        b.build_br_if(cond, then_b, {}, merge, {});
+
+        b.position_at_end(then_b);
+        b.build_call("gpu_sync", Type::void_type());
+        b.build_br(merge, {});
+
+        b.position_at_end(merge);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        GpuDivergenceAnalysis div(*fn);
+        CHECK(div.is_divergent(tid));
+        CHECK(div.is_divergent_branch(entry));
+        CHECK(div.is_under_divergent_control(then_b));
+        CHECK(!div.is_under_divergent_control(merge));
+
+        DiagnosticReporter diag;
+        CHECK(!verify_gpu_portability(*fn, strict, &diag));
+        CHECK(diag.has_errors());
+    }
+}
+
+TEST_CASE("GPU Targets - Native spirv-val and xcrun metal Validation") {
+    Module mod("native_val");
+    Function* fn = mod.create_function("native_val_k", Type::void_type(),
+                                       {Type::ptr(), Type::ptr(), Type::f32(), Type::i32()});
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    BasicBlock* loop  = b.append_block("loop");
+    BasicBlock* body  = b.append_block("body");
+    BasicBlock* exit  = b.append_block("exit");
+
+    b.position_at_end(entry);
+    Value* in_ptr  = b.add_block_param(entry, Type::ptr());
+    Value* out_ptr = b.add_block_param(entry, Type::ptr());
+    Value* alpha   = b.add_block_param(entry, Type::f32());
+    Value* n       = b.add_block_param(entry, Type::i32());
+    Value* tid     = b.build_call("gpu_tid_x", Type::i32());
+    Value* smem    = b.build_call("gpu_shared_alloc_f32", Type::ptr(), {b.build_iconst_i32(32)});
+    Value* c0      = b.build_iconst_i32(0);
+    Value* c1      = b.build_iconst_i32(1);
+    b.build_br(loop, {c0, b.build_fconst_f32(0.0f)});
+
+    b.position_at_end(loop);
+    Value* iv  = b.add_block_param(loop, Type::i32());
+    Value* acc = b.add_block_param(loop, Type::f32());
+    b.build_br_if(b.build_slt(iv, n), body, {}, exit, {});
+
+    b.position_at_end(body);
+    Value* idx = b.build_add(tid, iv);
+    Value* x   = b.build_load_indexed(Type::f32(), in_ptr, idx, 4);
+    Value* h   = b.build_sdiv(x, b.build_fconst_f32(2.0f));
+    Value* nxt = b.build_add(b.build_mul(alpha, h), acc);
+    b.build_br(loop, {b.build_add(iv, c1), nxt});
+
+    b.position_at_end(exit);
+    b.build_call("gpu_shared_store_f32_indexed", Type::void_type(), {smem, tid, acc});
+    b.build_call("gpu_sync", Type::void_type());
+    Value* partner = b.build_call("gpu_shfl_xor_f32", Type::f32(), {acc, c1});
+    Value* sv = b.build_call("gpu_shared_load_f32_indexed", Type::f32(), {smem, tid});
+    b.build_store_indexed(Type::f32(), out_ptr, tid, 4, b.build_add(partner, sv));
+    b.build_ret_void();
+
+    GpuOptOptions gopt;
+    gopt.opt_level = 1;
+    gopt.enable_fdiv_pow2 = true;
+    gopt.enable_fma = true;
+    CHECK(optimize_gpu_function(*fn, mod, gopt));
+    DiagnosticReporter diag;
+    CHECK(verify_gpu_portability(*fn, {}, &diag));
+
+    target::SpirvOptions spv_opts;
+    spv_opts.stage = target::SpirvStage::Compute;
+    spv_opts.local_size_x = 32;
+    target::SpirvKernel spv = target::SpirvTarget::compile(*fn, spv_opts);
+    CHECK(!spv.words.empty());
+
+    target::MslOptions msl_opts;
+    msl_opts.workgroup_x = 32;
+    target::MslKernel msl = target::MslTarget::compile(*fn, msl_opts);
+    CHECK(!msl.source.empty());
+    CHECK(!target::PtxTarget::emit_function(*fn).empty());
+
+#if !defined(_WIN32)
+    const std::filesystem::path tmp_dir = std::filesystem::temp_directory_path();
+    if (std::system("command -v spirv-val >/dev/null 2>&1") == 0) {
+        const std::filesystem::path spv_path = tmp_dir / "brass_native_val_test.spv";
+        {
+            std::ofstream os(spv_path, std::ios::binary | std::ios::trunc);
+            os.write(reinterpret_cast<const char*>(spv.words.data()),
+                     static_cast<std::streamsize>(spv.words.size() * sizeof(uint32_t)));
+        }
+        const std::string cmd = "spirv-val --target-env vulkan1.2 \"" + spv_path.string() + "\"";
+        const int rc = std::system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::remove(spv_path, ec);
+        CHECK_EQ(rc, 0);
+    }
+#if defined(__APPLE__)
+    if (std::system("xcrun -sdk macosx --find metal >/dev/null 2>&1") == 0) {
+        const std::filesystem::path mtl_path = tmp_dir / "brass_native_val_test.metal";
+        const std::filesystem::path air_path = tmp_dir / "brass_native_val_test.air";
+        {
+            std::ofstream os(mtl_path, std::ios::trunc);
+            os << msl.source;
+        }
+        const std::string cmd = "xcrun -sdk macosx metal -std=metal3.1 -c \"" +
+                                mtl_path.string() + "\" -o \"" + air_path.string() + "\"";
+        const int rc = std::system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::remove(mtl_path, ec);
+        std::filesystem::remove(air_path, ec);
+        CHECK_EQ(rc, 0);
+    }
+#endif
+#endif
 }

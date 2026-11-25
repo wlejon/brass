@@ -18,6 +18,7 @@ struct GpuOptOptions {
     bool enable_superopt = true;
     bool enable_gpu_superopt = true;
     bool enable_licm = true;
+    bool enable_fdiv_pow2 = true;
     bool enable_fma = false; // FP contraction (a*b+c -> fma): opt-in (changes IEEE-754 rounding)
     bool enable_scalar_cleanup = true;
     uint32_t max_sat_conflicts = 1000;

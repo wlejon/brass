@@ -1,0 +1,6 @@
+name: "Brass CodeQL Config"
+paths-ignore:
+  - tests
+  - benchmarks
+  - tools
+  - third_party

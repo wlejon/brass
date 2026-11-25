@@ -39,7 +39,7 @@ jobs:
 
       - name: Linux build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build spirv-tools
 
       - name: Ninja (macOS)
         if: runner.os == 'macOS'
