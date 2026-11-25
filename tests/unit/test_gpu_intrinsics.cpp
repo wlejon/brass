@@ -163,6 +163,7 @@ TEST_CASE("GPU Opt - FMA Fusion and Pure Loop-Invariant Hoisting Lower Cleanly")
 
     GpuOptOptions opt;
     opt.opt_level = 1;
+    opt.enable_fma = true;
     CHECK(optimize_gpu_function(*fn, mod, opt));
 
     DiagnosticReporter diag;
