@@ -37,14 +37,22 @@ Id SpirvISel::Intrinsics::coop_ptr_and_stride(SpirvISel& isel,
     Module& m = isel.m_;
     if (auto it = isel.shared_.find(ptr); it != isel.shared_.end()) {
         const SpirvISel::SharedRef& ref = it->second;
-        if (ref.elem != Type::i32x4()) {
-            isel.fail("coop matrix shared load/store requires ptx_shared_alloc_i32x4");
+        uint32_t shift = 0;
+        Id p = 0;
+        if (ref.elem == Type::i32x4()) {
+            p = isel.shared_element_pointer(ref, nullptr, false, Type::i32x4());
+            shift = elem_is_f16 ? 3u : 2u;
+        } else if (ref.elem == Type::f32() && !elem_is_f16) {
+            p = isel.shared_element_pointer(ref, nullptr, false, Type::f32());
+            shift = 0u;
+        } else {
+            isel.fail("coop matrix shared load/store requires ptx_shared_alloc_i32x4 (or f32 for f32 acc)");
         }
-        Id p = isel.shared_element_pointer(ref, nullptr, false, Type::i32x4());
-        uint32_t shift = elem_is_f16 ? 3u : 2u;
         int64_t sc = 0;
         if (isel.const_int(stride_elems, &sc)) {
             out_stride = m.c_u32(static_cast<uint32_t>(sc >> shift));
+        } else if (shift == 0u) {
+            out_stride = isel.as_u32(stride_elems, "stride");
         } else {
             out_stride = isel.op(spv::OpShiftRightLogical, m.t_int(32),
                                  {isel.as_u32(stride_elems, "stride"), m.c_u32(shift)});
@@ -212,6 +220,41 @@ void SpirvISel::Intrinsics::coop_add_acc(SpirvISel& isel, const brass::Instructi
     Id b = isel.op(spv::OpLoad, rhs.mat_type, {rhs.var});
     Id res = isel.op(spv::OpFAdd, dst.mat_type, {a, b});
     isel.emit(Inst(spv::OpStore).id(dst.var).id(res));
+}
+
+void SpirvISel::Intrinsics::coop_acc_len(SpirvISel& isel, const brass::Instruction& inst) {
+    const CoopRef& ref = coop_ref(isel, inst.operand(0), "coop_acc_len acc");
+    if (ref.use != spv::CooperativeMatrixUseMatrixAccumulatorKHR) {
+        isel.fail("ptx_coop_acc_len requires an accumulator slot");
+    }
+    Id len = isel.op(spv::OpCooperativeMatrixLengthKHR, isel.t_u32(), {ref.mat_type});
+    isel.define(inst.result(), len);
+}
+
+void SpirvISel::Intrinsics::coop_get_acc(SpirvISel& isel, const brass::Instruction& inst) {
+    Module& m = isel.m_;
+    const CoopRef& ref = coop_ref(isel, inst.operand(0), "coop_get_acc acc");
+    if (ref.use != spv::CooperativeMatrixUseMatrixAccumulatorKHR) {
+        isel.fail("ptx_coop_get_acc requires an accumulator slot");
+    }
+    Id idx = isel.as_u32(inst.operand(1), "coop_get_acc idx");
+    Id ptr_t = m.t_pointer(spv::StorageClassFunction, m.t_float(32));
+    Id ep = isel.op(spv::OpAccessChain, ptr_t, {ref.var, idx});
+    Id val = isel.op(spv::OpLoad, m.t_float(32), {ep});
+    isel.define(inst.result(), val);
+}
+
+void SpirvISel::Intrinsics::coop_set_acc(SpirvISel& isel, const brass::Instruction& inst) {
+    Module& m = isel.m_;
+    const CoopRef& ref = coop_ref(isel, inst.operand(0), "coop_set_acc acc");
+    if (ref.use != spv::CooperativeMatrixUseMatrixAccumulatorKHR) {
+        isel.fail("ptx_coop_set_acc requires an accumulator slot");
+    }
+    Id idx = isel.as_u32(inst.operand(1), "coop_set_acc idx");
+    Id val = isel.id_of(inst.operand(2), "coop_set_acc value");
+    Id ptr_t = m.t_pointer(spv::StorageClassFunction, m.t_float(32));
+    Id ep = isel.op(spv::OpAccessChain, ptr_t, {ref.var, idx});
+    isel.emit(Inst(spv::OpStore).id(ep).id(val));
 }
 
 } // namespace brass::spirv

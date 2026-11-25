@@ -417,6 +417,9 @@ public:
     Instruction* coop_store_acc(Value* acc, Value* ptr, Value* stride_elems, bool col_major, bool dst_is_f16 = false);
     Instruction* coop_scale_acc(Value* acc, Value* scalar_f32);
     Instruction* coop_add_acc(Value* dst_acc, Value* rhs_acc);
+    Value* coop_acc_len(Value* acc);
+    Value* coop_get_acc(Value* acc, Value* idx);
+    Instruction* coop_set_acc(Value* acc, Value* idx, Value* val_f32);
 
     // Narrow global loads/stores (result/value in i32, zero- or sign-extended)
     Value* load_u8(Value* ptr, int32_t byte_offset = 0);

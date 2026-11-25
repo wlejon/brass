@@ -134,6 +134,44 @@ void MslFnBuilder::lower_coop_call(const Instruction& inst, int d) {
         return;
     }
 
+    if (sym == "ptx_coop_acc_len") {
+        const auto& [name, use] = coop_slot(inst.operand(0), "ptx_coop_acc_len");
+        (void)name;
+        if (use != 2) fail_msl(fn_, "ptx_coop_acc_len requires an accumulator slot");
+        emit_assign(inst, "8", d);
+        return;
+    }
+
+    if (sym == "ptx_coop_get_acc") {
+        const auto& [name, use] = coop_slot(inst.operand(0), "ptx_coop_get_acc");
+        if (use != 2) fail_msl(fn_, "ptx_coop_get_acc requires an accumulator slot");
+        const Value* idx_v = inst.operand(1);
+        if (idx_v && idx_v->is_instruction() && idx_v->defining_instruction()->opcode() == Opcode::iconst_i32) {
+            int32_t k = idx_v->defining_instruction()->imm_i32();
+            emit_assign(inst, name + "[" + std::to_string((k >> 1) & 3) + "].thread_elements()[" + std::to_string(k & 1) + "]", d);
+            return;
+        }
+        std::string iv = arg(1);
+        emit_assign(inst, name + "[((" + iv + ") >> 1) & 3].thread_elements()[(" + iv + ") & 1]", d);
+        return;
+    }
+
+    if (sym == "ptx_coop_set_acc") {
+        const auto& [name, use] = coop_slot(inst.operand(0), "ptx_coop_set_acc");
+        if (use != 2) fail_msl(fn_, "ptx_coop_set_acc requires an accumulator slot");
+        const Value* idx_v = inst.operand(1);
+        std::string val = arg(2);
+        indent_line(d);
+        if (idx_v && idx_v->is_instruction() && idx_v->defining_instruction()->opcode() == Opcode::iconst_i32) {
+            int32_t k = idx_v->defining_instruction()->imm_i32();
+            body_ << name << "[" << ((k >> 1) & 3) << "].thread_elements()[" << (k & 1) << "] = " << val << ";\n";
+        } else {
+            std::string iv = arg(1);
+            body_ << name << "[((" << iv << ") >> 1) & 3].thread_elements()[(" << iv << ") & 1] = " << val << ";\n";
+        }
+        return;
+    }
+
     fail_msl(fn_, "unsupported coop intrinsic '" + std::string(sym) + "'");
 }
 

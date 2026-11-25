@@ -93,6 +93,9 @@ struct SpirvISel::Intrinsics {
     static void coop_store_acc(SpirvISel& isel, const brass::Instruction& inst);
     static void coop_scale_acc(SpirvISel& isel, const brass::Instruction& inst);
     static void coop_add_acc(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_acc_len(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_get_acc(SpirvISel& isel, const brass::Instruction& inst);
+    static void coop_set_acc(SpirvISel& isel, const brass::Instruction& inst);
     static const SpirvISel::CoopRef& coop_ref(SpirvISel& isel, const Value* v, const char* what);
     static Id coop_ptr_and_stride(SpirvISel& isel, const Value* ptr, const Value* stride_elems,
                                   bool elem_is_f16, Id& out_stride, bool& out_is_psb, uint32_t& out_align);

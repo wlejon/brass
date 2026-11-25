@@ -162,4 +162,60 @@ void PtxISel::Intrinsics::coop_add_acc(PtxISel& isel, const brass::Instruction& 
     }
 }
 
+void PtxISel::Intrinsics::coop_acc_len(PtxISel& isel, const brass::Instruction& inst) {
+    auto it = isel.coop_.find(inst.operand(0));
+    if (it == isel.coop_.end() || it->second.use != 2) {
+        isel.malformed(inst, "ptx_coop_acc_len requires an accumulator slot");
+    }
+    Reg dst = isel.result_reg(inst);
+    isel.emit(Inst::make(Opcode::mov, Type::u32).dst(dst).src(Operand::imm(8)));
+}
+
+void PtxISel::Intrinsics::coop_get_acc(PtxISel& isel, const brass::Instruction& inst) {
+    auto it = isel.coop_.find(inst.operand(0));
+    if (it == isel.coop_.end() || it->second.use != 2) {
+        isel.malformed(inst, "ptx_coop_get_acc requires an accumulator slot");
+    }
+    Reg dst = isel.result_reg(inst);
+    int64_t cidx = 0;
+    if (isel.const_int(inst.operand(1), &cidx) && cidx >= 0 && cidx < 8) {
+        isel.emit(Inst::make(Opcode::mov, Type::f32).dst(dst).src(it->second.regs[static_cast<size_t>(cidx)]));
+        return;
+    }
+    Reg idx = isel.reg_of(inst.operand(1), "coop_get_acc idx");
+    Reg cur = isel.fn_->new_f32();
+    isel.emit(Inst::make(Opcode::mov, Type::f32).dst(cur).src(it->second.regs[0]));
+    for (int64_t k = 1; k < 8; ++k) {
+        Reg pred = isel.fn_->new_pred();
+        Reg nxt = isel.fn_->new_f32();
+        isel.emit(Inst::make(Opcode::setp, Type::u32).cmp(CmpOp::eq).dst(pred).src(idx).src(Operand::imm(k)));
+        isel.emit(Inst::make(Opcode::selp, Type::f32).dst(nxt).src(it->second.regs[static_cast<size_t>(k)]).src(cur).src(pred));
+        cur = nxt;
+    }
+    isel.emit(Inst::make(Opcode::mov, Type::f32).dst(dst).src(cur));
+}
+
+void PtxISel::Intrinsics::coop_set_acc(PtxISel& isel, const brass::Instruction& inst) {
+    auto it = isel.coop_.find(inst.operand(0));
+    if (it == isel.coop_.end() || it->second.use != 2) {
+        isel.malformed(inst, "ptx_coop_set_acc requires an accumulator slot");
+    }
+    Operand val = isel.operand_of(inst.operand(2), Opcode::mov, 0, Type::f32, "coop_set_acc val");
+    int64_t cidx = 0;
+    if (isel.const_int(inst.operand(1), &cidx) && cidx >= 0 && cidx < 8) {
+        isel.emit(Inst::make(Opcode::mov, Type::f32).dst(it->second.regs[static_cast<size_t>(cidx)]).src(val));
+        return;
+    }
+    Reg idx = isel.reg_of(inst.operand(1), "coop_set_acc idx");
+    for (int64_t k = 0; k < 8; ++k) {
+        Reg pred = isel.fn_->new_pred();
+        isel.emit(Inst::make(Opcode::setp, Type::u32).cmp(CmpOp::eq).dst(pred).src(idx).src(Operand::imm(k)));
+        isel.emit(Inst::make(Opcode::selp, Type::f32)
+                      .dst(it->second.regs[static_cast<size_t>(k)])
+                      .src(val)
+                      .src(it->second.regs[static_cast<size_t>(k)])
+                      .src(pred));
+    }
+}
+
 } // namespace brass::ptx

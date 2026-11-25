@@ -425,6 +425,9 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_coop_store_acc", &coop_store_acc },
         { "ptx_coop_scale_acc", &coop_scale_acc },
         { "ptx_coop_add_acc",   &coop_add_acc },
+        { "ptx_coop_acc_len",   &coop_acc_len },
+        { "ptx_coop_get_acc",   &coop_get_acc },
+        { "ptx_coop_set_acc",   &coop_set_acc },
     };
     return kIntrinsics;
 }

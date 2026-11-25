@@ -273,6 +273,19 @@ Instruction* KernelBuilder::coop_add_acc(Value* dst_acc, Value* rhs_acc) {
     return b_.current_block()->tail();
 }
 
+Value* KernelBuilder::coop_acc_len(Value* acc) {
+    return b_.build_call("ptx_coop_acc_len", Type::i32(), {acc});
+}
+
+Value* KernelBuilder::coop_get_acc(Value* acc, Value* idx) {
+    return b_.build_call("ptx_coop_get_acc", Type::f32(), {acc, idx});
+}
+
+Instruction* KernelBuilder::coop_set_acc(Value* acc, Value* idx, Value* val_f32) {
+    b_.build_call("ptx_coop_set_acc", Type::void_type(), {acc, idx, val_f32});
+    return b_.current_block()->tail();
+}
+
 // ---------------------------------------------------------------------------
 // Narrow loads/stores and atomics
 // ---------------------------------------------------------------------------

@@ -116,6 +116,9 @@ struct PtxISel::Intrinsics {
     static void coop_store_acc(PtxISel& isel, const brass::Instruction& inst);
     static void coop_scale_acc(PtxISel& isel, const brass::Instruction& inst);
     static void coop_add_acc(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_acc_len(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_get_acc(PtxISel& isel, const brass::Instruction& inst);
+    static void coop_set_acc(PtxISel& isel, const brass::Instruction& inst);
 };
 
 } // namespace brass::ptx
