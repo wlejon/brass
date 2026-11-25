@@ -544,7 +544,7 @@ TEST_CASE("GPU Targets - Native spirv-val and xcrun metal Validation") {
         CHECK_EQ(rc, 0);
     }
 #if defined(__APPLE__)
-    if (std::system("xcrun -sdk macosx --find metal >/dev/null 2>&1") == 0) {
+    if (std::system("xcrun -sdk macosx metal --version >/dev/null 2>&1") == 0) {
         const std::filesystem::path mtl_path = tmp_dir / "brass_native_val_test.metal";
         const std::filesystem::path air_path = tmp_dir / "brass_native_val_test.air";
         {
