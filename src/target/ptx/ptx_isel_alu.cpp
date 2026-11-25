@@ -49,10 +49,19 @@ void PtxISel::lower_fconst(const brass::Instruction& inst) {
 // gets registers).
 void PtxISel::lower_binary(const brass::Instruction& inst, Opcode op) {
     Type t = signed_type_for(inst.type());
-    emit(Inst::make(op, t)
-             .dst(result_reg(inst))
-             .src(operand_of(inst.operand(0), op, 0, t, "operand 0"))
-             .src(operand_of(inst.operand(1), op, 1, t, "operand 1")));
+    auto widen_for_ptr_arith = [&](const brass::Value* v, Operand src) -> Operand {
+        if (t == Type::s64 && v && v->type().is_integer() && v->type() != brass::Type::i64() &&
+            src.is_reg() && src.reg_val.cls == RegClass::B32) {
+            Reg wide = fn_->new_b64();
+            emit(Inst::make(Opcode::cvt, Type::s64).from(signed_type_for(v->type()))
+                     .dst(wide).src(src));
+            return Operand::reg(wide);
+        }
+        return src;
+    };
+    Operand s0 = widen_for_ptr_arith(inst.operand(0), operand_of(inst.operand(0), op, 0, t, "operand 0"));
+    Operand s1 = widen_for_ptr_arith(inst.operand(1), operand_of(inst.operand(1), op, 1, t, "operand 1"));
+    emit(Inst::make(op, t).dst(result_reg(inst)).src(s0).src(s1));
 }
 
 void PtxISel::lower_mul(const brass::Instruction& inst) {

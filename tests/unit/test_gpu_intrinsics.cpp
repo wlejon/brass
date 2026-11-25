@@ -483,6 +483,7 @@ TEST_CASE("GPU Targets - Native spirv-val and xcrun metal Validation") {
     Value* n       = b.add_block_param(entry, Type::i32());
     Value* tid     = b.build_call("gpu_tid_x", Type::i32());
     Value* smem    = b.build_call("gpu_shared_alloc_f32", Type::ptr(), {b.build_iconst_i32(32)});
+    Value* smem_off = b.build_add(smem, b.build_shl(tid, b.build_iconst_i32(2)));
     Value* c0      = b.build_iconst_i32(0);
     Value* c1      = b.build_iconst_i32(1);
     b.build_br(loop, {c0, b.build_fconst_f32(0.0f)});
@@ -503,7 +504,7 @@ TEST_CASE("GPU Targets - Native spirv-val and xcrun metal Validation") {
     b.build_call("gpu_shared_store_f32_indexed", Type::void_type(), {smem, tid, acc});
     b.build_call("gpu_sync", Type::void_type());
     Value* partner = b.build_call("gpu_shfl_xor_f32", Type::f32(), {acc, c1});
-    Value* sv = b.build_call("gpu_shared_load_f32_indexed", Type::f32(), {smem, tid});
+    Value* sv = b.build_call("gpu_shared_load_f32", Type::f32(), {smem_off});
     b.build_store_indexed(Type::f32(), out_ptr, tid, 4, b.build_add(partner, sv));
     b.build_ret_void();
 
