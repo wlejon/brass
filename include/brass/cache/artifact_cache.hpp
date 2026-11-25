@@ -202,6 +202,14 @@ std::optional<Artifact> read_artifact_file(const std::filesystem::path& path, co
 // The cache
 // ---------------------------------------------------------------------------
 
+// A bundle export/import summary.
+struct BundleStats {
+    size_t entries_written = 0;
+    size_t entries_imported = 0;
+    size_t entries_skipped = 0;
+    size_t bytes = 0;
+};
+
 class ArtifactCache {
 public:
     struct Stats {
@@ -243,6 +251,23 @@ public:
 
     // Deletes the entry; false when there was none (or it could not be).
     bool remove(const CacheKey& key);
+
+    // Lists all valid cached entry keys currently present in `dir()`.
+    std::vector<CacheKey> list_keys() const;
+
+    // Exports all valid entries in `dir()` plus caller-provided `metadata`
+    // into an integrity-checked `.bacb` bundle written atomically to `out_path`.
+    bool export_bundle(const std::filesystem::path& out_path,
+                       std::string_view metadata = {},
+                       BundleStats* stats = nullptr,
+                       std::string* error = nullptr) const;
+
+    // Validates and imports entries from a `.bacb` bundle into this cache,
+    // returning the stored metadata string when `metadata_out` is non-null.
+    bool import_bundle(const std::filesystem::path& in_path,
+                       std::string* metadata_out = nullptr,
+                       BundleStats* stats = nullptr,
+                       std::string* error = nullptr);
 
     // Walks the directory now, on this thread: deletes writes abandoned more
     // than ten minutes ago, and when the entries take more than the budget,

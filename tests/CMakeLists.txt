@@ -304,6 +304,7 @@ add_executable(brass_unit_tests
     unit/test_ptx_vector.cpp
     unit/test_ptx_cleanup.cpp
     unit/test_gpu_intrinsics.cpp
+    unit/test_gpu_sandbox_and_bundle.cpp
     unit/test_ml_fusion.cpp
     unit/test_gpu_execution.cpp
     unit/test_gpu_kernels.cpp

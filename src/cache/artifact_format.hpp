@@ -48,6 +48,17 @@ struct ArtifactCodec {
     static std::vector<uint8_t> encode(const CacheKey& key, std::span<const BlobRef> blobs, std::string* error);
     // Reads and checks the file at `path`.
     static std::optional<Artifact> read(const std::filesystem::path& path, const CacheKey& key, Miss* why);
+    // Reads and validates a `.bac` file without requiring a prior expected key.
+    static std::optional<Artifact> read_any(const std::filesystem::path& path, CacheKey& out_key, Miss* why);
+    // Validates and decodes an in-memory `.bac` byte buffer.
+    static std::optional<Artifact> decode(std::span<const uint8_t> raw, CacheKey& out_key, Miss* why);
+
+private:
+    static std::optional<Artifact> parse_blob_table(Artifact& art, size_t end, const uint8_t* header, Miss* why);
+    static std::optional<Artifact> read_checked_impl(const std::filesystem::path& path,
+                                                     const CacheKey* expected_key,
+                                                     CacheKey* out_key,
+                                                     Miss* why);
 };
 
 namespace detail {

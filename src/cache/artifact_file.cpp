@@ -233,52 +233,21 @@ std::vector<uint8_t> ArtifactCodec::encode(const CacheKey& key, std::span<const 
     return out;
 }
 
-std::optional<Artifact> ArtifactCodec::read(const std::filesystem::path& path, const CacheKey& key, Miss* why) {
+std::optional<Artifact> ArtifactCodec::parse_blob_table(Artifact& art, size_t end, const uint8_t* header, Miss* why) {
     auto miss = [&](Miss m) -> std::optional<Artifact> {
         if (why) *why = m;
         return std::nullopt;
     };
-    if (!key.valid) return miss(Miss::InvalidKey);
-    ReadHandle file(path);
-    if (!file.open()) return miss(file.absent() ? Miss::Absent : Miss::Unreadable);
-    uint64_t size = 0;
-    if (!file.size(size)) return miss(Miss::Unreadable);
-
-    uint8_t header[kHeaderBytes];
-    if (size < kHeaderBytes) {
-        if (size >= 4 && file.read(header, 4) && get_u32(header) != kMagic) return miss(Miss::Foreign);
-        return miss(Miss::Truncated);
-    }
-    if (!file.read(header, kHeaderBytes)) return miss(Miss::Unreadable);
-    if (get_u32(header) != kMagic || get_u32(header + 4) != kFormatVersion) return miss(Miss::Foreign);
-    if (get_u64(header + 40) != size - kHeaderBytes) return miss(Miss::Truncated);
-    const Digest128 id{get_u64(header + 8), get_u64(header + 16)};
-    const Digest128 check{get_u64(header + 24), get_u64(header + 32)};
-    if (id != key.id || check != key.check) return miss(Miss::KeyMismatch);
-    if (size > static_cast<uint64_t>(SIZE_MAX) - 16) return miss(Miss::Unreadable);
-
-    Artifact art;
-    art.file_bytes_ = size;
-    try {
-        art.buffer_.resize(static_cast<size_t>((size + 15) / 16));
-    } catch (const std::bad_alloc&) {
-        return miss(Miss::Unreadable);
-    }
-    auto* base = reinterpret_cast<uint8_t*>(art.buffer_.data());
-    std::memcpy(base, header, kHeaderBytes);
-    const size_t payload_size = static_cast<size_t>(size - kHeaderBytes);
-    if (payload_size > 0 && !file.read(base + kHeaderBytes, payload_size)) return miss(Miss::Truncated);
-
+    const size_t payload_size = end - kHeaderBytes;
+    const auto* base = reinterpret_cast<const uint8_t*>(art.buffer_.data());
     const Digest128 stored{get_u64(header + 48), get_u64(header + 56)};
     if (checksum(base, base + kHeaderBytes, payload_size) != stored) return miss(Miss::Corrupt);
 
-    // The blob table: well-formed, and covering the payload exactly.
     const uint32_t count = get_u32(header + 64);
     if (get_u32(header + 68) != 0 || get_u64(header + 72) != 0) return miss(Miss::Corrupt);
     if (count > payload_size / 16) return miss(Miss::Corrupt);
     art.blobs_.reserve(count);
     size_t at = kHeaderBytes;
-    const size_t end = static_cast<size_t>(size);
     for (uint32_t i = 0; i < count; ++i) {
         if (end - at < 16) return miss(Miss::Corrupt);
         const uint32_t name_len = get_u32(base + at);
@@ -297,7 +266,88 @@ std::optional<Artifact> ArtifactCodec::read(const std::filesystem::path& path, c
     }
     if (at != end) return miss(Miss::Corrupt);
     if (why) *why = Miss::None;
-    return art;
+    return std::move(art);
+}
+
+std::optional<Artifact> ArtifactCodec::read_checked_impl(
+    const std::filesystem::path& path,
+    const CacheKey* expected_key,
+    CacheKey* out_key,
+    Miss* why) {
+    auto miss = [&](Miss m) -> std::optional<Artifact> {
+        if (why) *why = m;
+        return std::nullopt;
+    };
+    if (expected_key && !expected_key->valid) return miss(Miss::InvalidKey);
+    ReadHandle file(path);
+    if (!file.open()) return miss(file.absent() ? Miss::Absent : Miss::Unreadable);
+    uint64_t size = 0;
+    if (!file.size(size)) return miss(Miss::Unreadable);
+
+    uint8_t header[kHeaderBytes];
+    if (size < kHeaderBytes) {
+        if (size >= 4 && file.read(header, 4) && get_u32(header) != kMagic) return miss(Miss::Foreign);
+        return miss(Miss::Truncated);
+    }
+    if (!file.read(header, kHeaderBytes)) return miss(Miss::Unreadable);
+    if (get_u32(header) != kMagic || get_u32(header + 4) != kFormatVersion) return miss(Miss::Foreign);
+    if (get_u64(header + 40) != size - kHeaderBytes) return miss(Miss::Truncated);
+    const Digest128 id{get_u64(header + 8), get_u64(header + 16)};
+    const Digest128 check{get_u64(header + 24), get_u64(header + 32)};
+    if (expected_key && (id != expected_key->id || check != expected_key->check)) return miss(Miss::KeyMismatch);
+    if (size > static_cast<uint64_t>(SIZE_MAX) - 16) return miss(Miss::Unreadable);
+    if (out_key) *out_key = CacheKey{id, check, true};
+
+    Artifact art;
+    art.file_bytes_ = size;
+    try {
+        art.buffer_.resize(static_cast<size_t>((size + 15) / 16));
+    } catch (const std::bad_alloc&) {
+        return miss(Miss::Unreadable);
+    }
+    auto* base = reinterpret_cast<uint8_t*>(art.buffer_.data());
+    std::memcpy(base, header, kHeaderBytes);
+    const size_t payload_size = static_cast<size_t>(size - kHeaderBytes);
+    if (payload_size > 0 && !file.read(base + kHeaderBytes, payload_size)) return miss(Miss::Truncated);
+
+    return parse_blob_table(art, static_cast<size_t>(size), header, why);
+}
+
+std::optional<Artifact> ArtifactCodec::read(const std::filesystem::path& path, const CacheKey& key, Miss* why) {
+    return read_checked_impl(path, &key, nullptr, why);
+}
+
+std::optional<Artifact> ArtifactCodec::read_any(const std::filesystem::path& path, CacheKey& out_key, Miss* why) {
+    out_key = CacheKey{};
+    return read_checked_impl(path, nullptr, &out_key, why);
+}
+
+std::optional<Artifact> ArtifactCodec::decode(std::span<const uint8_t> raw, CacheKey& out_key, Miss* why) {
+    auto miss = [&](Miss m) -> std::optional<Artifact> {
+        if (why) *why = m;
+        return std::nullopt;
+    };
+    out_key = CacheKey{};
+    if (raw.size() < kHeaderBytes) {
+        if (raw.size() >= 4 && get_u32(raw.data()) != kMagic) return miss(Miss::Foreign);
+        return miss(Miss::Truncated);
+    }
+    const uint8_t* header = raw.data();
+    if (get_u32(header) != kMagic || get_u32(header + 4) != kFormatVersion) return miss(Miss::Foreign);
+    if (get_u64(header + 40) != raw.size() - kHeaderBytes) return miss(Miss::Truncated);
+    const Digest128 id{get_u64(header + 8), get_u64(header + 16)};
+    const Digest128 check{get_u64(header + 24), get_u64(header + 32)};
+    out_key = CacheKey{id, check, true};
+
+    Artifact art;
+    art.file_bytes_ = raw.size();
+    try {
+        art.buffer_.resize((raw.size() + 15) / 16);
+    } catch (const std::bad_alloc&) {
+        return miss(Miss::Unreadable);
+    }
+    std::memcpy(art.buffer_.data(), raw.data(), raw.size());
+    return parse_blob_table(art, raw.size(), header, why);
 }
 
 bool write_artifact_file(const std::filesystem::path& path, const CacheKey& key, std::span<const BlobRef> blobs,
