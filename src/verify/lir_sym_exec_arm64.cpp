@@ -283,6 +283,8 @@ BVNodeId arm64_read_op(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st,
     } else if (op.is_mem()) {
         return read_mem_sized(ctx, env, st, eval_mem_addr(ctx, env, st, op.mem_val), width_bits / 8);
     } else {
+        st.supported = false;
+        st.error_msg = "Unsupported AArch64 LIR operand kind in equivalence checker";
         return ctx.make_const(0, width_bits);
     }
     return (width_bits == 64) ? raw64 : ctx.make_extract(raw64, width_bits - 1, 0);
@@ -828,10 +830,15 @@ bool execute_arm64_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, c
             }
 
             case LirOpcode::Jmp:
-                if (!inst.uses.empty() && inst.uses[0].is_label()) {
-                    st.has_uncond_branch = true;
-                    st.uncond_target_label = inst.uses[0].label_id;
+                if (inst.uses.empty() || !inst.uses[0].is_label()) {
+                    st.supported = false;
+                    st.error_msg = "Unsupported indirect Jmp in AArch64 LIR equivalence checker";
+                    #undef eval_mem_addr
+                    #undef read_mem_sized
+                    return false;
                 }
+                st.has_uncond_branch = true;
+                st.uncond_target_label = inst.uses[0].label_id;
                 break;
 
             case LirOpcode::Jcc:
@@ -866,7 +873,7 @@ Arm64ExecState execute_arm64_block(BVContext& ctx, const LirBlock& block, Arm64I
     st.cond_branch_taken = ctx.make_const(0, 1);
     for (const auto& inst_ptr : block.instructions) {
         if (!inst_ptr) continue;
-        if (!execute_arm64_inst(ctx, env, st, *inst_ptr)) return st;
+        if (!execute_arm64_inst(ctx, env, st, *inst_ptr) || !st.supported) return st;
     }
     return st;
 }

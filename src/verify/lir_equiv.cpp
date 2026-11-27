@@ -265,6 +265,8 @@ LirExecState execute_lir_block(
             uint32_t sz = width_bits / 8;
             return read_mem_sized(addr, sz);
         } else {
+            st.supported = false;
+            st.error_msg = "Unsupported x64 LIR operand kind in equivalence checker";
             return ctx.make_const(0, width_bits);
         }
         if (width_bits == 64) return raw64;
@@ -787,6 +789,7 @@ LirExecState execute_lir_block(
                                std::string(to_string(op));
                 return st;
         }
+        if (!st.supported) return st;
     }
 
     return st;

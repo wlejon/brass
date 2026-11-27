@@ -57,10 +57,31 @@ uint64_t eval_bin_imm64(LirOpcode op, uint64_t a, uint64_t b) noexcept {
     }
 }
 
+bool is_protected_inst(const LirInst& inst) noexcept {
+    return inst.is_patchable || inst.safepoint_id != 0 || inst.resume_id != 0 || !inst.live_gcrefs.empty();
+}
+
+bool has_symbolic_operand(const LirInst& inst) noexcept {
+    for (const auto& d : inst.defs) {
+        if (d.is_symbol() || d.is_label()) return true;
+    }
+    for (const auto& u : inst.uses) {
+        if (u.is_symbol() || u.is_label()) return true;
+    }
+    return false;
+}
+
+bool operand_reads_gpr(const LirOperand& op, codegen::PReg r) noexcept {
+    if (op.is_preg()) return op.preg_val == r;
+    if (op.is_mem()) return op.mem_val.base_preg == r || op.mem_val.index_preg == r;
+    return false;
+}
+
 bool is_add_or_sub_imm64(const LirInst& inst, codegen::PReg& reg, int64_t& signed_imm) noexcept {
     if (inst.opcode != LirOpcode::Add && inst.opcode != LirOpcode::Sub) return false;
     if (inst.defs.size() != 1 || inst.uses.size() != 2) return false;
     if (!inst.defs[0].is_preg() || !inst.uses[0].is_preg()) return false;
+    if (!inst.defs[0].preg_val.is_gpr() || inst.defs[0].preg_val.code >= 31) return false;
     if (inst.defs[0].preg_val != inst.uses[0].preg_val || !inst.uses[1].is_imm_int()) return false;
     const int64_t v = inst.uses[1].imm_int;
     if (v < INT32_MIN || v > INT32_MAX) return false;
@@ -75,8 +96,8 @@ bool run_arm64_lir_superopt(LirBlock& block, const SuperoptOptions& opts) {
     bool any_changed = false;
     bool progress = true;
     const uint32_t gpr_mask = (opts.lir_live_out_gpr_mask == 0xFFFFULL)
-        ? verify::kArm64AllGprsMask
-        : static_cast<uint32_t>(opts.lir_live_out_gpr_mask & verify::kArm64AllGprsMask);
+        ? 0xFFFFFFFFu
+        : static_cast<uint32_t>(opts.lir_live_out_gpr_mask);
 
     while (progress) {
         progress = false;
@@ -85,17 +106,19 @@ bool run_arm64_lir_superopt(LirBlock& block, const SuperoptOptions& opts) {
         for (size_t i = 0; i + 1 < block.instructions.size(); ++i) {
             const LirInst* i0 = block.instructions[i].get();
             const LirInst* i1 = block.instructions[i + 1].get();
-            if (!i0 || !i1 || i0->is_patchable || i1->is_patchable ||
+            if (!i0 || !i1 || is_protected_inst(*i0) || is_protected_inst(*i1) ||
+                has_symbolic_operand(*i0) || has_symbolic_operand(*i1) ||
                 !is_pure_arm64_alu_or_mov(i0->opcode) || !is_pure_arm64_alu_or_mov(i1->opcode)) continue;
             if (i0->defs.size() != 1 || i1->defs.size() != 1) continue;
             const LirOperand& d0 = i0->defs[0];
             const LirOperand& d1 = i1->defs[0];
-            if (!d0.is_preg() || !d1.is_preg() || d0.preg_val != d1.preg_val) continue;
+            if (!d0.is_preg() || !d0.preg_val.is_gpr() || d0.preg_val.code >= 31 ||
+                !d1.is_preg() || d0.preg_val != d1.preg_val) continue;
 
             std::vector<LirInst> candidates;
             // (a) Overwritten Mov/ALU where i1 is Mov/Mov32 not reading dst
             if ((i1->opcode == LirOpcode::Mov || i1->opcode == LirOpcode::Mov32) && i1->uses.size() == 1 &&
-                (!i1->uses[0].is_preg() || i1->uses[0].preg_val != d0.preg_val)) {
+                !operand_reads_gpr(i1->uses[0], d0.preg_val)) {
                 candidates.push_back(*i1);
             }
             // (b) Mov(r, imm1); ALU(r, r, imm2) -> Mov(r, imm1 op imm2)
@@ -134,7 +157,7 @@ bool run_arm64_lir_superopt(LirBlock& block, const SuperoptOptions& opts) {
                 cand_block.instructions.erase(cand_block.instructions.begin() + static_cast<std::ptrdiff_t>(i + 1));
                 if (opts.stats) opts.stats->solver_queries++;
                 auto eq = verify::verify_arm64_lir_block_equivalence(
-                    block, cand_block, gpr_mask, 0u, opts.lir_check_flags);
+                    block, cand_block, gpr_mask, verify::kArm64AllVecMask, opts.lir_check_flags);
                 if (eq.status == verify::EquivStatus::ProvenEquivalent) {
                     block.instructions = std::move(cand_block.instructions);
                     if (opts.stats) opts.stats->lir_windows_optimized++;
@@ -151,11 +174,12 @@ bool run_arm64_lir_superopt(LirBlock& block, const SuperoptOptions& opts) {
         // 2. Single-instruction identity elision (`[i]` -> empty)
         for (size_t i = 0; i < block.instructions.size(); ++i) {
             const LirInst* inst = block.instructions[i].get();
-            if (!inst || inst->is_patchable || !is_pure_arm64_alu_or_mov(inst->opcode) || inst->defs.size() != 1) {
+            if (!inst || is_protected_inst(*inst) || has_symbolic_operand(*inst) ||
+                !is_pure_arm64_alu_or_mov(inst->opcode) || inst->defs.size() != 1) {
                 continue;
             }
             const LirOperand& dst = inst->defs[0];
-            if (!dst.is_preg()) continue;
+            if (!dst.is_preg() || !dst.preg_val.is_gpr() || dst.preg_val.code >= 31) continue;
 
             bool plausible = false;
             if (inst->opcode == LirOpcode::Mov && inst->uses.size() == 1 &&
@@ -180,7 +204,7 @@ bool run_arm64_lir_superopt(LirBlock& block, const SuperoptOptions& opts) {
             cand_block.instructions.erase(cand_block.instructions.begin() + static_cast<std::ptrdiff_t>(i));
             if (opts.stats) opts.stats->solver_queries++;
             auto eq = verify::verify_arm64_lir_block_equivalence(
-                block, cand_block, gpr_mask, 0u, opts.lir_check_flags);
+                block, cand_block, gpr_mask, verify::kArm64AllVecMask, opts.lir_check_flags);
             if (eq.status == verify::EquivStatus::ProvenEquivalent) {
                 block.instructions = std::move(cand_block.instructions);
                 if (opts.stats) opts.stats->lir_windows_optimized++;

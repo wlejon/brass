@@ -467,6 +467,52 @@ TEST_CASE("ARM64 LIR Superopt & No-Op ParallelCopy Peephole") {
         CHECK(fn.blocks[0]->instructions[1]->condition == x64::Condition::L);
         CHECK_EQ(fn.blocks[0]->instructions[1]->uses[0].label_id, b0->id);
     }
+
+    // 3. Soundness guards: Symbol operands return Unsupported in equivalence checks
+    //    (never folded to 0), superopt leaves symbol/mem-read/SP instructions alone.
+    {
+        LirBlock sym_blk(0, "sym_a");
+        auto s0 = std::make_unique<LirInst>(LirOpcode::Mov);
+        s0->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        s0->add_use(LirOperand::symbol("__foo"));
+        sym_blk.append_inst(std::move(s0));
+
+        LirBlock zero_blk(0, "sym_zero");
+        auto z0 = std::make_unique<LirInst>(LirOpcode::Mov);
+        z0->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        z0->add_use(LirOperand::imm(0, 8));
+        zero_blk.append_inst(std::move(z0));
+
+        CHECK_EQ(verify_arm64_lir_block_equivalence(sym_blk, zero_blk, kArm64AllGprsMask, 0u, true).status,
+                 EquivStatus::Unsupported);
+
+        LirBlock guard_blk(0, "superopt_guards");
+        auto g0 = std::make_unique<LirInst>(LirOpcode::Mov);
+        g0->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        g0->add_use(LirOperand::imm(0, 8));
+        guard_blk.append_inst(std::move(g0));
+
+        auto g1 = std::make_unique<LirInst>(LirOpcode::Mov);
+        g1->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        g1->add_use(LirOperand::symbol("__foo"));
+        guard_blk.append_inst(std::move(g1));
+
+        auto g2 = std::make_unique<LirInst>(LirOpcode::Mov);
+        g2->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        g2->add_use(LirOperand::mem(PReg::aarch64_gpr(GPR::X0), 0, 8));
+        guard_blk.append_inst(std::move(g2));
+
+        auto g3 = std::make_unique<LirInst>(LirOpcode::Add);
+        g3->add_def(LirOperand::preg_aarch64_gpr(GPR::SP, 8));
+        g3->add_use(LirOperand::preg_aarch64_gpr(GPR::X29, 8));
+        g3->add_use(LirOperand::imm(0, 8));
+        guard_blk.append_inst(std::move(g3));
+
+        SuperoptOptions opts;
+        opts.lir_check_flags = true;
+        CHECK_FALSE(run_arm64_lir_superopt(guard_blk, opts));
+        CHECK_EQ(guard_blk.instructions.size(), size_t{4});
+    }
 }
 
 #ifdef BRASS_STANDALONE_TEST

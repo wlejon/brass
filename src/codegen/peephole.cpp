@@ -161,7 +161,9 @@ bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
             auto same_pcopy_loc = [](const LirOperand& a, const LirOperand& b) noexcept {
                 if (a.kind != b.kind) return false;
                 switch (a.kind) {
-                    case LirOperandKind::PReg: return a.preg_val == b.preg_val;
+                    case LirOperandKind::PReg:
+                        return a.preg_val == b.preg_val && a.size == b.size &&
+                               !(a.preg_val.is_gpr() && a.size == 4);
                     case LirOperandKind::SpillSlot: return a.spill_slot == b.spill_slot;
                     case LirOperandKind::LocalSlot: return a.local_offset == b.local_offset;
                     case LirOperandKind::Mem: return a.mem_val == b.mem_val && a.size == b.size;
