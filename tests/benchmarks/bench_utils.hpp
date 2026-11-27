@@ -83,12 +83,18 @@ inline void ClobberMemory() {
 // only a header shifted matmul_i64_32 by 14-16%. The baselines are therefore
 // out-of-line and, under MSVC, in their own grouped section, which the
 // linker sorts ahead of ordinary code (.text$mn) at the page-aligned start of
-// .text, so their addresses depend only on the baselines themselves. GCC and
-// Clang get 64-byte function alignment instead. (The JIT side needs none of
+// .text, so their addresses depend only on the baselines themselves. On Apple
+// Silicon Mach-O, `__TEXT,__text_bnat` aligned to the 16 KB page size
+// prevents `libbrass.a` edits from shifting branch-predictor/fetch alignment
+// (e.g. `native_matmul_i64_scalar` 38.9 ms vs 20.8 ms). Other GCC and Clang
+// targets get 64-byte function alignment instead. (The JIT side needs none of
 // this: it is measured at several code placements and the median taken.)
 #if defined(_MSC_VER)
 #define BRASS_BENCH_SECTION __declspec(code_seg(".text$bnat"))
 #define BRASS_BENCH_NATIVE __declspec(noinline) BRASS_BENCH_SECTION
+#elif defined(__APPLE__)
+#define BRASS_BENCH_SECTION __attribute__((section("__TEXT,__text_bnat,regular,pure_instructions"), aligned(16384)))
+#define BRASS_BENCH_NATIVE __attribute__((noinline)) BRASS_BENCH_SECTION
 #else
 #define BRASS_BENCH_SECTION __attribute__((aligned(64)))
 #define BRASS_BENCH_NATIVE __attribute__((noinline)) BRASS_BENCH_SECTION
