@@ -37,6 +37,10 @@ struct KernelOptions {
     bool enable_slp = true;
     bool enable_unroll = true;
     size_t unroll_factor = 4;
+    bool enable_trace_layout = true;
+    bool enable_pre_ra_schedule = false;
+    bool enable_post_ra_schedule = true;
+    bool enable_software_pipelining = true;
     bool enable_parallel = false;
     uint64_t parallel_threshold = 1000;
     uint32_t parallel_workers = 0; // 0 = hardware concurrency

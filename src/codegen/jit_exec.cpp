@@ -231,7 +231,7 @@ bool JitExecutionEngine::compile_and_load(const Module& mod, size_t code_padding
     compiler.set_threads(1);
     // The code runs here, so it may use what this CPU has.
     compiler.set_x64_avx(target_.is_x64() && target_ == Target::host() && Target::host_has_avx());
-    if (code_tier_ == debug::JitTier::Optimized && (sched_opts_.enable_post_ra || sched_opts_.enable_software_pipelining)) {
+    if (code_tier_ == debug::JitTier::Optimized) {
         compiler.set_enable_trace_layout(true);
     }
     const runtime::DeoptStressConfig stress = runtime::deopt_stress_config();

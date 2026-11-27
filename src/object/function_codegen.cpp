@@ -311,11 +311,13 @@ EmittedFunction compile_function(const Module& mod, const Function& fn, const Fu
     // 3.6 LIR Peephole Optimization
     PhaseTimeScope peephole_timing("backend: peephole + emit");
     codegen::run_lir_peephole_optimizations(*lir);
-    if (cfg.sched.enable_lir_superopt && cfg.target.is_x64()) {
+    if (cfg.sched.enable_lir_superopt) {
         SuperoptOptions sopts;
         sopts.lir_check_flags = true;
         for (auto& blk : lir->blocks) {
-            if (blk && blk->instructions.size() <= 128) run_x64_lir_superopt(*blk, sopts);
+            if (!blk || blk->instructions.size() > 128) continue;
+            if (cfg.target.is_x64()) run_x64_lir_superopt(*blk, sopts);
+            else if (cfg.target.is_aarch64()) run_arm64_lir_superopt(*blk, sopts);
         }
     }
 

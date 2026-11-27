@@ -157,6 +157,39 @@ bool PeepholeOptimizer::eliminate_redundant_moves(LirBlock& block) {
             continue;
         }
 
+        if (inst.opcode == LirOpcode::ParallelCopy && inst.defs.size() == inst.uses.size()) {
+            auto same_pcopy_loc = [](const LirOperand& a, const LirOperand& b) noexcept {
+                if (a.kind != b.kind) return false;
+                switch (a.kind) {
+                    case LirOperandKind::PReg: return a.preg_val == b.preg_val;
+                    case LirOperandKind::SpillSlot: return a.spill_slot == b.spill_slot;
+                    case LirOperandKind::LocalSlot: return a.local_offset == b.local_offset;
+                    case LirOperandKind::Mem: return a.mem_val == b.mem_val && a.size == b.size;
+                    default: return false;
+                }
+            };
+            bool all_noop = true;
+            for (size_t k = 0; k < inst.defs.size(); ++k) {
+                bool shadowed = false;
+                for (size_t j = k + 1; j < inst.defs.size(); ++j) {
+                    if (same_pcopy_loc(inst.defs[k], inst.defs[j])) {
+                        shadowed = true;
+                        break;
+                    }
+                }
+                if (!shadowed && !same_pcopy_loc(inst.defs[k], inst.uses[k])) {
+                    all_noop = false;
+                    break;
+                }
+            }
+            if (all_noop) {
+                slot.reset();
+                stats_.redundant_moves_eliminated++;
+                changed = true;
+                continue;
+            }
+        }
+
         // A GPR Mov32 to itself zeroes the upper 32 bits, which is how
         // trunc.i32 / zext.i64 are lowered. However, when it comes from a
         // coalesced two-address pre-copy (`mov edi, edi; xor edi, edx`), it is
@@ -546,6 +579,60 @@ bool PeepholeOptimizer::simplify_arithmetic(LirBlock& block) {
             stats_.arithmetic_simplified++;
             changed = true;
             continue;
+        }
+
+        // 2b. Consecutive add/sub immediate on the same GPR -> single add/sub (or fold to 0)
+        if (std::next(it) != block.instructions.end() && *std::next(it)) {
+            auto& next = **std::next(it);
+            if (!is_protected(next)) {
+                auto as_signed_add_imm = [](const LirInst& x, bool& is_32, PReg& reg, int64_t& imm) noexcept -> bool {
+                    if (x.opcode == LirOpcode::Add || x.opcode == LirOpcode::Sub) is_32 = false;
+                    else if (x.opcode == LirOpcode::Add32 || x.opcode == LirOpcode::Sub32) is_32 = true;
+                    else return false;
+                    if (x.defs.size() != 1 || x.uses.size() != 2) return false;
+                    if (!x.defs[0].is_preg() || !x.defs[0].preg_val.is_gpr()) return false;
+                    if (!x.uses[0].is_preg() || x.uses[0].preg_val != x.defs[0].preg_val ||
+                        x.uses[0].size != x.defs[0].size || !x.uses[1].is_imm_int()) {
+                        return false;
+                    }
+                    const int64_t raw = x.uses[1].imm_int;
+                    if (raw < INT32_MIN || raw > INT32_MAX) return false;
+                    reg = x.defs[0].preg_val;
+                    const bool is_sub = (x.opcode == LirOpcode::Sub || x.opcode == LirOpcode::Sub32);
+                    imm = is_sub ? -raw : raw;
+                    return true;
+                };
+                bool is_32_0 = false, is_32_1 = false;
+                PReg r0, r1;
+                int64_t v0 = 0, v1 = 0;
+                if (as_signed_add_imm(inst, is_32_0, r0, v0) &&
+                    as_signed_add_imm(next, is_32_1, r1, v1) &&
+                    is_32_0 == is_32_1 && r0 == r1 &&
+                    !are_flags_live_after(block, it, lir_arch(fn_)) &&
+                    !are_flags_live_after(block, std::next(it), lir_arch(fn_))) {
+                    const int64_t sum = v0 + v1;
+                    if (sum >= -4095 && sum <= 4095) {
+                        if (sum == 0) {
+                            if (is_32_0) {
+                                inst.opcode = LirOpcode::Mov32;
+                                inst.uses.pop_back();
+                            } else {
+                                it->reset();
+                            }
+                        } else {
+                            inst.opcode = (sum > 0) ? (is_32_0 ? LirOpcode::Add32 : LirOpcode::Add)
+                                                    : (is_32_0 ? LirOpcode::Sub32 : LirOpcode::Sub);
+                            inst.uses[1] = LirOperand::imm(sum > 0 ? sum : -sum, inst.defs[0].size);
+                        }
+                        std::next(it)->reset();
+                        removed = true;
+                        stats_.arithmetic_simplified++;
+                        changed = true;
+                        it = std::next(it, 2);
+                        continue;
+                    }
+                }
+            }
         }
 
         // 3. imul reg, 1 / imul32 reg, 1

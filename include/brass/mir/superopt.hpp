@@ -54,6 +54,12 @@ bool run_x64_lir_superopt(
     codegen::LirBlock& block,
     const SuperoptOptions& opts = {});
 
+// Runs solver-verified peephole superoptimization on a straight-line AArch64 LIR basic block.
+// Every candidate rewrite is verified bit-exact by `verify::verify_arm64_lir_block_equivalence` before acceptance.
+bool run_arm64_lir_superopt(
+    codegen::LirBlock& block,
+    const SuperoptOptions& opts = {});
+
 } // namespace brass
 
 #include <brass/mir/gpu_superopt.hpp>

@@ -369,9 +369,13 @@ object::ObjectFile KernelJit::compile_object(Module& mod) const {
     compiler.set_emit_stack_map_symbol(false);
     compiler.set_threads(1);
     compiler.set_x64_avx(options_.enable_avx2 && target_.is_x64() && target_ == Target::host() && Target::host_has_avx());
-    if (options_.enable_optimizations && options_.opt_level >= 2 && options_.enable_superopt) {
+    if (options_.enable_optimizations && options_.opt_level >= 2) {
+        compiler.set_enable_trace_layout(options_.enable_trace_layout);
         codegen::SchedOptions sched_opts = compiler.sched_options();
-        sched_opts.enable_lir_superopt = true;
+        sched_opts.enable_pre_ra = options_.enable_pre_ra_schedule;
+        sched_opts.enable_post_ra = options_.enable_post_ra_schedule;
+        sched_opts.enable_software_pipelining = options_.enable_software_pipelining;
+        sched_opts.enable_lir_superopt = options_.enable_superopt;
         compiler.set_sched_options(sched_opts);
     }
     return compiler.compile(working_mod);
@@ -394,9 +398,12 @@ KernelFunction KernelJit::compile(Module& mod, std::string_view entry_name) {
 
     auto engine = std::make_shared<codegen::JitExecutionEngine>(target_);
     setup_default_symbols(*engine);
-    if (options_.enable_optimizations && options_.opt_level >= 2 && options_.enable_superopt) {
+    if (options_.enable_optimizations && options_.opt_level >= 2) {
         codegen::SchedOptions sched_opts = engine->sched_options();
-        sched_opts.enable_lir_superopt = true;
+        sched_opts.enable_pre_ra = options_.enable_pre_ra_schedule;
+        sched_opts.enable_post_ra = options_.enable_post_ra_schedule;
+        sched_opts.enable_software_pipelining = options_.enable_software_pipelining;
+        sched_opts.enable_lir_superopt = options_.enable_superopt;
         engine->set_sched_options(sched_opts);
     }
 

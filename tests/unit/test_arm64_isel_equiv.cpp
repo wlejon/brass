@@ -5,6 +5,9 @@
 #include <brass/target/aarch64/aarch64_isel.hpp>
 #include <brass/target/target.hpp>
 #include <brass/target/calling_conv.hpp>
+#include <brass/mir/superopt.hpp>
+#include <brass/codegen/peephole.hpp>
+#include <brass/verify/arm64_lir_equiv.hpp>
 
 using namespace brass;
 using namespace brass::verify;
@@ -367,6 +370,103 @@ TEST_CASE("ARM64 ISel Equiv - Memory, Float Arithmetic, NEON v128, and Negative 
     }
     REQUIRE(br_mutated);
     CHECK_EQ(verify_arm64_isel_equivalence(*mut_cfg, *cfg_lir).status, EquivStatus::Counterexample);
+}
+
+TEST_CASE("ARM64 LIR Superopt & No-Op ParallelCopy Peephole") {
+    using namespace brass::codegen;
+    using namespace brass::aarch64;
+
+    // 1. run_arm64_lir_superopt folds Mov + Add constants, drops overwritten Mov,
+    //    elides identity ops, and respects live NZCV flags.
+    {
+        LirBlock blk(0, "superopt_arm64");
+        auto m0 = std::make_unique<LirInst>(LirOpcode::Mov);
+        m0->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        m0->add_use(LirOperand::imm(10, 8));
+        blk.append_inst(std::move(m0));
+
+        auto a0 = std::make_unique<LirInst>(LirOpcode::Add);
+        a0->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        a0->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        a0->add_use(LirOperand::imm(32, 8));
+        blk.append_inst(std::move(a0));
+
+        auto m_over = std::make_unique<LirInst>(LirOpcode::Mov);
+        m_over->add_def(LirOperand::preg_aarch64_gpr(GPR::X1, 8));
+        m_over->add_use(LirOperand::imm(7, 8));
+        blk.append_inst(std::move(m_over));
+
+        auto m_final = std::make_unique<LirInst>(LirOpcode::Mov);
+        m_final->add_def(LirOperand::preg_aarch64_gpr(GPR::X1, 8));
+        m_final->add_use(LirOperand::preg_aarch64_gpr(GPR::X2, 8));
+        blk.append_inst(std::move(m_final));
+
+        auto id0 = std::make_unique<LirInst>(LirOpcode::Add);
+        id0->add_def(LirOperand::preg_aarch64_gpr(GPR::X3, 8));
+        id0->add_use(LirOperand::preg_aarch64_gpr(GPR::X3, 8));
+        id0->add_use(LirOperand::imm(0, 8));
+        blk.append_inst(std::move(id0));
+
+        auto flags_keep = std::make_unique<LirInst>(LirOpcode::Adds);
+        flags_keep->add_def(LirOperand::preg_aarch64_gpr(GPR::X4, 8));
+        flags_keep->add_use(LirOperand::preg_aarch64_gpr(GPR::X4, 8));
+        flags_keep->add_use(LirOperand::imm(0, 8));
+        blk.append_inst(std::move(flags_keep));
+
+        LirBlock orig(0, "orig");
+        for (const auto& inst : blk.instructions) orig.instructions.push_back(std::make_unique<LirInst>(*inst));
+
+        SuperoptOptions opts;
+        opts.lir_check_flags = true;
+        CHECK(run_arm64_lir_superopt(blk, opts));
+        CHECK_EQ(blk.instructions.size(), size_t{3});
+        CHECK(blk.instructions[0]->opcode == LirOpcode::Mov);
+        CHECK_EQ(blk.instructions[0]->uses[0].imm_int, 42);
+        CHECK(blk.instructions[1]->opcode == LirOpcode::Mov);
+        CHECK(blk.instructions[1]->uses[0].preg_val == PReg::aarch64_gpr(GPR::X2));
+        CHECK(blk.instructions[2]->opcode == LirOpcode::Adds);
+        CHECK_EQ(verify_arm64_lir_block_equivalence(orig, blk, kArm64AllGprsMask, 0u, true).status,
+                 EquivStatus::ProvenEquivalent);
+    }
+
+    // 2. Peephole strips no-op ParallelCopy between Jcc and Jmp, enabling branch simplification.
+    {
+        LirFunction fn;
+        fn.calling_conv = CallingConvention::apple_aapcs64();
+        auto* b0 = fn.create_block("loop");
+        auto* b1 = fn.create_block("exit");
+
+        auto cmp = std::make_unique<LirInst>(LirOpcode::Cmp);
+        cmp->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        cmp->add_use(LirOperand::preg_aarch64_gpr(GPR::X1, 8));
+        b0->append_inst(std::move(cmp));
+
+        auto jcc = std::make_unique<LirInst>(LirOpcode::Jcc);
+        jcc->condition = x64::Condition::GE;
+        jcc->add_use(LirOperand::label(b1->id));
+        b0->append_inst(std::move(jcc));
+
+        auto pc = std::make_unique<LirInst>(LirOpcode::ParallelCopy);
+        pc->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        pc->add_use(LirOperand::preg_aarch64_gpr(GPR::X0, 8));
+        b0->append_inst(std::move(pc));
+
+        auto jmp = std::make_unique<LirInst>(LirOpcode::Jmp);
+        jmp->add_use(LirOperand::label(b0->id));
+        b0->append_inst(std::move(jmp));
+
+        auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+        b1->append_inst(std::move(ret));
+
+        CHECK_EQ(verify_arm64_peephole(fn).status, EquivStatus::ProvenEquivalent);
+        PeepholeStats stats = run_lir_peephole_optimizations(fn);
+        CHECK(stats.redundant_moves_eliminated >= 1);
+        CHECK(stats.branches_simplified >= 1);
+        CHECK_EQ(fn.blocks[0]->instructions.size(), size_t{2});
+        CHECK(fn.blocks[0]->instructions[1]->opcode == LirOpcode::Jcc);
+        CHECK(fn.blocks[0]->instructions[1]->condition == x64::Condition::L);
+        CHECK_EQ(fn.blocks[0]->instructions[1]->uses[0].label_id, b0->id);
+    }
 }
 
 #ifdef BRASS_STANDALONE_TEST
