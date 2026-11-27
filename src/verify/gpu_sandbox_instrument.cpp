@@ -162,6 +162,10 @@ Value* build_zero_value(Builder& b, Type t) {
             return b.build_iconst_i64(0);
         case TypeKind::F32:
             return b.build_fconst_f32(0.0f);
+        case TypeKind::F16:
+            return b.build_fptrunc_f16_f32(b.build_fconst_f32(0.0f));
+        case TypeKind::BF16:
+            return b.build_fptrunc_bf16_f32(b.build_fconst_f32(0.0f));
         case TypeKind::F64:
             return b.build_fconst_f64(0.0);
         case TypeKind::F32x4:

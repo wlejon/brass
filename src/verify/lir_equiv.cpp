@@ -716,12 +716,10 @@ LirExecState execute_lir_block(
                 break;
             }
 
-            case LirOpcode::Cvtsd2ss:
-                write_op(inst.defs[0], ctx.make_unary(BVOp::FpTrunc, read_op(inst.uses[0], 64), 32), true);
-                break;
-            case LirOpcode::Cvtss2sd:
-                write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, read_op(inst.uses[0], 32), 64), true);
-                break;
+            case LirOpcode::Cvtsd2ss: write_op(inst.defs[0], ctx.make_unary(BVOp::FpTrunc, read_op(inst.uses[0], 64), 32), true); break;
+            case LirOpcode::Cvtss2sd: write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, read_op(inst.uses[0], 32), 64), true); break;
+            case LirOpcode::Cvth2ss:  write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, ctx.make_extract(read_op(inst.uses[0], 32), 15, 0), 32), true); break;
+            case LirOpcode::Cvtss2h:  write_op(inst.defs[0], ctx.make_zext(ctx.make_unary(BVOp::FpTrunc, read_op(inst.uses[0], 32), 16), 16), true); break;
 
             case LirOpcode::Ucomisd:
             case LirOpcode::Ucomiss: {

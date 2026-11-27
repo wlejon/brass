@@ -13,6 +13,8 @@ RuntimeValue model_bits_to_runtime_value(Type t, uint64_t bits) {
     switch (t.kind()) {
         case TypeKind::I8:     return RuntimeValue::from_i32(static_cast<int32_t>(bits & 0xFFu));
         case TypeKind::I16:    return RuntimeValue::from_i32(static_cast<int32_t>(bits & 0xFFFFu));
+        case TypeKind::F16:    return RuntimeValue::from_f16_bits(static_cast<uint16_t>(bits & 0xFFFFu));
+        case TypeKind::BF16:   return RuntimeValue::from_bf16_bits(static_cast<uint16_t>(bits & 0xFFFFu));
         case TypeKind::I32:    return RuntimeValue::from_i32(static_cast<int32_t>(static_cast<uint32_t>(bits)));
         case TypeKind::I64:    return RuntimeValue::from_i64(static_cast<int64_t>(bits));
         case TypeKind::F32: {

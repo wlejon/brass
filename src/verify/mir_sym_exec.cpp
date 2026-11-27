@@ -15,7 +15,7 @@ namespace brass::verify {
 uint32_t type_bv_width(Type t) noexcept {
     switch (t.kind()) {
         case TypeKind::I8: return 8;
-        case TypeKind::I16: return 16;
+        case TypeKind::I16: case TypeKind::F16: case TypeKind::BF16: return 16;
         case TypeKind::I32: case TypeKind::F32: return 32;
         case TypeKind::I64: case TypeKind::F64: case TypeKind::Ptr:
         case TypeKind::GCRef: case TypeKind::Tagged: return 64;
@@ -460,6 +460,32 @@ SymExecOutput symbolically_execute_mir_region(
                     case Opcode::sitofp_f32_i64: set_res(ctx.make_unary(BVOp::SiToFp, get_op(0), 32)); break;
                     case Opcode::fptrunc_f32_f64: set_res(ctx.make_unary(BVOp::FpTrunc, get_op(0), 32)); break;
                     case Opcode::fpext_f64_f32:   set_res(ctx.make_unary(BVOp::FpExt, get_op(0), 64)); break;
+                    case Opcode::fpext_f32_f16:
+                        set_res(init_mem.eval_uninterpreted_call(
+                            ctx, "brass_f16_to_f32", {coerce_width(ctx, get_op(0), 16, false)}, Type::f32()));
+                        break;
+                    case Opcode::fptrunc_f16_f32:
+                        set_res(init_mem.eval_uninterpreted_call(
+                            ctx, "brass_f32_to_f16", {coerce_width(ctx, get_op(0), 32, false)}, Type::f16()));
+                        break;
+                    case Opcode::fpext_f32_bf16:
+                        set_res(ctx.make_binary(BVOp::Shl, coerce_width(ctx, get_op(0), 32, false),
+                                                ctx.make_const(16, 32), 32));
+                        break;
+                    case Opcode::fptrunc_bf16_f32: {
+                        BVNodeId u = coerce_width(ctx, get_op(0), 32, false);
+                        BVNodeId hi = ctx.make_binary(BVOp::LShr, u, ctx.make_const(16, 32), 32);
+                        BVNodeId lsb = ctx.make_binary(BVOp::And, hi, ctx.make_const(1, 32), 32);
+                        BVNodeId rnd = ctx.make_binary(
+                            BVOp::LShr,
+                            ctx.make_binary(BVOp::Add, ctx.make_binary(BVOp::Add, u, ctx.make_const(0x7FFFu, 32), 32), lsb, 32),
+                            ctx.make_const(16, 32), 32);
+                        BVNodeId abs_u = ctx.make_binary(BVOp::And, u, ctx.make_const(0x7FFFFFFFu, 32), 32);
+                        BVNodeId is_nan = ctx.make_binary(BVOp::Ugt, abs_u, ctx.make_const(0x7F800000u, 32), 1);
+                        BVNodeId quiet = ctx.make_binary(BVOp::Or, hi, ctx.make_const(0x40u, 32), 32);
+                        set_res(ctx.make_extract(ctx.make_ite(is_nan, quiet, rnd), 15, 0));
+                        break;
+                    }
                     case Opcode::bitcast_i64_f64:
                     case Opcode::bitcast_f64_i64:
                     case Opcode::bitcast_i64_tagged:

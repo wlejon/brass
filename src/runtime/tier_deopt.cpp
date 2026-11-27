@@ -48,6 +48,8 @@ RuntimeValue materialize(Type t, uint64_t bits) {
     switch (t.kind()) {
         case TypeKind::I8:
         case TypeKind::I16:
+        case TypeKind::F16:
+        case TypeKind::BF16:
         case TypeKind::I32:
         case TypeKind::F32:
             bits &= 0xFFFFFFFFull;

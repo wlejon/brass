@@ -313,6 +313,16 @@ void PtxISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::fptosi_i64_f32: lower_fptosi(inst, Type::s64); break;
         case Opcode::fptrunc_f32_f64: lower_cvt(inst, Type::f32, Type::f64, Rounding::rn); break;
         case Opcode::fpext_f64_f32:   lower_cvt(inst, Type::f64, Type::f32); break;
+        case Opcode::fptrunc_f16_f32: lower_cvt(inst, Type::f16, Type::f32, Rounding::rn); break;
+        case Opcode::fpext_f32_f16:   lower_cvt(inst, Type::f32, Type::f16); break;
+        case Opcode::fptrunc_bf16_f32: lower_cvt(inst, Type::bf16, Type::f32, Rounding::rn); break;
+        case Opcode::fpext_f32_bf16: {
+            Reg shifted = fn_->new_b32();
+            emit(Inst::make(ptx::Opcode::shl, Type::b32).dst(shifted)
+                     .src(reg_of(inst.operand(0), "operand 0")).src(Operand::imm(16)));
+            emit(Inst::make(ptx::Opcode::mov, Type::b32).dst(result_reg(inst)).src(shifted));
+            break;
+        }
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32:

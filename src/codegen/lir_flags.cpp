@@ -83,6 +83,7 @@ FlagEffect x64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Cvtsi2ss: case LirOpcode::Cvtsi2ss32:
         case LirOpcode::Cvttss2si: case LirOpcode::Cvttss2si32:
         case LirOpcode::Cvtsd2ss: case LirOpcode::Cvtss2sd:
+        case LirOpcode::Cvth2ss: case LirOpcode::Cvtss2h:
         case LirOpcode::Floor32: case LirOpcode::Floor64:
         case LirOpcode::Ceil32: case LirOpcode::Ceil64:
         case LirOpcode::Round32: case LirOpcode::Round64:
@@ -218,6 +219,7 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Cvtsi2ss: case LirOpcode::Cvtsi2ss32:
         case LirOpcode::Cvttss2si: case LirOpcode::Cvttss2si32:
         case LirOpcode::Cvtsd2ss: case LirOpcode::Cvtss2sd:
+        case LirOpcode::Cvth2ss: case LirOpcode::Cvtss2h:
         case LirOpcode::Floor32: case LirOpcode::Floor64:
         case LirOpcode::Ceil32: case LirOpcode::Ceil64:
         case LirOpcode::Round32: case LirOpcode::Round64:

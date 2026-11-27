@@ -12,4 +12,7 @@ bool host_has_avx2() noexcept;
 // always true on aarch64, where fused multiply-add is base ISA.
 bool host_has_fma() noexcept;
 
+// F16C (half-precision vcvtph2ps / vcvtps2ph) usable on x64 with OS YMM state.
+bool host_has_f16c() noexcept;
+
 } // namespace brass

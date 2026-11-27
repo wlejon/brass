@@ -87,6 +87,140 @@ void AArch64ISel::lower_fp_instruction(const Instruction& inst, LirBlock& lir_bb
         case Opcode::fpext_f64_f32:
             emit_unary_fp(LirOpcode::Cvtss2sd, 8, 4);
             break;
+        case Opcode::fpext_f32_f16: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            VReg zext = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            auto zx = std::make_unique<LirInst>(LirOpcode::Movzx16);
+            zx->add_def(LirOperand::vreg(zext, 4));
+            zx->add_use(LirOperand::vreg(src, 2));
+            lir_bb.append_inst(std::move(zx));
+
+            VReg tmp_fpr = lir_fn_->allocate_vreg(RegClass::XMM, 4);
+            auto xg = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+            xg->add_def(LirOperand::vreg(tmp_fpr, 4));
+            xg->add_use(LirOperand::vreg(zext, 4));
+            lir_bb.append_inst(std::move(xg));
+
+            auto cvt = std::make_unique<LirInst>(LirOpcode::Cvth2ss);
+            cvt->add_def(LirOperand::vreg(dst, 4));
+            cvt->add_use(LirOperand::vreg(tmp_fpr, 4));
+            cvt->mir_origin = &inst;
+            lir_bb.append_inst(std::move(cvt));
+            break;
+        }
+        case Opcode::fptrunc_f16_f32: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            VReg tmp_fpr = lir_fn_->allocate_vreg(RegClass::XMM, 4);
+            auto cvt = std::make_unique<LirInst>(LirOpcode::Cvtss2h);
+            cvt->add_def(LirOperand::vreg(tmp_fpr, 4));
+            cvt->add_use(LirOperand::vreg(src, 4));
+            lir_bb.append_inst(std::move(cvt));
+
+            VReg raw = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            auto gx = std::make_unique<LirInst>(LirOpcode::Movd_gx);
+            gx->add_def(LirOperand::vreg(raw, 4));
+            gx->add_use(LirOperand::vreg(tmp_fpr, 4));
+            lir_bb.append_inst(std::move(gx));
+
+            auto zx = std::make_unique<LirInst>(LirOpcode::Movzx16);
+            zx->add_def(LirOperand::vreg(dst, 4));
+            zx->add_use(LirOperand::vreg(raw, 2));
+            zx->mir_origin = &inst;
+            lir_bb.append_inst(std::move(zx));
+            break;
+        }
+        case Opcode::fpext_f32_bf16: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            VReg shifted = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            auto zx = std::make_unique<LirInst>(LirOpcode::Movzx16);
+            zx->add_def(LirOperand::vreg(shifted, 4));
+            zx->add_use(LirOperand::vreg(src, 2));
+            lir_bb.append_inst(std::move(zx));
+
+            auto shl = std::make_unique<LirInst>(LirOpcode::Shl32);
+            shl->add_def(LirOperand::vreg(shifted, 4));
+            shl->add_use(LirOperand::vreg(shifted, 4));
+            shl->add_use(LirOperand::imm(16, 4));
+            lir_bb.append_inst(std::move(shl));
+
+            auto xg = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+            xg->add_def(LirOperand::vreg(dst, 4));
+            xg->add_use(LirOperand::vreg(shifted, 4));
+            xg->mir_origin = &inst;
+            lir_bb.append_inst(std::move(xg));
+            break;
+        }
+        case Opcode::fptrunc_bf16_f32: {
+            VReg dst = get_vreg(inst.result());
+            VReg src = get_vreg(inst.operand(0));
+            auto emit_bin_imm = [&](LirOpcode lop, VReg r, int64_t imm) {
+                auto i = std::make_unique<LirInst>(lop);
+                i->add_def(LirOperand::vreg(r, 4));
+                i->add_use(LirOperand::vreg(r, 4));
+                i->add_use(LirOperand::imm(imm, 4));
+                lir_bb.append_inst(std::move(i));
+            };
+            auto emit_mov32 = [&](VReg r, VReg s) {
+                auto i = std::make_unique<LirInst>(LirOpcode::Mov32);
+                i->add_def(LirOperand::vreg(r, 4));
+                i->add_use(LirOperand::vreg(s, 4));
+                lir_bb.append_inst(std::move(i));
+            };
+
+            VReg u = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            auto gx = std::make_unique<LirInst>(LirOpcode::Movd_gx);
+            gx->add_def(LirOperand::vreg(u, 4));
+            gx->add_use(LirOperand::vreg(src, 4));
+            lir_bb.append_inst(std::move(gx));
+
+            VReg hi = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            emit_mov32(hi, u);
+            emit_bin_imm(LirOpcode::Shr32, hi, 16);
+
+            VReg lsb = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            emit_mov32(lsb, hi);
+            emit_bin_imm(LirOpcode::And32, lsb, 1);
+
+            VReg rnd = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            emit_mov32(rnd, u);
+            emit_bin_imm(LirOpcode::Add32, rnd, 0x7FFF);
+            auto add_lsb = std::make_unique<LirInst>(LirOpcode::Add32);
+            add_lsb->add_def(LirOperand::vreg(rnd, 4));
+            add_lsb->add_use(LirOperand::vreg(rnd, 4));
+            add_lsb->add_use(LirOperand::vreg(lsb, 4));
+            lir_bb.append_inst(std::move(add_lsb));
+            emit_bin_imm(LirOpcode::Shr32, rnd, 16);
+
+            VReg quiet = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            emit_mov32(quiet, hi);
+            emit_bin_imm(LirOpcode::Or32, quiet, 0x40);
+
+            VReg abs_u = lir_fn_->allocate_vreg(RegClass::GPR, 4);
+            emit_mov32(abs_u, u);
+            emit_bin_imm(LirOpcode::And32, abs_u, 0x7FFFFFFF);
+
+            auto cmp = std::make_unique<LirInst>(LirOpcode::Cmp32);
+            cmp->add_use(LirOperand::vreg(abs_u, 4));
+            cmp->add_use(LirOperand::imm(0x7F800000, 4));
+            lir_bb.append_inst(std::move(cmp));
+
+            auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
+            cmov->condition = x64::Condition::A;
+            cmov->add_def(LirOperand::vreg(rnd, 4));
+            cmov->add_use(LirOperand::vreg(rnd, 4));
+            cmov->add_use(LirOperand::vreg(quiet, 4));
+            lir_bb.append_inst(std::move(cmov));
+
+            auto zx = std::make_unique<LirInst>(LirOpcode::Movzx16);
+            zx->add_def(LirOperand::vreg(dst, 4));
+            zx->add_use(LirOperand::vreg(rnd, 2));
+            zx->mir_origin = &inst;
+            lir_bb.append_inst(std::move(zx));
+            break;
+        }
         case Opcode::bitcast_i64_f64: {
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));

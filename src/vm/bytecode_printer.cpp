@@ -40,7 +40,10 @@ bool is_unary(BytecodeOp op) {
         case BytecodeOp::sext8: case BytecodeOp::sext16: case BytecodeOp::fptosi32: case BytecodeOp::fptosi64:
         case BytecodeOp::fptosi32_f32: case BytecodeOp::fptosi64_f32: case BytecodeOp::sitofp_f64:
         case BytecodeOp::sitofp_f32: case BytecodeOp::sitofp_f64_i64: case BytecodeOp::sitofp_f32_i64:
-        case BytecodeOp::fptrunc_f32: case BytecodeOp::fpext_f64: case BytecodeOp::bitcast_i64_f64:
+        case BytecodeOp::fptrunc_f32: case BytecodeOp::fpext_f64:
+        case BytecodeOp::fptrunc_f16: case BytecodeOp::fpext_f32_f16:
+        case BytecodeOp::fptrunc_bf16: case BytecodeOp::fpext_f32_bf16:
+        case BytecodeOp::bitcast_i64_f64:
         case BytecodeOp::bitcast_f64_i64: case BytecodeOp::neg_i32: case BytecodeOp::neg_i64:
         case BytecodeOp::neg_f32: case BytecodeOp::neg_f64: case BytecodeOp::not_i32: case BytecodeOp::not_i64:
         case BytecodeOp::clz_i32: case BytecodeOp::clz_i64: case BytecodeOp::ctz_i32: case BytecodeOp::ctz_i64:

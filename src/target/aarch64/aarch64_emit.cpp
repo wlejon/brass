@@ -663,6 +663,8 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Cvttss2si32:
         case LirOpcode::Cvtsd2ss:
         case LirOpcode::Cvtss2sd:
+        case LirOpcode::Cvth2ss:
+        case LirOpcode::Cvtss2h:
         case LirOpcode::Floor32:
         case LirOpcode::Floor64:
         case LirOpcode::Ceil32:

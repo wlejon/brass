@@ -25,6 +25,10 @@ std::string_view opcode_name(Opcode op) noexcept {
         case Opcode::sitofp_f32_i64: return "sitofp_f32_i64";
         case Opcode::fptrunc_f32_f64: return "fptrunc_f32_f64";
         case Opcode::fpext_f64_f32: return "fpext_f64_f32";
+        case Opcode::fptrunc_f16_f32: return "fptrunc_f16_f32";
+        case Opcode::fpext_f32_f16: return "fpext_f32_f16";
+        case Opcode::fptrunc_bf16_f32: return "fptrunc_bf16_f32";
+        case Opcode::fpext_f32_bf16: return "fpext_f32_bf16";
         case Opcode::bitcast_i64_f64: return "bitcast_i64_f64";
         case Opcode::bitcast_f64_i64: return "bitcast_f64_i64";
         case Opcode::bitcast_i32_f32: return "bitcast_i32_f32";
@@ -217,6 +221,10 @@ bool is_conversion(Opcode op) noexcept {
         case Opcode::sitofp_f32_i64:
         case Opcode::fptrunc_f32_f64:
         case Opcode::fpext_f64_f32:
+        case Opcode::fptrunc_f16_f32:
+        case Opcode::fpext_f32_f16:
+        case Opcode::fptrunc_bf16_f32:
+        case Opcode::fpext_f32_bf16:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32:

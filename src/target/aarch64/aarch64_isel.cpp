@@ -567,6 +567,10 @@ void AArch64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::fptosi_i64:
         case Opcode::fptrunc_f32_f64:
         case Opcode::fpext_f64_f32:
+        case Opcode::fptrunc_f16_f32:
+        case Opcode::fpext_f32_f16:
+        case Opcode::fptrunc_bf16_f32:
+        case Opcode::fpext_f32_bf16:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32:

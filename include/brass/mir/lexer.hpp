@@ -27,8 +27,12 @@ enum class TokenKind : uint16_t {
     Kw_unreachable,
 
     // Types
+    Kw_i8,
+    Kw_i16,
     Kw_i32,
     Kw_i64,
+    Kw_f16,
+    Kw_bf16,
     Kw_f32,
     Kw_f64,
     Kw_ptr,

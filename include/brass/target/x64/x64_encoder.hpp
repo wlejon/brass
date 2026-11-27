@@ -567,6 +567,9 @@ public:
     // dst(ymm) = src1(ymm) with half imm & 1 replaced by src2(xmm).
     void vextractf128(XMM dst, XMM src, uint8_t imm);
     void vinsertf128(XMM dst, XMM src1, XMM src2, uint8_t imm);
+    // F16C half-precision conversions (128-bit VEX).
+    void vcvtph2ps(XMM dst, XMM src);
+    void vcvtps2ph(XMM dst, XMM src, uint8_t imm8 = 0);
 
     // FMA3: Vector FMA (both 128-bit [is_256=false] and 256-bit [is_256=true])
     void vfmadd213ps(XMM dst, XMM src2, XMM src3, bool is_256 = false);

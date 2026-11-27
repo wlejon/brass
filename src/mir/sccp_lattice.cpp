@@ -1,6 +1,7 @@
 #include "sccp_lattice.hpp"
 #include "int_fold.hpp"
 #include <brass/interpreter/float_arith.hpp>
+#include <brass/mir/half_float.hpp>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -222,6 +223,14 @@ LatticeValue evaluate_conversion(Opcode op, Type res_type, const LatticeValue& v
             return LatticeValue::make_f32(static_cast<float>(val.as_f64()));
         case Opcode::fpext_f64_f32:
             return LatticeValue::make_f64(static_cast<double>(val.as_f32()));
+        case Opcode::fptrunc_f16_f32:
+            return LatticeValue::make_f16(f32_to_f16_bits(val.as_f32()));
+        case Opcode::fpext_f32_f16:
+            return LatticeValue::make_f32(f16_bits_to_f32(val.as_u16()));
+        case Opcode::fptrunc_bf16_f32:
+            return LatticeValue::make_bf16(f32_to_bf16_bits(val.as_f32()));
+        case Opcode::fpext_f32_bf16:
+            return LatticeValue::make_f32(bf16_bits_to_f32(val.as_u16()));
         case Opcode::bitcast_i64_f64: {
             double d = val.as_f64();
             int64_t i = 0;

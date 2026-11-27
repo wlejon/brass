@@ -178,6 +178,10 @@ namespace brass::mir_parser {
             case Opcode::sitofp_f32_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_sitofp_f32_i64(v); break; }
             case Opcode::fptrunc_f32_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptrunc_f32_f64(v); break; }
             case Opcode::fpext_f64_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f64_f32(v); break; }
+            case Opcode::fptrunc_f16_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptrunc_f16_f32(v); break; }
+            case Opcode::fpext_f32_f16: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f32_f16(v); break; }
+            case Opcode::fptrunc_bf16_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fptrunc_bf16_f32(v); break; }
+            case Opcode::fpext_f32_bf16: { Value* v = parse_val(); if (!v) return false; res_val = b.build_fpext_f32_bf16(v); break; }
             case Opcode::bitcast_i64_f64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i64_f64(v); break; }
             case Opcode::bitcast_f64_i64: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_f64_i64(v); break; }
             case Opcode::bitcast_i32_f32: { Value* v = parse_val(); if (!v) return false; res_val = b.build_bitcast_i32_f32(v); break; }

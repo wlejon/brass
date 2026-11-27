@@ -270,38 +270,7 @@ bool Verifier::verify_function(const Function& fn) {
                     break;
 
                 case Opcode::sext_i64:
-                    if (inst->operand_count() != 1 || !inst->operand(0) || inst->operand(0)->type() != Type::i32()) {
-                        report_error(inst_prefix + "Requires 1 i32 operand.");
-                    }
-                    if (inst->type() != Type::i64()) {
-                        report_error(inst_prefix + "Result type must be i64.");
-                    }
-                    break;
-                case Opcode::zext_i64:
-                    if (inst->operand_count() != 1 || !inst->operand(0) ||
-                        (inst->operand(0)->type() != Type::i32() && inst->operand(0)->type() != Type::i8())) {
-                        report_error(inst_prefix + "Requires 1 i32 or i8 operand.");
-                    }
-                    if (inst->type() != Type::i64()) {
-                        report_error(inst_prefix + "Result type must be i64.");
-                    }
-                    break;
                 case Opcode::trunc_i32:
-                    if (inst->operand_count() != 1 || !inst->operand(0) || inst->operand(0)->type() != Type::i64()) {
-                        report_error(inst_prefix + "Requires 1 i64 operand.");
-                    }
-                    if (inst->type() != Type::i32()) {
-                        report_error(inst_prefix + "Result type must be i32.");
-                    }
-                    break;
-                case Opcode::trunc_i8:
-                    if (inst->operand_count() != 1 || !inst->operand(0) || !inst->operand(0)->type().is_integer()) {
-                        report_error(inst_prefix + "Requires 1 integer operand.");
-                    }
-                    if (inst->type() != Type::i8()) {
-                        report_error(inst_prefix + "Result type must be i8.");
-                    }
-                    break;
                 case Opcode::fptosi_i32:
                 case Opcode::fptosi_i64:
                 case Opcode::fptosi_i32_f32:
@@ -311,30 +280,53 @@ bool Verifier::verify_function(const Function& fn) {
                 case Opcode::sitofp_f32_i32:
                 case Opcode::sitofp_f32_i64:
                 case Opcode::fptrunc_f32_f64:
-                case Opcode::fpext_f64_f32: {
+                case Opcode::fpext_f64_f32:
+                case Opcode::fptrunc_f16_f32:
+                case Opcode::fpext_f32_f16:
+                case Opcode::fptrunc_bf16_f32:
+                case Opcode::fpext_f32_bf16: {
                     if (inst->operand_count() != 1 || !inst->operand(0)) {
                         report_error(inst_prefix + "Conversion requires 1 operand.");
                         break;
                     }
-                    Type in_t = inst->operand(0)->type();
-                    Type out_t = inst->type();
+                    struct CvtSig { Opcode op; Type in; Type out; };
+                    const CvtSig kCvtSigs[] = {
+                        {Opcode::sext_i64, Type::i32(), Type::i64()},
+                        {Opcode::trunc_i32, Type::i64(), Type::i32()},
+                        {Opcode::fptosi_i32, Type::f64(), Type::i32()},
+                        {Opcode::fptosi_i64, Type::f64(), Type::i64()},
+                        {Opcode::fptosi_i32_f32, Type::f32(), Type::i32()},
+                        {Opcode::fptosi_i64_f32, Type::f32(), Type::i64()},
+                        {Opcode::sitofp_f64_i32, Type::i32(), Type::f64()},
+                        {Opcode::sitofp_f64_i64, Type::i64(), Type::f64()},
+                        {Opcode::sitofp_f32_i32, Type::i32(), Type::f32()},
+                        {Opcode::sitofp_f32_i64, Type::i64(), Type::f32()},
+                        {Opcode::fptrunc_f32_f64, Type::f64(), Type::f32()},
+                        {Opcode::fpext_f64_f32, Type::f32(), Type::f64()},
+                        {Opcode::fptrunc_f16_f32, Type::f32(), Type::f16()},
+                        {Opcode::fpext_f32_f16, Type::f16(), Type::f32()},
+                        {Opcode::fptrunc_bf16_f32, Type::f32(), Type::bf16()},
+                        {Opcode::fpext_f32_bf16, Type::bf16(), Type::f32()},
+                    };
+                    Type in_t = inst->operand(0)->type(), out_t = inst->type();
                     bool ok = false;
-                    switch (inst->opcode()) {
-                        case Opcode::fptosi_i32: ok = (in_t == Type::f64() && out_t == Type::i32()); break;
-                        case Opcode::fptosi_i64: ok = (in_t == Type::f64() && out_t == Type::i64()); break;
-                        case Opcode::fptosi_i32_f32: ok = (in_t == Type::f32() && out_t == Type::i32()); break;
-                        case Opcode::fptosi_i64_f32: ok = (in_t == Type::f32() && out_t == Type::i64()); break;
-                        case Opcode::sitofp_f64_i32: ok = (in_t == Type::i32() && out_t == Type::f64()); break;
-                        case Opcode::sitofp_f64_i64: ok = (in_t == Type::i64() && out_t == Type::f64()); break;
-                        case Opcode::sitofp_f32_i32: ok = (in_t == Type::i32() && out_t == Type::f32()); break;
-                        case Opcode::sitofp_f32_i64: ok = (in_t == Type::i64() && out_t == Type::f32()); break;
-                        case Opcode::fptrunc_f32_f64: ok = (in_t == Type::f64() && out_t == Type::f32()); break;
-                        case Opcode::fpext_f64_f32: ok = (in_t == Type::f32() && out_t == Type::f64()); break;
-                        default: break;
+                    for (const auto& s : kCvtSigs) {
+                        if (s.op == inst->opcode()) { ok = (in_t == s.in && out_t == s.out); break; }
                     }
                     if (!ok) report_error(inst_prefix + "Invalid operand or result type for conversion.");
                     break;
                 }
+                case Opcode::zext_i64:
+                    if (inst->operand_count() != 1 || !inst->operand(0) ||
+                        (inst->operand(0)->type() != Type::i32() && inst->operand(0)->type() != Type::i8()))
+                        report_error(inst_prefix + "Requires 1 i32 or i8 operand.");
+                    if (inst->type() != Type::i64()) report_error(inst_prefix + "Result type must be i64.");
+                    break;
+                case Opcode::trunc_i8:
+                    if (inst->operand_count() != 1 || !inst->operand(0) || !inst->operand(0)->type().is_integer())
+                        report_error(inst_prefix + "Requires 1 integer operand.");
+                    if (inst->type() != Type::i8()) report_error(inst_prefix + "Result type must be i8.");
+                    break;
                 case Opcode::bitcast_i64_f64:
                 case Opcode::bitcast_f64_i64:
                 case Opcode::bitcast_i32_f32:

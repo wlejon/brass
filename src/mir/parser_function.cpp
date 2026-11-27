@@ -55,8 +55,12 @@ Function* Parser::parse_single_function(Module& mod) {
 
 Type Parser::parse_type() {
     Token tok = peek();
+    if (tok.is(TokenKind::Kw_i8)) { advance(); return Type::i8(); }
+    if (tok.is(TokenKind::Kw_i16)) { advance(); return Type::i16(); }
     if (tok.is(TokenKind::Kw_i32)) { advance(); return Type::i32(); }
     if (tok.is(TokenKind::Kw_i64)) { advance(); return Type::i64(); }
+    if (tok.is(TokenKind::Kw_f16)) { advance(); return Type::f16(); }
+    if (tok.is(TokenKind::Kw_bf16)) { advance(); return Type::bf16(); }
     if (tok.is(TokenKind::Kw_f32)) { advance(); return Type::f32(); }
     if (tok.is(TokenKind::Kw_f64)) { advance(); return Type::f64(); }
     if (tok.is(TokenKind::Kw_ptr)) { advance(); return Type::ptr(); }

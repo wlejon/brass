@@ -177,165 +177,36 @@ Value* Builder::build_patchable_const_i64(std::string_view symbol, int64_t initi
     return res;
 }
 
-Value* Builder::build_sext_i64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::sext_i64, Type::i64());
+static Value* build_typed_un_op(Builder* b, Arena& arena, Opcode op, Type res_type, Value* val) {
+    Instruction* inst = arena.make<Instruction>(op, res_type);
     inst->add_operand(val);
-    Value* res = create_value(Type::i64());
+    Value* res = b->create_value(res_type);
     res->set_defining_instruction(inst);
     inst->set_result(res);
-    insert(inst);
+    b->insert(inst);
     return res;
 }
 
-Value* Builder::build_zext_i64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::zext_i64, Type::i64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_trunc_i32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::trunc_i32, Type::i32());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_trunc_i8(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::trunc_i8, Type::i8());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i8());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_fptosi_i32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::fptosi_i32, Type::i32());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_fptosi_i64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::fptosi_i64, Type::i64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_fptosi_i32_f32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::fptosi_i32_f32, Type::i32());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_fptosi_i64_f32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::fptosi_i64_f32, Type::i64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_sitofp_f64_i32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::sitofp_f64_i32, Type::f64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_sitofp_f64_i64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::sitofp_f64_i64, Type::f64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_sitofp_f32_i32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::sitofp_f32_i32, Type::f32());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_sitofp_f32_i64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::sitofp_f32_i64, Type::f32());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_fptrunc_f32_f64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::fptrunc_f32_f64, Type::f32());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f32());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_fpext_f64_f32(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::fpext_f64_f32, Type::f64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_bitcast_i64_f64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::bitcast_i64_f64, Type::i64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::i64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
-
-Value* Builder::build_bitcast_f64_i64(Value* val) {
-    Instruction* inst = get_arena().make<Instruction>(Opcode::bitcast_f64_i64, Type::f64());
-    inst->add_operand(val);
-    Value* res = create_value(Type::f64());
-    res->set_defining_instruction(inst);
-    inst->set_result(res);
-    insert(inst);
-    return res;
-}
+Value* Builder::build_sext_i64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::sext_i64, Type::i64(), val); }
+Value* Builder::build_zext_i64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::zext_i64, Type::i64(), val); }
+Value* Builder::build_trunc_i32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::trunc_i32, Type::i32(), val); }
+Value* Builder::build_trunc_i8(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::trunc_i8, Type::i8(), val); }
+Value* Builder::build_fptosi_i32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptosi_i32, Type::i32(), val); }
+Value* Builder::build_fptosi_i64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptosi_i64, Type::i64(), val); }
+Value* Builder::build_fptosi_i32_f32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptosi_i32_f32, Type::i32(), val); }
+Value* Builder::build_fptosi_i64_f32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptosi_i64_f32, Type::i64(), val); }
+Value* Builder::build_sitofp_f64_i32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::sitofp_f64_i32, Type::f64(), val); }
+Value* Builder::build_sitofp_f64_i64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::sitofp_f64_i64, Type::f64(), val); }
+Value* Builder::build_sitofp_f32_i32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::sitofp_f32_i32, Type::f32(), val); }
+Value* Builder::build_sitofp_f32_i64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::sitofp_f32_i64, Type::f32(), val); }
+Value* Builder::build_fptrunc_f32_f64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptrunc_f32_f64, Type::f32(), val); }
+Value* Builder::build_fpext_f64_f32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fpext_f64_f32, Type::f64(), val); }
+Value* Builder::build_fptrunc_f16_f32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptrunc_f16_f32, Type::f16(), val); }
+Value* Builder::build_fpext_f32_f16(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fpext_f32_f16, Type::f32(), val); }
+Value* Builder::build_fptrunc_bf16_f32(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fptrunc_bf16_f32, Type::bf16(), val); }
+Value* Builder::build_fpext_f32_bf16(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::fpext_f32_bf16, Type::f32(), val); }
+Value* Builder::build_bitcast_i64_f64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::bitcast_i64_f64, Type::i64(), val); }
+Value* Builder::build_bitcast_f64_i64(Value* val) { return build_typed_un_op(this, get_arena(), Opcode::bitcast_f64_i64, Type::f64(), val); }
 
 static Value* build_bin_op(Builder* b, Arena& arena, Opcode op, Value* lhs, Value* rhs) {
     Type res_type = lhs ? lhs->type() : Type::i32();

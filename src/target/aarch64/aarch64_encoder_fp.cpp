@@ -200,6 +200,14 @@ void AArch64Encoder::fcvt_s_d(FPR dst, FPR src) {
     buffer_.emit_inst(0x1E624000u | (reg_code(src) << 5) | reg_code(dst));
 }
 
+void AArch64Encoder::fcvt_s_h(FPR dst, FPR src) {
+    buffer_.emit_inst(0x1EE24000u | (reg_code(src) << 5) | reg_code(dst));
+}
+
+void AArch64Encoder::fcvt_h_s(FPR dst, FPR src) {
+    buffer_.emit_inst(0x1E23C000u | (reg_code(src) << 5) | reg_code(dst));
+}
+
 void AArch64Encoder::scvtf_d(FPR dst, GPR src) {
     buffer_.emit_inst(0x9E620000u | (reg_code(src) << 5) | reg_code(dst));
 }

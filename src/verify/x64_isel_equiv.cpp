@@ -30,7 +30,9 @@ constexpr uint64_t kLirCanonicalRbp  = 0x7FFD000000000000ULL;
 uint32_t mir_type_width(Type t) {
     switch (t.kind()) {
         case TypeKind::I8:     return 8;
-        case TypeKind::I16:    return 16;
+        case TypeKind::I16:
+        case TypeKind::F16:
+        case TypeKind::BF16:    return 16;
         case TypeKind::I32:
         case TypeKind::F32:    return 32;
         case TypeKind::I64:
@@ -734,6 +736,19 @@ LirExecResult symbolically_execute_lir(
                     case LirOpcode::Cvtss2sd:
                         write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, read_op(inst.uses[0], 32), 64), true);
                         break;
+                    case LirOpcode::Cvth2ss:
+                        write_op(inst.defs[0],
+                                 init_mem.eval_uninterpreted_call(
+                                     ctx, "brass_f16_to_f32",
+                                     {ctx.make_extract(read_op(inst.uses[0], 32), 15, 0)}, Type::f32()),
+                                 true);
+                        break;
+                    case LirOpcode::Cvtss2h: {
+                        BVNodeId r16 = init_mem.eval_uninterpreted_call(
+                            ctx, "brass_f32_to_f16", {read_op(inst.uses[0], 32)}, Type::f16());
+                        write_op(inst.defs[0], ctx.make_zext(ctx.make_extract(r16, 15, 0), 16), true);
+                        break;
+                    }
                     case LirOpcode::Ucomisd: case LirOpcode::Ucomiss: {
                         uint32_t w = (op == LirOpcode::Ucomiss) ? 32 : 64;
                         BVNodeId a = read_op(inst.uses[0], w), b = read_op(inst.uses[1], w);

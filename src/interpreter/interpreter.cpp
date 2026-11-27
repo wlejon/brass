@@ -205,6 +205,10 @@ RuntimeValue Interpreter::execute_function_from_block(const Function& fn, BasicB
                 case Opcode::sitofp_f32_i64: frame.set_value(inst->result(), val_sitofp_f32_i64(frame.get_value(inst->operand(0)))); break;
                 case Opcode::fptrunc_f32_f64: frame.set_value(inst->result(), val_fptrunc_f32_f64(frame.get_value(inst->operand(0)))); break;
                 case Opcode::fpext_f64_f32: frame.set_value(inst->result(), val_fpext_f64_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fptrunc_f16_f32: frame.set_value(inst->result(), val_fptrunc_f16_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fpext_f32_f16: frame.set_value(inst->result(), val_fpext_f32_f16(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fptrunc_bf16_f32: frame.set_value(inst->result(), val_fptrunc_bf16_f32(frame.get_value(inst->operand(0)))); break;
+                case Opcode::fpext_f32_bf16: frame.set_value(inst->result(), val_fpext_f32_bf16(frame.get_value(inst->operand(0)))); break;
                 case Opcode::bitcast_i64_f64: {
                     frame.set_value(inst->result(), val_bitcast_i64_f64(frame.get_value(inst->operand(0))));
                     break;

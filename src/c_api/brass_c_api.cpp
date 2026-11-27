@@ -13,6 +13,8 @@ static BrassType_T s_type_i8{ Type::i8() };
 static BrassType_T s_type_i16{ Type::i16() };
 static BrassType_T s_type_i32{ Type::i32() };
 static BrassType_T s_type_i64{ Type::i64() };
+static BrassType_T s_type_f16{ Type::f16() };
+static BrassType_T s_type_bf16{ Type::bf16() };
 static BrassType_T s_type_f32{ Type::f32() };
 static BrassType_T s_type_f64{ Type::f64() };
 static BrassType_T s_type_ptr{ Type::ptr() };
@@ -35,6 +37,8 @@ BrassType get_type_handle(Type t) {
         case TypeKind::I16: return &s_type_i16;
         case TypeKind::I32: return &s_type_i32;
         case TypeKind::I64: return &s_type_i64;
+        case TypeKind::F16: return &s_type_f16;
+        case TypeKind::BF16: return &s_type_bf16;
         case TypeKind::F32: return &s_type_f32;
         case TypeKind::F64: return &s_type_f64;
         case TypeKind::Ptr: return &s_type_ptr;

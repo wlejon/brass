@@ -10,6 +10,8 @@ Type parse_type_from_string(std::string_view s) {
     if (s == "i16") return Type::i16();
     if (s == "i32") return Type::i32();
     if (s == "i64") return Type::i64();
+    if (s == "f16") return Type::f16();
+    if (s == "bf16") return Type::bf16();
     if (s == "f32") return Type::f32();
     if (s == "f64") return Type::f64();
     if (s == "ptr") return Type::ptr();
@@ -111,6 +113,10 @@ bool decode_opcode_string(std::string_view str, Opcode& op, Type& type_suffix, T
     if (str == "fptosi.i64.f32" || str == "fptosi_i64_f32") { op = Opcode::fptosi_i64_f32; type_suffix = Type::i64(); return true; }
     if (str == "fptrunc.f32.f64" || str == "fptrunc_f32_f64") { op = Opcode::fptrunc_f32_f64; type_suffix = Type::f32(); return true; }
     if (str == "fpext.f64.f32" || str == "fpext_f64_f32") { op = Opcode::fpext_f64_f32; type_suffix = Type::f64(); return true; }
+    if (str == "fptrunc.f16.f32" || str == "fptrunc_f16_f32") { op = Opcode::fptrunc_f16_f32; type_suffix = Type::f16(); return true; }
+    if (str == "fpext.f32.f16" || str == "fpext_f32_f16") { op = Opcode::fpext_f32_f16; type_suffix = Type::f32(); return true; }
+    if (str == "fptrunc.bf16.f32" || str == "fptrunc_bf16_f32") { op = Opcode::fptrunc_bf16_f32; type_suffix = Type::bf16(); return true; }
+    if (str == "fpext.f32.bf16" || str == "fpext_f32_bf16") { op = Opcode::fpext_f32_bf16; type_suffix = Type::f32(); return true; }
 
     // The bare `bitcast.i64` / `bitcast.f64` / `bitcast.i32` /
     // `bitcast.f32` (docs/mir_reference.md) name

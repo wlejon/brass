@@ -77,6 +77,10 @@ public:
     Value* build_sitofp_f32_i64(Value* val);
     Value* build_fptrunc_f32_f64(Value* val);
     Value* build_fpext_f64_f32(Value* val);
+    Value* build_fptrunc_f16_f32(Value* val);
+    Value* build_fpext_f32_f16(Value* val);
+    Value* build_fptrunc_bf16_f32(Value* val);
+    Value* build_fpext_f32_bf16(Value* val);
     Value* build_bitcast_i64_f64(Value* val);
     Value* build_bitcast_f64_i64(Value* val);
     Value* build_bitcast_i32_f32(Value* val);

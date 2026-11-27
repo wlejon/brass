@@ -63,6 +63,22 @@ public:
         return v;
     }
 
+    static LatticeValue make_f16(uint16_t bits) noexcept {
+        LatticeValue v;
+        v.state_ = LatticeState::Constant;
+        v.type_ = Type::f16();
+        v.data_.i64_val = bits;
+        return v;
+    }
+
+    static LatticeValue make_bf16(uint16_t bits) noexcept {
+        LatticeValue v;
+        v.state_ = LatticeState::Constant;
+        v.type_ = Type::bf16();
+        v.data_.i64_val = bits;
+        return v;
+    }
+
     static LatticeValue make_f64(double val) noexcept {
         LatticeValue v;
         v.state_ = LatticeState::Constant;
@@ -88,6 +104,7 @@ public:
 
     int32_t as_i32() const noexcept { return static_cast<int32_t>(data_.i64_val); }
     int64_t as_i64() const noexcept { return data_.i64_val; }
+    uint16_t as_u16() const noexcept { return static_cast<uint16_t>(data_.i64_val & 0xFFFF); }
     float as_f32() const noexcept {
         if (type_ == Type::f64()) return static_cast<float>(data_.f64_val);
         return data_.f32_val;
@@ -133,6 +150,7 @@ public:
         if (type_ != other.type_) return false;
         if (type_ == Type::i32()) return as_i32() == other.as_i32();
         if (type_ == Type::i64()) return as_i64() == other.as_i64();
+        if (type_ == Type::f16() || type_ == Type::bf16()) return as_u16() == other.as_u16();
         if (type_ == Type::ptr()) return as_ptr() == other.as_ptr();
         if (type_ == Type::f32()) {
             return std::memcmp(&data_.f32_val, &other.data_.f32_val, sizeof(float)) == 0;

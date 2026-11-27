@@ -284,7 +284,15 @@ void SpirvISel::lower_load(const brass::Instruction& inst) {
         return;
     }
     Id base = id_of(inst.operand(0), "pointer");
-    define(inst.result(), load_global(address(base, inst.offset()), scalar_type(t), static_cast<uint32_t>(t.size_in_bytes())));
+    Id addr = address(base, inst.offset());
+    if (t.is_half_float()) {
+        m_.add_capability(spv::CapabilityStorageBuffer16BitAccess);
+        Id i16_t = m_.t_int(16);
+        Id raw = load_global(addr, i16_t, 2);
+        define(inst.result(), op(spv::OpUConvert, t_u32(), {raw}));
+        return;
+    }
+    define(inst.result(), load_global(addr, scalar_type(t), static_cast<uint32_t>(t.size_in_bytes())));
 }
 
 void SpirvISel::lower_store(const brass::Instruction& inst) {
@@ -304,8 +312,16 @@ void SpirvISel::lower_store(const brass::Instruction& inst) {
         return;
     }
     Id base = id_of(inst.operand(0), "pointer");
-    store_global(address(base, inst.offset()), id_of(value, "value"), scalar_type(value->type()),
-                 static_cast<uint32_t>(value->type().size_in_bytes()));
+    Id addr = address(base, inst.offset());
+    Type vt = value->type();
+    Id v = id_of(value, "value");
+    if (vt.is_half_float()) {
+        m_.add_capability(spv::CapabilityStorageBuffer16BitAccess);
+        Id i16_t = m_.t_int(16);
+        store_global(addr, op(spv::OpUConvert, i16_t, {v}), i16_t, 2);
+        return;
+    }
+    store_global(addr, v, scalar_type(vt), static_cast<uint32_t>(vt.size_in_bytes()));
 }
 
 // One 16-byte OpLoad per part (vec4 of 32-bit lanes, vec2 of 64-bit ones);
@@ -347,6 +363,13 @@ void SpirvISel::lower_load_indexed(const brass::Instruction& inst) {
         return;
     }
     Id addr = indexed_address(inst, inst.operand(0), inst.operand(1));
+    if (t.is_half_float()) {
+        m_.add_capability(spv::CapabilityStorageBuffer16BitAccess);
+        Id i16_t = m_.t_int(16);
+        Id raw = load_global(addr, i16_t, 2);
+        define(inst.result(), op(spv::OpUConvert, t_u32(), {raw}));
+        return;
+    }
     define(inst.result(), load_global(addr, scalar_type(t), static_cast<uint32_t>(t.size_in_bytes())));
 }
 
@@ -363,8 +386,15 @@ void SpirvISel::lower_store_indexed(const brass::Instruction& inst) {
         return;
     }
     Id addr = indexed_address(inst, inst.operand(0), inst.operand(1));
-    store_global(addr, id_of(value, "value"), scalar_type(value->type()),
-                 static_cast<uint32_t>(value->type().size_in_bytes()));
+    Type vt = value->type();
+    Id v = id_of(value, "value");
+    if (vt.is_half_float()) {
+        m_.add_capability(spv::CapabilityStorageBuffer16BitAccess);
+        Id i16_t = m_.t_int(16);
+        store_global(addr, op(spv::OpUConvert, i16_t, {v}), i16_t, 2);
+        return;
+    }
+    store_global(addr, v, scalar_type(vt), static_cast<uint32_t>(vt.size_in_bytes()));
 }
 
 // ---------------------------------------------------------------------------

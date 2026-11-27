@@ -251,6 +251,15 @@ bb0:
   coro_destroy %1
   ret %3
 }
+
+func @narrow_floats(%0: f32) -> f32 {
+bb0:
+  %1 = fptrunc.f16.f32 %0
+  %2 = fpext.f32.f16 %1
+  %3 = fptrunc.bf16.f32 %2
+  %4 = fpext.f32.bf16 %3
+  ret %4
+}
 )";
 
 std::unique_ptr<Module> parse_or_report(std::string_view text) {

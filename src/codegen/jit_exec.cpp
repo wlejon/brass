@@ -11,6 +11,7 @@
 #include <brass/runtime/patcher.hpp>
 #include <brass/runtime/exception.hpp>
 #include <brass/runtime/coroutine.hpp>
+#include <brass/mir/half_float.hpp>
 #include <brass/runtime/fast_trig.hpp>
 #include <brass/runtime/multi_tier_pipeline.hpp>
 #include <brass/runtime/parallel_runtime.hpp>
@@ -98,6 +99,10 @@ static void register_brass_runtime_symbols(JitExecutionEngine& e) {
     e.register_external_symbol("brass_coro_create", reinterpret_cast<void*>(&brass_default_coro_create));
     e.register_external_symbol("brass_coro_create_body", reinterpret_cast<void*>(&brass_coro_create_body));
     e.register_external_symbol("brass_coro_set_awaiter", reinterpret_cast<void*>(&brass_coro_set_awaiter));
+    e.register_external_symbol("brass_f16_to_f32", reinterpret_cast<void*>(&brass_f16_to_f32));
+    e.register_external_symbol("brass_f32_to_f16", reinterpret_cast<void*>(&brass_f32_to_f16));
+    e.register_external_symbol("brass_bf16_to_f32", reinterpret_cast<void*>(&brass_bf16_to_f32));
+    e.register_external_symbol("brass_f32_to_bf16", reinterpret_cast<void*>(&brass_f32_to_bf16));
     e.register_external_symbol("brass_coro_awaiter", reinterpret_cast<void*>(&brass_coro_awaiter));
     e.register_external_symbol("brass_coro_resume", reinterpret_cast<void*>(&brass_coro_resume_from_generated));
     e.register_external_symbol("brass_coro_resume_from_generated",
@@ -981,11 +986,8 @@ const runtime::MultiTierPipeline* JitExecutionEngine::multi_tier_pipeline() cons
 }
 
 void JitExecutionEngine::set_multi_tier_enabled(bool enabled) {
-    if (enabled) {
-        runtime::MultiTierPipeline::instance().initialize();
-    } else {
-        runtime::MultiTierPipeline::instance().shutdown();
-    }
+    if (enabled) runtime::MultiTierPipeline::instance().initialize();
+    else runtime::MultiTierPipeline::instance().shutdown();
 }
 
 bool JitExecutionEngine::is_multi_tier_enabled() const noexcept {

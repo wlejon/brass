@@ -13,28 +13,28 @@ bool is_narrow_int(Type t) {
 // zero-extended into registers (the i32 register form).
 BytecodeOp load_op(Type t) {
     if (t == Type::i8()) return BytecodeOp::load8;
-    if (t == Type::i16()) return BytecodeOp::load16;
+    if (t == Type::i16() || t.is_half_float()) return BytecodeOp::load16;
     if (t == Type::i32() || t == Type::f32()) return BytecodeOp::load32;
     return BytecodeOp::load64;
 }
 
 BytecodeOp store_op(Type t) {
     if (t == Type::i8()) return BytecodeOp::store8;
-    if (t == Type::i16()) return BytecodeOp::store16;
+    if (t == Type::i16() || t.is_half_float()) return BytecodeOp::store16;
     if (t == Type::i32() || t == Type::f32()) return BytecodeOp::store32;
     return BytecodeOp::store64;
 }
 
 BytecodeOp load_indexed_op(Type t) {
     if (t == Type::i8()) return BytecodeOp::load8_indexed;
-    if (t == Type::i16()) return BytecodeOp::load16_indexed;
+    if (t == Type::i16() || t.is_half_float()) return BytecodeOp::load16_indexed;
     if (t == Type::i32() || t == Type::f32()) return BytecodeOp::load32_indexed;
     return BytecodeOp::load64_indexed;
 }
 
 BytecodeOp store_indexed_op(Type t) {
     if (t == Type::i8()) return BytecodeOp::store8_indexed;
-    if (t == Type::i16()) return BytecodeOp::store16_indexed;
+    if (t == Type::i16() || t.is_half_float()) return BytecodeOp::store16_indexed;
     if (t == Type::i32() || t == Type::f32()) return BytecodeOp::store32_indexed;
     return BytecodeOp::store64_indexed;
 }
@@ -55,6 +55,8 @@ void FunctionCompilerContext::lower_instruction(const Instruction& inst) {
         case Opcode::fptosi_i32: case Opcode::fptosi_i64: case Opcode::fptosi_i32_f32: case Opcode::fptosi_i64_f32:
         case Opcode::sitofp_f64_i32: case Opcode::sitofp_f64_i64: case Opcode::sitofp_f32_i32:
         case Opcode::sitofp_f32_i64: case Opcode::fptrunc_f32_f64: case Opcode::fpext_f64_f32:
+        case Opcode::fptrunc_f16_f32: case Opcode::fpext_f32_f16:
+        case Opcode::fptrunc_bf16_f32: case Opcode::fpext_f32_bf16:
         case Opcode::bitcast_i64_f64: case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32: case Opcode::bitcast_f32_i32:
             lower_conversion(inst);
@@ -192,6 +194,10 @@ void FunctionCompilerContext::lower_conversion(const Instruction& inst) {
         case Opcode::sitofp_f32_i64: op = BytecodeOp::sitofp_f32_i64; break;
         case Opcode::fptrunc_f32_f64: op = BytecodeOp::fptrunc_f32; break;
         case Opcode::fpext_f64_f32: op = BytecodeOp::fpext_f64; break;
+        case Opcode::fptrunc_f16_f32: op = BytecodeOp::fptrunc_f16; break;
+        case Opcode::fpext_f32_f16: op = BytecodeOp::fpext_f32_f16; break;
+        case Opcode::fptrunc_bf16_f32: op = BytecodeOp::fptrunc_bf16; break;
+        case Opcode::fpext_f32_bf16: op = BytecodeOp::fpext_f32_bf16; break;
         case Opcode::bitcast_i64_f64: op = BytecodeOp::bitcast_i64_f64; break;
         case Opcode::bitcast_f64_i64: op = BytecodeOp::bitcast_f64_i64; break;
         // An i32 and an f32 both sit zero-extended in the low word of a

@@ -168,6 +168,21 @@ void X64Encoder::vinsertf128(XMM dst, XMM src1, XMM src2, uint8_t imm) {
     buffer_.emit8(static_cast<uint8_t>(imm & 1));
 }
 
+// VEX.128.66.0F38.W0 13 /r: xmm dst, xmm src.
+void X64Encoder::vcvtph2ps(XMM dst, XMM src) {
+    emit_vex(false, 2, 1, false, is_extended(dst), false, is_extended(src), 0);
+    buffer_.emit8(0x13);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+}
+
+// VEX.128.66.0F3A.W0 1D /r ib: xmm dst (ModRM.rm), xmm src (ModRM.reg), imm8.
+void X64Encoder::vcvtps2ph(XMM dst, XMM src, uint8_t imm8) {
+    emit_vex(false, 3, 1, false, is_extended(src), false, is_extended(dst), 0);
+    buffer_.emit8(0x1D);
+    emit_modrm(3, reg_code(src), reg_code(dst));
+    buffer_.emit8(static_cast<uint8_t>(imm8 & 0x0F));
+}
+
 // Unary 256-bit square roots: VEX.256.0F(.66) 51 /r, vvvv unused (1111).
 void X64Encoder::vsqrtps(XMM dst, XMM src) {
     emit_vex(false, 1, 0, true, is_extended(dst), false, is_extended(src), 0);

@@ -16,7 +16,9 @@ uint64_t native_int_arg_bits(const RuntimeValue& arg, const Type* param) {
         }
         switch (param->kind()) {
             case TypeKind::I8: return static_cast<uint8_t>(arg.as_u64());
-            case TypeKind::I16: return static_cast<uint16_t>(arg.as_u64());
+            case TypeKind::I16:
+            case TypeKind::F16:
+            case TypeKind::BF16: return static_cast<uint16_t>(arg.as_u64());
             case TypeKind::I32: return static_cast<uint32_t>(arg.as_u64());
             case TypeKind::I64: return static_cast<uint64_t>(arg.as_i64());
             default: break;
@@ -47,6 +49,8 @@ RuntimeValue native_return_value(Type ret, uint64_t gpr, const uint8_t* vec) {
         case TypeKind::Void: return RuntimeValue::from_void();
         case TypeKind::I8: return RuntimeValue::from_i32(static_cast<int32_t>(static_cast<int8_t>(gpr)));
         case TypeKind::I16: return RuntimeValue::from_i32(static_cast<int32_t>(static_cast<int16_t>(gpr)));
+        case TypeKind::F16: return RuntimeValue::from_f16_bits(static_cast<uint16_t>(gpr & 0xFFFFu));
+        case TypeKind::BF16: return RuntimeValue::from_bf16_bits(static_cast<uint16_t>(gpr & 0xFFFFu));
         case TypeKind::I32: return RuntimeValue::from_i32(static_cast<int32_t>(gpr));
         case TypeKind::I64: return RuntimeValue::from_i64(static_cast<int64_t>(gpr));
         case TypeKind::F32: {

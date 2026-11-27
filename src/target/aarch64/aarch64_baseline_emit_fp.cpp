@@ -3,6 +3,7 @@
 // results are the interpreter's bit for bit (it evaluates them with the same
 // functions), as the x64 tier does.
 #include "aarch64_baseline_emit_internal.hpp"
+#include <brass/mir/half_float.hpp>
 #include <cmath>
 #include <cstring>
 
@@ -204,6 +205,26 @@ bool emit_baseline_aarch64_fp_op(AArch64BaselineEmitter& em, const Instruction& 
             enc.fcvt_d_s(FPR::V0, FPR::V0);
             enc.str(FPR::V0, em.slot_addr(inst.result(), 8));
             return true;
+        case Opcode::fpext_f32_f16:
+        case Opcode::fpext_f32_bf16: {
+            enc.ldrh(GPR::X0, em.slot_addr(inst.operand(0), 2));
+            const void* fn = (op == Opcode::fpext_f32_f16)
+                ? reinterpret_cast<const void*>(&brass_f16_to_f32)
+                : reinterpret_cast<const void*>(&brass_bf16_to_f32);
+            em.call_abs(fn);
+            enc.str_s(FPR::V0, em.slot_addr(inst.result(), 4));
+            return true;
+        }
+        case Opcode::fptrunc_f16_f32:
+        case Opcode::fptrunc_bf16_f32: {
+            enc.ldr_s(FPR::V0, em.slot_addr(inst.operand(0), 4));
+            const void* fn = (op == Opcode::fptrunc_f16_f32)
+                ? reinterpret_cast<const void*>(&brass_f32_to_f16)
+                : reinterpret_cast<const void*>(&brass_f32_to_bf16);
+            em.call_abs(fn);
+            enc.str32(GPR::X0, em.slot_addr(inst.result(), 4));
+            return true;
+        }
 
         // Arithmetic
         case Opcode::add:

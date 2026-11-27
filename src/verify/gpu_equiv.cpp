@@ -13,7 +13,7 @@ uint32_t gpu_type_bv_width(Type t) noexcept {
     if (t.is_void()) return 0;
     if (t.is_pointer() || t.is_i64() || t.kind() == TypeKind::F64) return 64;
     if (t.is_i8()) return 8;
-    if (t.is_i16()) return 16;
+    if (t.is_i16() || t.is_half_float()) return 16;
     return 32;
 }
 

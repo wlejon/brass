@@ -49,6 +49,10 @@ enum class BytecodeOp : uint8_t {
     sitofp_f32_i64,
     fptrunc_f32,
     fpext_f64,
+    fptrunc_f16,
+    fpext_f32_f16,
+    fptrunc_bf16,
+    fpext_f32_bf16,
     bitcast_i64_f64,
     bitcast_f64_i64,
 

@@ -200,7 +200,9 @@ constexpr BVNodeId kInvalidBV = UINT32_MAX;
 uint32_t gpu_bv_width(Type t) noexcept {
     switch (t.kind()) {
         case TypeKind::I8: return 8;
-        case TypeKind::I16: return 16;
+        case TypeKind::I16:
+        case TypeKind::F16:
+        case TypeKind::BF16: return 16;
         case TypeKind::I32: return 32;
         case TypeKind::I64:
         case TypeKind::Ptr:

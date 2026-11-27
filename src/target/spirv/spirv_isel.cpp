@@ -4,6 +4,7 @@
 // spirv_isel_intrinsics*.cpp; control flow comes from ../gpu_structurize.cpp.
 
 #include <brass/target/spirv/spirv_isel.hpp>
+#include "spirv_isel_intrinsics.hpp"
 #include <brass/mir/block.hpp>
 #include <brass/mir/opcodes.hpp>
 
@@ -435,6 +436,10 @@ void SpirvISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::fptosi_i64_f32: lower_convert(inst, spv::OpConvertFToS, inst.type()); break;
         case Opcode::fptrunc_f32_f64:
         case Opcode::fpext_f64_f32:  lower_convert(inst, spv::OpFConvert, inst.type()); break;
+        case Opcode::fptrunc_f16_f32:  Intrinsics::f32_to_f16(*this, inst); break;
+        case Opcode::fpext_f32_f16:    Intrinsics::f16_to_f32(*this, inst); break;
+        case Opcode::fptrunc_bf16_f32: Intrinsics::f32_to_bf16(*this, inst); break;
+        case Opcode::fpext_f32_bf16:   Intrinsics::bf16_to_f32(*this, inst); break;
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32:
@@ -592,7 +597,7 @@ Id SpirvISel::workgroup_size(uint32_t component) {
 // ---------------------------------------------------------------------------
 
 Id SpirvISel::scalar_type(Type t) {
-    if (t.is_i32()) return t_u32();
+    if (t.is_i32() || t.is_half_float()) return t_u32();
     if (t.is_i64() || t.is_pointer()) return t_u64();
     if (t.kind() == TypeKind::F32) return t_f32();
     if (t.kind() == TypeKind::F64) return m_.t_float(64);
@@ -678,7 +683,7 @@ Id SpirvISel::as_u32(const Value* v, const char* what) {
     int64_t c = 0;
     if (const_int(v, &c)) return m_.c_u32(static_cast<uint32_t>(c));
     Id x = id_of(v, what);
-    if (v->type().is_i32()) return x;
+    if (v->type().is_i32() || v->type().is_half_float()) return x;
     if (v->type().is_i64() || v->type().is_pointer()) return op(spv::OpUConvert, t_u32(), {x});
     fail(std::string(what) + " must be an integer");
 }

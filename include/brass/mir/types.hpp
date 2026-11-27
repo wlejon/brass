@@ -13,6 +13,8 @@ enum class TypeKind : uint8_t {
     I16,
     I32,
     I64,
+    F16,
+    BF16,
     F32,
     F64,
     Ptr,
@@ -44,6 +46,8 @@ public:
     static constexpr Type i16() noexcept { return Type(TypeKind::I16); }
     static constexpr Type i32() noexcept { return Type(TypeKind::I32); }
     static constexpr Type i64() noexcept { return Type(TypeKind::I64); }
+    static constexpr Type f16() noexcept { return Type(TypeKind::F16); }
+    static constexpr Type bf16() noexcept { return Type(TypeKind::BF16); }
     static constexpr Type f32() noexcept { return Type(TypeKind::F32); }
     static constexpr Type f64() noexcept { return Type(TypeKind::F64); }
     static constexpr Type ptr() noexcept { return Type(TypeKind::Ptr); }
@@ -66,7 +70,9 @@ public:
     constexpr size_t size_in_bytes() const noexcept {
         switch (kind_) {
             case TypeKind::I8: return 1;
-            case TypeKind::I16: return 2;
+            case TypeKind::I16:
+            case TypeKind::F16:
+            case TypeKind::BF16: return 2;
             case TypeKind::I32:
             case TypeKind::F32: return 4;
             case TypeKind::I64:
@@ -109,6 +115,22 @@ public:
 
     constexpr bool is_float() const noexcept {
         return kind_ == TypeKind::F32 || kind_ == TypeKind::F64;
+    }
+
+    constexpr bool is_f16() const noexcept {
+        return kind_ == TypeKind::F16;
+    }
+
+    constexpr bool is_bf16() const noexcept {
+        return kind_ == TypeKind::BF16;
+    }
+
+    constexpr bool is_half_float() const noexcept {
+        return kind_ == TypeKind::F16 || kind_ == TypeKind::BF16;
+    }
+
+    constexpr bool is_any_float() const noexcept {
+        return is_float() || is_half_float();
     }
 
     constexpr bool is_numeric() const noexcept {

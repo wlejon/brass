@@ -2,6 +2,7 @@
 
 #include <brass/mir/types.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/mir/half_float.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -17,6 +18,8 @@ enum class RuntimeValueKind : uint8_t {
     Void = 0,
     I32,
     I64,
+    F16,
+    BF16,
     F32,
     F64,
     Ptr,
@@ -67,6 +70,28 @@ public:
         v.kind_ = RuntimeValueKind::I64;
         v.raw_bits_ = val;
         return v;
+    }
+
+    static RuntimeValue from_f16_bits(uint16_t bits) noexcept {
+        RuntimeValue v;
+        v.kind_ = RuntimeValueKind::F16;
+        v.raw_bits_ = bits;
+        return v;
+    }
+
+    static RuntimeValue from_f16(float val) noexcept {
+        return from_f16_bits(f32_to_f16_bits(val));
+    }
+
+    static RuntimeValue from_bf16_bits(uint16_t bits) noexcept {
+        RuntimeValue v;
+        v.kind_ = RuntimeValueKind::BF16;
+        v.raw_bits_ = bits;
+        return v;
+    }
+
+    static RuntimeValue from_bf16(float val) noexcept {
+        return from_bf16_bits(f32_to_bf16_bits(val));
     }
 
     static RuntimeValue from_f32(float val) noexcept {
@@ -242,6 +267,8 @@ public:
             case TypeKind::I16:
             case TypeKind::I32: v.kind_ = RuntimeValueKind::I32; break;
             case TypeKind::I64: v.kind_ = RuntimeValueKind::I64; break;
+            case TypeKind::F16: v.kind_ = RuntimeValueKind::F16; v.raw_bits_ &= 0xFFFFULL; break;
+            case TypeKind::BF16: v.kind_ = RuntimeValueKind::BF16; v.raw_bits_ &= 0xFFFFULL; break;
             case TypeKind::F32: v.kind_ = RuntimeValueKind::F32; break;
             case TypeKind::F64: v.kind_ = RuntimeValueKind::F64; break;
             case TypeKind::Ptr: v.kind_ = RuntimeValueKind::Ptr; break;
@@ -266,6 +293,8 @@ public:
         switch (kind_) {
             case RuntimeValueKind::I32: return Type::i32();
             case RuntimeValueKind::I64: return Type::i64();
+            case RuntimeValueKind::F16: return Type::f16();
+            case RuntimeValueKind::BF16: return Type::bf16();
             case RuntimeValueKind::F32: return Type::f32();
             case RuntimeValueKind::F64: return Type::f64();
             case RuntimeValueKind::Ptr: return Type::ptr();
@@ -287,6 +316,8 @@ public:
     constexpr bool is_void() const noexcept { return kind_ == RuntimeValueKind::Void; }
     constexpr bool is_i32() const noexcept { return kind_ == RuntimeValueKind::I32; }
     constexpr bool is_i64() const noexcept { return kind_ == RuntimeValueKind::I64; }
+    constexpr bool is_f16() const noexcept { return kind_ == RuntimeValueKind::F16; }
+    constexpr bool is_bf16() const noexcept { return kind_ == RuntimeValueKind::BF16; }
     constexpr bool is_f32() const noexcept { return kind_ == RuntimeValueKind::F32; }
     constexpr bool is_f64() const noexcept { return kind_ == RuntimeValueKind::F64; }
     constexpr bool is_ptr() const noexcept { return kind_ == RuntimeValueKind::Ptr; }
@@ -339,7 +370,17 @@ public:
         return raw_bits_;
     }
 
+    uint16_t as_f16_bits() const noexcept {
+        return static_cast<uint16_t>(raw_bits_ & 0xFFFFULL);
+    }
+
+    uint16_t as_bf16_bits() const noexcept {
+        return static_cast<uint16_t>(raw_bits_ & 0xFFFFULL);
+    }
+
     float as_f32() const noexcept {
+        if (is_f16()) return f16_bits_to_f32(as_f16_bits());
+        if (is_bf16()) return bf16_bits_to_f32(as_bf16_bits());
         if (is_f32()) {
             float f = 0.0f;
             std::memcpy(&f, &raw_bits_, sizeof(float));
@@ -362,6 +403,8 @@ public:
     }
 
     double as_f64() const noexcept {
+        if (is_f16()) return static_cast<double>(f16_bits_to_f32(as_f16_bits()));
+        if (is_bf16()) return static_cast<double>(bf16_bits_to_f32(as_bf16_bits()));
         if (is_f64()) {
             double d = 0.0;
             std::memcpy(&d, &raw_bits_, sizeof(double));
@@ -521,6 +564,22 @@ inline RuntimeValue val_fptrunc_f32_f64(RuntimeValue v) noexcept {
 
 inline RuntimeValue val_fpext_f64_f32(RuntimeValue v) noexcept {
     return RuntimeValue::from_f64(static_cast<double>(v.as_f32()));
+}
+
+inline RuntimeValue val_fptrunc_f16_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f16_bits(f32_to_f16_bits(v.as_f32()));
+}
+
+inline RuntimeValue val_fpext_f32_f16(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(f16_bits_to_f32(static_cast<uint16_t>(v.raw_bits() & 0xFFFFULL)));
+}
+
+inline RuntimeValue val_fptrunc_bf16_f32(RuntimeValue v) noexcept {
+    return RuntimeValue::from_bf16_bits(f32_to_bf16_bits(v.as_f32()));
+}
+
+inline RuntimeValue val_fpext_f32_bf16(RuntimeValue v) noexcept {
+    return RuntimeValue::from_f32(bf16_bits_to_f32(static_cast<uint16_t>(v.raw_bits() & 0xFFFFULL)));
 }
 
 inline RuntimeValue val_sqrt_f32(RuntimeValue v) noexcept {

@@ -552,6 +552,26 @@ void AArch64EmitContext::emit_fp_instruction(const LirInst& inst) {
             }
             break;
         }
+        case LirOpcode::Cvth2ss: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvt_s_h(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvt_s_h(dst, FPR::V31);
+            }
+            break;
+        }
+        case LirOpcode::Cvtss2h: {
+            FPR dst = to_fpr(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) enc_.fcvt_h_s(dst, to_fpr(src));
+            else {
+                enc_.ldr_s(FPR::V31, ensure_accessible_mem(to_mem_address(src)));
+                enc_.fcvt_h_s(dst, FPR::V31);
+            }
+            break;
+        }
 
         default:
             throw_unsupported("aarch64 emit (fp)", to_string(inst.opcode));

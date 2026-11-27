@@ -245,6 +245,8 @@ std::string MslFnBuilder::msl_type(Type t) const {
         switch (t.kind()) {
             case TypeKind::I8:     return "int8_t";
             case TypeKind::I16:    return "int16_t";
+            case TypeKind::F16:
+            case TypeKind::BF16:   return "uint16_t";
             case TypeKind::I32:    return "int32_t";
             case TypeKind::I64:    return "int64_t";
             case TypeKind::F32:    return "float";
@@ -269,7 +271,9 @@ std::string MslFnBuilder::msl_type(Type t) const {
 std::string MslFnBuilder::msl_utype(Type t) const {
     switch (t.kind()) {
         case TypeKind::I8:    return "uint8_t";
-        case TypeKind::I16:   return "uint16_t";
+        case TypeKind::I16:
+        case TypeKind::F16:
+        case TypeKind::BF16:  return "uint16_t";
         case TypeKind::I32:   return "uint32_t";
         case TypeKind::I64:   return "uint64_t";
         case TypeKind::I32x4: return "uint4";
@@ -303,6 +307,8 @@ std::string MslFnBuilder::zero_init(Type t, const Value* v) const {
         case TypeKind::I32x4: return "int4(0)";
         case TypeKind::I64x2: return "long2(0)";
         case TypeKind::I64:   return "0LL";
+        case TypeKind::F16:
+        case TypeKind::BF16:  return "0u";
         default:              return "0";
     }
 }
@@ -498,6 +504,28 @@ void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
             case Opcode::fptosi_i64_f32: emit_assign(inst, "static_cast<int64_t>(" + arg(0) + ")", d); return;
             case Opcode::sitofp_f32_i32:
             case Opcode::sitofp_f32_i64: emit_assign(inst, "static_cast<float>(" + arg(0) + ")", d); return;
+            case Opcode::fptrunc_f16_f32:
+                emit_assign(inst, "as_type<uint16_t>(static_cast<half>(" + arg(0) + "))", d);
+                return;
+            case Opcode::fpext_f32_f16:
+                emit_assign(inst, "static_cast<float>(as_type<half>(" + arg(0) + "))", d);
+                return;
+            case Opcode::fpext_f32_bf16:
+                emit_assign(inst, "as_type<float>(static_cast<uint32_t>(" + arg(0) + ") << 16u)", d);
+                return;
+            case Opcode::fptrunc_bf16_f32: {
+                std::string pfx = "_bf" + std::to_string(tmp_seq_++);
+                indent_line(d);
+                body_ << "uint32_t " << pfx << "_u = as_type<uint32_t>(" << arg(0) << ");\n";
+                indent_line(d);
+                body_ << "uint32_t " << pfx << "_hi = " << pfx << "_u >> 16u;\n";
+                indent_line(d);
+                body_ << "uint32_t " << pfx << "_rnd = (" << pfx << "_u + 0x7FFFu + (" << pfx << "_hi & 1u)) >> 16u;\n";
+                indent_line(d);
+                body_ << "bool " << pfx << "_nan = ((" << pfx << "_u & 0x7FFFFFFFu) > 0x7F800000u);\n";
+                emit_assign(inst, "static_cast<uint16_t>(" + pfx + "_nan ? (" + pfx + "_hi | 0x40u) : " + pfx + "_rnd)", d);
+                return;
+            }
             case Opcode::bitcast_i32_f32: emit_assign(inst, "as_type<int32_t>(" + arg(0) + ")", d); return;
             case Opcode::bitcast_f32_i32: emit_assign(inst, "as_type<float>(" + arg(0) + ")", d); return;
 

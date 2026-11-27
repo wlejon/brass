@@ -308,6 +308,8 @@ enum class LirOpcode : uint16_t {
     Cvttss2si32,
     Cvtsd2ss,
     Cvtss2sd,
+    Cvth2ss,        // XMM (low u16 f16 bits) -> XMM (f32)
+    Cvtss2h,        // XMM (f32) -> XMM (low u16 f16 bits)
     Floor32,
     Floor64,
     Ceil32,

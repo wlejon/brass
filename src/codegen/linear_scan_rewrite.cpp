@@ -182,6 +182,8 @@ static bool is_xmm_opcode(LirOpcode op) {
         case LirOpcode::Cvtsi2ss32:
         case LirOpcode::Cvtsd2ss:
         case LirOpcode::Cvtss2sd:
+        case LirOpcode::Cvth2ss:
+        case LirOpcode::Cvtss2h:
         case LirOpcode::Floor32:
         case LirOpcode::Floor64:
         case LirOpcode::Ceil32:

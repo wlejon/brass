@@ -463,6 +463,8 @@ std::string to_string(const RuntimeValue& val) {
             }
             return s;
         }
+        case RuntimeValueKind::F16:
+        case RuntimeValueKind::BF16:
         case RuntimeValueKind::F32: {
             float f = val.as_f32();
             if (std::isnan(f)) return "nan";

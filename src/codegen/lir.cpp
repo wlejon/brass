@@ -142,6 +142,8 @@ std::string_view to_string(LirOpcode op) noexcept {
         case LirOpcode::Cvttss2si32: return "cvttss2si32";
         case LirOpcode::Cvtsd2ss: return "cvtsd2ss";
         case LirOpcode::Cvtss2sd: return "cvtss2sd";
+        case LirOpcode::Cvth2ss: return "cvth2ss";
+        case LirOpcode::Cvtss2h: return "cvtss2h";
         case LirOpcode::Floor32: return "floor32";
         case LirOpcode::Floor64: return "floor64";
         case LirOpcode::Ceil32: return "ceil32";

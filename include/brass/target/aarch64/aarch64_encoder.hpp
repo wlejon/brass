@@ -301,6 +301,8 @@ public:
 
     void fcvt_d_s(FPR dst, FPR src); // f32 -> f64
     void fcvt_s_d(FPR dst, FPR src); // f64 -> f32
+    void fcvt_s_h(FPR dst, FPR src); // f16 -> f32
+    void fcvt_h_s(FPR dst, FPR src); // f32 -> f16
 
     void scvtf_d(FPR dst, GPR src);  // i64 -> f64
     void scvtf_s(FPR dst, GPR src);  // i64 -> f32

@@ -24,8 +24,12 @@ std::string_view token_kind_name(TokenKind kind) noexcept {
         case TokenKind::Kw_resume_point: return "resume_point";
         case TokenKind::Kw_safepoint: return "safepoint";
         case TokenKind::Kw_unreachable: return "unreachable";
+        case TokenKind::Kw_i8: return "i8";
+        case TokenKind::Kw_i16: return "i16";
         case TokenKind::Kw_i32: return "i32";
         case TokenKind::Kw_i64: return "i64";
+        case TokenKind::Kw_f16: return "f16";
+        case TokenKind::Kw_bf16: return "bf16";
         case TokenKind::Kw_f32: return "f32";
         case TokenKind::Kw_f64: return "f64";
         case TokenKind::Kw_ptr: return "ptr";
@@ -315,8 +319,12 @@ Token Lexer::scan_identifier_or_keyword() {
     if (text == "unreachable") return Token{TokenKind::Kw_unreachable, text, loc, 0, 0.0};
 
     // Types
+    if (text == "i8") return Token{TokenKind::Kw_i8, text, loc, 0, 0.0};
+    if (text == "i16") return Token{TokenKind::Kw_i16, text, loc, 0, 0.0};
     if (text == "i32") return Token{TokenKind::Kw_i32, text, loc, 0, 0.0};
     if (text == "i64") return Token{TokenKind::Kw_i64, text, loc, 0, 0.0};
+    if (text == "f16") return Token{TokenKind::Kw_f16, text, loc, 0, 0.0};
+    if (text == "bf16") return Token{TokenKind::Kw_bf16, text, loc, 0, 0.0};
     if (text == "f32") return Token{TokenKind::Kw_f32, text, loc, 0, 0.0};
     if (text == "f64") return Token{TokenKind::Kw_f64, text, loc, 0, 0.0};
     if (text == "ptr") return Token{TokenKind::Kw_ptr, text, loc, 0, 0.0};

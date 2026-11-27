@@ -34,6 +34,10 @@ std::string_view bytecode_op_name(BytecodeOp op) noexcept {
         case BytecodeOp::sitofp_f32_i64: return "sitofp_f32_i64";
         case BytecodeOp::fptrunc_f32: return "fptrunc_f32";
         case BytecodeOp::fpext_f64: return "fpext_f64";
+        case BytecodeOp::fptrunc_f16: return "fptrunc_f16";
+        case BytecodeOp::fpext_f32_f16: return "fpext_f32_f16";
+        case BytecodeOp::fptrunc_bf16: return "fptrunc_bf16";
+        case BytecodeOp::fpext_f32_bf16: return "fpext_f32_bf16";
         case BytecodeOp::bitcast_i64_f64: return "bitcast_i64_f64";
         case BytecodeOp::bitcast_f64_i64: return "bitcast_f64_i64";
 

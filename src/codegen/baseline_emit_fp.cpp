@@ -2,6 +2,7 @@
 // Rounding, min/max, fma and fmod call the C library, so the results are the
 // interpreter's bit for bit (it evaluates them with the same functions).
 #include "baseline_emit_internal.hpp"
+#include <brass/mir/half_float.hpp>
 #include <cmath>
 #include <cstring>
 
@@ -214,6 +215,28 @@ bool emit_baseline_x64_fp_op(X64BaselineEmitter& em, const Instruction& inst) {
             enc.cvtss2sd(XMM::XMM0, em.slot_addr(inst.operand(0)));
             enc.movsd(em.slot_addr(inst.result()), XMM::XMM0);
             return true;
+        case Opcode::fpext_f32_f16:
+        case Opcode::fpext_f32_bf16: {
+            const GPR arg0 = em.cc.arg_gprs()[0];
+            enc.movzx16(arg0, em.slot_addr(inst.operand(0)));
+            const void* fn = (op == Opcode::fpext_f32_f16)
+                ? reinterpret_cast<const void*>(&brass_f16_to_f32)
+                : reinterpret_cast<const void*>(&brass_bf16_to_f32);
+            em.call_abs(fn);
+            enc.movss(em.slot_addr(inst.result()), XMM::XMM0);
+            return true;
+        }
+        case Opcode::fptrunc_f16_f32:
+        case Opcode::fptrunc_bf16_f32: {
+            enc.movss(XMM::XMM0, em.slot_addr(inst.operand(0)));
+            const void* fn = (op == Opcode::fptrunc_f16_f32)
+                ? reinterpret_cast<const void*>(&brass_f32_to_f16)
+                : reinterpret_cast<const void*>(&brass_f32_to_bf16);
+            em.call_abs(fn);
+            enc.movzx16(GPR::RAX, GPR::RAX);
+            enc.mov32(em.slot_addr(inst.result()), GPR::RAX);
+            return true;
+        }
 
         // Arithmetic
         case Opcode::add:

@@ -92,6 +92,8 @@ uint64_t register_bits(Type t, uint64_t bits) {
         case TypeKind::I8:
             return bits & 0xFFull;
         case TypeKind::I16:
+        case TypeKind::F16:
+        case TypeKind::BF16:
             return bits & 0xFFFFull;
         case TypeKind::I32:
         case TypeKind::F32:

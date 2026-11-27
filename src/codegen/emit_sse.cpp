@@ -264,6 +264,28 @@ void EmitContext::emit_sse_instruction(const LirInst& inst) {
             }
             break;
         }
+        case LirOpcode::Cvth2ss: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) {
+                enc_.vcvtph2ps(dst, to_xmm(src));
+            } else {
+                enc_.movss(dst, to_mem_address(src));
+                enc_.vcvtph2ps(dst, dst);
+            }
+            break;
+        }
+        case LirOpcode::Cvtss2h: {
+            XMM dst = to_xmm(inst.defs[0]);
+            const auto& src = inst.uses[0];
+            if (src.is_preg()) {
+                enc_.vcvtps2ph(dst, to_xmm(src), 0);
+            } else {
+                enc_.movss(dst, to_mem_address(src));
+                enc_.vcvtps2ph(dst, dst, 0);
+            }
+            break;
+        }
         case LirOpcode::Floor32: {
             XMM dst = to_xmm(inst.defs[0]);
             const auto& src = inst.uses.back();

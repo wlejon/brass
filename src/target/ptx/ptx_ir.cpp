@@ -90,6 +90,8 @@ Type type_for(brass::Type t) noexcept {
         case TypeKind::I16:   return Type::u16;
         case TypeKind::I32:   return Type::u32;
         case TypeKind::I64:   return Type::u64;
+        case TypeKind::F16:   return Type::u16;
+        case TypeKind::BF16:  return Type::u16;
         case TypeKind::F32:   return Type::f32;
         case TypeKind::F64:   return Type::f64;
         case TypeKind::Ptr:   return Type::u64;
@@ -116,6 +118,7 @@ Type signed_type_for(brass::Type t) noexcept {
 Type bit_type_for(brass::Type t) noexcept {
     Type u = type_for(t);
     switch (u) {
+        case Type::u16: return Type::b16;
         case Type::u32: return Type::b32;
         case Type::u64: return Type::b64;
         default:        return u;

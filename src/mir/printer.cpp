@@ -227,6 +227,18 @@ public:
             case Opcode::fpext_f64_f32:
                 os_ << "fpext.f64.f32 " << value_name(inst.operand(0));
                 break;
+            case Opcode::fptrunc_f16_f32:
+                os_ << "fptrunc.f16.f32 " << value_name(inst.operand(0));
+                break;
+            case Opcode::fpext_f32_f16:
+                os_ << "fpext.f32.f16 " << value_name(inst.operand(0));
+                break;
+            case Opcode::fptrunc_bf16_f32:
+                os_ << "fptrunc.bf16.f32 " << value_name(inst.operand(0));
+                break;
+            case Opcode::fpext_f32_bf16:
+                os_ << "fpext.f32.bf16 " << value_name(inst.operand(0));
+                break;
             case Opcode::bitcast_i64_f64:
                 os_ << "bitcast.i64.f64 " << value_name(inst.operand(0));
                 break;

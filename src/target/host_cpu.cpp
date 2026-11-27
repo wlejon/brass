@@ -12,6 +12,7 @@ namespace {
 struct HostCpu {
     bool avx2 = false;
     bool fma = false;
+    bool f16c = false;
 };
 
 HostCpu measure() noexcept {
@@ -21,6 +22,7 @@ HostCpu measure() noexcept {
     __builtin_cpu_init();
     h.avx2 = __builtin_cpu_supports("avx2") != 0;
     h.fma = __builtin_cpu_supports("fma") != 0;
+    h.f16c = __builtin_cpu_supports("f16c") != 0;
 #elif defined(_MSC_VER)
     int info[4] = {};
     __cpuid(info, 0);
@@ -30,9 +32,11 @@ HostCpu measure() noexcept {
     const bool osxsave = (info[2] & (1 << 27)) != 0;
     const bool avx = (info[2] & (1 << 28)) != 0;
     const bool fma = (info[2] & (1 << 12)) != 0;
+    const bool f16c = (info[2] & (1 << 29)) != 0;
     // The OS saves the XMM and YMM state across context switches.
     if (!osxsave || !avx || (_xgetbv(0) & 0x6ULL) != 0x6ULL) return h;
     h.fma = fma;
+    h.f16c = f16c;
     if (max_leaf >= 7) {
         __cpuidex(info, 7, 0);
         h.avx2 = (info[1] & (1 << 5)) != 0;
@@ -53,5 +57,6 @@ const HostCpu& host() noexcept {
 
 bool host_has_avx2() noexcept { return host().avx2; }
 bool host_has_fma() noexcept { return host().fma; }
+bool host_has_f16c() noexcept { return host().f16c; }
 
 } // namespace brass

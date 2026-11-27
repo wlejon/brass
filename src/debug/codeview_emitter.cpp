@@ -79,7 +79,9 @@ public:
     uint32_t value_type(Type t) {
         switch (t.kind()) {
             case TypeKind::I8:    return codeview::T_INT1;
-            case TypeKind::I16:   return codeview::T_INT2;
+            case TypeKind::I16:
+            case TypeKind::F16:
+            case TypeKind::BF16:  return codeview::T_INT2;
             case TypeKind::I32:   return codeview::T_INT4;
             case TypeKind::I64:   return codeview::T_INT8;
             case TypeKind::F32:   return codeview::T_REAL32;

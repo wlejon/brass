@@ -271,6 +271,10 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::fptosi_i64:
         case Opcode::fptrunc_f32_f64:
         case Opcode::fpext_f64_f32:
+        case Opcode::fptrunc_f16_f32:
+        case Opcode::fpext_f32_f16:
+        case Opcode::fptrunc_bf16_f32:
+        case Opcode::fpext_f32_bf16:
         case Opcode::bitcast_i64_f64:
         case Opcode::bitcast_f64_i64:
         case Opcode::bitcast_i32_f32:
@@ -389,75 +393,43 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
         case Opcode::ashr:
             lower_shift(inst, lir_bb, LirOpcode::Sar32, LirOpcode::Sar);
             break;
-        case Opcode::clz: {
-            VReg dst = get_vreg(inst.result());
-            VReg src = get_vreg(inst.operand(0));
-            uint8_t sz = dst.size;
-
-            // 1. bsr dst, src
-            auto lir_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Bsr32 : LirOpcode::Bsr);
-            lir_inst->add_def(LirOperand::vreg(dst, sz));
-            lir_inst->add_use(LirOperand::vreg(src, sz));
-            lir_bb.append_inst(std::move(lir_inst));
-
-            // 2. dst = (63 or 31) - dst
-            VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, sz);
-            auto mov_tmp = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_tmp->add_def(LirOperand::vreg(tmp, sz));
-            mov_tmp->add_use(LirOperand::imm(sz == 4 ? 31 : 63, sz));
-            lir_bb.append_inst(std::move(mov_tmp));
-
-            auto sub_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub);
-            sub_inst->add_def(LirOperand::vreg(tmp, sz));
-            sub_inst->add_use(LirOperand::vreg(tmp, sz));
-            sub_inst->add_use(LirOperand::vreg(dst, sz));
-            lir_bb.append_inst(std::move(sub_inst));
-
-            auto mov_back = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_back->add_def(LirOperand::vreg(dst, sz));
-            mov_back->add_use(LirOperand::vreg(tmp, sz));
-            lir_bb.append_inst(std::move(mov_back));
-
-            // 3. test src, src
-            auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
-            test_inst->add_use(LirOperand::vreg(src, sz));
-            test_inst->add_use(LirOperand::vreg(src, sz));
-            lir_bb.append_inst(std::move(test_inst));
-
-            // 4. if zero, dst = 64 (or 32)
-            VReg zero_val = lir_fn_->allocate_vreg(RegClass::GPR, sz);
-            auto mov_zero = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
-            mov_zero->add_def(LirOperand::vreg(zero_val, sz));
-            mov_zero->add_use(LirOperand::imm(sz == 4 ? 32 : 64, sz));
-            lir_bb.append_inst(std::move(mov_zero));
-
-            auto cmov = std::make_unique<LirInst>(LirOpcode::Cmovcc);
-            cmov->condition = Condition::E;
-            cmov->add_def(LirOperand::vreg(dst, sz));
-            cmov->add_use(LirOperand::vreg(dst, sz));
-            cmov->add_use(LirOperand::vreg(zero_val, sz));
-            cmov->mir_origin = &inst;
-            lir_bb.append_inst(std::move(cmov));
-            break;
-        }
+        case Opcode::clz:
         case Opcode::ctz: {
+            const bool is_clz = (inst.opcode() == Opcode::clz);
             VReg dst = get_vreg(inst.result());
             VReg src = get_vreg(inst.operand(0));
             uint8_t sz = dst.size;
 
-            // 1. bsf dst, src
-            auto lir_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Bsf32 : LirOpcode::Bsf);
+            auto lir_inst = std::make_unique<LirInst>(is_clz ? (sz == 4 ? LirOpcode::Bsr32 : LirOpcode::Bsr)
+                                                             : (sz == 4 ? LirOpcode::Bsf32 : LirOpcode::Bsf));
             lir_inst->add_def(LirOperand::vreg(dst, sz));
             lir_inst->add_use(LirOperand::vreg(src, sz));
             lir_bb.append_inst(std::move(lir_inst));
 
-            // 2. test src, src
+            if (is_clz) {
+                VReg tmp = lir_fn_->allocate_vreg(RegClass::GPR, sz);
+                auto mov_tmp = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                mov_tmp->add_def(LirOperand::vreg(tmp, sz));
+                mov_tmp->add_use(LirOperand::imm(sz == 4 ? 31 : 63, sz));
+                lir_bb.append_inst(std::move(mov_tmp));
+
+                auto sub_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Sub32 : LirOpcode::Sub);
+                sub_inst->add_def(LirOperand::vreg(tmp, sz));
+                sub_inst->add_use(LirOperand::vreg(tmp, sz));
+                sub_inst->add_use(LirOperand::vreg(dst, sz));
+                lir_bb.append_inst(std::move(sub_inst));
+
+                auto mov_back = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+                mov_back->add_def(LirOperand::vreg(dst, sz));
+                mov_back->add_use(LirOperand::vreg(tmp, sz));
+                lir_bb.append_inst(std::move(mov_back));
+            }
+
             auto test_inst = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Test32 : LirOpcode::Test);
             test_inst->add_use(LirOperand::vreg(src, sz));
             test_inst->add_use(LirOperand::vreg(src, sz));
             lir_bb.append_inst(std::move(test_inst));
 
-            // 3. if zero, dst = 64 (or 32)
             VReg zero_val = lir_fn_->allocate_vreg(RegClass::GPR, sz);
             auto mov_zero = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
             mov_zero->add_def(LirOperand::vreg(zero_val, sz));
@@ -484,36 +456,16 @@ void X64ISel::lower_instruction(const Instruction& inst, LirBlock& lir_bb) {
             lir_bb.append_inst(std::move(lir_inst));
             break;
         }
-        case Opcode::eq:
-            lower_comparison(inst, lir_bb, Condition::E, Condition::E);
-            break;
-        case Opcode::ne:
-            lower_comparison(inst, lir_bb, Condition::NE, Condition::NE);
-            break;
-        case Opcode::slt:
-            lower_comparison(inst, lir_bb, Condition::L, Condition::B);
-            break;
-        case Opcode::ult:
-            lower_comparison(inst, lir_bb, Condition::B, Condition::B);
-            break;
-        case Opcode::sle:
-            lower_comparison(inst, lir_bb, Condition::LE, Condition::BE);
-            break;
-        case Opcode::ule:
-            lower_comparison(inst, lir_bb, Condition::BE, Condition::BE);
-            break;
-        case Opcode::sgt:
-            lower_comparison(inst, lir_bb, Condition::G, Condition::A);
-            break;
-        case Opcode::ugt:
-            lower_comparison(inst, lir_bb, Condition::A, Condition::A);
-            break;
-        case Opcode::sge:
-            lower_comparison(inst, lir_bb, Condition::GE, Condition::AE);
-            break;
-        case Opcode::uge:
-            lower_comparison(inst, lir_bb, Condition::AE, Condition::AE);
-            break;
+        case Opcode::eq:  lower_comparison(inst, lir_bb, Condition::E, Condition::E); break;
+        case Opcode::ne:  lower_comparison(inst, lir_bb, Condition::NE, Condition::NE); break;
+        case Opcode::slt: lower_comparison(inst, lir_bb, Condition::L, Condition::B); break;
+        case Opcode::ult: lower_comparison(inst, lir_bb, Condition::B, Condition::B); break;
+        case Opcode::sle: lower_comparison(inst, lir_bb, Condition::LE, Condition::BE); break;
+        case Opcode::ule: lower_comparison(inst, lir_bb, Condition::BE, Condition::BE); break;
+        case Opcode::sgt: lower_comparison(inst, lir_bb, Condition::G, Condition::A); break;
+        case Opcode::ugt: lower_comparison(inst, lir_bb, Condition::A, Condition::A); break;
+        case Opcode::sge: lower_comparison(inst, lir_bb, Condition::GE, Condition::AE); break;
+        case Opcode::uge: lower_comparison(inst, lir_bb, Condition::AE, Condition::AE); break;
         case Opcode::sadd_overflow:
         case Opcode::ssub_overflow:
         case Opcode::smul_overflow:

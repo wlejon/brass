@@ -127,6 +127,8 @@ bool bridgeable(Type t) {
     switch (t.kind()) {
         case TypeKind::I8:
         case TypeKind::I16:
+        case TypeKind::F16:
+        case TypeKind::BF16:
         case TypeKind::I32:
         case TypeKind::I64:
         case TypeKind::Ptr:
@@ -142,7 +144,7 @@ bool bridgeable(Type t) {
 // Raw bits as the value the interpreter holds for a value of type `t`.
 RuntimeValue materialize(Type t, uint64_t bits) {
     if (t.kind() == TypeKind::I8) bits &= 0xFFull;
-    if (t.kind() == TypeKind::I16) bits &= 0xFFFFull;
+    if (t.kind() == TypeKind::I16 || t.is_half_float()) bits &= 0xFFFFull;
     if (t.kind() == TypeKind::I32) bits &= 0xFFFFFFFFull;
     return RuntimeValue::from_bits(t, bits);
 }

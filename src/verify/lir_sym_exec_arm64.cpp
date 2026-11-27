@@ -780,6 +780,22 @@ bool execute_arm64_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& st, c
             case LirOpcode::Cvtss2sd:
                 write_op(inst.defs[0], ctx.make_unary(BVOp::FpExt, read_op(inst.uses[0], 32), 64));
                 break;
+            case LirOpcode::Cvth2ss: {
+                BVNodeId v16 = ctx.make_extract(read_op(inst.uses[0], 32), 15, 0);
+                BVNodeId r = (env.shared_mem != nullptr)
+                    ? env.shared_mem->eval_uninterpreted_call(ctx, "brass_f16_to_f32", {v16}, Type::f32())
+                    : ctx.make_unary(BVOp::FpExt, v16, 32);
+                write_op(inst.defs[0], r);
+                break;
+            }
+            case LirOpcode::Cvtss2h: {
+                BVNodeId v32 = read_op(inst.uses[0], 32);
+                BVNodeId r16 = (env.shared_mem != nullptr)
+                    ? env.shared_mem->eval_uninterpreted_call(ctx, "brass_f32_to_f16", {v32}, Type::f16())
+                    : ctx.make_unary(BVOp::FpTrunc, v32, 16);
+                write_op(inst.defs[0], ctx.make_zext(ctx.make_extract(r16, 15, 0), 16));
+                break;
+            }
 
             case LirOpcode::Vfmadd213ss:
             case LirOpcode::Vfmadd231ss:

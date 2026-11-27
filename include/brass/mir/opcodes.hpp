@@ -29,6 +29,10 @@ enum class Opcode : uint16_t {
     sitofp_f32_i64,
     fptrunc_f32_f64,
     fpext_f64_f32,
+    fptrunc_f16_f32,
+    fpext_f32_f16,
+    fptrunc_bf16_f32,
+    fpext_f32_bf16,
     bitcast_i64_f64,
     bitcast_f64_i64,
     // The 32-bit pair: an f32's bits as an i32, and an f32 from bits.

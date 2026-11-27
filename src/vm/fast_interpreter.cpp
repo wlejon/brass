@@ -6,6 +6,7 @@
 
 #include "fast_interpreter_impl.hpp"
 #include <brass/interpreter/float_arith.hpp>
+#include <brass/mir/half_float.hpp>
 #include <brass/interpreter/twin_exit.hpp>
 #include <brass/runtime/osr_coordinator.hpp>
 #include <brass/runtime/code_installer.hpp>
@@ -185,7 +186,10 @@ RuntimeValue FastInterpreter::execute_frame(FastFrame& frame) {
         TENTRY(fptosi32); TENTRY(fptosi64);
         TENTRY(fptosi32_f32); TENTRY(fptosi64_f32); TENTRY(sitofp_f64);
         TENTRY(sitofp_f32); TENTRY(sitofp_f64_i64); TENTRY(sitofp_f32_i64);
-        TENTRY(fptrunc_f32); TENTRY(fpext_f64); TENTRY(bitcast_i64_f64); TENTRY(bitcast_f64_i64);
+        TENTRY(fptrunc_f32); TENTRY(fpext_f64);
+        TENTRY(fptrunc_f16); TENTRY(fpext_f32_f16);
+        TENTRY(fptrunc_bf16); TENTRY(fpext_f32_bf16);
+        TENTRY(bitcast_i64_f64); TENTRY(bitcast_f64_i64);
         TENTRY(add_i32); TENTRY(add_i64); TENTRY(sub_i32); TENTRY(sub_i64);
         TENTRY(mul_i32); TENTRY(mul_i64); TENTRY(sdiv_i32); TENTRY(sdiv_i64);
         TENTRY(udiv_i32); TENTRY(udiv_i64); TENTRY(smod_i32); TENTRY(smod_i64);
@@ -321,6 +325,10 @@ loop_start:
         UN(sitofp_f32_i64, put_f32(static_cast<float>(static_cast<int64_t>(x))))
         UN(fptrunc_f32, put_f32(static_cast<float>(get_f64(x))))
         UN(fpext_f64, put_f64(static_cast<double>(get_f32(x))))
+        UN(fptrunc_f16, static_cast<uint64_t>(f32_to_f16_bits(get_f32(x))))
+        UN(fpext_f32_f16, put_f32(f16_bits_to_f32(static_cast<uint16_t>(x))))
+        UN(fptrunc_bf16, static_cast<uint64_t>(f32_to_bf16_bits(get_f32(x))))
+        UN(fpext_f32_bf16, put_f32(bf16_bits_to_f32(static_cast<uint16_t>(x))))
         UN(bitcast_i64_f64, x)
         UN(bitcast_f64_i64, x)
 

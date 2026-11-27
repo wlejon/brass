@@ -1,7 +1,15 @@
 #include <brass/mir/types.hpp>
+#include <brass/mir/half_float.hpp>
 #include <ostream>
 
 namespace brass {
+
+extern "C" {
+float brass_f16_to_f32(uint32_t bits) noexcept { return f16_bits_to_f32(static_cast<uint16_t>(bits)); }
+uint32_t brass_f32_to_f16(float val) noexcept { return f32_to_f16_bits(val); }
+float brass_bf16_to_f32(uint32_t bits) noexcept { return bf16_bits_to_f32(static_cast<uint16_t>(bits)); }
+uint32_t brass_f32_to_bf16(float val) noexcept { return f32_to_bf16_bits(val); }
+}
 
 std::string_view Type::name() const noexcept {
     switch (kind_) {
@@ -9,6 +17,8 @@ std::string_view Type::name() const noexcept {
         case TypeKind::I16: return "i16";
         case TypeKind::I32: return "i32";
         case TypeKind::I64: return "i64";
+        case TypeKind::F16: return "f16";
+        case TypeKind::BF16: return "bf16";
         case TypeKind::F32: return "f32";
         case TypeKind::F64: return "f64";
         case TypeKind::Ptr: return "ptr";
