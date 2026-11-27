@@ -82,7 +82,8 @@ void PtxISel::find_shared_allocs(const brass::Function& mir_fn) {
         std::string_view s = target::canonical_gpu_intrinsic(raw);
         return s == "ptx_shared_alloc_f32" || s == "ptx_shared_alloc_i32" ||
                s == "ptx_shared_alloc_f64" || s == "ptx_shared_alloc_i64" ||
-               s == "ptx_shared_alloc_i32x4" || s == "ptx_shared_alloc_u16";
+               s == "ptx_shared_alloc_i32x4" || s == "ptx_shared_alloc_u16" ||
+               s == "ptx_shared_dynamic";
     };
     for (const BasicBlock* bb : mir_fn.blocks()) {
         for (const brass::Instruction* inst : *bb) {

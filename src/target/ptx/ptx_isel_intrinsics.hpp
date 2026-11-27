@@ -99,6 +99,7 @@ struct PtxISel::Intrinsics {
     template <Type T>
     static void shared_store_indexed(PtxISel& isel, const brass::Instruction& inst);
     static void shared_alloc_i32x4(PtxISel& isel, const brass::Instruction& inst);
+    static void shared_dynamic(PtxISel& isel, const brass::Instruction& inst);
     static void shared_load_i32x4_indexed(PtxISel& isel, const brass::Instruction& inst);
     static void shared_store_i32x4_indexed(PtxISel& isel, const brass::Instruction& inst);
     static void shared_load_f32_from_v4(PtxISel& isel, const brass::Instruction& inst);
@@ -125,6 +126,8 @@ struct PtxISel::Intrinsics {
     static void ldmatrix(PtxISel& isel, const brass::Instruction& inst);
     template <Type AB>
     static void mma_m16n8k16(PtxISel& isel, const brass::Instruction& inst);
+    static void mma_m16n8k16_f16_f16(PtxISel& isel, const brass::Instruction& inst);
+    static void l2_evict_first_policy(PtxISel& isel, const brass::Instruction& inst);
 
     // ---- cooperative matrix 16x16x16 (ptx_isel_coopmat.cpp) ----------------
     template <uint32_t Use>

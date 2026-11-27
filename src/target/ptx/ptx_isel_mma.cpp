@@ -51,6 +51,11 @@ void PtxISel::Intrinsics::cp_async(PtxISel& isel, const brass::Instruction& inst
     if (inst.operand_count() >= 3 && inst.operand(2)) {
         out.src(isel.lane_operand(inst.operand(2), "cp.async src_size"));
     }
+    if (inst.operand_count() >= 4 && inst.operand(3)) {
+        Reg pol = isel.reg_of(inst.operand(3), "cp.async cache policy");
+        if (pol.cls != RegClass::B64) isel.malformed(inst, "cp.async cache policy must be i64");
+        out.cache_hint().src(pol);
+    }
     isel.emit(std::move(out));
 }
 template void PtxISel::Intrinsics::cp_async<16, true>(PtxISel&, const brass::Instruction&);
@@ -132,5 +137,34 @@ void PtxISel::Intrinsics::mma_m16n8k16(PtxISel& isel, const brass::Instruction& 
 }
 template void PtxISel::Intrinsics::mma_m16n8k16<Type::f16>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::mma_m16n8k16<Type::bf16>(PtxISel&, const brass::Instruction&);
+
+void PtxISel::Intrinsics::mma_m16n8k16_f16_f16(PtxISel& isel, const brass::Instruction& inst) {
+    if (inst.operand_count() < 5) {
+        isel.malformed(inst, "ptx_mma_m16n8k16_f16_f16 requires (a:i32x4, b0:i32, b1:i32, c0:i32, c1:i32)");
+    }
+    Reg dst64 = isel.result_reg(inst);
+    if (dst64.cls != RegClass::B64) isel.malformed(inst, "mma_m16n8k16_f16_f16 requires i64 result");
+    const std::vector<Reg>& a_regs = isel.regs_of(inst.operand(0), "a");
+    if (a_regs.size() != 4) isel.malformed(inst, "mma_m16n8k16_f16_f16 expects i32x4 a");
+    Reg b0 = isel.reg_of(inst.operand(1), "b0");
+    Reg b1 = isel.reg_of(inst.operand(2), "b1");
+    Reg c0 = isel.reg_of(inst.operand(3), "c0");
+    Reg c1 = isel.reg_of(inst.operand(4), "c1");
+    std::vector<Reg> d_regs = isel.fn_->new_regs(RegClass::B32, 2);
+    isel.emit(Inst::make(Opcode::mma_sync, Type::f16)
+                  .ab_type(Type::f16)
+                  .ctype(Type::f16)
+                  .dst(Operand::vec(d_regs))
+                  .src(Operand::vec(a_regs))
+                  .src(Operand::vec({b0, b1}))
+                  .src(Operand::vec({c0, c1})));
+    isel.emit(Inst::make(Opcode::mov, Type::b64).dst(dst64).src(Operand::vec(d_regs)));
+}
+
+void PtxISel::Intrinsics::l2_evict_first_policy(PtxISel& isel, const brass::Instruction& inst) {
+    Reg dst = isel.result_reg(inst);
+    if (dst.cls != RegClass::B64) isel.malformed(inst, "ptx_l2_evict_first_policy requires i64 result");
+    isel.emit(Inst::make(Opcode::createpolicy_evict_first, Type::b64).dst(dst));
+}
 
 } // namespace brass::ptx

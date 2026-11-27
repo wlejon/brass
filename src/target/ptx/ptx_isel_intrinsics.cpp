@@ -364,6 +364,7 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_shared_alloc_i64", &shared_alloc<Type::u64> },
         { "ptx_shared_alloc_i32x4", &shared_alloc_i32x4 },
         { "ptx_shared_alloc_u16",   &shared_alloc<Type::u16> },
+        { "ptx_shared_dynamic",     &shared_dynamic },
         { "ptx_shared_load_f32",  &shared_load<Type::f32> },    // (ptr[, i32/i64 byte offset]) -> f32
         { "ptx_shared_load_i32",  &shared_load<Type::u32> },
         { "ptx_shared_load_f64",  &shared_load<Type::f64> },
@@ -419,6 +420,8 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_ldmatrix_x4_trans",      &ldmatrix<4, true> },
         { "ptx_mma_m16n8k16_f16_f32",   &mma_m16n8k16<Type::f16> },
         { "ptx_mma_m16n8k16_bf16_f32",  &mma_m16n8k16<Type::bf16> },
+        { "ptx_mma_m16n8k16_f16_f16",   &mma_m16n8k16_f16_f16 },
+        { "ptx_l2_evict_first_policy",  &l2_evict_first_policy },
 
         // Cooperative matrix 16x16x16 (wmma.sync.aligned.m16n16k16)
         { "ptx_coop_alloc_a",   &coop_alloc<0> },

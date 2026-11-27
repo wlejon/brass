@@ -209,6 +209,7 @@ std::string_view to_string(Opcode op) noexcept {
         case Opcode::cp_async_wait_all:   return "cp.async.wait_all";
         case Opcode::ldmatrix:            return "ldmatrix";
         case Opcode::mma_sync:            return "mma.sync";
+        case Opcode::createpolicy_evict_first: return "createpolicy.fractional.L2::evict_first";
     }
     return "?";
 }
@@ -425,6 +426,7 @@ bool allows_immediate(Opcode op, size_t src_index) noexcept {
         case Opcode::cp_async_wait_all:
         case Opcode::ldmatrix:
         case Opcode::mma_sync:
+        case Opcode::createpolicy_evict_first:
         case Opcode::bra: case Opcode::ret: case Opcode::trap: case Opcode::exit:
             return false;
     }

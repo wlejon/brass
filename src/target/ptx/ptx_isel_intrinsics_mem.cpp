@@ -159,6 +159,14 @@ void PtxISel::Intrinsics::shared_alloc_i32x4(PtxISel& isel, const brass::Instruc
     isel.emit(Inst::make(Opcode::mov, Type::u64).dst(dst).src(Operand::symbol(name)));
 }
 
+// ptx_shared_dynamic() -> ptr:   .extern .shared .align 128 .b8 smem_dyn[]; mov.u64 %rd, smem_dyn
+void PtxISel::Intrinsics::shared_dynamic(PtxISel& isel, const brass::Instruction& inst) {
+    Reg dst = isel.result_reg(inst);
+    if (dst.cls != RegClass::B64) isel.malformed(inst, "ptx_shared_dynamic requires ptr/i64 result");
+    isel.fn_->has_dynamic_shared = true;
+    isel.emit(Inst::make(Opcode::mov, Type::u64).dst(dst).src(Operand::symbol("smem_dyn")));
+}
+
 // ptx_shared_load_<T>(ptr[, byte_offset]) -> T:   ld.shared.<T> d, [ptr + off]
 template <Type T>
 void PtxISel::Intrinsics::shared_load(PtxISel& isel, const brass::Instruction& inst) {

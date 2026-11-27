@@ -414,6 +414,9 @@ private:
             case Opcode::cp_async_wait_group: verify_cp_async_wait_group(); break;
             case Opcode::ldmatrix:            verify_ldmatrix(); break;
             case Opcode::mma_sync:            verify_mma_sync(); break;
+            case Opcode::createpolicy_evict_first:
+                if (check_arity(1, 0, 0)) expect_reg(I.dsts[0], Type::b64, "createpolicy dst");
+                break;
             default:
                 if (is_binary_alu(I.op)) verify_binary();
                 else if (is_unary_math(I.op)) verify_unary_math();
@@ -472,7 +475,8 @@ private:
             return;
         }
         if (s.is_symbol()) {
-            if (!fn_.find_shared(s.name))
+            const bool dyn = fn_.has_dynamic_shared && s.name == "smem_dyn";
+            if (!dyn && !fn_.find_shared(s.name))
                 error("symbol '" + s.name + "' is not a declared .shared array");
             if (!(is_integer(I.type) || is_bits(I.type)))
                 error("address-of-symbol move requires an integer type");
@@ -715,10 +719,11 @@ private:
     void verify_mma_sync() {
         const Inst& I = *inst_;
         if (!check_arity(1, 3, 3)) return;
-        verify_wmma_tuple(I.dsts[0], 4u, Type::f32, "mma.sync d");
+        const bool f16_c = (I.type == Type::f16 && I.wmma_c_type == Type::f16);
+        verify_wmma_tuple(I.dsts[0], f16_c ? 2u : 4u, f16_c ? Type::b32 : Type::f32, "mma.sync d");
         verify_wmma_tuple(I.srcs[0], 4u, Type::b32, "mma.sync a");
         verify_wmma_tuple(I.srcs[1], 2u, Type::b32, "mma.sync b");
-        verify_wmma_tuple(I.srcs[2], 4u, Type::f32, "mma.sync c");
+        verify_wmma_tuple(I.srcs[2], f16_c ? 2u : 4u, f16_c ? Type::b32 : Type::f32, "mma.sync c");
     }
 
     void verify_cvta() {
@@ -736,7 +741,7 @@ private:
 
     void verify_cp_async() {
         const Inst& I = *inst_;
-        if (!check_arity(0, 3, 4)) return;
+        if (!check_arity(0, I.has_cache_hint ? 5 : 3, I.has_cache_hint ? 5 : 4)) return;
         if (!I.srcs[0].is_addr()) error("cp.async dst must be a shared address");
         else if (I.srcs[0].addr_base.valid() &&
                  I.srcs[0].addr_base.cls != RegClass::B32 && I.srcs[0].addr_base.cls != RegClass::B64) {
@@ -752,7 +757,8 @@ private:
             if (bytes != 4 && bytes != 8 && bytes != 16) error("cp.async size must be 4, 8, or 16");
             if (I.is_cg && bytes != 16) error("cp.async.cg only supports 16-byte copies");
         }
-        if (I.srcs.size() == 4) expect_b32_or_imm(I.srcs[3], "cp.async src-size");
+        if (I.srcs.size() >= 4) expect_b32_or_imm(I.srcs[3], "cp.async src-size");
+        if (I.has_cache_hint) expect_reg(I.srcs[4], Type::b64, "cp.async L2 cache policy");
     }
 
     void verify_cp_async_wait_group() {

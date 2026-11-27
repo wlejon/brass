@@ -110,7 +110,8 @@ enum class Opcode : uint8_t {
     wmma_load, wmma_mma, wmma_store,
     cvta,
     cp_async, cp_async_commit, cp_async_wait_group, cp_async_wait_all,
-    ldmatrix, mma_sync
+    ldmatrix, mma_sync,
+    createpolicy_evict_first
 };
 
 std::string_view to_string(Opcode op) noexcept; // mnemonic ("and", "or", ...)
@@ -255,6 +256,7 @@ struct Inst {
     bool is_cg = false;           // cp.async.cg (vs .ca)
     bool is_trans = false;        // ldmatrix ... .trans
     bool is_to_space = false;     // cvta.to.<space>
+    bool has_cache_hint = false;  // cp.async ... .L2::cache_hint
     uint8_t cp_async_bytes = 0;   // cp.async copy size (4, 8, 16)
     uint8_t ldmatrix_num = 1;     // ldmatrix .x1/.x2/.x4
     StateSpace state_space = StateSpace::none;
@@ -301,6 +303,7 @@ struct Inst {
     Inst& cg() { is_cg = true; return *this; }
     Inst& trans() { is_trans = true; return *this; }
     Inst& to_space() { is_to_space = true; return *this; }
+    Inst& cache_hint() { has_cache_hint = true; return *this; }
     Inst& async_bytes(uint8_t n) { cp_async_bytes = n; return *this; }
     Inst& matrix_num(uint8_t n) { ldmatrix_num = n; return *this; }
     Inst& space(StateSpace s) { state_space = s; return *this; }
@@ -354,6 +357,7 @@ class Function {
 public:
     std::string name;
     bool is_entry = true;
+    bool has_dynamic_shared = false;
     uint32_t maxntid[3] = {0, 0, 0};
     uint32_t minnctapersm = 0;
     uint32_t maxnreg = 0;
