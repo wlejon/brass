@@ -140,6 +140,8 @@ file(GLOB_RECURSE _brass_fingerprint_inputs CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/*")
+list(FILTER _brass_fingerprint_inputs EXCLUDE REGEX
+    "/(src|include/brass)/codegen/(audio_builder|grammar_builder|image_builder|sdf_builder|trace_builder|ml_fusion)")
 set(_brass_fingerprint_cpp "${CMAKE_CURRENT_BINARY_DIR}/generated/brass_codegen_fingerprint.cpp")
 add_custom_command(
     OUTPUT "${_brass_fingerprint_cpp}"
@@ -266,8 +268,8 @@ if(BRASS_BUILD_SHARED)
     set_target_properties(brass_shared PROPERTIES
         OUTPUT_NAME "brass"
         ARCHIVE_OUTPUT_NAME "brass_shared"
-        SOVERSION 1
-        VERSION 1.0.0
+        SOVERSION ${PROJECT_VERSION_MAJOR}
+        VERSION ${PROJECT_VERSION}
     )
 endif()
 
@@ -288,6 +290,7 @@ if(BRASS_IS_TOP_LEVEL)
     install(FILES
         ${BRASS_INCLUDE_DIR}/brass/brass_c_api.h
         ${BRASS_INCLUDE_DIR}/brass/brass_export.h
+        ${BRASS_INCLUDE_DIR}/brass/brass_version.h
         DESTINATION include/brass)
     install(FILES ${BRASS_INCLUDE_DIR}/brass/embedding/brass_c_api.h DESTINATION include/brass/embedding)
 endif()

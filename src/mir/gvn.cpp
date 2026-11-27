@@ -42,6 +42,7 @@ void apply_substitutions(Function& fn, const std::unordered_map<Value*, Value*>&
                     inst->set_operand(i, r);
                 }
             }
+            if (!inst->has_extra()) continue;
             for (size_t i = 0; i < inst->branch_target().args.size(); ++i) {
                 Value* op = inst->branch_target().args[i];
                 Value* r = resolve(op);

@@ -1,11 +1,14 @@
 # brass's codegen fingerprint: the first 64 bits of a SHA-256 over every
-# source and header of the brass library (each file's path relative to the
-# repository and the SHA-256 of its content, in sorted order). Anything brass
-# generates is a function of these files, so the fingerprint names the code
-# generator without a number anyone must remember to bump. The cache key's
-# "brass.codegen" field (KeyBuilder::add_brass_codegen,
-# src/cache/artifact_key.cpp) is this value: an edit to brass is a new key
-# space for every artifact brass compiled.
+# source and header of the brass compiler/optimizer/backend library (each file's
+# path relative to the repository and the SHA-256 of its content, in sorted
+# order). Front-end domain MIR builders (audio/grammar/image/sdf/trace/ml_fusion)
+# only construct MIR on top of Builder/KernelBuilder and are excluded so edits
+# to a domain kernel helper do not invalidate ArtifactCache entries for
+# unrelated consumers. Anything brass generates is a function of these files,
+# so the fingerprint names the code generator without a number anyone must
+# remember to bump. The cache key's "brass.codegen" field
+# (KeyBuilder::add_brass_codegen, src/cache/artifact_key.cpp) is this value:
+# an edit to brass's codegen is a new key space for every artifact brass compiled.
 #
 # Run in script mode at build time (CMakeLists.txt's custom command, which
 # depends on the same files): cmake -DBRASS_ROOT=<repo> -DOUT=<file.cpp> -P <this>
@@ -20,6 +23,8 @@ file(GLOB_RECURSE _files RELATIVE "${BRASS_ROOT}"
     "${BRASS_ROOT}/src/*"
     "${BRASS_ROOT}/include/*"
     "${BRASS_ROOT}/third_party/*")
+list(FILTER _files EXCLUDE REGEX
+    "^(src|include/brass)/codegen/(audio_builder|grammar_builder|image_builder|sdf_builder|trace_builder|ml_fusion)")
 list(SORT _files)
 set(_material "")
 foreach(_f IN LISTS _files)

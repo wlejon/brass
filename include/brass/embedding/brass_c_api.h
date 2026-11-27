@@ -1,10 +1,14 @@
 #ifndef BRASS_C_API_H
 #define BRASS_C_API_H
 
+/* Host embedding C-ABI (HostEngine, GC heap, NaN-boxing, runtime patching).
+ * For the standalone compiler/JIT/GPU builder C-ABI, see <brass/brass_c_api.h>. */
+
 #include <stdint.h>
 #include <stddef.h>
 
 #include <brass/brass_export.h>
+#include <brass/brass_version.h>
 
 #ifdef __cplusplus
 extern "C" {

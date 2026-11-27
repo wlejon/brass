@@ -44,8 +44,10 @@ std::unordered_map<const Value*, UseList> collect_uses(Function& fn) {
             for (size_t i = 0; i < ops.size(); ++i) {
                 if (ops[i]) uses[ops[i]].emplace_back(inst, static_cast<int>(i));
             }
-            for (Value* v : inst->state_map()) {
-                if (v) uses[v].emplace_back(inst, -1);
+            if (inst->has_extra()) {
+                for (Value* v : inst->state_map()) {
+                    if (v) uses[v].emplace_back(inst, -1);
+                }
             }
             for_each_edge(*inst, [&](BranchTarget& bt) {
                 for (Value* v : bt.args) {

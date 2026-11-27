@@ -2,6 +2,7 @@
 #include <brass/mir/module.hpp>
 #include <brass/mir/builder.hpp>
 #include <brass/mir/verifier.hpp>
+#include <cmath>
 
 using namespace brass;
 
@@ -303,4 +304,55 @@ TEST_CASE("BasicBlock instruction list manipulation") {
     CHECK_EQ(i1->next(), i3);
     CHECK_EQ(i3->prev(), i1);
     CHECK(i2->parent() == nullptr);
+}
+
+TEST_CASE("Instruction compact layout and lazy extra data") {
+    static_assert(sizeof(Instruction) <= 136);
+
+    Instruction arith(Opcode::add, Type::i64());
+    const Instruction& carith = arith;
+    CHECK(!carith.has_extra());
+    CHECK(carith.extra_symbol().empty());
+    CHECK(carith.branch_target().block == nullptr);
+    CHECK(carith.true_target().block == nullptr);
+    CHECK(carith.false_target().block == nullptr);
+    CHECK(carith.switch_cases().empty());
+    CHECK(carith.state_map().empty());
+    // Setting empty extra_symbol must not allocate ExtraData.
+    arith.set_extra_symbol("");
+    CHECK(!arith.has_extra());
+
+    // imm_f64 bit-exact round-trip (-0.0 and NaN) and copy_attributes_from.
+    Instruction fconst(Opcode::fconst_f64, Type::f64());
+    fconst.set_imm_f64(-0.0);
+    CHECK(std::signbit(fconst.imm_f64()));
+    CHECK_EQ(fconst.imm_i64(), static_cast<int64_t>(0x8000000000000000ULL));
+
+    Instruction fcopy(Opcode::fconst_f64, Type::f64());
+    fcopy.copy_attributes_from(fconst);
+    CHECK(std::signbit(fcopy.imm_f64()));
+    CHECK_EQ(fcopy.imm_i64(), static_cast<int64_t>(0x8000000000000000ULL));
+
+    // Lazy allocation on branch/switch/guard/extra_symbol.
+    Module mod("extra_mod");
+    Function* fn = mod.create_function("f", Type::void_type());
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* bb = b.append_block("entry");
+    Instruction br(Opcode::br, Type::void_type());
+    br.set_branch_target(BranchTarget(bb));
+    CHECK(br.has_extra());
+    CHECK_EQ(br.branch_target().block, bb);
+
+    Instruction sw(Opcode::switch_, Type::void_type());
+    sw.add_switch_case(42, bb);
+    CHECK(sw.has_extra());
+    CHECK_EQ(sw.switch_cases().size(), size_t{1});
+
+    Instruction gd(Opcode::guard, Type::void_type());
+    gd.add_state_value(nullptr);
+    gd.set_extra_symbol("twin");
+    CHECK(gd.has_extra());
+    CHECK_EQ(gd.state_map().size(), size_t{1});
+    CHECK_EQ(gd.extra_symbol(), "twin");
 }

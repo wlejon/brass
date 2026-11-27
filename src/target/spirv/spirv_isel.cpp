@@ -1,13 +1,13 @@
 // SpirvISel core: driver, kernel parameters (push constants), builtins, value
 // access and the opcode dispatch. Per-family lowering lives in
 // spirv_isel_alu.cpp, spirv_isel_mem.cpp, spirv_isel_vec.cpp and
-// spirv_isel_intrinsics*.cpp; control flow comes from spirv_structurize.cpp.
+// spirv_isel_intrinsics*.cpp; control flow comes from ../gpu_structurize.cpp.
 
 #include <brass/target/spirv/spirv_isel.hpp>
 #include <brass/mir/block.hpp>
 #include <brass/mir/opcodes.hpp>
 
-#include "spirv_structurize.hpp"
+#include "../gpu_structurize.hpp"
 
 #include <spirv/unified1/GLSL.std.450.h>
 

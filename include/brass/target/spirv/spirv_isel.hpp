@@ -4,7 +4,7 @@
 // ptx::PtxISel. One `lower()` call adds one function plus its OpEntryPoint
 // to a spirv::Module.
 //
-//   - control flow: the structurizer (src/target/spirv/spirv_structurize.*)
+//   - control flow: the structurizer (src/target/gpu_structurize.*)
 //     turns the MIR CFG into SPIR-V structured control flow; MIR block
 //     parameters become OpPhi;
 //   - memory: MIR `ptr` is a 64-bit buffer device address (u64). Loads and
@@ -31,9 +31,11 @@
 #include <unordered_map>
 #include <vector>
 
-namespace brass::spirv {
-
+namespace brass::gpu {
 struct StructuredCfg;
+} // namespace brass::gpu
+
+namespace brass::spirv {
 
 struct KernelLayout {
     std::vector<target::SpirvParam> params;
@@ -99,7 +101,7 @@ private:
     Module& m_;
     target::SpirvOptions opts_;
     const brass::Function* mir_ = nullptr;
-    const StructuredCfg* cfg_ = nullptr;
+    const brass::gpu::StructuredCfg* cfg_ = nullptr;
     size_t fn_index_ = 0;
     size_t cur_ = 0;                                          // current block index
     const brass::Instruction* origin_ = nullptr;

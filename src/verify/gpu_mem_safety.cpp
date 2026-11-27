@@ -87,14 +87,14 @@ GpuMemorySafetyResult check_trace_memory_safety(
                 bv_bin(ctx, BVOp::Ule, 1, lvar, bv_const(ctx, lw, hi)));
         };
         if (dims.size() == 1) {
-            bound_dim(dims[0], 0x3FFFFFFFULL / scale);
+            bound_dim(dims[0], kMaxProverDim1D / scale);
         } else if (dims.size() == 2) {
-            bound_dim(dims[0], 0x7FFFULL);
-            bound_dim(dims[1], 0x7FFFULL / scale);
+            bound_dim(dims[0], kMaxProverDim2D);
+            bound_dim(dims[1], kMaxProverDim2D / scale);
         } else if (dims.size() >= 3) {
-            bound_dim(dims[0], 0x3FFULL);
-            bound_dim(dims[1], 0x3FFULL);
-            bound_dim(dims[2], 0x3FFULL / scale);
+            bound_dim(dims[0], kMaxProverDim3D);
+            bound_dim(dims[1], kMaxProverDim3D);
+            bound_dim(dims[2], kMaxProverDim3D / scale);
         }
     }
 

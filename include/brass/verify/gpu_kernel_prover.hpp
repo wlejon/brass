@@ -12,6 +12,13 @@
 
 namespace brass::verify {
 
+// Per-axis element count caps enforced when checking dynamic-length buffers so
+// bit-blasting products stay within 30 bits (last axis is divided by elem_scale).
+// Callers enforcing a security boundary must uphold these bounds at dispatch.
+inline constexpr uint64_t kMaxProverDim1D = 0x3FFFFFFFULL;
+inline constexpr uint64_t kMaxProverDim2D = 0x7FFFULL;
+inline constexpr uint64_t kMaxProverDim3D = 0x3FFULL;
+
 struct GpuBufferSpec {
     uint32_t param_index = 0;
     uint64_t static_byte_size = 0;      // > 0 when buffer has a known static byte capacity

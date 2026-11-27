@@ -192,9 +192,11 @@ bool value_has_use(const Function& fn, const Value* target) {
             for (const Value* op : inst->operands()) {
                 if (op == target) return true;
             }
-            for (const BranchTarget* bt : {&inst->branch_target(), &inst->true_target(), &inst->false_target()}) {
-                for (const Value* arg : bt->args) {
-                    if (arg == target) return true;
+            if (inst->has_extra()) {
+                for (const BranchTarget* bt : {&inst->branch_target(), &inst->true_target(), &inst->false_target()}) {
+                    for (const Value* arg : bt->args) {
+                        if (arg == target) return true;
+                    }
                 }
             }
         }

@@ -4,7 +4,7 @@
 #include <brass/mir/function.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/types.hpp>
-#include "../spirv/spirv_structurize.hpp"
+#include "../gpu_structurize.hpp"
 
 #include <cstdint>
 #include <sstream>

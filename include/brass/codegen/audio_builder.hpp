@@ -7,6 +7,8 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#elif defined(_M_ARM64)
+#include <intrin.h>
 #endif
 
 namespace brass::codegen {
@@ -23,7 +25,13 @@ public:
         saved_mxcsr_ = _mm_getcsr();
         // FTZ = bit 15 (0x8000), DAZ = bit 6 (0x0040)
         _mm_setcsr(saved_mxcsr_ | 0x8040);
-#elif defined(__aarch64__) || defined(_M_ARM64)
+#elif defined(_M_ARM64)
+        uint64_t fpcr = static_cast<uint64_t>(_ReadStatusReg(kArm64Fpcr));
+        saved_fpcr_ = fpcr;
+        // FZ = bit 24 (Flush to zero)
+        fpcr |= (1ULL << 24);
+        _WriteStatusReg(kArm64Fpcr, static_cast<__int64>(fpcr));
+#elif defined(__aarch64__)
         uint64_t fpcr;
         __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
         saved_fpcr_ = fpcr;
@@ -36,7 +44,9 @@ public:
     ~ScopedFtzDaz() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
         _mm_setcsr(saved_mxcsr_);
-#elif defined(__aarch64__) || defined(_M_ARM64)
+#elif defined(_M_ARM64)
+        _WriteStatusReg(kArm64Fpcr, static_cast<__int64>(saved_fpcr_));
+#elif defined(__aarch64__)
         __asm__ __volatile__("msr fpcr, %0" : : "r"(saved_fpcr_));
 #endif
     }
@@ -53,7 +63,15 @@ public:
             mxcsr &= ~0x8040u;
         }
         _mm_setcsr(mxcsr);
-#elif defined(__aarch64__) || defined(_M_ARM64)
+#elif defined(_M_ARM64)
+        uint64_t fpcr = static_cast<uint64_t>(_ReadStatusReg(kArm64Fpcr));
+        if (enable) {
+            fpcr |= (1ULL << 24);
+        } else {
+            fpcr &= ~(1ULL << 24);
+        }
+        _WriteStatusReg(kArm64Fpcr, static_cast<__int64>(fpcr));
+#elif defined(__aarch64__)
         uint64_t fpcr;
         __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
         if (enable) {
@@ -70,7 +88,9 @@ public:
     static bool is_ftz_daz_enabled() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
         return (_mm_getcsr() & 0x8040) == 0x8040;
-#elif defined(__aarch64__) || defined(_M_ARM64)
+#elif defined(_M_ARM64)
+        return (static_cast<uint64_t>(_ReadStatusReg(kArm64Fpcr)) & (1ULL << 24)) != 0;
+#elif defined(__aarch64__)
         uint64_t fpcr;
         __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
         return (fpcr & (1ULL << 24)) != 0;
@@ -83,6 +103,9 @@ private:
 #if defined(__x86_64__) || defined(_M_X64)
     unsigned int saved_mxcsr_ = 0;
 #elif defined(__aarch64__) || defined(_M_ARM64)
+#if defined(_M_ARM64)
+    static constexpr int kArm64Fpcr = ARM64_SYSREG(3, 3, 4, 4, 0);
+#endif
     uint64_t saved_fpcr_ = 0;
 #endif
 };

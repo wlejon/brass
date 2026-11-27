@@ -178,7 +178,7 @@ an 8-byte access of a 4-byte array is a diagnostic, where PTX's untyped
 - **Entry point**: `GLCompute`, named after the MIR function; void, no
   parameters.
 
-## Structurization (`src/target/spirv/spirv_structurize.cpp`)
+## Structurization (`src/target/gpu_structurize.cpp`)
 
 SPIR-V requires structured control flow: every loop has a header with
 `OpLoopMerge` naming one merge block and one continue target, every
@@ -254,7 +254,7 @@ without forwarding beyond the per-loop header/continue nodes.
 | `spirv_isel_vec.cpp` | vector ops per part, `fmin`/`fmax`/`vmin`/`vmax`, shuffles, lane access |
 | `spirv_isel_intrinsics.cpp` | the intrinsic table, the unsupported list, builtins, math, conversions, `call` |
 | `spirv_isel_intrinsics_mem.cpp` | barriers, shuffles, atomics, wide multiplies, shared arrays, narrow access |
-| `spirv_structurize.cpp` | the structurizer above |
+| `../gpu_structurize.cpp` | the shared GPU structurizer above |
 
 Rules:
 

@@ -16,11 +16,24 @@ namespace {
 // Native Scalar Baselines (prevent auto-vectorization)
 // ============================================================================
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("no-tree-vectorize")))
+#if defined(__GNUC__) && !defined(__clang__)
+#define BRASS_NO_VEC_ATTR __attribute__((optimize("no-tree-vectorize")))
+#else
+#define BRASS_NO_VEC_ATTR
 #endif
+
+#if defined(__clang__)
+#define BRASS_NO_VEC_LOOP _Pragma("clang loop vectorize(disable) interleave(disable)")
+#elif defined(_MSC_VER)
+#define BRASS_NO_VEC_LOOP __pragma(loop(no_vector))
+#else
+#define BRASS_NO_VEC_LOOP
+#endif
+
+BRASS_NO_VEC_ATTR
 BRASS_BENCH_NATIVE float native_dot4_scalar(const float* a, const float* b, int64_t count) {
     float sum = 0.0f;
+    BRASS_NO_VEC_LOOP
     for (int64_t i = 0; i < count; ++i) {
         int64_t idx = i * 4;
         sum += a[idx + 0] * b[idx + 0]
@@ -31,10 +44,9 @@ BRASS_BENCH_NATIVE float native_dot4_scalar(const float* a, const float* b, int6
     return sum;
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("no-tree-vectorize")))
-#endif
+BRASS_NO_VEC_ATTR
 BRASS_BENCH_NATIVE void native_vec3_math_scalar(const float* a, const float* b, float* out, int64_t count, float half_val) {
+    BRASS_NO_VEC_LOOP
     for (int64_t i = 0; i < count; ++i) {
         int64_t idx = i * 4;
         float x = a[idx + 0];
@@ -49,10 +61,9 @@ BRASS_BENCH_NATIVE void native_vec3_math_scalar(const float* a, const float* b, 
     }
 }
 
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("no-tree-vectorize")))
-#endif
+BRASS_NO_VEC_ATTR
 BRASS_BENCH_NATIVE void native_matmul4x4_scalar(const float* a, const float* b, float* c, int64_t count) {
+    BRASS_NO_VEC_LOOP
     for (int64_t m = 0; m < count; ++m) {
         const float* ma = a + m * 16;
         const float* mb = b + m * 16;

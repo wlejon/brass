@@ -339,17 +339,21 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (is_213) {
                 // 213: dst = (src1 * src2) + src3
                 // In AArch64, fmla Vd, Vn, Vm computes Vd = Vd + (Vn * Vm).
+                FPR acc = dst;
+                bool aliases_mul_src = (dst == src1 || dst == src2);
+                if (aliases_mul_src) {
+                    acc = FPR::V31;
+                }
                 if (src3_op.is_preg()) {
                     FPR src3 = to_fpr(src3_op);
-                    enc_.vec_orr(FPR::V31, src3, src3);
-                    if (is_double) enc_.vec_fmla_2d(FPR::V31, src1, src2);
-                    else enc_.vec_fmla_4s(FPR::V31, src1, src2);
-                    enc_.vec_orr(dst, FPR::V31, FPR::V31);
+                    if (acc != src3) enc_.vec_orr(acc, src3, src3);
                 } else {
-                    enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src3_op)));
-                    if (is_double) enc_.vec_fmla_2d(FPR::V31, src1, src2);
-                    else enc_.vec_fmla_4s(FPR::V31, src1, src2);
-                    enc_.vec_orr(dst, FPR::V31, FPR::V31);
+                    enc_.ldr_q(acc, ensure_accessible_mem(to_mem_address(src3_op)));
+                }
+                if (is_double) enc_.vec_fmla_2d(acc, src1, src2);
+                else enc_.vec_fmla_4s(acc, src1, src2);
+                if (acc != dst) {
+                    enc_.vec_orr(dst, acc, acc);
                 }
             } else {
                 // 231: dst = (src2 * src3) + src1

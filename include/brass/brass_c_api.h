@@ -8,10 +8,12 @@
 extern "C" {
 #endif
 
+/* Public compiler/JIT/GPU builder C-ABI.
+ * For host GC heap, NaN-boxing, and runtime patching FFI, see
+ * <brass/embedding/brass_c_api.h>. */
+
 /* Version numbers */
-#define BRASS_VERSION_MAJOR 1
-#define BRASS_VERSION_MINOR 0
-#define BRASS_VERSION_PATCH 0
+#include <brass/brass_version.h>
 
 /* Platform export macros (BRASS_API, BRASS_CALL) */
 #include <brass/brass_export.h>

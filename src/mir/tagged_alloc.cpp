@@ -84,8 +84,10 @@ void Analyzer::index_uses() {
             for (size_t i = 0; i < inst->operand_count(); ++i) {
                 if (inst->operand(i)) uses_[inst->operand(i)].push_back({inst, Slot::Operand, static_cast<uint32_t>(i)});
             }
-            for (size_t i = 0; i < inst->state_map().size(); ++i) {
-                if (inst->state_map()[i]) uses_[inst->state_map()[i]].push_back({inst, Slot::State, static_cast<uint32_t>(i)});
+            if (inst->has_extra()) {
+                for (size_t i = 0; i < inst->state_map().size(); ++i) {
+                    if (inst->state_map()[i]) uses_[inst->state_map()[i]].push_back({inst, Slot::State, static_cast<uint32_t>(i)});
+                }
             }
             for_each_edge(*inst, [&](BranchTarget& t) {
                 for (size_t i = 0; i < t.args.size(); ++i) {

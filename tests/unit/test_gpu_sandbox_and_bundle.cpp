@@ -143,10 +143,79 @@ TEST_CASE("GPU Sandbox - Portability, Safety Proofs, and Equivalence Gate") {
         CHECK(res.spirv_parsed);
         CHECK(res.memory_safe);
         CHECK(res.barrier_uniform);
+        CHECK(res.global_bounds_proven);
+        CHECK(res.proof_tier == SandboxProofTier::FullSmt);
         CHECK(res.shared_accesses_proven >= 2);
         CHECK(res.barriers_proven >= 1);
         CHECK(res.passed());
         CHECK(res.violations.empty());
+    }
+
+    // 1b. StaticOnly tier when SMT prover is disabled; require_full_smt rejects it.
+    {
+        Module mod("sb_static");
+        Function* fn = build_valid_shared_kernel(mod, "sb_static", 16);
+        GpuSandboxOptions static_opts = opts;
+        static_opts.run_smt_prover = false;
+        const auto res = verify_gpu_kernel_sandbox(*fn, static_opts);
+        CHECK(res.proof_tier == SandboxProofTier::StaticOnly);
+        CHECK(!res.global_bounds_proven);
+        CHECK(res.passed());
+
+        static_opts.require_full_smt = true;
+        const auto strict_res = verify_gpu_kernel_sandbox(*fn, static_opts);
+        CHECK(strict_res.proof_tier == SandboxProofTier::StaticOnly);
+        CHECK(!strict_res.passed());
+        CHECK(!strict_res.violations.empty());
+    }
+
+    // 1c. StaticFallbackLoopBound tier when loop exceeds loop_unroll_bound.
+    {
+        Module mod("sb_loop");
+        Function* fn = mod.create_function("sb_loop", Type::void_type(), {Type::ptr()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        BasicBlock* hdr   = b.create_block("hdr");
+        BasicBlock* body  = b.create_block("body");
+        BasicBlock* done  = b.create_block("done");
+        fn->append_block(hdr);
+        fn->append_block(body);
+        fn->append_block(done);
+
+        b.position_at_end(entry);
+        Value* dst  = b.add_block_param(entry, Type::ptr());
+        Value* smem = b.build_call("gpu_shared_alloc_f32", Type::ptr(), {b.build_iconst_i32(16)});
+        Value* tid  = b.build_call("gpu_tid_x", Type::i32());
+        b.build_br(hdr, {b.build_iconst_i32(0)});
+
+        b.position_at_end(hdr);
+        Value* idx = b.add_block_param(hdr, Type::i32());
+        b.build_br_if(b.build_slt(idx, b.build_iconst_i32(20)), body, {}, done, {});
+
+        b.position_at_end(body);
+        b.build_call("gpu_shared_store_f32_indexed", Type::void_type(), {smem, tid, b.build_fconst_f32(1.0f)});
+        b.build_br(hdr, {b.build_add(idx, b.build_iconst_i32(1))});
+
+        b.position_at_end(done);
+        Value* v = b.build_call("gpu_shared_load_f32_indexed", Type::f32(), {smem, tid});
+        b.build_store_indexed(Type::f32(), dst, tid, 4, v);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+
+        GpuSandboxOptions loop_opts = opts;
+        loop_opts.prover_opts.buffers = {GpuBufferSpec{0, 64, -1, 4, 4}};
+        loop_opts.prover_opts.loop_unroll_bound = 2;
+        const auto res = verify_gpu_kernel_sandbox(*fn, loop_opts);
+        CHECK(res.proof_tier == SandboxProofTier::StaticFallbackLoopBound);
+        CHECK(!res.global_bounds_proven);
+        CHECK(res.passed());
+
+        loop_opts.require_full_smt = true;
+        const auto strict_res = verify_gpu_kernel_sandbox(*fn, loop_opts);
+        CHECK(strict_res.proof_tier == SandboxProofTier::StaticFallbackLoopBound);
+        CHECK(!strict_res.passed());
+        CHECK(!strict_res.violations.empty());
     }
 
     // 2. Divergent barrier rejected.

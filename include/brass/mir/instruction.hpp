@@ -5,8 +5,11 @@
 #include <brass/mir/opcodes.hpp>
 #include <brass/mir/proof_cert.hpp>
 #include <brass/debug/source_loc.hpp>
+#include <bit>
 #include <cstdint>
+#include <memory>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace brass {
@@ -119,14 +122,14 @@ public:
         }
     }
 
-    int64_t imm_i64() const noexcept { return imm_i64_; }
-    void set_imm_i64(int64_t val) noexcept { imm_i64_ = val; }
+    int64_t imm_i64() const noexcept { return imm_bits_; }
+    void set_imm_i64(int64_t val) noexcept { imm_bits_ = val; }
 
-    int32_t imm_i32() const noexcept { return static_cast<int32_t>(imm_i64_); }
-    void set_imm_i32(int32_t val) noexcept { imm_i64_ = static_cast<int64_t>(val); }
+    int32_t imm_i32() const noexcept { return static_cast<int32_t>(imm_bits_); }
+    void set_imm_i32(int32_t val) noexcept { imm_bits_ = static_cast<int64_t>(val); }
 
-    double imm_f64() const noexcept { return imm_f64_; }
-    void set_imm_f64(double val) noexcept { imm_f64_ = val; }
+    double imm_f64() const noexcept { return std::bit_cast<double>(imm_bits_); }
+    void set_imm_f64(double val) noexcept { imm_bits_ = std::bit_cast<int64_t>(val); }
 
     uint8_t scale() const noexcept { return scale_; }
     void set_scale(uint8_t scale) noexcept { scale_ = scale; }
@@ -168,8 +171,7 @@ public:
     // (not symbols, which live in a module's pool, nor the debug location or a
     // barrier certificate).
     void copy_attributes_from(const Instruction& src) noexcept {
-        imm_i64_ = src.imm_i64_;
-        imm_f64_ = src.imm_f64_;
+        imm_bits_ = src.imm_bits_;
         scale_ = src.scale_;
         offset_ = src.offset_;
         memory_type_ = src.memory_type_;
@@ -178,6 +180,8 @@ public:
         fresh_in_twin_ = src.fresh_in_twin_;
         non_trapping_load_ = src.non_trapping_load_;
     }
+
+    bool has_extra() const noexcept { return extra_ != nullptr; }
 
     std::string_view symbol() const noexcept { return symbol_; }
     void set_symbol(std::string_view sym) noexcept { symbol_ = sym; }
@@ -188,55 +192,74 @@ public:
     // callee computes, which is all the passes read; a front end stores
     // another entry of the callee there (a resume twin's generic entry,
     // docs/speculation_and_deopt.md 7.3.7).
-    std::string_view extra_symbol() const noexcept { return extra_symbol_; }
-    void set_extra_symbol(std::string_view sym) noexcept { extra_symbol_ = sym; }
+    std::string_view extra_symbol() const noexcept {
+        return extra_ ? extra_->extra_symbol : std::string_view{};
+    }
+    void set_extra_symbol(std::string_view sym) {
+        if (sym.empty() && !extra_) return;
+        ensure_extra().extra_symbol = sym;
+    }
 
-    uint32_t resume_id() const noexcept { return static_cast<uint32_t>(imm_i64_); }
+    uint32_t resume_id() const noexcept { return static_cast<uint32_t>(imm_bits_); }
     // A guard's id is reported to its function (Function::
     // note_guard_resume_id), which hands out the next fresh one.
     void set_resume_id(uint32_t id) noexcept;
 
-    uint32_t site_id() const noexcept { return static_cast<uint32_t>(imm_i64_); }
-    void set_site_id(uint32_t id) noexcept { imm_i64_ = static_cast<int64_t>(id); }
+    uint32_t site_id() const noexcept { return static_cast<uint32_t>(imm_bits_); }
+    void set_site_id(uint32_t id) noexcept { imm_bits_ = static_cast<int64_t>(id); }
 
-    uint32_t lane() const noexcept { return static_cast<uint32_t>(imm_i64_); }
-    void set_lane(uint32_t l) noexcept { imm_i64_ = static_cast<int64_t>(l); }
+    uint32_t lane() const noexcept { return static_cast<uint32_t>(imm_bits_); }
+    void set_lane(uint32_t l) noexcept { imm_bits_ = static_cast<int64_t>(l); }
 
-    uint32_t shuffle_mask() const noexcept { return static_cast<uint32_t>(imm_i64_); }
-    void set_shuffle_mask(uint32_t m) noexcept { imm_i64_ = static_cast<int64_t>(m); }
+    uint32_t shuffle_mask() const noexcept { return static_cast<uint32_t>(imm_bits_); }
+    void set_shuffle_mask(uint32_t m) noexcept { imm_bits_ = static_cast<int64_t>(m); }
 
-    const BranchTarget& branch_target() const noexcept { return branch_target_; }
-    BranchTarget& branch_target() noexcept { return branch_target_; }
-    void set_branch_target(BranchTarget target) { branch_target_ = std::move(target); }
+    const BranchTarget& branch_target() const noexcept {
+        return extra_ ? extra_->branch_target : empty_branch_target();
+    }
+    BranchTarget& branch_target() { return ensure_extra().branch_target; }
+    void set_branch_target(BranchTarget target) { ensure_extra().branch_target = std::move(target); }
 
-    const BranchTarget& default_target() const noexcept { return branch_target_; }
-    BranchTarget& default_target() noexcept { return branch_target_; }
-    void set_default_target(BranchTarget target) { branch_target_ = std::move(target); }
+    const BranchTarget& default_target() const noexcept { return branch_target(); }
+    BranchTarget& default_target() { return branch_target(); }
+    void set_default_target(BranchTarget target) { set_branch_target(std::move(target)); }
 
-    const std::vector<SwitchCase>& switch_cases() const noexcept { return switch_cases_; }
-    std::vector<SwitchCase>& switch_cases() noexcept { return switch_cases_; }
-    void add_switch_case(int64_t value, BranchTarget target) { switch_cases_.push_back(SwitchCase(value, std::move(target))); }
-    void add_switch_case(int64_t value, BasicBlock* block, std::vector<Value*> args = {}) { switch_cases_.push_back(SwitchCase(value, block, std::move(args))); }
+    const std::vector<SwitchCase>& switch_cases() const noexcept {
+        return extra_ ? extra_->switch_cases : empty_switch_cases();
+    }
+    std::vector<SwitchCase>& switch_cases() { return ensure_extra().switch_cases; }
+    void add_switch_case(int64_t value, BranchTarget target) {
+        ensure_extra().switch_cases.push_back(SwitchCase(value, std::move(target)));
+    }
+    void add_switch_case(int64_t value, BasicBlock* block, std::vector<Value*> args = {}) {
+        ensure_extra().switch_cases.push_back(SwitchCase(value, block, std::move(args)));
+    }
 
-    const BranchTarget& true_target() const noexcept { return true_target_; }
-    BranchTarget& true_target() noexcept { return true_target_; }
-    void set_true_target(BranchTarget target) { true_target_ = std::move(target); }
+    const BranchTarget& true_target() const noexcept {
+        return extra_ ? extra_->true_target : empty_branch_target();
+    }
+    BranchTarget& true_target() { return ensure_extra().true_target; }
+    void set_true_target(BranchTarget target) { ensure_extra().true_target = std::move(target); }
 
-    const BranchTarget& false_target() const noexcept { return false_target_; }
-    BranchTarget& false_target() noexcept { return false_target_; }
-    void set_false_target(BranchTarget target) { false_target_ = std::move(target); }
+    const BranchTarget& false_target() const noexcept {
+        return extra_ ? extra_->false_target : empty_branch_target();
+    }
+    BranchTarget& false_target() { return ensure_extra().false_target; }
+    void set_false_target(BranchTarget target) { ensure_extra().false_target = std::move(target); }
 
-    const BranchTarget& normal_target() const noexcept { return true_target_; }
-    BranchTarget& normal_target() noexcept { return true_target_; }
-    void set_normal_target(BranchTarget target) { true_target_ = std::move(target); }
+    const BranchTarget& normal_target() const noexcept { return true_target(); }
+    BranchTarget& normal_target() { return true_target(); }
+    void set_normal_target(BranchTarget target) { set_true_target(std::move(target)); }
 
-    const BranchTarget& unwind_target() const noexcept { return false_target_; }
-    BranchTarget& unwind_target() noexcept { return false_target_; }
-    void set_unwind_target(BranchTarget target) { false_target_ = std::move(target); }
+    const BranchTarget& unwind_target() const noexcept { return false_target(); }
+    BranchTarget& unwind_target() { return false_target(); }
+    void set_unwind_target(BranchTarget target) { set_false_target(std::move(target)); }
 
-    const std::vector<Value*>& state_map() const noexcept { return state_map_; }
-    std::vector<Value*>& state_map() noexcept { return state_map_; }
-    void add_state_value(Value* val) { state_map_.push_back(val); }
+    const std::vector<Value*>& state_map() const noexcept {
+        return extra_ ? extra_->state_map : empty_state_map();
+    }
+    std::vector<Value*>& state_map() { return ensure_extra().state_map; }
+    void add_state_value(Value* val) { ensure_extra().state_map.push_back(val); }
 
     bool is_terminator() const noexcept { return brass::is_terminator(opcode_); }
     bool is_branch() const noexcept { return brass::is_branch(opcode_); }
@@ -254,36 +277,41 @@ public:
     void set_barrier_cert(BarrierCertKind cert) noexcept { barrier_cert_ = cert; }
 
 private:
-    Opcode opcode_ = Opcode::unreachable;
-    Type type_ = Type::void_type();
+    struct ExtraData {
+        BranchTarget branch_target;
+        BranchTarget true_target;
+        BranchTarget false_target;
+        std::vector<SwitchCase> switch_cases;
+        std::vector<Value*> state_map;
+        std::string_view extra_symbol;
+    };
+
+    ExtraData& ensure_extra();
+    static const BranchTarget& empty_branch_target() noexcept;
+    static const std::vector<SwitchCase>& empty_switch_cases() noexcept;
+    static const std::vector<Value*>& empty_state_map() noexcept;
+
     Value* result_ = nullptr;
     BasicBlock* parent_ = nullptr;
     Instruction* prev_ = nullptr;
     Instruction* next_ = nullptr;
+    int64_t imm_bits_ = 0;
 
+    std::string_view symbol_;
     std::vector<Value*> operands_;
+    std::unique_ptr<ExtraData> extra_;
+    DebugLoc loc_;
 
-    int64_t imm_i64_ = 0;
-    double imm_f64_ = 0.0;
     int32_t offset_ = 0;
+    Opcode opcode_ = Opcode::unreachable;
+    Type type_ = Type::void_type();
+    Type memory_type_ = Type::void_type();
     uint8_t scale_ = 1;
     uint8_t alias_class_ = 0;
     bool inline_hint_ = false;
     bool fresh_in_twin_ = false;
     bool non_trapping_load_ = false;
     BarrierCertKind barrier_cert_ = BarrierCertKind::None;
-    Type memory_type_ = Type::void_type();
-
-    std::string_view symbol_;
-    std::string_view extra_symbol_;
-
-    BranchTarget branch_target_;
-    BranchTarget true_target_;
-    BranchTarget false_target_;
-    std::vector<SwitchCase> switch_cases_;
-
-    std::vector<Value*> state_map_;
-    DebugLoc loc_;
 };
 
 } // namespace brass

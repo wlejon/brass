@@ -12,6 +12,13 @@
 
 namespace brass::verify {
 
+enum class SandboxProofTier : uint8_t {
+    None = 0,
+    StaticOnly,              // Static SPIR-V audit only (SMT skipped or disabled)
+    StaticFallbackLoopBound, // SMT hit loop_unroll_bound; fell back to static audit
+    FullSmt                  // Full bounded-SMT memory + barrier uniformity proof
+};
+
 struct GpuSandboxOptions {
     GpuPortabilityOptions portability{};
     target::SpirvOptions spirv_opts{};
@@ -19,6 +26,7 @@ struct GpuSandboxOptions {
     EquivOptions equiv_opts{};
     bool verify_spirv = true;
     bool run_smt_prover = true;
+    bool require_full_smt = false;
     size_t max_smt_spirv_words = 3072;
     const Function* reference_mir = nullptr;
 };
@@ -29,6 +37,8 @@ struct GpuSandboxResult {
     bool spirv_parsed = false;
     bool memory_safe = false;
     bool barrier_uniform = false;
+    bool global_bounds_proven = false;
+    SandboxProofTier proof_tier = SandboxProofTier::None;
     bool equivalence_checked = false;
     bool equivalence_ok = false;
     size_t shared_accesses_proven = 0;
@@ -65,5 +75,6 @@ GpuSandboxResult verify_gpu_kernel_sandbox(
 namespace brass {
 using verify::GpuSandboxOptions;
 using verify::GpuSandboxResult;
+using verify::SandboxProofTier;
 using verify::verify_gpu_kernel_sandbox;
 } // namespace brass

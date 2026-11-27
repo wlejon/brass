@@ -1,5 +1,5 @@
-// Structurizer: MIR CFG -> SPIR-V structured control flow (see
-// spirv_structurize.hpp and docs/spirv_backend_design.md).
+// Shared GPU CFG structurizer: MIR CFG -> structured control flow (see
+// gpu_structurize.hpp and docs/spirv_backend_design.md).
 //
 // 1. Build one node per reachable MIR block plus the prologue; a br_if with
 //    both edges to one block gets a forward node on its false edge.
@@ -23,7 +23,7 @@
 //    it from the header's region -- that is how an inner if whose arms jump
 //    straight to an outer join gets its own merge.
 
-#include "spirv_structurize.hpp"
+#include "gpu_structurize.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -32,7 +32,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
-namespace brass::spirv {
+namespace brass::gpu {
 
 std::string block_name(const BasicBlock* bb) {
     if (!bb) return "<null>";
@@ -45,7 +45,8 @@ namespace {
 
 class Structurizer {
 public:
-    explicit Structurizer(const brass::Function& fn) : fn_(fn) {}
+    explicit Structurizer(const brass::Function& fn, std::string_view backend_name)
+        : fn_(fn), backend_name_(backend_name) {}
 
     StructuredCfg run() {
         build();
@@ -62,6 +63,7 @@ public:
 
 private:
     const brass::Function& fn_;
+    std::string_view backend_name_;
     StructuredCfg g_;
     std::vector<size_t> rpo_;
     std::vector<size_t> rpo_index_; // kNoNode when unreachable
@@ -79,7 +81,7 @@ private:
     std::vector<uint8_t> side_;             // first_common's marks (bit 0: from a, bit 1: from b); zero between calls
 
     [[noreturn]] void fail(const std::string& what) const {
-        throw std::runtime_error("SpirvISel: kernel '" + std::string(fn_.name()) + "': " + what);
+        throw std::runtime_error(std::string(backend_name_) + ": kernel '" + std::string(fn_.name()) + "': " + what);
     }
 
     std::string node_name(size_t n) const { return g_.nodes[n].name; }
@@ -596,8 +598,8 @@ private:
 
 } // namespace
 
-StructuredCfg structurize(const brass::Function& fn) {
-    return Structurizer(fn).run();
+StructuredCfg structurize(const brass::Function& fn, std::string_view backend_name) {
+    return Structurizer(fn, backend_name).run();
 }
 
-} // namespace brass::spirv
+} // namespace brass::gpu

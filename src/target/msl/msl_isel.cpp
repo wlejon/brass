@@ -52,7 +52,7 @@ MslEmitter::KernelResult MslFnBuilder::run() {
         }
 
         find_shared_allocs();
-        StructuredCfg cfg = brass::spirv::structurize(fn_);
+        StructuredCfg cfg = brass::gpu::structurize(fn_, "MslISel");
         cfg_ = &cfg;
 
         std::string entry_ident = sanitize_ident(fn_.name());

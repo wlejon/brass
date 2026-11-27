@@ -1,7 +1,7 @@
 #pragma once
 
-// Private to the SPIR-V ISel: recovers SPIR-V structured control flow from a
-// MIR CFG (docs/spirv_backend_design.md, "Structurization").
+// Shared GPU CFG structurizer: recovers structured control flow from a MIR
+// CFG for SPIR-V and MSL (docs/spirv_backend_design.md, "Structurization").
 //
 // The result is a graph of nodes -- one per reachable MIR block plus
 // synthetic ones -- in which every loop has a dedicated header node (with
@@ -29,9 +29,10 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
-namespace brass::spirv {
+namespace brass::gpu {
 
 constexpr size_t kNoNode = static_cast<size_t>(-1);
 
@@ -59,11 +60,20 @@ struct StructuredCfg {
     std::vector<size_t> order; // emission order: reverse postorder, unreachable merges last
 };
 
-// Throws std::runtime_error naming the function and block(s) for an
+// Throws std::runtime_error naming the backend, function, and block(s) for an
 // irreducible CFG, a loop with more than one exit target, an unsupported
 // terminator (switch, invoke, throw, ...), or a block without a terminator.
-StructuredCfg structurize(const brass::Function& fn);
+StructuredCfg structurize(const brass::Function& fn, std::string_view backend_name = "SpirvISel");
 
 std::string block_name(const BasicBlock* bb);
 
+} // namespace brass::gpu
+
+namespace brass::spirv {
+using brass::gpu::kNoNode;
+using brass::gpu::CfgEdge;
+using brass::gpu::CfgNode;
+using brass::gpu::StructuredCfg;
+using brass::gpu::structurize;
+using brass::gpu::block_name;
 } // namespace brass::spirv

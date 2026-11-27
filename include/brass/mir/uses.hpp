@@ -22,6 +22,7 @@ namespace brass {
 template <typename F>
 void for_each_use_slot(Instruction& inst, F&& f) {
     for (Value*& v : inst.operands()) f(v);
+    if (!inst.has_extra()) return;
     for (Value*& v : inst.state_map()) f(v);
     for (Value*& v : inst.branch_target().args) f(v);
     for (Value*& v : inst.true_target().args) f(v);
@@ -35,6 +36,7 @@ void for_each_use_slot(Instruction& inst, F&& f) {
 template <typename F>
 void for_each_use(const Instruction& inst, F&& f) {
     for (Value* v : inst.operands()) if (v) f(v);
+    if (!inst.has_extra()) return;
     for (Value* v : inst.state_map()) if (v) f(v);
     for (Value* v : inst.branch_target().args) if (v) f(v);
     for (Value* v : inst.true_target().args) if (v) f(v);
@@ -49,6 +51,7 @@ void for_each_use(const Instruction& inst, F&& f) {
 // unwind) targets, switch the default target and its cases.
 template <typename F>
 void for_each_edge(Instruction& inst, F&& f) {
+    if (!inst.has_extra()) return;
     if (inst.branch_target().block) f(inst.branch_target());
     if (inst.true_target().block) f(inst.true_target());
     if (inst.false_target().block) f(inst.false_target());
@@ -59,6 +62,7 @@ void for_each_edge(Instruction& inst, F&& f) {
 
 template <typename F>
 void for_each_edge(const Instruction& inst, F&& f) {
+    if (!inst.has_extra()) return;
     if (inst.branch_target().block) f(inst.branch_target());
     if (inst.true_target().block) f(inst.true_target());
     if (inst.false_target().block) f(inst.false_target());

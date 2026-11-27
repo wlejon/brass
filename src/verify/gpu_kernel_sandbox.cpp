@@ -84,6 +84,7 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
                 const auto audit = brass::verify::prove_spirv_shader_safety(spv_mod);
                 const bool use_smt = opts.run_smt_prover && spv.words.size() <= opts.max_smt_spirv_words;
                 if (!use_smt) {
+                    res.proof_tier = SandboxProofTier::StaticOnly;
                     record_static_audit(audit, res);
                 } else {
                     const auto mem = verify_spirv_memory_safety(spv_mod, opts.prover_opts);
@@ -94,12 +95,14 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
                         mem.diagnostic.find("loop_unroll_bound") != std::string::npos &&
                         bar.is_uniform();
                     if (loop_bound_unknown) {
+                        res.proof_tier = SandboxProofTier::StaticFallbackLoopBound;
                         record_static_audit(audit, res);
                         res.shared_accesses_proven = std::max(res.shared_accesses_proven, size_t(mem.shared_accesses_proven));
                         res.global_accesses_proven = std::max(res.global_accesses_proven, size_t(mem.global_accesses_proven));
                         res.barriers_proven = std::max(res.barriers_proven, size_t(bar.barriers_proven));
                         res.collectives_proven = std::max(res.collectives_proven, size_t(bar.collectives_proven));
                     } else {
+                        res.proof_tier = SandboxProofTier::FullSmt;
                         size_t audit_shared_proven = 0;
                         for (const auto& sa : audit.shared_accesses) {
                             if (sa.proven_in_bounds) ++audit_shared_proven;
@@ -111,6 +114,7 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
                         res.memory_safe = mem.is_safe() && audit.parse_ok && audit.structural_ok &&
                                           audit.dominance_ok && audit.shared_bounds_ok;
                         res.barrier_uniform = bar.is_uniform() && audit.barriers_uniform;
+                        res.global_bounds_proven = opts.prover_opts.check_global_bounds && res.memory_safe;
                         res.shared_accesses_proven = std::max(size_t(mem.shared_accesses_proven), audit_shared_proven);
                         res.global_accesses_proven = mem.global_accesses_proven;
                         res.barriers_proven = std::max(size_t(bar.barriers_proven), audit_bar_proven);
@@ -131,6 +135,9 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
                             if (!d.message.empty()) res.violations.push_back(d.message);
                         }
                     }
+                }
+                if (opts.require_full_smt && res.proof_tier != SandboxProofTier::FullSmt) {
+                    res.violations.push_back("full SMT proof required, but only static audit completed");
                 }
             }
         }

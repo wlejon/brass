@@ -13,9 +13,9 @@
 
 namespace brass::msl {
 
-using brass::spirv::CfgNode;
-using brass::spirv::kNoNode;
-using brass::spirv::StructuredCfg;
+using brass::gpu::CfgNode;
+using brass::gpu::kNoNode;
+using brass::gpu::StructuredCfg;
 
 [[noreturn]] inline void fail_msl(const Function& fn, const std::string& msg) {
     throw std::runtime_error("MslTarget: kernel '" + std::string(fn.name()) + "': " + msg);

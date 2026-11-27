@@ -129,18 +129,16 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 }
 
                 if (half_op != LirOpcode::Nop) {
-                    emit_movaps(dst.lo, v0.lo);
                     auto binop_lo = std::make_unique<LirInst>(half_op);
                     binop_lo->add_def(LirOperand::vreg(dst.lo, 16));
-                    binop_lo->add_use(LirOperand::vreg(dst.lo, 16));
+                    binop_lo->add_use(LirOperand::vreg(v0.lo, 16));
                     binop_lo->add_use(LirOperand::vreg(v1.lo, 16));
                     binop_lo->mir_origin = &inst;
                     lir_bb.append_inst(std::move(binop_lo));
 
-                    emit_movaps(dst.hi, v0.hi);
                     auto binop_hi = std::make_unique<LirInst>(half_op);
                     binop_hi->add_def(LirOperand::vreg(dst.hi, 16));
-                    binop_hi->add_use(LirOperand::vreg(dst.hi, 16));
+                    binop_hi->add_use(LirOperand::vreg(v0.hi, 16));
                     binop_hi->add_use(LirOperand::vreg(v1.hi, 16));
                     binop_hi->mir_origin = &inst;
                     lir_bb.append_inst(std::move(binop_hi));
@@ -180,11 +178,9 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Pmaxsd;
             }
 
-            emit_movaps(dst, v0);
-
             auto binop = std::make_unique<LirInst>(op);
             binop->add_def(LirOperand::vreg(dst, 16));
-            binop->add_use(LirOperand::vreg(dst, 16));
+            binop->add_use(LirOperand::vreg(v0, 16));
             binop->add_use(LirOperand::vreg(v1, 16));
             binop->mir_origin = &inst;
             lir_bb.append_inst(std::move(binop));
@@ -235,18 +231,16 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 if (inst.opcode() == Opcode::vor) op = LirOpcode::Por;
                 else if (inst.opcode() == Opcode::vxor) op = LirOpcode::Pxor;
 
-                emit_movaps(dst.lo, v0.lo);
                 auto binop_lo = std::make_unique<LirInst>(op);
                 binop_lo->add_def(LirOperand::vreg(dst.lo, 16));
-                binop_lo->add_use(LirOperand::vreg(dst.lo, 16));
+                binop_lo->add_use(LirOperand::vreg(v0.lo, 16));
                 binop_lo->add_use(LirOperand::vreg(v1.lo, 16));
                 binop_lo->mir_origin = &inst;
                 lir_bb.append_inst(std::move(binop_lo));
 
-                emit_movaps(dst.hi, v0.hi);
                 auto binop_hi = std::make_unique<LirInst>(op);
                 binop_hi->add_def(LirOperand::vreg(dst.hi, 16));
-                binop_hi->add_use(LirOperand::vreg(dst.hi, 16));
+                binop_hi->add_use(LirOperand::vreg(v0.hi, 16));
                 binop_hi->add_use(LirOperand::vreg(v1.hi, 16));
                 binop_hi->mir_origin = &inst;
                 lir_bb.append_inst(std::move(binop_hi));
@@ -261,11 +255,9 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
             if (inst.opcode() == Opcode::vor) op = LirOpcode::Por;
             else if (inst.opcode() == Opcode::vxor) op = LirOpcode::Pxor;
 
-            emit_movaps(dst, v0);
-
             auto binop = std::make_unique<LirInst>(op);
             binop->add_def(LirOperand::vreg(dst, 16));
-            binop->add_use(LirOperand::vreg(dst, 16));
+            binop->add_use(LirOperand::vreg(v0, 16));
             binop->add_use(LirOperand::vreg(v1, 16));
             binop->mir_origin = &inst;
             lir_bb.append_inst(std::move(binop));
@@ -719,36 +711,35 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
             VReg dst = get_vreg(inst.result());
             VReg vec = get_vreg(inst.operand(0));
 
-            emit_movaps(dst, vec);
-
             if (t.kind() == TypeKind::F32x4) {
                 auto ins = std::make_unique<LirInst>(LirOpcode::Insertps);
                 ins->add_def(LirOperand::vreg(dst, 16));
-                ins->add_use(LirOperand::vreg(dst, 16));
+                ins->add_use(LirOperand::vreg(vec, 16));
                 ins->add_use(LirOperand::vreg(val, 16));
                 ins->add_use(LirOperand::imm((lane & 3) << 4, 1));
                 ins->mir_origin = &inst;
                 lir_bb.append_inst(std::move(ins));
             } else if (t.kind() == TypeKind::F64x2) {
                 if (lane == 0) {
-                    // {val[0], dst[1]}: a scalar fmov would clear lane 1.
+                    // {val[0], vec[1]}: a scalar fmov would clear lane 1.
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                     shuf->add_def(LirOperand::vreg(dst, 16));
                     shuf->add_use(LirOperand::vreg(val, 16));
-                    shuf->add_use(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::vreg(vec, 16));
                     shuf->add_use(LirOperand::imm(0x02, 1));
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 } else {
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                     shuf->add_def(LirOperand::vreg(dst, 16));
-                    shuf->add_use(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::vreg(vec, 16));
                     shuf->add_use(LirOperand::vreg(val, 16));
                     shuf->add_use(LirOperand::imm(0x00, 1));
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
             } else if (t.kind() == TypeKind::I32x4) {
+                emit_movaps(dst, vec);
                 auto pinsr = std::make_unique<LirInst>(LirOpcode::Pinsrd);
                 pinsr->add_def(LirOperand::vreg(dst, 16));
                 pinsr->add_use(LirOperand::vreg(dst, 16));
@@ -757,6 +748,7 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 pinsr->mir_origin = &inst;
                 lir_bb.append_inst(std::move(pinsr));
             } else if (t.kind() == TypeKind::I64x2) {
+                emit_movaps(dst, vec);
                 auto pinsr = std::make_unique<LirInst>(LirOpcode::Pinsrq);
                 pinsr->add_def(LirOperand::vreg(dst, 16));
                 pinsr->add_use(LirOperand::vreg(dst, 16));
@@ -776,10 +768,9 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
             Type t = inst.type();
 
             if (t.kind() == TypeKind::F32x4) {
-                emit_movaps(dst, v0);
                 auto shuf = std::make_unique<LirInst>(LirOpcode::Shufps);
                 shuf->add_def(LirOperand::vreg(dst, 16));
-                shuf->add_use(LirOperand::vreg(dst, 16));
+                shuf->add_use(LirOperand::vreg(v0, 16));
                 shuf->add_use(LirOperand::vreg(v1, 16));
                 shuf->add_use(LirOperand::imm(mask, 1));
                 shuf->mir_origin = &inst;
@@ -794,20 +785,18 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                     pshuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(pshuf));
                 } else {
-                    emit_movaps(dst, v0);
                     auto shuf = std::make_unique<LirInst>(LirOpcode::Shufps);
                     shuf->add_def(LirOperand::vreg(dst, 16));
-                    shuf->add_use(LirOperand::vreg(dst, 16));
+                    shuf->add_use(LirOperand::vreg(v0, 16));
                     shuf->add_use(LirOperand::vreg(v1, 16));
                     shuf->add_use(LirOperand::imm(mask, 1));
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
             } else {
-                emit_movaps(dst, v0);
                 auto shuf = std::make_unique<LirInst>(LirOpcode::Shufpd);
                 shuf->add_def(LirOperand::vreg(dst, 16));
-                shuf->add_use(LirOperand::vreg(dst, 16));
+                shuf->add_use(LirOperand::vreg(v0, 16));
                 shuf->add_use(LirOperand::vreg(v1, 16));
                 shuf->add_use(LirOperand::imm(mask, 1));
                 shuf->mir_origin = &inst;
@@ -854,20 +843,18 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                 VRegPair b = get_vreg_pair(inst.operand(1));
                 VRegPair c = get_vreg_pair(inst.operand(2));
 
-                emit_movaps(dst.lo, a.lo);
                 LirOpcode fma_op = (t.kind() == TypeKind::F64x4) ? LirOpcode::Vfmadd213pd : LirOpcode::Vfmadd213ps;
                 auto fma_lo = std::make_unique<LirInst>(fma_op);
                 fma_lo->add_def(LirOperand::vreg(dst.lo, 16));
-                fma_lo->add_use(LirOperand::vreg(dst.lo, 16));
+                fma_lo->add_use(LirOperand::vreg(a.lo, 16));
                 fma_lo->add_use(LirOperand::vreg(b.lo, 16));
                 fma_lo->add_use(LirOperand::vreg(c.lo, 16));
                 fma_lo->mir_origin = &inst;
                 lir_bb.append_inst(std::move(fma_lo));
 
-                emit_movaps(dst.hi, a.hi);
                 auto fma_hi = std::make_unique<LirInst>(fma_op);
                 fma_hi->add_def(LirOperand::vreg(dst.hi, 16));
-                fma_hi->add_use(LirOperand::vreg(dst.hi, 16));
+                fma_hi->add_use(LirOperand::vreg(a.hi, 16));
                 fma_hi->add_use(LirOperand::vreg(b.hi, 16));
                 fma_hi->add_use(LirOperand::vreg(c.hi, 16));
                 fma_hi->mir_origin = &inst;
@@ -880,14 +867,12 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
             VReg b = get_vreg(inst.operand(1));
             VReg c = get_vreg(inst.operand(2));
 
-            emit_movaps(dst, a);
-
             LirOpcode fma_op = (t.kind() == TypeKind::F64x2)
                              ? LirOpcode::Vfmadd213pd : LirOpcode::Vfmadd213ps;
 
             auto fma = std::make_unique<LirInst>(fma_op);
             fma->add_def(LirOperand::vreg(dst, 16));
-            fma->add_use(LirOperand::vreg(dst, 16));
+            fma->add_use(LirOperand::vreg(a, 16));
             fma->add_use(LirOperand::vreg(b, 16));
             fma->add_use(LirOperand::vreg(c, 16));
             fma->mir_origin = &inst;

@@ -184,8 +184,10 @@ bool SroaTransformer::process_candidate(const Value* alloc_val) {
             }
 
             // Deopt state would need the whole object rematerialized.
-            for (const Value* sv : inst->state_map()) {
-                if (aliases.count(sv) > 0) return false;
+            if (inst->has_extra()) {
+                for (const Value* sv : inst->state_map()) {
+                    if (aliases.count(sv) > 0) return false;
+                }
             }
 
             // An alias may only flow into an alias parameter, and an alias

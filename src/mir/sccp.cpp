@@ -141,8 +141,10 @@ private:
                     Value* op = inst->operand(i);
                     if (op) users_[op].push_back(inst);
                 }
-                for (Value* sv : inst->state_map()) {
-                    if (sv) users_[sv].push_back(inst);
+                if (inst->has_extra()) {
+                    for (Value* sv : inst->state_map()) {
+                        if (sv) users_[sv].push_back(inst);
+                    }
                 }
 
                 auto record_target_args = [&](const BranchTarget& bt) {

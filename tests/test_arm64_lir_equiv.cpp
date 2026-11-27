@@ -3,6 +3,9 @@
 #include <brass/verify/arm64_lir_equiv.hpp>
 #include <brass/verify/bv_solver.hpp>
 #include <brass/target/aarch64/aarch64_isel.hpp>
+#include <brass/target/aarch64/aarch64_emit.hpp>
+#include <brass/codegen/live_range.hpp>
+#include <brass/codegen/linear_scan.hpp>
 #include <brass/codegen/peephole.hpp>
 #include <brass/codegen/ml_fusion.hpp>
 
@@ -769,6 +772,89 @@ TEST_CASE("ARM64 LIR Equiv - BVContext::make_extract Memoizes Shared Diamond DAG
     CHECK_EQ(ctx.width(e1), 32u);
     CHECK_EQ(e1, e2);
     CHECK_EQ(solve_nonzero(ctx, ctx.make_binary(BVOp::Ne, e1, e2, 1)).status, SolveOutcome::Unsat);
+}
+
+TEST_CASE("ARM64 Vector ISEL - Emits 3-Address NEON LIR Without Redundant Movaps") {
+    Module mod("a64_vec3");
+    Function* fn = mod.create_function(
+        "vec3_ops",
+        Type::f32x4(),
+        {Type::f32x4(), Type::f32x4(), Type::f32x4(), Type::i32x4(), Type::i32x4()});
+
+    Builder b(mod);
+    b.set_function(fn);
+    BasicBlock* entry = b.append_block("entry");
+    Value* a = b.add_block_param(entry, Type::f32x4());
+    Value* c = b.add_block_param(entry, Type::f32x4());
+    Value* d = b.add_block_param(entry, Type::f32x4());
+    Value* ia = b.add_block_param(entry, Type::i32x4());
+    Value* ib = b.add_block_param(entry, Type::i32x4());
+
+    Value* sum = b.build_vadd(a, c);
+    Value* prod = b.build_vmul(sum, d);
+    Value* fma_v = b.build_vfma(prod, c, d);
+    Value* shuf = b.build_vshuffle(fma_v, a, 0x4E);
+    Value* masked = b.build_vand(ia, ib);
+    Value* masked_f = b.build_vbitcast(Type::f32x4(), masked);
+    Value* res = b.build_vadd(shuf, masked_f);
+    b.build_ret(res);
+    fn->rebuild_cfg_predecessors();
+
+    AArch64ISel isel(Target::aarch64_macos(), CallingConvention::aapcs64());
+    auto lir = isel.lower(*fn);
+    REQUIRE(lir != nullptr);
+    REQUIRE(!lir->blocks.empty());
+
+    bool saw_addps = false, saw_mulps = false, saw_fma = false, saw_shuf = false, saw_pand = false;
+    for (const auto& inst : lir->blocks[0]->instructions) {
+        if (inst->opcode == LirOpcode::Movaps && inst->mir_origin) {
+            Opcode origin = inst->mir_origin->opcode();
+            CHECK(origin != Opcode::vadd);
+            CHECK(origin != Opcode::vmul);
+            CHECK(origin != Opcode::vfma);
+            CHECK(origin != Opcode::vshuffle);
+            CHECK(origin != Opcode::vand);
+        }
+        if (inst->opcode == LirOpcode::Addps) {
+            saw_addps = true;
+            CHECK(inst->uses.size() == 2);
+            CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+        }
+        if (inst->opcode == LirOpcode::Mulps) {
+            saw_mulps = true;
+            CHECK(inst->uses.size() == 2);
+            CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+        }
+        if (inst->opcode == LirOpcode::Vfmadd213ps) {
+            saw_fma = true;
+            CHECK(inst->uses.size() == 3);
+            CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+        }
+        if (inst->opcode == LirOpcode::Shufps) {
+            saw_shuf = true;
+            CHECK(inst->uses.size() == 3);
+            CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+        }
+        if (inst->opcode == LirOpcode::Pand) {
+            saw_pand = true;
+            CHECK(inst->uses.size() == 2);
+            CHECK(inst->defs[0].vreg_val != inst->uses[0].vreg_val);
+        }
+    }
+    CHECK(saw_addps);
+    CHECK(saw_mulps);
+    CHECK(saw_fma);
+    CHECK(saw_shuf);
+    CHECK(saw_pand);
+
+    // Register allocation + AArch64 encoding must succeed cleanly on the 3-address LIR.
+    LivenessAnalysis liveness(*lir);
+    liveness.run();
+    LinearScanAllocator regalloc(*lir, liveness, lir->calling_conv);
+    regalloc.allocate();
+
+    auto compiled = compile_lir_to_aarch64(*lir, Target::aarch64_macos());
+    CHECK(!compiled.code_buffer.empty());
 }
 
 #ifdef BRASS_STANDALONE_TEST

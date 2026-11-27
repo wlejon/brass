@@ -61,13 +61,15 @@ bool collect_accesses(const Function& fn, const LoopInfo& loop, const Value* buf
             for (size_t i = 1; i < inst->operand_count(); ++i) {
                 if (inst->operand(i) == buf) return false;
             }
-            auto passes = [&](const BranchTarget& bt) {
-                for (const Value* a : bt.args) if (a == buf) return true;
-                return false;
-            };
-            if (passes(inst->branch_target()) || passes(inst->true_target()) || passes(inst->false_target())) return false;
-            for (const auto& sc : inst->switch_cases()) if (passes(sc.target)) return false;
-            for (const Value* sv : inst->state_map()) if (sv == buf) return false;
+            if (inst->has_extra()) {
+                auto passes = [&](const BranchTarget& bt) {
+                    for (const Value* a : bt.args) if (a == buf) return true;
+                    return false;
+                };
+                if (passes(inst->branch_target()) || passes(inst->true_target()) || passes(inst->false_target())) return false;
+                for (const auto& sc : inst->switch_cases()) if (passes(sc.target)) return false;
+                for (const Value* sv : inst->state_map()) if (sv == buf) return false;
+            }
             if (!uses_as_address) continue;
 
             const Opcode op = inst->opcode();
