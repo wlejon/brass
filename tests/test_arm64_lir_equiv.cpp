@@ -857,6 +857,103 @@ TEST_CASE("ARM64 Vector ISEL - Emits 3-Address NEON LIR Without Redundant Movaps
     CHECK(!compiled.code_buffer.empty());
 }
 
+TEST_CASE("ARM64 ISEL - Constant Multiply (2^k+1) and Broadcast Lane Extraction") {
+    // 1. mul by 3, 5, 9 (i32 & i64) lowers to Add32Shifted / AddShifted with zero Imul,
+    //    and proves bit-exact equivalence against Imul.
+    for (int64_t c : {int64_t(3), int64_t(5), int64_t(9)}) {
+        for (Type ty : {Type::i32(), Type::i64()}) {
+            Module mod("a64_mul_sh");
+            Function* fn = mod.create_function("mul_c", ty, {ty});
+            Builder b(mod);
+            b.set_function(fn);
+            BasicBlock* entry = b.append_block("entry");
+            Value* x = b.add_block_param(entry, ty);
+            Value* kc = (ty == Type::i32()) ? b.build_iconst_i32(static_cast<int32_t>(c)) : b.build_iconst_i64(c);
+            b.build_ret(b.build_mul(x, kc));
+            fn->rebuild_cfg_predecessors();
+
+            AArch64ISel isel(Target::aarch64_macos(), CallingConvention::aapcs64());
+            auto lir = isel.lower(*fn);
+            REQUIRE(lir != nullptr);
+            REQUIRE(!lir->blocks.empty());
+
+            const LirOpcode want_op = (ty == Type::i32()) ? LirOpcode::Add32Shifted : LirOpcode::AddShifted;
+            const uint8_t sz = static_cast<uint8_t>(ty.size_in_bytes());
+            bool saw_add_sh = false, saw_imul = false;
+            LirBlock opt_blk(0, "opt_mul");
+            for (const auto& inst : lir->blocks[0]->instructions) {
+                if (inst->opcode == LirOpcode::Imul || inst->opcode == LirOpcode::Imul32) saw_imul = true;
+                if (inst->opcode == want_op) {
+                    saw_add_sh = true;
+                    auto copy = std::make_unique<LirInst>(want_op);
+                    copy->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, sz));
+                    copy->add_use(LirOperand::preg_aarch64_gpr(GPR::X1, sz));
+                    copy->add_use(LirOperand::preg_aarch64_gpr(GPR::X1, sz));
+                    copy->add_use(inst->uses[2]);
+                    opt_blk.append_inst(std::move(copy));
+                }
+            }
+            CHECK(saw_add_sh);
+            CHECK(!saw_imul);
+
+            LirBlock ref_blk(0, "ref_mul");
+            auto mv = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Mov32 : LirOpcode::Mov);
+            mv->add_def(LirOperand::preg_aarch64_gpr(GPR::X2, sz));
+            mv->add_use(LirOperand::imm(c, sz));
+            ref_blk.append_inst(std::move(mv));
+            auto im = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Imul32 : LirOpcode::Imul);
+            im->add_def(LirOperand::preg_aarch64_gpr(GPR::X0, sz));
+            im->add_use(LirOperand::preg_aarch64_gpr(GPR::X1, sz));
+            im->add_use(LirOperand::preg_aarch64_gpr(GPR::X2, sz));
+            ref_blk.append_inst(std::move(im));
+
+            CHECK_EQ(verify_arm64_lir_block_equivalence(ref_blk, opt_blk, reg_mask(GPR::X0), 0, false).status,
+                     EquivStatus::ProvenEquivalent);
+        }
+    }
+
+    // 2. vextract_lane(f32x4, 1/2/3) and vextract_lane(f64x2, 1) emit broadcast masks
+    //    (0x55/0xAA/0xFF and 0x03) and encode to a single DUP instruction (4 bytes, no V31).
+    {
+        Module mod("a64_ext");
+        Function* fn = mod.create_function("ext", Type::f32(), {Type::f32x4(), Type::f64x2()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* entry = b.append_block("entry");
+        Value* vf = b.add_block_param(entry, Type::f32x4());
+        Value* vd = b.add_block_param(entry, Type::f64x2());
+        Value* f1 = b.build_vextract_lane(vf, 1);
+        Value* f2 = b.build_vextract_lane(vf, 2);
+        Value* f3 = b.build_vextract_lane(vf, 3);
+        Value* d1 = b.build_vextract_lane(vd, 1);
+        Value* sum = b.build_add(b.build_add(f1, f2), b.build_add(f3, b.build_fptrunc_f32_f64(d1)));
+        b.build_ret(sum);
+        fn->rebuild_cfg_predecessors();
+
+        AArch64ISel isel(Target::aarch64_macos(), CallingConvention::aapcs64());
+        auto lir = isel.lower(*fn);
+        REQUIRE(lir != nullptr);
+        std::vector<int64_t> pshuf_masks, shufpd_masks;
+        for (const auto& inst : lir->blocks[0]->instructions) {
+            if (inst->opcode == LirOpcode::Pshufd) pshuf_masks.push_back(inst->uses.back().imm_int);
+            if (inst->opcode == LirOpcode::Shufpd) shufpd_masks.push_back(inst->uses.back().imm_int);
+        }
+        REQUIRE_EQ(pshuf_masks.size(), size_t(3));
+        CHECK_EQ(pshuf_masks[0], int64_t(0x55));
+        CHECK_EQ(pshuf_masks[1], int64_t(0xAA));
+        CHECK_EQ(pshuf_masks[2], int64_t(0xFF));
+        REQUIRE_EQ(shufpd_masks.size(), size_t(1));
+        CHECK_EQ(shufpd_masks[0], int64_t(3));
+
+        LivenessAnalysis liveness(*lir);
+        liveness.run();
+        LinearScanAllocator regalloc(*lir, liveness, lir->calling_conv);
+        regalloc.allocate();
+        auto compiled = compile_lir_to_aarch64(*lir, Target::aarch64_macos());
+        CHECK(!compiled.code_buffer.empty());
+    }
+}
+
 #ifdef BRASS_STANDALONE_TEST
 BRASS_TEST_MAIN()
 #endif

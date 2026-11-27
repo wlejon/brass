@@ -294,6 +294,46 @@ TEST_CASE("GPU Sandbox - Portability, Safety Proofs, and Equivalence Gate") {
         CHECK(!bad_res.equivalence_ok);
         CHECK(!bad_res.passed());
     }
+
+    // 6. Runtime dispatch bounds enforcement matches prover dimension caps and param constraints.
+    {
+        GpuProverOptions p;
+        GpuBufferSpec b1d{};
+        b1d.param_index = 0;
+        b1d.length_param_index = 1;
+        b1d.elem_scale = 4;
+        GpuBufferSpec b3d{};
+        b3d.param_index = 2;
+        b3d.length_param_index = 3;
+        b3d.length_param_index2 = 4;
+        b3d.length_param_index3 = 5;
+        b3d.elem_scale = 2;
+        p.buffers = {b1d, b3d};
+        GpuParamConstraint c{};
+        c.param_index = 1;
+        c.min_val = 4;
+        c.divisor_const = 4;
+        p.param_constraints = {c};
+
+        std::string err;
+        const uint64_t max_1d_aligned = (kMaxProverDim1D / 4) & ~uint64_t{3};
+        const uint64_t ok_vals[] = {0, max_1d_aligned, 0, kMaxProverDim3D, kMaxProverDim3D, kMaxProverDim3D / 2};
+        CHECK(verify_gpu_dispatch_bounds(p, ok_vals, &err));
+        CHECK(err.empty());
+
+        const uint64_t bad_1d[] = {0, (kMaxProverDim1D / 4) + 1, 0, 4, 4, 4};
+        CHECK(!verify_gpu_dispatch_bounds(p, bad_1d, &err));
+        CHECK(!err.empty());
+
+        const uint64_t bad_3d[] = {0, 16, 0, 4, 4, (kMaxProverDim3D / 2) + 1};
+        CHECK(!verify_gpu_dispatch_bounds(p, bad_3d, &err));
+
+        const uint64_t bad_div[] = {0, 6, 0, 4, 4, 4};
+        CHECK(!verify_gpu_dispatch_bounds(p, bad_div, &err));
+
+        const uint64_t bad_min[] = {0, 0, 0, 4, 4, 4};
+        CHECK(!verify_gpu_dispatch_bounds(p, bad_min, &err));
+    }
 }
 
 TEST_CASE("ArtifactCache - Key Listing and Portable Bundle Export/Import") {

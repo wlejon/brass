@@ -542,7 +542,7 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                     shuf->add_def(LirOperand::vreg(dst, 4));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::vreg(src, 16));
-                    shuf->add_use(LirOperand::imm(lane & 3, 1));
+                    shuf->add_use(LirOperand::imm(static_cast<int64_t>((lane & 3u) * 0x55u), 1));
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
@@ -561,7 +561,7 @@ void AArch64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& li
                     shuf->add_def(LirOperand::vreg(dst, 8));
                     shuf->add_use(LirOperand::vreg(src, 16));
                     shuf->add_use(LirOperand::vreg(src, 16));
-                    shuf->add_use(LirOperand::imm(1, 1));
+                    shuf->add_use(LirOperand::imm(3, 1));
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }

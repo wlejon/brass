@@ -82,14 +82,27 @@ BRASS_BENCH_NATIVE void native_matmul_i64(const int64_t* A, const int64_t* B, in
     }
 }
 
-// Scalar -O3 companion baseline (no auto-vectorization)
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("no-tree-vectorize")))
+#if defined(__GNUC__) && !defined(__clang__)
+#define BRASS_NO_VEC_ATTR __attribute__((optimize("no-tree-vectorize")))
+#else
+#define BRASS_NO_VEC_ATTR
 #endif
+
+#if defined(__clang__)
+#define BRASS_NO_VEC_LOOP _Pragma("clang loop vectorize(disable) interleave(disable)")
+#elif defined(_MSC_VER)
+#define BRASS_NO_VEC_LOOP __pragma(loop(no_vector))
+#else
+#define BRASS_NO_VEC_LOOP
+#endif
+
+// Scalar -O3 companion baseline (no auto-vectorization)
+BRASS_NO_VEC_ATTR
 BRASS_BENCH_NATIVE void native_matmul_i64_scalar(const int64_t* A, const int64_t* B, int64_t* C, int64_t N) {
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             int64_t sum = 0;
+            BRASS_NO_VEC_LOOP
             for (int64_t k = 0; k < N; ++k) {
                 sum += A[i * N + k] * B[k * N + j];
             }
@@ -112,13 +125,12 @@ BRASS_BENCH_NATIVE void native_matmul_f64(const double* A, const double* B, doub
 }
 
 // Scalar -O3 companion baseline (no auto-vectorization)
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((optimize("no-tree-vectorize")))
-#endif
+BRASS_NO_VEC_ATTR
 BRASS_BENCH_NATIVE void native_matmul_f64_scalar(const double* A, const double* B, double* C, int64_t N) {
     for (int64_t i = 0; i < N; ++i) {
         for (int64_t j = 0; j < N; ++j) {
             double sum = 0.0;
+            BRASS_NO_VEC_LOOP
             for (int64_t k = 0; k < N; ++k) {
                 sum += A[i * N + k] * B[k * N + j];
             }

@@ -192,6 +192,9 @@ inline bool verify_spirv_structural(std::span<const uint32_t> words, std::string
 } // namespace brass::verify
 
 namespace brass {
+using verify::kMaxProverDim1D;
+using verify::kMaxProverDim2D;
+using verify::kMaxProverDim3D;
 using verify::BarrierDivergence;
 using verify::BarrierUniformityResult;
 using verify::GpuAccessViolation;

@@ -92,6 +92,12 @@ endif()
 # brass library include directory
 set(BRASS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+option(BRASS_BUILD_DOMAIN_BUILDERS
+    "Build front-end domain MIR builders (audio/grammar/image/sdf/trace/ml_fusion)" ON)
+
+set(_brass_domain_builder_regex
+    "/(src|include/brass)/codegen/(audio_builder|grammar_builder|image_builder|sdf_builder|trace_builder|ml_fusion)")
+
 # brass core library
 file(GLOB_RECURSE BRASS_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
@@ -101,6 +107,9 @@ list(APPEND BRASS_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/target/macho_dylib_writer.cpp"
 )
 list(REMOVE_DUPLICATES BRASS_SOURCES)
+if(NOT BRASS_BUILD_DOMAIN_BUILDERS)
+    list(FILTER BRASS_SOURCES EXCLUDE REGEX "${_brass_domain_builder_regex}")
+endif()
 
 # SPIR-V compute target (src/target/spirv*, docs/spirv_backend_design.md):
 # needs the Khronos SPIR-V headers (spirv/unified1/spirv.hpp,
@@ -140,8 +149,7 @@ file(GLOB_RECURSE _brass_fingerprint_inputs CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/include/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/*")
-list(FILTER _brass_fingerprint_inputs EXCLUDE REGEX
-    "/(src|include/brass)/codegen/(audio_builder|grammar_builder|image_builder|sdf_builder|trace_builder|ml_fusion)")
+list(FILTER _brass_fingerprint_inputs EXCLUDE REGEX "${_brass_domain_builder_regex}")
 set(_brass_fingerprint_cpp "${CMAKE_CURRENT_BINARY_DIR}/generated/brass_codegen_fingerprint.cpp")
 add_custom_command(
     OUTPUT "${_brass_fingerprint_cpp}"

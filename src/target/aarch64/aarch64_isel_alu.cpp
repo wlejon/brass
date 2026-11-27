@@ -164,6 +164,22 @@ void AArch64ISel::lower_binary_alu(
                 lir_bb.append_inst(std::move(shl_inst));
                 return;
             }
+            const unsigned max_bits = (sz == 4) ? 32u : 64u;
+            const uint64_t u = (sz == 4) ? static_cast<uint64_t>(static_cast<uint32_t>(C))
+                                         : static_cast<uint64_t>(C);
+            if (u > 2u && std::has_single_bit(u - 1u)) {
+                const unsigned k = static_cast<unsigned>(std::countr_zero(u - 1u));
+                if (k >= 1u && k < max_bits) {
+                    auto add_sh = std::make_unique<LirInst>(sz == 4 ? LirOpcode::Add32Shifted : LirOpcode::AddShifted);
+                    add_sh->add_def(LirOperand::vreg(dst, sz));
+                    add_sh->add_use(LirOperand::vreg(r_vreg, sz));
+                    add_sh->add_use(LirOperand::vreg(r_vreg, sz));
+                    add_sh->add_use(LirOperand::imm((static_cast<int64_t>(ShiftType::LSL) << 8) | k, 4));
+                    add_sh->mir_origin = &inst;
+                    lir_bb.append_inst(std::move(add_sh));
+                    return;
+                }
+            }
             if (imm_info.fits_i32) {
                 emit_3addr_alu(r_vreg, LirOperand::imm(C, sz));
                 return;

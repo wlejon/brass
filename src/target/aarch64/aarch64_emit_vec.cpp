@@ -596,10 +596,14 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             uint32_t mask = static_cast<uint32_t>(inst.uses.back().imm_int);
             uint32_t l0 = mask & 1;
             uint32_t l1 = (mask >> 1) & 1;
-            FPR tmp = (v0 == FPR::V31 || v1 == FPR::V31) ? FPR::V30 : FPR::V31;
-            buffer_.emit_inst(0x6E080400u | (0u << 20) | (l0 << 14) | (reg_code(v0) << 5) | reg_code(tmp));
-            buffer_.emit_inst(0x6E080400u | (1u << 20) | (l1 << 14) | (reg_code(v1) << 5) | reg_code(tmp));
-            enc_.vec_orr(dst, tmp, tmp);
+            if (v0 == v1 && l0 == l1) {
+                buffer_.emit_inst(0x4E080400u | (l0 << 20) | (reg_code(v0) << 5) | reg_code(dst));
+            } else {
+                FPR tmp = (v0 == FPR::V31 || v1 == FPR::V31) ? FPR::V30 : FPR::V31;
+                buffer_.emit_inst(0x6E080400u | (0u << 20) | (l0 << 14) | (reg_code(v0) << 5) | reg_code(tmp));
+                buffer_.emit_inst(0x6E080400u | (1u << 20) | (l1 << 14) | (reg_code(v1) << 5) | reg_code(tmp));
+                enc_.vec_orr(dst, tmp, tmp);
+            }
             break;
         }
 

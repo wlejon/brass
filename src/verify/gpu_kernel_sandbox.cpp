@@ -159,4 +159,94 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
     return res;
 }
 
+bool verify_gpu_dispatch_bounds(
+    const GpuProverOptions& prover_opts,
+    Span<const uint64_t> param_values,
+    std::string* err_out) {
+    auto fail = [&](const std::string& msg) {
+        if (err_out) *err_out = msg;
+        return false;
+    };
+
+    for (const auto& bspec : prover_opts.buffers) {
+        if (bspec.static_byte_size > 0) continue;
+        std::vector<uint32_t> dims;
+        for (int32_t idx : {bspec.length_param_index, bspec.length_param_index2, bspec.length_param_index3}) {
+            if (idx >= 0) {
+                if (static_cast<size_t>(idx) >= param_values.size()) {
+                    return fail("buffer param " + std::to_string(bspec.param_index) +
+                                " dimension param_index " + std::to_string(idx) + " out of range");
+                }
+                dims.push_back(static_cast<uint32_t>(idx));
+            }
+        }
+        if (dims.empty()) continue;
+
+        const uint64_t scale = std::max<uint32_t>(1u, bspec.elem_scale);
+        auto check_dim = [&](size_t axis, uint64_t max_val) {
+            const uint32_t pidx = dims[axis];
+            const uint64_t v = param_values[pidx];
+            if (v > max_val) {
+                return fail("buffer param " + std::to_string(bspec.param_index) +
+                            " dim[" + std::to_string(axis) + "] (param " + std::to_string(pidx) +
+                            "=" + std::to_string(v) + ") exceeds prover cap " + std::to_string(max_val));
+            }
+            return true;
+        };
+
+        if (dims.size() == 1) {
+            if (!check_dim(0, kMaxProverDim1D / scale)) return false;
+        } else if (dims.size() == 2) {
+            if (!check_dim(0, kMaxProverDim2D)) return false;
+            if (!check_dim(1, kMaxProverDim2D / scale)) return false;
+        } else {
+            if (!check_dim(0, kMaxProverDim3D)) return false;
+            if (!check_dim(1, kMaxProverDim3D)) return false;
+            if (!check_dim(2, kMaxProverDim3D / scale)) return false;
+        }
+    }
+
+    for (const auto& c : prover_opts.param_constraints) {
+        if (c.param_index >= param_values.size()) {
+            return fail("param_constraint index " + std::to_string(c.param_index) + " out of range");
+        }
+        const uint64_t lhs = param_values[c.param_index];
+        if (c.min_val > 0 && lhs < c.min_val) {
+            return fail("param " + std::to_string(c.param_index) + "=" + std::to_string(lhs) +
+                        " < min_val " + std::to_string(c.min_val));
+        }
+        if (c.max_val > 0 && lhs > c.max_val) {
+            return fail("param " + std::to_string(c.param_index) + "=" + std::to_string(lhs) +
+                        " > max_val " + std::to_string(c.max_val));
+        }
+        if (c.rhs_param_index != UINT32_MAX) {
+            if (c.rhs_param_index >= param_values.size()) {
+                return fail("param_constraint rhs_param_index " + std::to_string(c.rhs_param_index) + " out of range");
+            }
+            const uint64_t rhs = param_values[c.rhs_param_index];
+            if (lhs > rhs) {
+                return fail("param " + std::to_string(c.param_index) + "=" + std::to_string(lhs) +
+                            " > rhs param " + std::to_string(c.rhs_param_index) + "=" + std::to_string(rhs));
+            }
+        }
+        if (c.divisor_param != UINT32_MAX) {
+            if (c.divisor_param >= param_values.size()) {
+                return fail("param_constraint divisor_param " + std::to_string(c.divisor_param) + " out of range");
+            }
+            const uint64_t div = param_values[c.divisor_param];
+            if (div == 0 || (lhs % div) != 0) {
+                return fail("param " + std::to_string(c.param_index) + "=" + std::to_string(lhs) +
+                            " not divisible by param " + std::to_string(c.divisor_param) + "=" + std::to_string(div));
+            }
+        }
+        if (c.divisor_const > 1 && (lhs % c.divisor_const) != 0) {
+            return fail("param " + std::to_string(c.param_index) + "=" + std::to_string(lhs) +
+                        " not divisible by " + std::to_string(c.divisor_const));
+        }
+    }
+
+    if (err_out) err_out->clear();
+    return true;
+}
+
 } // namespace brass::verify

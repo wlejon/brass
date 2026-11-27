@@ -1,5 +1,6 @@
 #pragma once
 
+#include <brass/core/span.hpp>
 #include <brass/mir/function.hpp>
 #include <brass/mir/gpu_portability.hpp>
 #include <brass/target/spirv_target.hpp>
@@ -70,11 +71,20 @@ GpuSandboxResult verify_gpu_kernel_sandbox(
     const Function& mir_fn,
     const GpuSandboxOptions& opts = {});
 
+/// Runtime dispatch-time check enforcing the bounded-domain assumptions
+/// (`kMaxProverDim{1,2,3}D` and `GpuProverOptions::param_constraints`)
+/// under which `verify_gpu_kernel_sandbox` proved memory safety.
+bool verify_gpu_dispatch_bounds(
+    const GpuProverOptions& prover_opts,
+    Span<const uint64_t> param_values,
+    std::string* err_out = nullptr);
+
 } // namespace brass::verify
 
 namespace brass {
 using verify::GpuSandboxOptions;
 using verify::GpuSandboxResult;
 using verify::SandboxProofTier;
+using verify::verify_gpu_dispatch_bounds;
 using verify::verify_gpu_kernel_sandbox;
 } // namespace brass
