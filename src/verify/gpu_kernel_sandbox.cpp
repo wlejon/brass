@@ -2,6 +2,7 @@
 
 #include <brass/core/diagnostics.hpp>
 #include <brass/target/spirv/spirv_binary_reader.hpp>
+#include <brass/verify/gpu_equiv.hpp>
 
 #include <algorithm>
 #include <sstream>
@@ -50,6 +51,12 @@ void build_diagnostic(GpuSandboxResult& res) {
     }
 }
 
+std::string format_diag_message(const Diagnostic& d) {
+    const std::string base = d.message.empty() ? "gpu portability error" : d.message;
+    if (!d.location.is_valid()) return base;
+    return d.location.to_string() + ": " + base;
+}
+
 } // namespace
 
 GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSandboxOptions& opts) {
@@ -59,7 +66,7 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
     res.portability_ok = verify_gpu_portability(mir_fn, opts.portability, &diag);
     for (const auto& d : diag.diagnostics()) {
         if (d.severity == DiagnosticSeverity::Error || d.severity == DiagnosticSeverity::Fatal) {
-            res.violations.push_back(d.message.empty() ? "gpu portability error" : d.message);
+            res.violations.push_back(format_diag_message(d));
         }
     }
 
@@ -142,9 +149,45 @@ GpuSandboxResult verify_gpu_kernel_sandbox(const Function& mir_fn, const GpuSand
             }
         }
     }
-#else
-    (void)opts;
 #endif
+
+    if ((opts.verify_ptx_compile || opts.verify_ptx_equiv) && res.portability_ok) {
+        res.ptx_checked_ = true;
+        try {
+            const std::string ptx_src = target::PtxTarget::emit_function(mir_fn, opts.ptx_opts);
+            res.ptx_compiled = !ptx_src.empty();
+            if (!res.ptx_compiled) {
+                res.violations.push_back("PTX compile produced empty output");
+            }
+        } catch (const std::exception& ex) {
+            res.violations.push_back(std::string("PTX compile failed: ") + ex.what());
+        }
+
+        if (opts.verify_ptx_equiv && res.ptx_compiled) {
+            res.ptx_equiv_checked_ = true;
+            std::string ptx_err;
+            const auto peq = verify_ptx_equivalence(mir_fn, opts.ptx_opts, &ptx_err, opts.equiv_opts);
+            res.ptx_equiv_ok = peq.is_equivalent();
+            if (!res.ptx_equiv_ok) {
+                if (!ptx_err.empty()) res.violations.push_back(ptx_err);
+                else if (!peq.diagnostic.empty()) res.violations.push_back(peq.diagnostic);
+                else res.violations.push_back("PTX equivalence check failed");
+            }
+        }
+    }
+
+    if (opts.verify_msl_compile && res.portability_ok) {
+        res.msl_checked_ = true;
+        try {
+            const target::MslKernel msl = target::MslTarget::compile(mir_fn, opts.msl_opts);
+            res.msl_compiled = !msl.source.empty();
+            if (!res.msl_compiled) {
+                res.violations.push_back("MSL compile produced empty source");
+            }
+        } catch (const std::exception& ex) {
+            res.violations.push_back(std::string("MSL compile failed: ") + ex.what());
+        }
+    }
 
     if (opts.reference_mir != nullptr) {
         res.equivalence_checked = true;

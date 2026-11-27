@@ -305,6 +305,8 @@ add_executable(brass_unit_tests
     unit/test_ptx_cleanup.cpp
     unit/test_gpu_intrinsics.cpp
     unit/test_gpu_sandbox_and_bundle.cpp
+    unit/test_gpu_sandbox_harden.cpp
+    unit/test_cross_module_fusion.cpp
     unit/test_ml_fusion.cpp
     unit/test_gpu_execution.cpp
     unit/test_gpu_kernels.cpp
@@ -391,6 +393,16 @@ add_executable(test_superopt unit/test_superopt.cpp)
 target_compile_definitions(test_superopt PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_superopt PRIVATE brass)
 target_include_directories(test_superopt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_cross_module_fusion unit/test_cross_module_fusion.cpp)
+target_compile_definitions(test_cross_module_fusion PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_cross_module_fusion PRIVATE brass)
+target_include_directories(test_cross_module_fusion PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_gpu_sandbox_harden unit/test_gpu_sandbox_harden.cpp)
+target_compile_definitions(test_gpu_sandbox_harden PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_gpu_sandbox_harden PRIVATE brass)
+target_include_directories(test_gpu_sandbox_harden PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 add_executable(test_artifact_cache unit/test_artifact_cache.cpp unit/test_native_module_cache.cpp)
 target_compile_definitions(test_artifact_cache PRIVATE BRASS_STANDALONE_TEST)

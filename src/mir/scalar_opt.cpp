@@ -49,6 +49,15 @@ bool reads_tagged_bits(const Value* v) {
     return def && def->opcode() == Opcode::bitcast_i64_tagged;
 }
 
+bool no_gc_between_in_block(const Instruction* from, const Instruction* to) noexcept {
+    if (!from || !to || from->parent() != to->parent()) return false;
+    for (const Instruction* it = from->next(); it; it = it->next()) {
+        if (it == to) return true;
+        if (may_trigger_gc(*it)) return false;
+    }
+    return false;
+}
+
 } // namespace
 
 // Pure and safe to execute speculatively: LICM hoists these out of loops
@@ -462,6 +471,14 @@ bool fold_constants(Function& fn) {
                     } else if (op == Opcode::bitcast_f32_i32 && dop == Opcode::bitcast_i32_f32 && def->operand(0)->type() == cur->type()) {
                         replacement = def->operand(0);
                     } else if (op == Opcode::bitcast_i32_f32 && dop == Opcode::bitcast_f32_i32 && def->operand(0)->type() == cur->type()) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::bitcast_i64_tagged && dop == Opcode::bitcast_tagged_i64 &&
+                               def->operand_count() == 1 && def->operand(0) && def->operand(0)->type() == cur->type() &&
+                               no_gc_between_in_block(def, cur)) {
+                        replacement = def->operand(0);
+                    } else if (op == Opcode::bitcast_tagged_i64 && dop == Opcode::bitcast_i64_tagged &&
+                               def->operand_count() == 1 && def->operand(0) && def->operand(0)->type() == cur->type() &&
+                               no_gc_between_in_block(def, cur)) {
                         replacement = def->operand(0);
                     } else if (op == Opcode::trunc_i32 && (dop == Opcode::sext_i64 || dop == Opcode::zext_i64) &&
                                def->operand(0) && def->operand(0)->type() == Type::i32()) {

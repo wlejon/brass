@@ -2,6 +2,7 @@
 #include <brass/mir/block.hpp>
 #include <brass/mir/instruction.hpp>
 #include <brass/mir/opcodes.hpp>
+#include <brass/target/gpu_intrinsics.hpp>
 #include <bit>
 #include <cstring>
 #include <unordered_map>
@@ -379,7 +380,7 @@ GpuExecTrace execute_gpu_mir(
                 break;
             }
             case Opcode::call: {
-                std::string_view sym = inst->symbol();
+                std::string_view sym = target::canonical_gpu_intrinsic(inst->symbol());
                 if (sym == "ptx_tid_x") res = env.tid[0];
                 else if (sym == "ptx_tid_y") res = env.tid[1];
                 else if (sym == "ptx_tid_z") res = env.tid[2];
