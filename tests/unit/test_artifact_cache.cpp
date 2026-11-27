@@ -430,9 +430,18 @@ TEST_CASE("artifact_cache: several processes writing and reading one key") {
         CHECK_EQ(WEXITSTATUS(status), 0);
     }
     ArtifactCache cache(dir, 0);
-    const std::optional<Artifact> a = cache.get(key);
-    REQUIRE(a.has_value());
-    CHECK_EQ(a->text("payload").size(), 30000u);
+    Miss why = Miss::None;
+    const std::optional<Artifact> a = cache.get(key, &why);
+    if (a) {
+        const std::string_view p = a->text("payload");
+        CHECK_EQ(p.size(), 30000u);
+        CHECK(p.find_first_not_of(p[0]) == std::string_view::npos);
+    } else {
+        // A racing trim from another process may evict `key` between the
+        // mtime re-check and remove (or within one coarse filesystem mtime
+        // tick); eviction is a valid miss, never a corrupt or torn entry.
+        CHECK(why == Miss::Absent);
+    }
 }
 #endif
 
