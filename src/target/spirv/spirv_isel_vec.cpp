@@ -14,6 +14,8 @@ namespace {
 
 Type element_of(Type t) { return t.is_vector() ? t.element_type() : t; }
 
+uint32_t lanes_per_part(Type t) { return t.element_type().size_in_bytes() == 8 ? 2u : 4u; }
+
 // The x64 shufps/shufpd mask encoding, per 128-bit half (= part): a 4-lane
 // part takes lanes 0..1 from `a` and 2..3 from `b`, 2-bit selectors; a
 // 2-lane part takes lane 0 from `a` and lane 1 from `b`, one bit each (the
@@ -85,7 +87,7 @@ void SpirvISel::lower_vector_bitwise(const brass::Instruction& inst, spv::Op o) 
     if (!t.is_vector()) malformed(inst, "result is not a vector type");
     Type e = t.element_type();
     Id pt = part_type(t);
-    uint32_t lanes = static_cast<uint32_t>(16 / e.size_in_bytes());
+    uint32_t lanes = lanes_per_part(t);
     Id it = e.is_float() ? m_.t_vector(m_.t_int(static_cast<uint32_t>(e.size_in_bytes() * 8)), lanes) : pt;
     auto to_int = [&](Id x) { return e.is_float() ? op(spv::OpBitcast, it, {x}) : x; };
 
@@ -104,10 +106,17 @@ void SpirvISel::lower_vbroadcast(const brass::Instruction& inst) {
     Type t = inst.type();
     if (!t.is_vector()) malformed(inst, "result is not a vector type");
     Id s = id_of(inst.operand(0), "scalar operand");
+    if (t.kind() == TypeKind::I8x16) {
+        m_.add_capability(spv::CapabilityInt8);
+        s = op(spv::OpUConvert, m_.t_int(8), {s});
+    } else if (t.kind() == TypeKind::I16x8) {
+        m_.add_capability(spv::CapabilityInt16);
+        s = op(spv::OpUConvert, m_.t_int(16), {s});
+    }
     Id pt = part_type(t);
     Id r = m_.new_id();
     Inst c(spv::OpCompositeConstruct, pt, r);
-    for (uint32_t i = 0; i < 16 / t.element_type().size_in_bytes(); ++i) c.id(s);
+    for (uint32_t i = 0; i < lanes_per_part(t); ++i) c.id(s);
     emit(std::move(c));
     define(inst.result(), std::vector<Id>(part_count(t), r));
 }
@@ -121,25 +130,40 @@ void SpirvISel::lower_vzero(const brass::Instruction& inst) {
 void SpirvISel::lower_vextract_lane(const brass::Instruction& inst) {
     const Value* vec = inst.operand(0);
     if (!vec || !vec->type().is_vector()) malformed(inst, "missing vector operand");
-    uint32_t per = static_cast<uint32_t>(16 / vec->type().element_type().size_in_bytes());
+    Type vt = vec->type();
+    uint32_t per = lanes_per_part(vt);
     uint32_t lane = inst.lane();
-    if (lane >= vec->type().vector_lanes()) malformed(inst, "lane index out of range");
+    if (lane >= vt.vector_lanes()) malformed(inst, "lane index out of range");
     Id part = ids_of(vec, "vector operand").at(lane / per);
+    Id elem_t = (vt.kind() == TypeKind::I8x16)  ? m_.t_int(8)
+              : (vt.kind() == TypeKind::I16x8) ? m_.t_int(16)
+                                               : scalar_type(vt.element_type());
     Id r = m_.new_id();
-    emit(Inst(spv::OpCompositeExtract, scalar_type(vec->type().element_type()), r).id(part).lit(lane % per));
+    emit(Inst(spv::OpCompositeExtract, elem_t, r).id(part).lit(lane % per));
+    if (vt.kind() == TypeKind::I8x16 || vt.kind() == TypeKind::I16x8) {
+        r = op(spv::OpUConvert, t_u32(), {r});
+    }
     define(inst.result(), r);
 }
 
 void SpirvISel::lower_vinsert_lane(const brass::Instruction& inst) {
     const Value* vec = inst.operand(0);
     if (!vec || !vec->type().is_vector()) malformed(inst, "missing vector operand");
-    uint32_t per = static_cast<uint32_t>(16 / vec->type().element_type().size_in_bytes());
+    Type vt = vec->type();
+    uint32_t per = lanes_per_part(vt);
     uint32_t lane = inst.lane();
-    if (lane >= vec->type().vector_lanes()) malformed(inst, "lane index out of range");
+    if (lane >= vt.vector_lanes()) malformed(inst, "lane index out of range");
     std::vector<Id> parts = ids_of(vec, "vector operand");
     Id s = id_of(inst.operand(1), "scalar operand");
+    if (vt.kind() == TypeKind::I8x16) {
+        m_.add_capability(spv::CapabilityInt8);
+        s = op(spv::OpUConvert, m_.t_int(8), {s});
+    } else if (vt.kind() == TypeKind::I16x8) {
+        m_.add_capability(spv::CapabilityInt16);
+        s = op(spv::OpUConvert, m_.t_int(16), {s});
+    }
     Id r = m_.new_id();
-    emit(Inst(spv::OpCompositeInsert, part_type(vec->type()), r).id(s).id(parts[lane / per]).lit(lane % per));
+    emit(Inst(spv::OpCompositeInsert, part_type(vt), r).id(s).id(parts[lane / per]).lit(lane % per));
     parts[lane / per] = r;
     define(inst.result(), std::move(parts));
 }
@@ -147,10 +171,11 @@ void SpirvISel::lower_vinsert_lane(const brass::Instruction& inst) {
 void SpirvISel::lower_vshuffle(const brass::Instruction& inst) {
     Type t = inst.type();
     if (!t.is_vector()) malformed(inst, "result is not a vector type");
+    if (t.element_type().size_in_bytes() < 4) malformed(inst, "vshuffle is not supported for narrow integer vectors");
     const std::vector<Id> a = ids_of(inst.operand(0), "operand 0");
     const std::vector<Id> b = ids_of(inst.operand(1), "operand 1");
     if (a.size() != b.size()) malformed(inst, "operand widths differ");
-    uint32_t per = static_cast<uint32_t>(16 / t.element_type().size_in_bytes());
+    uint32_t per = lanes_per_part(t);
     Id pt = part_type(t);
     std::vector<Id> out;
     for (uint32_t half = 0; half < a.size(); ++half) {

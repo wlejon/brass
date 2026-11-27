@@ -74,9 +74,13 @@ RuntimeValue val_vlanes(Opcode op, Type result_type, const RuntimeValue* ops) {
                 bool r;
                 if (e0 == Type::f32()) r = compare(op, a.get<float>(i), b.get<float>(i));
                 else if (e0 == Type::f64()) r = compare(op, a.get<double>(i), b.get<double>(i));
+                else if (e0 == Type::i8()) r = compare(op, a.get<int8_t>(i), b.get<int8_t>(i));
+                else if (e0 == Type::i16()) r = compare(op, a.get<int16_t>(i), b.get<int16_t>(i));
                 else if (e0 == Type::i32()) r = compare(op, a.get<int32_t>(i), b.get<int32_t>(i));
                 else r = compare(op, a.get<int64_t>(i), b.get<int64_t>(i));
-                if (e0.size_in_bytes() == 4) out.set<int32_t>(i, r ? -1 : 0);
+                if (e0.size_in_bytes() == 1) out.set<int8_t>(i, r ? int8_t{-1} : int8_t{0});
+                else if (e0.size_in_bytes() == 2) out.set<int16_t>(i, r ? int16_t{-1} : int16_t{0});
+                else if (e0.size_in_bytes() == 4) out.set<int32_t>(i, r ? -1 : 0);
                 else out.set<int64_t>(i, r ? -1 : 0);
             }
             return make_vec(result_type, out);
@@ -88,7 +92,9 @@ RuntimeValue val_vlanes(Opcode op, Type result_type, const RuntimeValue* ops) {
             const uint32_t w = static_cast<uint32_t>(e0.size_in_bytes());
             const uint32_t vn = result_type.vector_lanes();
             for (uint32_t i = 0; i < vn; ++i) {
-                const bool take = w == 4 ? a.get<int32_t>(i) < 0 : a.get<int64_t>(i) < 0;
+                const bool take = (w == 1) ? a.get<int8_t>(i) < 0
+                                : (w == 2) ? a.get<int16_t>(i) < 0
+                                : (w == 4) ? a.get<int32_t>(i) < 0 : a.get<int64_t>(i) < 0;
                 std::memcpy(out.bytes + i * w, (take ? x : y).bytes + i * w, w);
             }
             return make_vec(result_type, out);
@@ -97,7 +103,21 @@ RuntimeValue val_vlanes(Opcode op, Type result_type, const RuntimeValue* ops) {
         case Opcode::vshl: case Opcode::vlshr: case Opcode::vashr: {
             const Lanes b = lanes_of(ops[1]);
             for (uint32_t i = 0; i < n; ++i) {
-                if (e0 == Type::i32()) {
+                if (e0 == Type::i8()) {
+                    const uint8_t v = a.get<uint8_t>(i), s = b.get<uint8_t>(i);
+                    uint8_t r;
+                    if (op == Opcode::vshl) r = s >= 8 ? 0 : static_cast<uint8_t>(v << s);
+                    else if (op == Opcode::vlshr) r = s >= 8 ? 0 : static_cast<uint8_t>(v >> s);
+                    else r = static_cast<uint8_t>(static_cast<int8_t>(v) >> (s >= 8 ? 7 : s));
+                    out.set<uint8_t>(i, r);
+                } else if (e0 == Type::i16()) {
+                    const uint16_t v = a.get<uint16_t>(i), s = b.get<uint16_t>(i);
+                    uint16_t r;
+                    if (op == Opcode::vshl) r = s >= 16 ? 0 : static_cast<uint16_t>(v << s);
+                    else if (op == Opcode::vlshr) r = s >= 16 ? 0 : static_cast<uint16_t>(v >> s);
+                    else r = static_cast<uint16_t>(static_cast<int16_t>(v) >> (s >= 16 ? 15 : s));
+                    out.set<uint16_t>(i, r);
+                } else if (e0 == Type::i32()) {
                     const uint32_t v = a.get<uint32_t>(i), s = b.get<uint32_t>(i);
                     uint32_t r;
                     if (op == Opcode::vshl) r = s >= 32 ? 0 : v << s;
@@ -142,8 +162,11 @@ RuntimeValue val_vlanes(Opcode op, Type result_type, const RuntimeValue* ops) {
             return make_vec(result_type, out);
 
         default: {   // vany
+            const size_t w = e0.size_in_bytes();
             for (uint32_t i = 0; i < n; ++i) {
-                const bool neg = e0.size_in_bytes() == 4 ? a.get<int32_t>(i) < 0 : a.get<int64_t>(i) < 0;
+                const bool neg = (w == 1) ? a.get<int8_t>(i) < 0
+                               : (w == 2) ? a.get<int16_t>(i) < 0
+                               : (w == 4) ? a.get<int32_t>(i) < 0 : a.get<int64_t>(i) < 0;
                 if (neg) return RuntimeValue::from_i32(1);
             }
             return RuntimeValue::from_i32(0);

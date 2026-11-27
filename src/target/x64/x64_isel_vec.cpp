@@ -129,6 +129,29 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 pinsr1->mir_origin = &inst;
                 lir_bb.append_inst(std::move(pinsr1));
             };
+            if (inst.opcode() == Opcode::vmul && t.kind() == TypeKind::I8x16) {
+                auto emit_two = [&](LirOpcode mop, VReg d, LirOperand rhs) {
+                    auto m = std::make_unique<LirInst>(mop);
+                    m->add_def(LirOperand::vreg(d, 16));
+                    m->add_use(LirOperand::vreg(d, 16));
+                    m->add_use(rhs);
+                    lir_bb.append_inst(std::move(m));
+                };
+                VReg odd_a = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+                VReg odd_b = lir_fn_->allocate_vreg(RegClass::XMM, 16);
+                emit_movaps(dst, v0);
+                emit_two(LirOpcode::Pmullw, dst, LirOperand::vreg(v1, 16));
+                emit_two(LirOpcode::Psllw, dst, LirOperand::imm(8, 1));
+                emit_two(LirOpcode::Psrlw, dst, LirOperand::imm(8, 1));
+                emit_movaps(odd_a, v0);
+                emit_two(LirOpcode::Psrlw, odd_a, LirOperand::imm(8, 1));
+                emit_movaps(odd_b, v1);
+                emit_two(LirOpcode::Psrlw, odd_b, LirOperand::imm(8, 1));
+                emit_two(LirOpcode::Pmullw, odd_a, LirOperand::vreg(odd_b, 16));
+                emit_two(LirOpcode::Psllw, odd_a, LirOperand::imm(8, 1));
+                emit_two(LirOpcode::Por, dst, LirOperand::vreg(odd_a, 16));
+                break;
+            }
             if (inst.opcode() == Opcode::vmul && t.kind() == TypeKind::I64x2) {
                 mul_i64x2(dst, v0, v1);
                 break;
@@ -196,16 +219,21 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             if (inst.opcode() == Opcode::vadd) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Addps;
                 else if (t.kind() == TypeKind::F64x2) op = LirOpcode::Addpd;
+                else if (t.kind() == TypeKind::I8x16) op = LirOpcode::Paddb;
+                else if (t.kind() == TypeKind::I16x8) op = LirOpcode::Paddw;
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Paddd;
                 else if (t.kind() == TypeKind::I64x2) op = LirOpcode::Paddq;
             } else if (inst.opcode() == Opcode::vsub) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Subps;
                 else if (t.kind() == TypeKind::F64x2) op = LirOpcode::Subpd;
+                else if (t.kind() == TypeKind::I8x16) op = LirOpcode::Psubb;
+                else if (t.kind() == TypeKind::I16x8) op = LirOpcode::Psubw;
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Psubd;
                 else if (t.kind() == TypeKind::I64x2) op = LirOpcode::Psubq;
             } else if (inst.opcode() == Opcode::vmul) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Mulps;
                 else if (t.kind() == TypeKind::F64x2) op = LirOpcode::Mulpd;
+                else if (t.kind() == TypeKind::I16x8) op = LirOpcode::Pmullw;
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Pmulld;
             } else if (inst.opcode() == Opcode::vdiv) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Divps;
@@ -213,10 +241,14 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
             } else if (inst.opcode() == Opcode::vmin) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Minps;
                 else if (t.kind() == TypeKind::F64x2) op = LirOpcode::Minpd;
+                else if (t.kind() == TypeKind::I8x16) op = LirOpcode::Pminsb;
+                else if (t.kind() == TypeKind::I16x8) op = LirOpcode::Pminsw;
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Pminsd;
             } else if (inst.opcode() == Opcode::vmax) {
                 if (t.kind() == TypeKind::F32x4) op = LirOpcode::Maxps;
                 else if (t.kind() == TypeKind::F64x2) op = LirOpcode::Maxpd;
+                else if (t.kind() == TypeKind::I8x16) op = LirOpcode::Pmaxsb;
+                else if (t.kind() == TypeKind::I16x8) op = LirOpcode::Pmaxsw;
                 else if (t.kind() == TypeKind::I32x4) op = LirOpcode::Pmaxsd;
             }
             if (op == LirOpcode::Nop) {
@@ -417,7 +449,11 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 xor_op->mir_origin = &inst;
                 lir_bb.append_inst(std::move(xor_op));
             } else {
-                if (t.kind() != TypeKind::I32x4 && t.kind() != TypeKind::I64x2) {
+                LirOpcode sub_op = (t.kind() == TypeKind::I8x16) ? LirOpcode::Psubb
+                                 : (t.kind() == TypeKind::I16x8) ? LirOpcode::Psubw
+                                 : (t.kind() == TypeKind::I32x4) ? LirOpcode::Psubd
+                                 : (t.kind() == TypeKind::I64x2) ? LirOpcode::Psubq : LirOpcode::Nop;
+                if (sub_op == LirOpcode::Nop) {
                     codegen::throw_unsupported("x64 isel (vector)", "vneg " + brass::to_string(t));
                 }
                 auto zero = std::make_unique<LirInst>(LirOpcode::Xorps);
@@ -426,7 +462,6 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 zero->add_use(LirOperand::vreg(dst, 16));
                 lir_bb.append_inst(std::move(zero));
 
-                LirOpcode sub_op = (t.kind() == TypeKind::I32x4) ? LirOpcode::Psubd : LirOpcode::Psubq;
                 auto sub = std::make_unique<LirInst>(sub_op);
                 sub->add_def(LirOperand::vreg(dst, 16));
                 sub->add_use(LirOperand::vreg(dst, 16));
@@ -523,6 +558,32 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                 movddup->add_use(LirOperand::vreg(src, 8));
                 movddup->mir_origin = &inst;
                 lir_bb.append_inst(std::move(movddup));
+            } else if (t.kind() == TypeKind::I8x16 || t.kind() == TypeKind::I16x8) {
+                auto movd = std::make_unique<LirInst>(LirOpcode::Movd_xg);
+                movd->add_def(LirOperand::vreg(dst, 16));
+                movd->add_use(LirOperand::vreg(src, 4));
+                lir_bb.append_inst(std::move(movd));
+                if (t.kind() == TypeKind::I8x16) {
+                    auto unp = std::make_unique<LirInst>(LirOpcode::Punpcklbw);
+                    unp->add_def(LirOperand::vreg(dst, 16));
+                    unp->add_use(LirOperand::vreg(dst, 16));
+                    unp->add_use(LirOperand::vreg(dst, 16));
+                    lir_bb.append_inst(std::move(unp));
+                }
+                auto lsh = std::make_unique<LirInst>(LirOpcode::Pshuflw);
+                lsh->add_def(LirOperand::vreg(dst, 16));
+                lsh->add_use(LirOperand::vreg(dst, 16));
+                lsh->add_use(LirOperand::vreg(dst, 16));
+                lsh->add_use(LirOperand::imm(0x00, 1));
+                lir_bb.append_inst(std::move(lsh));
+
+                auto shuf = std::make_unique<LirInst>(LirOpcode::Pshufd);
+                shuf->add_def(LirOperand::vreg(dst, 16));
+                shuf->add_use(LirOperand::vreg(dst, 16));
+                shuf->add_use(LirOperand::vreg(dst, 16));
+                shuf->add_use(LirOperand::imm(0x00, 1));
+                shuf->mir_origin = &inst;
+                lir_bb.append_inst(std::move(shuf));
             } else if (t.kind() == TypeKind::I32x4) {
                 auto movd = std::make_unique<LirInst>(LirOpcode::Movd_xg);
                 movd->add_def(LirOperand::vreg(dst, 16));
@@ -610,6 +671,13 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
+            } else if (src_t.kind() == TypeKind::I8x16 || src_t.kind() == TypeKind::I16x8) {
+                auto pext = std::make_unique<LirInst>(src_t.kind() == TypeKind::I8x16 ? LirOpcode::Pextrb : LirOpcode::Pextrw);
+                pext->add_def(LirOperand::vreg(dst, 4));
+                pext->add_use(LirOperand::vreg(src, 16));
+                pext->add_use(LirOperand::imm(lane, 1));
+                pext->mir_origin = &inst;
+                lir_bb.append_inst(std::move(pext));
             } else if (src_t.kind() == TypeKind::I32x4 || src_t.kind() == TypeKind::I32x8) {
                 if (lane == 0) {
                     auto movd = std::make_unique<LirInst>(LirOpcode::Movd_gx);
@@ -712,6 +780,14 @@ void X64ISel::lower_vector_instruction(const Instruction& inst, LirBlock& lir_bb
                     shuf->mir_origin = &inst;
                     lir_bb.append_inst(std::move(shuf));
                 }
+            } else if (t.kind() == TypeKind::I8x16 || t.kind() == TypeKind::I16x8) {
+                auto pinsr = std::make_unique<LirInst>(t.kind() == TypeKind::I8x16 ? LirOpcode::Pinsrb : LirOpcode::Pinsrw);
+                pinsr->add_def(LirOperand::vreg(dst, 16));
+                pinsr->add_use(LirOperand::vreg(dst, 16));
+                pinsr->add_use(LirOperand::vreg(val, 4));
+                pinsr->add_use(LirOperand::imm(lane, 1));
+                pinsr->mir_origin = &inst;
+                lir_bb.append_inst(std::move(pinsr));
             } else if (t.kind() == TypeKind::I32x4) {
                 auto pinsr = std::make_unique<LirInst>(LirOpcode::Pinsrd);
                 pinsr->add_def(LirOperand::vreg(dst, 16));

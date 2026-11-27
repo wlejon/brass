@@ -324,16 +324,22 @@ void SpirvISel::lower_store(const brass::Instruction& inst) {
     store_global(addr, v, scalar_type(vt), static_cast<uint32_t>(vt.size_in_bytes()));
 }
 
-// One 16-byte OpLoad per part (vec4 of 32-bit lanes, vec2 of 64-bit ones);
-// 256-bit types are two parts 16 bytes apart, as on PTX.
+// One 16-byte OpLoad per part (vec4 of 32-bit lanes, vec2 of 64-bit ones),
+// or 4/8-byte part for narrow 8/16-bit vectors.
 void SpirvISel::lower_vload(const brass::Instruction& inst) {
     Type t = inst.type();
     if (!t.is_vector()) malformed(inst, "vector load of a non-vector type");
+    if (t.kind() == TypeKind::I8x16) m_.add_capability(spv::CapabilityStorageBuffer8BitAccess);
+    else if (t.kind() == TypeKind::I16x8) m_.add_capability(spv::CapabilityStorageBuffer16BitAccess);
     Id base = id_of(inst.operand(0), "pointer");
     Id pt = part_type(t);
+    const uint32_t parts_n = part_count(t);
+    const uint32_t part_bytes = static_cast<uint32_t>(t.size_in_bytes() / parts_n);
     std::vector<Id> parts;
-    for (uint32_t k = 0; k < part_count(t); ++k) {
-        parts.push_back(load_global(address(base, inst.offset() + 16 * static_cast<int64_t>(k)), pt, 16));
+    for (uint32_t k = 0; k < parts_n; ++k) {
+        parts.push_back(load_global(
+            address(base, inst.offset() + static_cast<int64_t>(part_bytes) * static_cast<int64_t>(k)),
+            pt, part_bytes));
     }
     define(inst.result(), std::move(parts));
 }
@@ -343,11 +349,16 @@ void SpirvISel::lower_vstore(const brass::Instruction& inst) {
     if (!inst.operand(0) || !value) malformed(inst, "missing operand");
     Type t = value->type();
     if (!t.is_vector()) malformed(inst, "vector store of a non-vector value");
+    if (t.kind() == TypeKind::I8x16) m_.add_capability(spv::CapabilityStorageBuffer8BitAccess);
+    else if (t.kind() == TypeKind::I16x8) m_.add_capability(spv::CapabilityStorageBuffer16BitAccess);
     Id base = id_of(inst.operand(0), "pointer");
     const std::vector<Id> parts = ids_of(value, "value");
     Id pt = part_type(t);
+    const uint32_t part_bytes = static_cast<uint32_t>(t.size_in_bytes() / part_count(t));
     for (uint32_t k = 0; k < parts.size(); ++k) {
-        store_global(address(base, inst.offset() + 16 * static_cast<int64_t>(k)), parts[k], pt, 16);
+        store_global(
+            address(base, inst.offset() + static_cast<int64_t>(part_bytes) * static_cast<int64_t>(k)),
+            parts[k], pt, part_bytes);
     }
 }
 

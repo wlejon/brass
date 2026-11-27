@@ -99,16 +99,26 @@ FlagEffect x64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Divpd: case LirOpcode::Minpd: case LirOpcode::Maxpd:
         case LirOpcode::Sqrtpd:
         case LirOpcode::Fneg4s: case LirOpcode::Fneg2d:
+        case LirOpcode::Paddb: case LirOpcode::Psubb: case LirOpcode::Pmulb:
+        case LirOpcode::Pminsb: case LirOpcode::Pmaxsb:
+        case LirOpcode::Paddw: case LirOpcode::Psubw: case LirOpcode::Pmullw:
+        case LirOpcode::Pminsw: case LirOpcode::Pmaxsw:
         case LirOpcode::Paddd: case LirOpcode::Psubd: case LirOpcode::Pmulld:
         case LirOpcode::Pminsd: case LirOpcode::Pmaxsd:
         case LirOpcode::Paddq: case LirOpcode::Psubq:
         case LirOpcode::Pand: case LirOpcode::Por: case LirOpcode::Pxor:
         case LirOpcode::Pandn: case LirOpcode::Pnot:
-        case LirOpcode::Pcmpeqd: case LirOpcode::Pslld: case LirOpcode::Psllq:
+        case LirOpcode::Pcmpeqd:
+        case LirOpcode::Psllb: case LirOpcode::Psrlb: case LirOpcode::Psrab:
+        case LirOpcode::Psllw: case LirOpcode::Psrlw: case LirOpcode::Psraw:
+        case LirOpcode::Pslld: case LirOpcode::Psllq:
         case LirOpcode::Psrld: case LirOpcode::Psrlq:
         case LirOpcode::Psrad: case LirOpcode::Psraq:
-        case LirOpcode::Shufps: case LirOpcode::Shufpd: case LirOpcode::Pshufd:
+        case LirOpcode::Shufps: case LirOpcode::Shufpd:
+        case LirOpcode::Pshufd: case LirOpcode::Pshuflw: case LirOpcode::Punpcklbw:
         case LirOpcode::Movddup:
+        case LirOpcode::Pinsrb: case LirOpcode::Pextrb:
+        case LirOpcode::Pinsrw: case LirOpcode::Pextrw:
         case LirOpcode::Pinsrd: case LirOpcode::Pextrd:
         case LirOpcode::Pinsrq: case LirOpcode::Pextrq:
         case LirOpcode::Insertps: case LirOpcode::Extractps:
@@ -126,23 +136,34 @@ FlagEffect x64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Vandpd: case LirOpcode::Vorpd: case LirOpcode::Vxorpd:
         case LirOpcode::Vpand: case LirOpcode::Vpor: case LirOpcode::Vpxor:
         case LirOpcode::Vbroadcastss: case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vpbroadcastb: case LirOpcode::Vpbroadcastw:
         case LirOpcode::Vpbroadcastd: case LirOpcode::Vpbroadcastq:
         case LirOpcode::Vfmadd213ps: case LirOpcode::Vfmadd231ps:
         case LirOpcode::Vfmadd213pd: case LirOpcode::Vfmadd231pd:
         case LirOpcode::Vfmadd213ss: case LirOpcode::Vfmadd231ss:
         case LirOpcode::Vfmadd213sd: case LirOpcode::Vfmadd231sd:
         case LirOpcode::Vcmpps: case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqb: case LirOpcode::Vpcmpgtb:
+        case LirOpcode::Vpcmpeqw: case LirOpcode::Vpcmpgtw:
         case LirOpcode::Vpcmpeqd: case LirOpcode::Vpcmpgtd:
         case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
         case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvb: case LirOpcode::Vpsrlvb: case LirOpcode::Vpsravb:
+        case LirOpcode::Vpsllvw: case LirOpcode::Vpsrlvw: case LirOpcode::Vpsravw:
         case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
         case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq:
         case LirOpcode::Vpsravd: case LirOpcode::Vpsravq:
-        case LirOpcode::Vshufps: case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
+        case LirOpcode::Vshufps:
+        case LirOpcode::Vpblendvb: case LirOpcode::Vblendvw:
+        case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
         case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
         case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:
         case LirOpcode::Vcvtps2pd: case LirOpcode::Vcvtpd2ps: case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vpmovsxwd: case LirOpcode::Vpmovzxwd:
+        case LirOpcode::Vpmovsxbd: case LirOpcode::Vpmovzxbd:
+        case LirOpcode::Vpackssdw: case LirOpcode::Vpacksswb:
         case LirOpcode::Vroundps: case LirOpcode::Vroundpd:
+        case LirOpcode::Vpmovmskb: case LirOpcode::Vany8: case LirOpcode::Vany16:
         case LirOpcode::Vmovmskps: case LirOpcode::Vmovmskpd:
         case LirOpcode::Jmp: case LirOpcode::Jcc: case LirOpcode::Ret:
         case LirOpcode::Push: case LirOpcode::Pop: case LirOpcode::Lea:
@@ -235,16 +256,26 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Divpd: case LirOpcode::Minpd: case LirOpcode::Maxpd:
         case LirOpcode::Sqrtpd:
         case LirOpcode::Fneg4s: case LirOpcode::Fneg2d:
+        case LirOpcode::Paddb: case LirOpcode::Psubb: case LirOpcode::Pmulb:
+        case LirOpcode::Pminsb: case LirOpcode::Pmaxsb:
+        case LirOpcode::Paddw: case LirOpcode::Psubw: case LirOpcode::Pmullw:
+        case LirOpcode::Pminsw: case LirOpcode::Pmaxsw:
         case LirOpcode::Paddd: case LirOpcode::Psubd: case LirOpcode::Pmulld:
         case LirOpcode::Pminsd: case LirOpcode::Pmaxsd:
         case LirOpcode::Paddq: case LirOpcode::Psubq:
         case LirOpcode::Pand: case LirOpcode::Por: case LirOpcode::Pxor:
         case LirOpcode::Pandn: case LirOpcode::Pnot:
-        case LirOpcode::Pcmpeqd: case LirOpcode::Pslld: case LirOpcode::Psllq:
+        case LirOpcode::Pcmpeqd:
+        case LirOpcode::Psllb: case LirOpcode::Psrlb: case LirOpcode::Psrab:
+        case LirOpcode::Psllw: case LirOpcode::Psrlw: case LirOpcode::Psraw:
+        case LirOpcode::Pslld: case LirOpcode::Psllq:
         case LirOpcode::Psrld: case LirOpcode::Psrlq:
         case LirOpcode::Psrad: case LirOpcode::Psraq:
-        case LirOpcode::Shufps: case LirOpcode::Shufpd: case LirOpcode::Pshufd:
+        case LirOpcode::Shufps: case LirOpcode::Shufpd:
+        case LirOpcode::Pshufd: case LirOpcode::Pshuflw: case LirOpcode::Punpcklbw:
         case LirOpcode::Movddup:
+        case LirOpcode::Pinsrb: case LirOpcode::Pextrb:
+        case LirOpcode::Pinsrw: case LirOpcode::Pextrw:
         case LirOpcode::Pinsrd: case LirOpcode::Pextrd:
         case LirOpcode::Pinsrq: case LirOpcode::Pextrq:
         case LirOpcode::Insertps: case LirOpcode::Extractps:
@@ -262,23 +293,34 @@ FlagEffect aarch64_flag_effect(LirOpcode op) noexcept {
         case LirOpcode::Vandpd: case LirOpcode::Vorpd: case LirOpcode::Vxorpd:
         case LirOpcode::Vpand: case LirOpcode::Vpor: case LirOpcode::Vpxor:
         case LirOpcode::Vbroadcastss: case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vpbroadcastb: case LirOpcode::Vpbroadcastw:
         case LirOpcode::Vpbroadcastd: case LirOpcode::Vpbroadcastq:
         case LirOpcode::Vfmadd213ps: case LirOpcode::Vfmadd231ps:
         case LirOpcode::Vfmadd213pd: case LirOpcode::Vfmadd231pd:
         case LirOpcode::Vfmadd213ss: case LirOpcode::Vfmadd231ss:
         case LirOpcode::Vfmadd213sd: case LirOpcode::Vfmadd231sd:
         case LirOpcode::Vcmpps: case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqb: case LirOpcode::Vpcmpgtb:
+        case LirOpcode::Vpcmpeqw: case LirOpcode::Vpcmpgtw:
         case LirOpcode::Vpcmpeqd: case LirOpcode::Vpcmpgtd:
         case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
         case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvb: case LirOpcode::Vpsrlvb: case LirOpcode::Vpsravb:
+        case LirOpcode::Vpsllvw: case LirOpcode::Vpsrlvw: case LirOpcode::Vpsravw:
         case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
         case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq:
         case LirOpcode::Vpsravd: case LirOpcode::Vpsravq:
-        case LirOpcode::Vshufps: case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
+        case LirOpcode::Vshufps:
+        case LirOpcode::Vpblendvb: case LirOpcode::Vblendvw:
+        case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
         case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
         case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:
         case LirOpcode::Vcvtps2pd: case LirOpcode::Vcvtpd2ps: case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vpmovsxwd: case LirOpcode::Vpmovzxwd:
+        case LirOpcode::Vpmovsxbd: case LirOpcode::Vpmovzxbd:
+        case LirOpcode::Vpackssdw: case LirOpcode::Vpacksswb:
         case LirOpcode::Vroundps: case LirOpcode::Vroundpd:
+        case LirOpcode::Vpmovmskb: case LirOpcode::Vany8: case LirOpcode::Vany16:
         case LirOpcode::Vmovmskps: case LirOpcode::Vmovmskpd:
         case LirOpcode::Jmp: case LirOpcode::Jcc: case LirOpcode::Ret:
         case LirOpcode::Push: case LirOpcode::Pop: case LirOpcode::Lea:

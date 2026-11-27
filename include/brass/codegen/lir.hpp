@@ -343,6 +343,16 @@ enum class LirOpcode : uint16_t {
     Sqrtpd,
     Fneg4s,
     Fneg2d,
+    Paddb,
+    Psubb,
+    Pmulb,
+    Pminsb,
+    Pmaxsb,
+    Paddw,
+    Psubw,
+    Pmullw,
+    Pminsw,
+    Pmaxsw,
     Paddd,
     Psubd,
     Pmulld,
@@ -356,6 +366,12 @@ enum class LirOpcode : uint16_t {
     Pandn,
     Pnot,
     Pcmpeqd,
+    Psllb,
+    Psrlb,
+    Psrab,
+    Psllw,
+    Psrlw,
+    Psraw,
     Pslld,
     Psllq,
     Psrld,
@@ -365,7 +381,13 @@ enum class LirOpcode : uint16_t {
     Shufps,
     Shufpd,
     Pshufd,
+    Pshuflw,
+    Punpcklbw,
     Movddup,
+    Pinsrb,
+    Pextrb,
+    Pinsrw,
+    Pextrw,
     Pinsrd,
     Pextrd,
     Pinsrq,
@@ -408,6 +430,8 @@ enum class LirOpcode : uint16_t {
     Vpxor,
     Vbroadcastss,
     Vbroadcastsd,
+    Vpbroadcastb,
+    Vpbroadcastw,
     Vpbroadcastd,
     Vpbroadcastq,
     Vfmadd213ps,
@@ -424,12 +448,22 @@ enum class LirOpcode : uint16_t {
     // is one), then an imm.
     Vcmpps,         // uses: a, b, imm predicate
     Vcmppd,
+    Vpcmpeqb,
+    Vpcmpgtb,
+    Vpcmpeqw,
+    Vpcmpgtw,
     Vpcmpeqd,       // uses: a, b
     Vpcmpgtd,
     Vpcmpeqq,
     Vpcmpgtq,
     Vpminsd,
     Vpmaxsd,
+    Vpsllvb,
+    Vpsrlvb,
+    Vpsravb,
+    Vpsllvw,
+    Vpsrlvw,
+    Vpsravw,
     Vpsllvd,        // uses: value, per-lane amounts
     Vpsllvq,
     Vpsrlvd,
@@ -437,6 +471,8 @@ enum class LirOpcode : uint16_t {
     Vpsravd,
     Vpsravq,
     Vshufps,        // uses: a, b, imm
+    Vpblendvb,      // uses: b, a, mask (MSB per byte)
+    Vblendvw,       // AArch64 16-bit lane select
     Vblendvps,      // uses: b (lanes where the mask is clear), a, mask
     Vblendvpd,
     Vcvtdq2ps,      // uses: src
@@ -446,8 +482,17 @@ enum class LirOpcode : uint16_t {
     Vcvtps2pd,      // ymm from xmm
     Vcvtpd2ps,      // xmm from ymm
     Vpmovsxdq,      // ymm from xmm
+    Vpmovsxwd,
+    Vpmovzxwd,
+    Vpmovsxbd,
+    Vpmovzxbd,
+    Vpackssdw,
+    Vpacksswb,
     Vroundps,       // uses: src, imm mode
     Vroundpd,
+    Vpmovmskb,      // def gpr; uses: src
+    Vany8,          // AArch64 vany i8x16: def gpr; uses: src
+    Vany16,         // AArch64 vany i16x8: def gpr; uses: src
     Vmovmskps,      // def gpr; uses: src
     Vmovmskpd,
     // Branches & Calls

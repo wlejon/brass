@@ -36,6 +36,8 @@ std::string_view token_kind_name(TokenKind kind) noexcept {
         case TokenKind::Kw_gcref: return "gcref";
         case TokenKind::Kw_tagged: return "tagged";
         case TokenKind::Kw_void: return "void";
+        case TokenKind::Kw_i8x16: return "i8x16";
+        case TokenKind::Kw_i16x8: return "i16x8";
         case TokenKind::Kw_f32x4: return "f32x4";
         case TokenKind::Kw_f64x2: return "f64x2";
         case TokenKind::Kw_i32x4: return "i32x4";
@@ -331,6 +333,8 @@ Token Lexer::scan_identifier_or_keyword() {
     if (text == "gcref") return Token{TokenKind::Kw_gcref, text, loc, 0, 0.0};
     if (text == "tagged") return Token{TokenKind::Kw_tagged, text, loc, 0, 0.0};
     if (text == "void") return Token{TokenKind::Kw_void, text, loc, 0, 0.0};
+    if (text == "i8x16") return Token{TokenKind::Kw_i8x16, text, loc, 0, 0.0};
+    if (text == "i16x8") return Token{TokenKind::Kw_i16x8, text, loc, 0, 0.0};
     if (text == "f32x4") return Token{TokenKind::Kw_f32x4, text, loc, 0, 0.0};
     if (text == "f64x2") return Token{TokenKind::Kw_f64x2, text, loc, 0, 0.0};
     if (text == "i32x4") return Token{TokenKind::Kw_i32x4, text, loc, 0, 0.0};

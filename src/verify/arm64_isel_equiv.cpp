@@ -34,14 +34,14 @@ BVNodeId fit_width(BVContext& ctx, BVNodeId n, uint32_t w, bool sext = false) {
 
 std::pair<BVNodeId, BVNodeId> pack_v128_lanes(BVContext& ctx, Type t, const std::vector<BVNodeId>& lanes) {
     uint32_t ew = type_bv_width(t.element_type());
-    if (ew == 64 && lanes.size() == 2) {
-        return {fit_width(ctx, lanes[0], 64), fit_width(ctx, lanes[1], 64)};
+    size_t half = 64u / ew;
+    BVNodeId lo = fit_width(ctx, lanes[half - 1], ew);
+    BVNodeId hi = fit_width(ctx, lanes[2 * half - 1], ew);
+    for (size_t k = half - 1; k-- > 0;) {
+        lo = ctx.make_concat(lo, fit_width(ctx, lanes[k], ew));
+        hi = ctx.make_concat(hi, fit_width(ctx, lanes[half + k], ew));
     }
-    BVNodeId l0 = fit_width(ctx, lanes[0], 32);
-    BVNodeId l1 = fit_width(ctx, lanes[1], 32);
-    BVNodeId l2 = fit_width(ctx, lanes[2], 32);
-    BVNodeId l3 = fit_width(ctx, lanes[3], 32);
-    return {ctx.make_concat(l1, l0), ctx.make_concat(l3, l2)};
+    return {lo, hi};
 }
 
 std::vector<BVNodeId> unpack_v128_lanes(BVContext& ctx, Type t, BVNodeId lo, BVNodeId hi) {
@@ -49,12 +49,14 @@ std::vector<BVNodeId> unpack_v128_lanes(BVContext& ctx, Type t, BVNodeId lo, BVN
     if (ew == 64) {
         return {fit_width(ctx, lo, 64), fit_width(ctx, hi, 64)};
     }
-    return {
-        ctx.make_extract(lo, 31, 0),
-        ctx.make_extract(lo, 63, 32),
-        ctx.make_extract(hi, 31, 0),
-        ctx.make_extract(hi, 63, 32),
-    };
+    size_t half = 64u / ew;
+    std::vector<BVNodeId> out(2 * half);
+    for (size_t k = 0; k < half; ++k) {
+        uint32_t bit = static_cast<uint32_t>(k) * ew;
+        out[k] = ctx.make_extract(lo, bit + ew - 1, bit);
+        out[half + k] = ctx.make_extract(hi, bit + ew - 1, bit);
+    }
+    return out;
 }
 
 void merge_u32_map(BVContext& ctx, std::unordered_map<uint32_t, BVNodeId>& dst,

@@ -39,12 +39,13 @@ void PtxISel::lower_store(const brass::Instruction& inst) {
 
 void PtxISel::emit_vector_access(Opcode op, StateSpace space, brass::Type vt, Reg base, int32_t disp,
                                  const std::vector<Reg>& lanes) {
-    auto per_tuple = static_cast<size_t>(vt.element_type().size_in_bytes() == 8 ? 2 : 4);
+    const size_t elem_bytes = vt.element_type().size_in_bytes();
+    auto per_tuple = static_cast<size_t>(elem_bytes == 8 ? 2 : 4);
     Type t = type_for(vt);
     for (size_t first = 0; first < lanes.size(); first += per_tuple) {
         std::vector<Reg> tuple(lanes.begin() + static_cast<std::ptrdiff_t>(first),
                                lanes.begin() + static_cast<std::ptrdiff_t>(first + per_tuple));
-        auto tuple_disp = disp + static_cast<int32_t>(first / per_tuple) * 16;
+        auto tuple_disp = disp + static_cast<int32_t>(first * elem_bytes);
         Inst access = Inst::make(op, t).space(space).vec(per_tuple == 2 ? VecWidth::v2 : VecWidth::v4);
         if (op == Opcode::ld) access.dst(Operand::vec(std::move(tuple))).src(Operand::addr(base, tuple_disp));
         else                  access.src(Operand::addr(base, tuple_disp)).src(Operand::vec(std::move(tuple)));

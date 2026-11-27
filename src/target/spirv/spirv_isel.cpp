@@ -608,11 +608,21 @@ Id SpirvISel::scalar_type(Type t) {
 
 Id SpirvISel::part_type(Type t) {
     if (!t.is_vector()) return scalar_type(t);
+    if (t.kind() == TypeKind::I8x16) {
+        m_.add_capability(spv::CapabilityInt8);
+        return m_.t_vector(m_.t_int(8), 4);
+    }
+    if (t.kind() == TypeKind::I16x8) {
+        m_.add_capability(spv::CapabilityInt16);
+        return m_.t_vector(m_.t_int(16), 4);
+    }
     Type e = t.element_type();
     return m_.t_vector(scalar_type(e), static_cast<uint32_t>(16 / e.size_in_bytes()));
 }
 
 uint32_t SpirvISel::part_count(Type t) const {
+    if (t.kind() == TypeKind::I8x16) return 4;
+    if (t.kind() == TypeKind::I16x8) return 2;
     return t.is_vector() ? static_cast<uint32_t>(t.size_in_bytes() / 16) : 1;
 }
 

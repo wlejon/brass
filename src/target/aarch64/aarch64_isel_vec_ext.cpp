@@ -40,7 +40,8 @@ void AArch64ISel::lower_vector_lane_instruction(const Instruction& inst, LirBloc
 
     const Type t0 = inst.operand(0)->type();
     const bool is_v256 = t0.is_v256();
-    const bool wide_lanes = t0.element_type().size_in_bytes() == 8;
+    const size_t elem_sz = t0.element_type().size_in_bytes();
+    const bool wide_lanes = elem_sz == 8;
 
     switch (inst.opcode()) {
         case Opcode::vcmp_eq:
@@ -63,8 +64,14 @@ void AArch64ISel::lower_vector_lane_instruction(const Instruction& inst, LirBloc
                     emit3_16(wide_lanes ? LirOpcode::Vcmppd : LirOpcode::Vcmpps, dst, a, b, pred);
                     return;
                 }
-                const LirOpcode eq = wide_lanes ? LirOpcode::Vpcmpeqq : LirOpcode::Vpcmpeqd;
-                const LirOpcode gt = wide_lanes ? LirOpcode::Vpcmpgtq : LirOpcode::Vpcmpgtd;
+                const LirOpcode eq = (elem_sz == 1) ? LirOpcode::Vpcmpeqb
+                                   : (elem_sz == 2) ? LirOpcode::Vpcmpeqw
+                                   : wide_lanes     ? LirOpcode::Vpcmpeqq
+                                                    : LirOpcode::Vpcmpeqd;
+                const LirOpcode gt = (elem_sz == 1) ? LirOpcode::Vpcmpgtb
+                                   : (elem_sz == 2) ? LirOpcode::Vpcmpgtw
+                                   : wide_lanes     ? LirOpcode::Vpcmpgtq
+                                                    : LirOpcode::Vpcmpgtd;
                 switch (inst.opcode()) {
                     case Opcode::vcmp_eq: emit3_16(eq, dst, a, b); break;
                     case Opcode::vcmp_gt: emit3_16(gt, dst, a, b); break;
@@ -93,8 +100,11 @@ void AArch64ISel::lower_vector_lane_instruction(const Instruction& inst, LirBloc
 
         case Opcode::vselect: {
             const Type out_t = inst.type();
-            const LirOpcode bop = (out_t.element_type().size_in_bytes() == 8) ? LirOpcode::Vblendvpd
-                                                                              : LirOpcode::Vblendvps;
+            const size_t sel_sz = out_t.element_type().size_in_bytes();
+            const LirOpcode bop = (sel_sz == 1) ? LirOpcode::Vpblendvb
+                                : (sel_sz == 2) ? LirOpcode::Vblendvw
+                                : (sel_sz == 8) ? LirOpcode::Vblendvpd
+                                                : LirOpcode::Vblendvps;
             auto emit_sel_16 = [&](VReg dst, VReg mask, VReg a, VReg b) {
                 auto i = std::make_unique<LirInst>(bop);
                 i->add_def(LirOperand::vreg(dst, 16));
@@ -130,14 +140,25 @@ void AArch64ISel::lower_vector_lane_instruction(const Instruction& inst, LirBloc
                 }
                 if (def->opcode() == Opcode::vbroadcast && def->operand_count() >= 1) {
                     const Value* sc = def->operand(0);
+                    uint64_t trunc_mask = UINT64_MAX;
+                    if (sc && sc->is_instruction()) {
+                        const Opcode sop = sc->defining_instruction()->opcode();
+                        if (sop == Opcode::trunc_i8) {
+                            trunc_mask = 0xFFu;
+                            sc = sc->defining_instruction()->operand(0);
+                        } else if (sop == Opcode::trunc_i32) {
+                            trunc_mask = 0xFFFFFFFFu;
+                            sc = sc->defining_instruction()->operand(0);
+                        }
+                    }
                     if (!sc || !sc->is_instruction()) return false;
                     const Instruction* sdef = sc->defining_instruction();
                     if (sdef->opcode() == Opcode::iconst_i32) {
-                        out_amt = static_cast<uint32_t>(sdef->imm_i32());
+                        out_amt = static_cast<uint32_t>(sdef->imm_i32()) & trunc_mask;
                         return true;
                     }
                     if (sdef->opcode() == Opcode::iconst_i64) {
-                        out_amt = static_cast<uint64_t>(sdef->imm_i64());
+                        out_amt = static_cast<uint64_t>(sdef->imm_i64()) & trunc_mask;
                         return true;
                     }
                 }
@@ -145,18 +166,30 @@ void AArch64ISel::lower_vector_lane_instruction(const Instruction& inst, LirBloc
             };
 
             uint64_t imm_amt = 0;
-            const uint64_t lane_bits = wide_lanes ? 64u : 32u;
+            const uint64_t lane_bits = elem_sz * 8u;
             const bool use_imm = try_const_shift(inst.operand(1), imm_amt) && imm_amt < lane_bits;
             LirOpcode imm_op = LirOpcode::Nop;
             if (use_imm && imm_amt > 0) {
-                if (inst.opcode() == Opcode::vshl) imm_op = wide_lanes ? LirOpcode::Psllq : LirOpcode::Pslld;
-                else if (inst.opcode() == Opcode::vlshr) imm_op = wide_lanes ? LirOpcode::Psrlq : LirOpcode::Psrld;
-                else imm_op = wide_lanes ? LirOpcode::Psraq : LirOpcode::Psrad;
+                if (inst.opcode() == Opcode::vshl) {
+                    imm_op = (elem_sz == 1) ? LirOpcode::Psllb : (elem_sz == 2) ? LirOpcode::Psllw
+                           : wide_lanes     ? LirOpcode::Psllq : LirOpcode::Pslld;
+                } else if (inst.opcode() == Opcode::vlshr) {
+                    imm_op = (elem_sz == 1) ? LirOpcode::Psrlb : (elem_sz == 2) ? LirOpcode::Psrlw
+                           : wide_lanes     ? LirOpcode::Psrlq : LirOpcode::Psrld;
+                } else {
+                    imm_op = (elem_sz == 1) ? LirOpcode::Psrab : (elem_sz == 2) ? LirOpcode::Psraw
+                           : wide_lanes     ? LirOpcode::Psraq : LirOpcode::Psrad;
+                }
             }
             const LirOpcode reg_op =
-                (inst.opcode() == Opcode::vshl)  ? (wide_lanes ? LirOpcode::Vpsllvq : LirOpcode::Vpsllvd)
-              : (inst.opcode() == Opcode::vlshr) ? (wide_lanes ? LirOpcode::Vpsrlvq : LirOpcode::Vpsrlvd)
-                                                 : (wide_lanes ? LirOpcode::Vpsravq : LirOpcode::Vpsravd);
+                (inst.opcode() == Opcode::vshl)
+                    ? ((elem_sz == 1) ? LirOpcode::Vpsllvb : (elem_sz == 2) ? LirOpcode::Vpsllvw
+                      : wide_lanes    ? LirOpcode::Vpsllvq : LirOpcode::Vpsllvd)
+              : (inst.opcode() == Opcode::vlshr)
+                    ? ((elem_sz == 1) ? LirOpcode::Vpsrlvb : (elem_sz == 2) ? LirOpcode::Vpsrlvw
+                      : wide_lanes    ? LirOpcode::Vpsrlvq : LirOpcode::Vpsrlvd)
+                    : ((elem_sz == 1) ? LirOpcode::Vpsravb : (elem_sz == 2) ? LirOpcode::Vpsravw
+                      : wide_lanes    ? LirOpcode::Vpsravq : LirOpcode::Vpsravd);
 
             auto lower_sh_16 = [&](VReg dst, VReg v, VReg s) {
                 if (use_imm && imm_amt == 0) {
@@ -267,6 +300,14 @@ void AArch64ISel::lower_vector_lane_instruction(const Instruction& inst, LirBloc
 
         case Opcode::vany: {
             VReg dst = get_vreg(inst.result());
+            if (elem_sz <= 2) {
+                auto a = std::make_unique<LirInst>(elem_sz == 1 ? LirOpcode::Vany8 : LirOpcode::Vany16);
+                a->add_def(LirOperand::vreg(dst, 4));
+                a->add_use(LirOperand::vreg(get_vreg(inst.operand(0)), 16));
+                a->mir_origin = &inst;
+                lir_bb.append_inst(std::move(a));
+                break;
+            }
             const LirOpcode msk_op = wide_lanes ? LirOpcode::Vmovmskpd : LirOpcode::Vmovmskps;
             VReg bits = lir_fn_->allocate_vreg(RegClass::GPR, 4);
             if (is_v256) {

@@ -23,6 +23,12 @@ T bl_sdiv(T a, T b) {
     if (a == std::numeric_limits<T>::min() && b == -1) return a;
     return a / b;
 }
+void bl_vdiv_i8x16(int8_t* d, const int8_t* a, const int8_t* b) {
+    for (int i = 0; i < 16; ++i) d[i] = bl_sdiv(a[i], b[i]);
+}
+void bl_vdiv_i16x8(int16_t* d, const int16_t* a, const int16_t* b) {
+    for (int i = 0; i < 8; ++i) d[i] = bl_sdiv(a[i], b[i]);
+}
 void bl_vdiv_i32x4(int32_t* d, const int32_t* a, const int32_t* b) {
     for (int i = 0; i < 4; ++i) d[i] = bl_sdiv(a[i], b[i]);
 }
@@ -45,6 +51,8 @@ bool lane_source_ok(Type vt, Type s) {
     switch (vt.kind()) {
         case TypeKind::F32x4: return s.kind() == TypeKind::F32;
         case TypeKind::F64x2: return s.kind() == TypeKind::F64;
+        case TypeKind::I8x16: return s.kind() == TypeKind::I8 || bl_is_int32(s);
+        case TypeKind::I16x8: return s.kind() == TypeKind::I16 || bl_is_int32(s);
         case TypeKind::I32x4: return bl_is_int32(s);
         case TypeKind::I64x2: return s.kind() == TypeKind::I64;
         default: return false;
@@ -85,6 +93,9 @@ void check_vector_op(const Instruction& inst) {
         case Opcode::vstore:
             if (inst.operand(0)->type().is_vector()) reject(inst, "vector address");
             return;
+        case Opcode::vshuffle:
+            if (vt.element_type().size_in_bytes() < 4) reject(inst, "vshuffle for " + brass::to_string(vt));
+            return;
         default:
             return;
     }
@@ -119,9 +130,12 @@ void emit_binop(AArch64BaselineEmitter& em, const Instruction& inst) {
         }
         return;
     }
-    if (op == Opcode::vdiv && (k == TypeKind::I32x4 || k == TypeKind::I64x2)) {
-        call_lane_helper(em, k == TypeKind::I32x4 ? reinterpret_cast<const void*>(&bl_vdiv_i32x4)
-                                                  : reinterpret_cast<const void*>(&bl_vdiv_i64x2), inst);
+    if (op == Opcode::vdiv && (k == TypeKind::I8x16 || k == TypeKind::I16x8 || k == TypeKind::I32x4 || k == TypeKind::I64x2)) {
+        const void* fn = (k == TypeKind::I8x16) ? reinterpret_cast<const void*>(&bl_vdiv_i8x16)
+                       : (k == TypeKind::I16x8) ? reinterpret_cast<const void*>(&bl_vdiv_i16x8)
+                       : (k == TypeKind::I32x4) ? reinterpret_cast<const void*>(&bl_vdiv_i32x4)
+                                                : reinterpret_cast<const void*>(&bl_vdiv_i64x2);
+        call_lane_helper(em, fn, inst);
         return;
     }
 
@@ -131,14 +145,17 @@ void emit_binop(AArch64BaselineEmitter& em, const Instruction& inst) {
     switch (op) {
         case Opcode::vadd:
             if (k == TypeKind::F32x4) enc.vec_fadd_4s(d, x, y); else if (k == TypeKind::F64x2) enc.vec_fadd_2d(d, x, y);
+            else if (k == TypeKind::I8x16) enc.vec_add_16b(d, x, y); else if (k == TypeKind::I16x8) enc.vec_add_8h(d, x, y);
             else if (k == TypeKind::I32x4) enc.vec_add_4s(d, x, y); else enc.vec_add_2d(d, x, y);
             break;
         case Opcode::vsub:
             if (k == TypeKind::F32x4) enc.vec_fsub_4s(d, x, y); else if (k == TypeKind::F64x2) enc.vec_fsub_2d(d, x, y);
+            else if (k == TypeKind::I8x16) enc.vec_sub_16b(d, x, y); else if (k == TypeKind::I16x8) enc.vec_sub_8h(d, x, y);
             else if (k == TypeKind::I32x4) enc.vec_sub_4s(d, x, y); else enc.vec_sub_2d(d, x, y);
             break;
         case Opcode::vmul:
             if (k == TypeKind::F32x4) enc.vec_fmul_4s(d, x, y); else if (k == TypeKind::F64x2) enc.vec_fmul_2d(d, x, y);
+            else if (k == TypeKind::I8x16) enc.vec_mul_16b(d, x, y); else if (k == TypeKind::I16x8) enc.vec_mul_8h(d, x, y);
             else enc.vec_mul_4s(d, x, y);
             break;
         case Opcode::vdiv:
@@ -146,6 +163,14 @@ void emit_binop(AArch64BaselineEmitter& em, const Instruction& inst) {
             break;
         case Opcode::vmin:
         case Opcode::vmax:
+            if (k == TypeKind::I8x16) {
+                if (op == Opcode::vmin) enc.vec_smin_16b(d, x, y); else enc.vec_smax_16b(d, x, y);
+                break;
+            }
+            if (k == TypeKind::I16x8) {
+                if (op == Opcode::vmin) enc.vec_smin_8h(d, x, y); else enc.vec_smax_8h(d, x, y);
+                break;
+            }
             if (k == TypeKind::I32x4) {
                 if (op == Opcode::vmin) enc.vec_smin_4s(d, x, y); else enc.vec_smax_4s(d, x, y);
                 break;
@@ -198,6 +223,8 @@ void emit_vector_op(AArch64BaselineEmitter& em, const Instruction& inst) {
             switch (inst.type().kind()) {
                 case TypeKind::F32x4: enc.vec_fneg_4s(FPR::V0, FPR::V0); break; // flips the sign bit, NaNs too
                 case TypeKind::F64x2: enc.vec_fneg_2d(FPR::V0, FPR::V0); break;
+                case TypeKind::I8x16: enc.vec_neg_16b(FPR::V0, FPR::V0); break;
+                case TypeKind::I16x8: enc.vec_neg_8h(FPR::V0, FPR::V0); break;
                 case TypeKind::I32x4: enc.vec_neg_4s(FPR::V0, FPR::V0); break;
                 default: enc.vec_neg_2d(FPR::V0, FPR::V0); break;
             }
@@ -233,7 +260,13 @@ void emit_vector_op(AArch64BaselineEmitter& em, const Instruction& inst) {
             // Bit copies of the scalar into every lane.
             const Value* s = inst.operand(0);
             const TypeKind k = inst.type().kind();
-            if (k == TypeKind::F32x4 || k == TypeKind::I32x4) {
+            if (k == TypeKind::I8x16) {
+                enc.ldrb(GPR::X0, em.slot_addr(s, 1));
+                enc.vec_dup_16b(FPR::V0, GPR::X0);
+            } else if (k == TypeKind::I16x8) {
+                enc.ldrh(GPR::X0, em.slot_addr(s, 2));
+                enc.vec_dup_8h(FPR::V0, GPR::X0);
+            } else if (k == TypeKind::F32x4 || k == TypeKind::I32x4) {
                 enc.ldr32(GPR::X0, em.slot_addr(s, 4));
                 enc.vec_dup_4s(FPR::V0, GPR::X0);
             } else {
@@ -247,7 +280,13 @@ void emit_vector_op(AArch64BaselineEmitter& em, const Instruction& inst) {
             const Type vt = inst.operand(0)->type();
             const int32_t esz = static_cast<int32_t>(vt.element_type().size_in_bytes());
             const int32_t byte = static_cast<int32_t>(inst.lane()) * esz;
-            if (esz == 4) {
+            if (esz == 1) {
+                enc.ldrb(GPR::X0, em.slot_addr_at(inst.operand(0), byte, 1));
+                enc.str32(GPR::X0, em.slot_addr(inst.result(), 4));
+            } else if (esz == 2) {
+                enc.ldrh(GPR::X0, em.slot_addr_at(inst.operand(0), byte, 2));
+                enc.str32(GPR::X0, em.slot_addr(inst.result(), 4));
+            } else if (esz == 4) {
                 enc.ldr32(GPR::X0, em.slot_addr_at(inst.operand(0), byte, 4));
                 enc.str32(GPR::X0, em.slot_addr(inst.result(), 4));
             } else {
@@ -263,7 +302,13 @@ void emit_vector_op(AArch64BaselineEmitter& em, const Instruction& inst) {
             em.store_v(inst.result(), FPR::V0);
             const int32_t esz = static_cast<int32_t>(inst.type().element_type().size_in_bytes());
             const int32_t byte = static_cast<int32_t>(inst.lane()) * esz;
-            if (esz == 4) {
+            if (esz == 1) {
+                enc.ldrb(GPR::X0, em.slot_addr(inst.operand(1), 1));
+                enc.strb(GPR::X0, em.slot_addr_at(inst.result(), byte, 1));
+            } else if (esz == 2) {
+                enc.ldrh(GPR::X0, em.slot_addr(inst.operand(1), 2));
+                enc.strh(GPR::X0, em.slot_addr_at(inst.result(), byte, 2));
+            } else if (esz == 4) {
                 enc.ldr32(GPR::X0, em.slot_addr(inst.operand(1), 4));
                 enc.str32(GPR::X0, em.slot_addr_at(inst.result(), byte, 4));
             } else {

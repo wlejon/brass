@@ -389,7 +389,17 @@ public:
     void sqrtpd(XMM dst, XMM src);
     void sqrtpd(XMM dst, const MemAddress& src);
 
-    // Integer vectors (i32x4)
+    // Integer vectors (i8x16, i16x8, i32x4)
+    void paddb(XMM dst, XMM src); void paddb(XMM dst, const MemAddress& src);
+    void psubb(XMM dst, XMM src); void psubb(XMM dst, const MemAddress& src);
+    void pminsb(XMM dst, XMM src); void pminsb(XMM dst, const MemAddress& src);
+    void pmaxsb(XMM dst, XMM src); void pmaxsb(XMM dst, const MemAddress& src);
+    void paddw(XMM dst, XMM src); void paddw(XMM dst, const MemAddress& src);
+    void psubw(XMM dst, XMM src); void psubw(XMM dst, const MemAddress& src);
+    void pmullw(XMM dst, XMM src); void pmullw(XMM dst, const MemAddress& src);
+    void pminsw(XMM dst, XMM src); void pminsw(XMM dst, const MemAddress& src);
+    void pmaxsw(XMM dst, XMM src); void pmaxsw(XMM dst, const MemAddress& src);
+    void punpcklbw(XMM dst, XMM src); void punpcklbw(XMM dst, const MemAddress& src);
     void paddd(XMM dst, XMM src);
     void paddd(XMM dst, const MemAddress& src);
     void psubd(XMM dst, XMM src);
@@ -421,15 +431,24 @@ public:
     void pcmpeqd(XMM dst, XMM src);
     void pcmpeqd(XMM dst, const MemAddress& src);
     void pslld(XMM dst, uint8_t imm);
+    void psrad(XMM dst, uint8_t imm);
+    void psllw(XMM dst, uint8_t imm);
+    void psrlw(XMM dst, uint8_t imm);
+    void psraw(XMM dst, uint8_t imm);
     void psllq(XMM dst, uint8_t imm);
 
     // Shuffles & broadcast
     void shufps(XMM dst, XMM src, uint8_t imm);
     void shufpd(XMM dst, XMM src, uint8_t imm);
     void pshufd(XMM dst, XMM src, uint8_t imm);
+    void pshuflw(XMM dst, XMM src, uint8_t imm);
     void movddup(XMM dst, XMM src);
 
     // Lane insert & extract
+    void pinsrb(XMM dst, GPR src, uint8_t lane);
+    void pextrb(GPR dst, XMM src, uint8_t lane);
+    void pinsrw(XMM dst, GPR src, uint8_t lane);
+    void pextrw(GPR dst, XMM src, uint8_t lane);
     void pinsrd(XMM dst, GPR src, uint8_t lane);
     void pextrd(GPR dst, XMM src, uint8_t lane);
     void pinsrq(XMM dst, GPR src, uint8_t lane);

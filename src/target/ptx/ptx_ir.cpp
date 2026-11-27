@@ -100,6 +100,8 @@ Type type_for(brass::Type t) noexcept {
         case TypeKind::Void:  return Type::none;
         case TypeKind::F32x4: case TypeKind::F32x8: return Type::f32;
         case TypeKind::F64x2: case TypeKind::F64x4: return Type::f64;
+        case TypeKind::I8x16: return Type::u8;
+        case TypeKind::I16x8: return Type::u16;
         case TypeKind::I32x4: case TypeKind::I32x8: return Type::u32;
         case TypeKind::I64x2: case TypeKind::I64x4: return Type::u64;
     }

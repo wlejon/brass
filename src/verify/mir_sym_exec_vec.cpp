@@ -52,32 +52,30 @@ std::vector<BVNodeId> reinterpret_lanes(BVContext& ctx, const std::vector<BVNode
                                         uint32_t src_w, uint32_t dst_lanes, uint32_t dst_w) {
     // Pack into contiguous 64-bit words and unpack into dst_w-bit lanes.
     std::vector<BVNodeId> words64;
-    if (src_w == 64) {
-        words64 = src;
-    } else {
-        for (size_t i = 0; i + 1 < src.size(); i += 2) {
-            words64.push_back(ctx.make_concat(src[i + 1], src[i]));
+    const uint32_t sper = 64u / src_w;
+    for (size_t base = 0; base < src.size(); base += sper) {
+        size_t cnt = std::min<size_t>(sper, src.size() - base);
+        BVNodeId w = src[base + cnt - 1];
+        for (size_t k = cnt - 1; k-- > 0;) {
+            w = ctx.make_concat(w, src[base + k]);
         }
-        if (src.size() % 2 == 1) {
-            words64.push_back(ctx.make_zext(src.back(), 32));
+        if (cnt < sper) {
+            w = ctx.make_zext(w, static_cast<uint32_t>(64u - cnt * src_w));
         }
+        words64.push_back(w);
     }
     std::vector<BVNodeId> dst;
     dst.reserve(dst_lanes);
-    if (dst_w == 64) {
-        for (size_t i = 0; i < dst_lanes; ++i) {
-            dst.push_back(i < words64.size() ? words64[i] : ctx.make_const(0, 64));
-        }
-    } else {
-        for (size_t i = 0; i < dst_lanes; ++i) {
-            size_t wi = i / 2;
-            if (wi >= words64.size()) {
-                dst.push_back(ctx.make_const(0, 32));
-            } else if (i % 2 == 0) {
-                dst.push_back(ctx.make_extract(words64[wi], 31, 0));
-            } else {
-                dst.push_back(ctx.make_extract(words64[wi], 63, 32));
-            }
+    const uint32_t dper = 64u / dst_w;
+    for (size_t i = 0; i < dst_lanes; ++i) {
+        size_t wi = i / dper;
+        uint32_t bi = static_cast<uint32_t>(i % dper) * dst_w;
+        if (wi >= words64.size()) {
+            dst.push_back(ctx.make_const(0, dst_w));
+        } else if (dst_w == 64) {
+            dst.push_back(words64[wi]);
+        } else {
+            dst.push_back(ctx.make_extract(words64[wi], bi + dst_w - 1, bi));
         }
     }
     return dst;
@@ -157,7 +155,7 @@ bool symbolically_execute_vec_inst(
             Type mt = inst->memory_type().is_vector() ? inst->memory_type() : inst->operand(1)->type();
             uint32_t lanes = mt.vector_lanes();
             uint32_t eb = static_cast<uint32_t>(mt.element_type().size_in_bytes());
-            if (lanes == 0 || src.size() != lanes || (eb != 4 && eb != 8)) {
+            if (lanes == 0 || src.size() != lanes || (eb != 1 && eb != 2 && eb != 4 && eb != 8)) {
                 out.has_type_error = true;
                 return true;
             }
@@ -196,7 +194,8 @@ bool symbolically_execute_vec_inst(
             std::vector<BVNodeId> a, b;
             if (!get_vec_operand(inst, 0, vec_vals, out, a) ||
                 !get_vec_operand(inst, 1, vec_vals, out, b) ||
-                !rt.is_vector() || a.size() != res_lanes || b.size() != res_lanes) {
+                !rt.is_vector() || a.size() != res_lanes || b.size() != res_lanes ||
+                res_elem.size_in_bytes() < 4) {
                 out.has_type_error = true;
                 return true;
             }

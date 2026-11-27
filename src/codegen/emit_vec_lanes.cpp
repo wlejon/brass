@@ -29,6 +29,10 @@ bool vex_form(LirOpcode op, VexForm& f) {
     switch (op) {
         case LirOpcode::Vcmpps:     f = {0xC2, 1, 0, false, S::RVM_I}; return true;
         case LirOpcode::Vcmppd:     f = {0xC2, 1, 1, false, S::RVM_I}; return true;
+        case LirOpcode::Vpcmpeqb:   f = {0x74, 1, 1, false, S::RVM}; return true;
+        case LirOpcode::Vpcmpgtb:   f = {0x64, 1, 1, false, S::RVM}; return true;
+        case LirOpcode::Vpcmpeqw:   f = {0x75, 1, 1, false, S::RVM}; return true;
+        case LirOpcode::Vpcmpgtw:   f = {0x65, 1, 1, false, S::RVM}; return true;
         case LirOpcode::Vpcmpeqd:   f = {0x76, 1, 1, false, S::RVM}; return true;
         case LirOpcode::Vpcmpgtd:   f = {0x66, 1, 1, false, S::RVM}; return true;
         case LirOpcode::Vpcmpeqq:   f = {0x29, 2, 1, false, S::RVM}; return true;
@@ -41,6 +45,7 @@ bool vex_form(LirOpcode op, VexForm& f) {
         case LirOpcode::Vpsrlvq:    f = {0x45, 2, 1, true,  S::RVM}; return true;
         case LirOpcode::Vpsravd:    f = {0x46, 2, 1, false, S::RVM}; return true;
         case LirOpcode::Vshufps:    f = {0xC6, 1, 0, false, S::RVM_I}; return true;
+        case LirOpcode::Vpblendvb:  f = {0x4C, 3, 1, false, S::RVM_IS4}; return true;
         case LirOpcode::Vblendvps:  f = {0x4A, 3, 1, false, S::RVM_IS4}; return true;
         case LirOpcode::Vblendvpd:  f = {0x4B, 3, 1, false, S::RVM_IS4}; return true;
         case LirOpcode::Vcvtdq2ps:  f = {0x5B, 1, 0, false, S::RM}; return true;
@@ -50,8 +55,15 @@ bool vex_form(LirOpcode op, VexForm& f) {
         case LirOpcode::Vcvtps2pd:  f = {0x5A, 1, 0, false, S::RM}; return true;
         case LirOpcode::Vcvtpd2ps:  f = {0x5A, 1, 1, false, S::RM}; return true;
         case LirOpcode::Vpmovsxdq:  f = {0x25, 2, 1, false, S::RM}; return true;
+        case LirOpcode::Vpmovsxwd:  f = {0x23, 2, 1, false, S::RM}; return true;
+        case LirOpcode::Vpmovzxwd:  f = {0x33, 2, 1, false, S::RM}; return true;
+        case LirOpcode::Vpmovsxbd:  f = {0x21, 2, 1, false, S::RM}; return true;
+        case LirOpcode::Vpmovzxbd:  f = {0x31, 2, 1, false, S::RM}; return true;
+        case LirOpcode::Vpackssdw:  f = {0x6B, 1, 1, false, S::RVM}; return true;
+        case LirOpcode::Vpacksswb:  f = {0x63, 1, 1, false, S::RVM}; return true;
         case LirOpcode::Vroundps:   f = {0x08, 3, 1, false, S::RM_I}; return true;
         case LirOpcode::Vroundpd:   f = {0x09, 3, 1, false, S::RM_I}; return true;
+        case LirOpcode::Vpmovmskb:  f = {0xD7, 1, 1, false, S::RM}; return true;
         case LirOpcode::Vmovmskps:  f = {0x50, 1, 0, false, S::RM}; return true;
         case LirOpcode::Vmovmskpd:  f = {0x50, 1, 1, false, S::RM}; return true;
         default: return false;

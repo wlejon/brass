@@ -170,6 +170,8 @@ Value* build_zero_value(Builder& b, Type t) {
             return b.build_fconst_f64(0.0);
         case TypeKind::F32x4:
         case TypeKind::F64x2:
+        case TypeKind::I8x16:
+        case TypeKind::I16x8:
         case TypeKind::I32x4:
         case TypeKind::I64x2:
         case TypeKind::F32x8:

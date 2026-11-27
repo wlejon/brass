@@ -354,6 +354,26 @@ public:
     void vec_fsqrt_2d(FPR dst, FPR src);
 
     // 128-bit SIMD Vector (Integer & Bitwise)
+    void vec_add_16b(FPR dst, FPR src1, FPR src2);
+    void vec_add_8h(FPR dst, FPR src1, FPR src2);
+    void vec_sub_16b(FPR dst, FPR src1, FPR src2);
+    void vec_sub_8h(FPR dst, FPR src1, FPR src2);
+    void vec_mul_16b(FPR dst, FPR src1, FPR src2);
+    void vec_mul_8h(FPR dst, FPR src1, FPR src2);
+    void vec_smin_16b(FPR dst, FPR src1, FPR src2);
+    void vec_smin_8h(FPR dst, FPR src1, FPR src2);
+    void vec_smax_16b(FPR dst, FPR src1, FPR src2);
+    void vec_smax_8h(FPR dst, FPR src1, FPR src2);
+    void vec_umin_16b(FPR dst, FPR src1, FPR src2);
+    void vec_umin_8h(FPR dst, FPR src1, FPR src2);
+    void vec_neg_16b(FPR dst, FPR src);
+    void vec_neg_8h(FPR dst, FPR src);
+    void vec_dup_16b(FPR dst, GPR src);
+    void vec_dup_8h(FPR dst, GPR src);
+    void vec_ins_b(FPR dst, GPR src, uint8_t lane);
+    void vec_ins_h(FPR dst, GPR src, uint8_t lane);
+    void vec_umov_b(GPR dst, FPR src, uint8_t lane);
+    void vec_umov_h(GPR dst, FPR src, uint8_t lane);
     void vec_add_4s(FPR dst, FPR src1, FPR src2);
     void vec_sub_4s(FPR dst, FPR src1, FPR src2);
     void vec_mul_4s(FPR dst, FPR src1, FPR src2);
@@ -412,20 +432,36 @@ public:
     void vec_sqxtn2_4s(FPR dst, FPR src);
 
     // Vector register & immediate shifts.
+    void vec_ushl_16b(FPR dst, FPR src1, FPR src2);
+    void vec_ushl_8h(FPR dst, FPR src1, FPR src2);
     void vec_ushl_4s(FPR dst, FPR src1, FPR src2);
     void vec_ushl_2d(FPR dst, FPR src1, FPR src2);
+    void vec_sshl_16b(FPR dst, FPR src1, FPR src2);
+    void vec_sshl_8h(FPR dst, FPR src1, FPR src2);
     void vec_sshl_4s(FPR dst, FPR src1, FPR src2);
     void vec_sshl_2d(FPR dst, FPR src1, FPR src2);
+    void vec_shl_imm_16b(FPR dst, FPR src, uint8_t shift);
+    void vec_shl_imm_8h(FPR dst, FPR src, uint8_t shift);
     void vec_shl_imm_4s(FPR dst, FPR src, uint8_t shift);
     void vec_shl_imm_2d(FPR dst, FPR src, uint8_t shift);
+    void vec_ushr_imm_16b(FPR dst, FPR src, uint8_t shift);
+    void vec_ushr_imm_8h(FPR dst, FPR src, uint8_t shift);
     void vec_ushr_imm_4s(FPR dst, FPR src, uint8_t shift);
     void vec_ushr_imm_2d(FPR dst, FPR src, uint8_t shift);
+    void vec_sshr_imm_16b(FPR dst, FPR src, uint8_t shift);
+    void vec_sshr_imm_8h(FPR dst, FPR src, uint8_t shift);
     void vec_sshr_imm_4s(FPR dst, FPR src, uint8_t shift);
     void vec_sshr_imm_2d(FPR dst, FPR src, uint8_t shift);
 
     // Vector compares, bitwise insert-if-false, clamping & lane helpers.
+    void vec_cmeq_16b(FPR dst, FPR src1, FPR src2);
+    void vec_cmeq_8h(FPR dst, FPR src1, FPR src2);
     void vec_cmeq_4s(FPR dst, FPR src1, FPR src2);
     void vec_cmeq_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmgt_16b(FPR dst, FPR src1, FPR src2);
+    void vec_cmgt_8h(FPR dst, FPR src1, FPR src2);
+    void vec_cmge_16b(FPR dst, FPR src1, FPR src2);
+    void vec_cmge_8h(FPR dst, FPR src1, FPR src2);
     void vec_cmge_4s(FPR dst, FPR src1, FPR src2);
     void vec_cmge_2d(FPR dst, FPR src1, FPR src2);
     void vec_cmhi_4s(FPR dst, FPR src1, FPR src2);
@@ -436,13 +472,19 @@ public:
     void vec_fcmeq_2d(FPR dst, FPR src1, FPR src2);
     void vec_fcmge_4s(FPR dst, FPR src1, FPR src2);
     void vec_fcmge_2d(FPR dst, FPR src1, FPR src2);
+    void vec_cmlt_zero_16b(FPR dst, FPR src);
+    void vec_cmlt_zero_8h(FPR dst, FPR src);
     void vec_cmlt_zero_4s(FPR dst, FPR src);
     void vec_cmlt_zero_2d(FPR dst, FPR src);
     void vec_bif(FPR dst, FPR src1, FPR src2);
     void vec_umin_4s(FPR dst, FPR src1, FPR src2);
+    void vec_umaxv_16b(FPR dst, FPR src);
+    void vec_umaxv_8h(FPR dst, FPR src);
     void vec_umaxv_4s(FPR dst, FPR src);
     void vec_dup_d1(FPR dst, FPR src);
     void vec_ins_d1(FPR dst, FPR src);
+    void vec_movi_16b(FPR dst, uint8_t imm8);
+    void vec_movi_8h(FPR dst, uint8_t imm8, uint8_t lsl_bits = 0);
     void vec_movi_4s(FPR dst, uint8_t imm8, uint8_t lsl_bits = 0);
 
     // =========================================================================

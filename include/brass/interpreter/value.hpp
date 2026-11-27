@@ -24,6 +24,8 @@ enum class RuntimeValueKind : uint8_t {
     F64,
     Ptr,
     GCRef,
+    I8x16,
+    I16x8,
     F32x4,
     F64x2,
     I32x4,
@@ -137,6 +139,20 @@ public:
         return RuntimeValue();
     }
 
+    static RuntimeValue from_i8x16(const int8_t* arr) noexcept {
+        RuntimeValue v;
+        v.kind_ = RuntimeValueKind::I8x16;
+        if (arr) std::memcpy(v.vec_bytes_, arr, 16);
+        return v;
+    }
+
+    static RuntimeValue from_i16x8(const int16_t* arr) noexcept {
+        RuntimeValue v;
+        v.kind_ = RuntimeValueKind::I16x8;
+        if (arr) std::memcpy(v.vec_bytes_, arr, 16);
+        return v;
+    }
+
     static RuntimeValue from_f32x4(float f0, float f1, float f2, float f3) noexcept {
         RuntimeValue v;
         v.kind_ = RuntimeValueKind::F32x4;
@@ -232,6 +248,8 @@ public:
     static RuntimeValue from_v128(Type type, const void* bytes) noexcept {
         RuntimeValue v;
         switch (type.kind()) {
+            case TypeKind::I8x16: v.kind_ = RuntimeValueKind::I8x16; break;
+            case TypeKind::I16x8: v.kind_ = RuntimeValueKind::I16x8; break;
             case TypeKind::F32x4: v.kind_ = RuntimeValueKind::F32x4; break;
             case TypeKind::F64x2: v.kind_ = RuntimeValueKind::F64x2; break;
             case TypeKind::I32x4: v.kind_ = RuntimeValueKind::I32x4; break;
@@ -275,6 +293,8 @@ public:
             case TypeKind::GCRef: v.kind_ = RuntimeValueKind::GCRef; break;
             case TypeKind::Tagged: v.kind_ = RuntimeValueKind::Tagged; break;
             case TypeKind::Void: v.kind_ = RuntimeValueKind::Void; break;
+            case TypeKind::I8x16: v.kind_ = RuntimeValueKind::I8x16; std::memcpy(v.vec_bytes_, &bits, 8); break;
+            case TypeKind::I16x8: v.kind_ = RuntimeValueKind::I16x8; std::memcpy(v.vec_bytes_, &bits, 8); break;
             case TypeKind::F32x4: v.kind_ = RuntimeValueKind::F32x4; std::memcpy(v.vec_bytes_, &bits, 8); break;
             case TypeKind::F64x2: v.kind_ = RuntimeValueKind::F64x2; std::memcpy(v.vec_bytes_, &bits, 8); break;
             case TypeKind::I32x4: v.kind_ = RuntimeValueKind::I32x4; std::memcpy(v.vec_bytes_, &bits, 8); break;
@@ -301,6 +321,8 @@ public:
             case RuntimeValueKind::GCRef: return Type::gcref();
             case RuntimeValueKind::Tagged: return Type::tagged();
             case RuntimeValueKind::Void: return Type::void_type();
+            case RuntimeValueKind::I8x16: return Type::i8x16();
+            case RuntimeValueKind::I16x8: return Type::i16x8();
             case RuntimeValueKind::F32x4: return Type::f32x4();
             case RuntimeValueKind::F64x2: return Type::f64x2();
             case RuntimeValueKind::I32x4: return Type::i32x4();
@@ -331,13 +353,16 @@ public:
         return is_v128() || is_v256();
     }
     constexpr bool is_v128() const noexcept {
-        return kind_ == RuntimeValueKind::F32x4 || kind_ == RuntimeValueKind::F64x2 ||
+        return kind_ == RuntimeValueKind::I8x16 || kind_ == RuntimeValueKind::I16x8 ||
+               kind_ == RuntimeValueKind::F32x4 || kind_ == RuntimeValueKind::F64x2 ||
                kind_ == RuntimeValueKind::I32x4 || kind_ == RuntimeValueKind::I64x2;
     }
     constexpr bool is_v256() const noexcept {
         return kind_ == RuntimeValueKind::F32x8 || kind_ == RuntimeValueKind::F64x4 ||
                kind_ == RuntimeValueKind::I32x8 || kind_ == RuntimeValueKind::I64x4;
     }
+    constexpr bool is_i8x16() const noexcept { return kind_ == RuntimeValueKind::I8x16; }
+    constexpr bool is_i16x8() const noexcept { return kind_ == RuntimeValueKind::I16x8; }
     constexpr bool is_f32x4() const noexcept { return kind_ == RuntimeValueKind::F32x4; }
     constexpr bool is_f64x2() const noexcept { return kind_ == RuntimeValueKind::F64x2; }
     constexpr bool is_i32x4() const noexcept { return kind_ == RuntimeValueKind::I32x4; }
@@ -440,6 +465,18 @@ public:
             std::memcpy(&d, vec_bytes_ + idx * sizeof(double), sizeof(double));
         }
         return d;
+    }
+
+    int8_t i8_lane(size_t idx) const noexcept {
+        int8_t v = 0;
+        if (idx < 16) std::memcpy(&v, vec_bytes_ + idx, sizeof(int8_t));
+        return v;
+    }
+
+    int16_t i16_lane(size_t idx) const noexcept {
+        int16_t v = 0;
+        if (idx < 8) std::memcpy(&v, vec_bytes_ + idx * sizeof(int16_t), sizeof(int16_t));
+        return v;
     }
 
     int32_t i32_lane(size_t idx) const noexcept {

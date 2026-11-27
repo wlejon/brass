@@ -189,6 +189,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
             return has_mem_load ? 6 : 3;
         case LirOpcode::Mulps:
         case LirOpcode::Mulpd:
+        case LirOpcode::Pmulb:
+        case LirOpcode::Pmullw:
         case LirOpcode::Pmulld:
             return has_mem_load ? 7 : 4;
         case LirOpcode::Divps:
@@ -199,6 +201,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         case LirOpcode::Vsqrtps:
         case LirOpcode::Vsqrtpd:
             return has_mem_load ? 17 : 14;
+        case LirOpcode::Paddb: case LirOpcode::Psubb: case LirOpcode::Pminsb: case LirOpcode::Pmaxsb:
+        case LirOpcode::Paddw: case LirOpcode::Psubw: case LirOpcode::Pminsw: case LirOpcode::Pmaxsw:
         case LirOpcode::Paddd:
         case LirOpcode::Psubd:
         case LirOpcode::Pminsd:
@@ -212,6 +216,8 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         case LirOpcode::Pcmpeqd:
         case LirOpcode::Xorps:
             return has_mem_load ? 5 : 1;
+        case LirOpcode::Psllb: case LirOpcode::Psrlb: case LirOpcode::Psrab:
+        case LirOpcode::Psllw: case LirOpcode::Psrlw: case LirOpcode::Psraw:
         case LirOpcode::Pslld:
         case LirOpcode::Psllq:
         case LirOpcode::Psrld:
@@ -222,7 +228,11 @@ uint32_t get_instruction_latency(const LirInst& inst) {
         case LirOpcode::Shufps:
         case LirOpcode::Shufpd:
         case LirOpcode::Pshufd:
+        case LirOpcode::Pshuflw:
+        case LirOpcode::Punpcklbw:
         case LirOpcode::Movddup:
+        case LirOpcode::Pinsrb: case LirOpcode::Pextrb:
+        case LirOpcode::Pinsrw: case LirOpcode::Pextrw:
         case LirOpcode::Pinsrd:
         case LirOpcode::Pextrd:
         case LirOpcode::Pinsrq:

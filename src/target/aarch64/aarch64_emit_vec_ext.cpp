@@ -8,6 +8,18 @@ using namespace brass::codegen;
 
 void AArch64EmitContext::emit_vec_lane_instruction(const LirInst& inst) {
     switch (inst.opcode) {
+        case LirOpcode::Vpcmpeqb:
+            enc_.vec_cmeq_16b(to_fpr(inst.defs[0]), to_fpr(inst.uses[0]), to_fpr(inst.uses[1]));
+            break;
+        case LirOpcode::Vpcmpeqw:
+            enc_.vec_cmeq_8h(to_fpr(inst.defs[0]), to_fpr(inst.uses[0]), to_fpr(inst.uses[1]));
+            break;
+        case LirOpcode::Vpcmpgtb:
+            enc_.vec_cmgt_16b(to_fpr(inst.defs[0]), to_fpr(inst.uses[0]), to_fpr(inst.uses[1]));
+            break;
+        case LirOpcode::Vpcmpgtw:
+            enc_.vec_cmgt_8h(to_fpr(inst.defs[0]), to_fpr(inst.uses[0]), to_fpr(inst.uses[1]));
+            break;
         case LirOpcode::Vpcmpeqd: {
             enc_.vec_cmeq_4s(to_fpr(inst.defs[0]), to_fpr(inst.uses[0]), to_fpr(inst.uses[1]));
             break;
@@ -55,19 +67,62 @@ void AArch64EmitContext::emit_vec_lane_instruction(const LirInst& inst) {
             break;
         }
 
+        case LirOpcode::Vpblendvb:
+        case LirOpcode::Vblendvw:
         case LirOpcode::Vblendvps:
         case LirOpcode::Vblendvpd: {
             FPR dst = to_fpr(inst.defs[0]);
             FPR b = to_fpr(inst.uses[0]);
             FPR a = to_fpr(inst.uses[1]);
             FPR mask = to_fpr(inst.uses[2]);
-            if (inst.opcode == LirOpcode::Vblendvpd) {
-                enc_.vec_cmlt_zero_2d(FPR::V30, mask);
-            } else {
-                enc_.vec_cmlt_zero_4s(FPR::V30, mask);
-            }
+            if (inst.opcode == LirOpcode::Vpblendvb) enc_.vec_cmlt_zero_16b(FPR::V30, mask);
+            else if (inst.opcode == LirOpcode::Vblendvw) enc_.vec_cmlt_zero_8h(FPR::V30, mask);
+            else if (inst.opcode == LirOpcode::Vblendvpd) enc_.vec_cmlt_zero_2d(FPR::V30, mask);
+            else enc_.vec_cmlt_zero_4s(FPR::V30, mask);
             enc_.vec_bsl(FPR::V30, a, b);
             enc_.vec_orr(dst, FPR::V30, FPR::V30);
+            break;
+        }
+
+        case LirOpcode::Psllb:
+        case LirOpcode::Psrlb:
+        case LirOpcode::Psrab: {
+            FPR dst = to_fpr(inst.defs[0]);
+            FPR src = to_fpr(inst.uses[0]);
+            uint32_t shift = static_cast<uint32_t>(inst.uses.back().imm_int);
+            if (shift == 0) {
+                if (dst != src) enc_.vec_orr(dst, src, src);
+            } else if (shift >= 8u) {
+                if (inst.opcode == LirOpcode::Psrab) enc_.vec_sshr_imm_16b(dst, src, 8u);
+                else enc_.movi_zero(dst);
+            } else if (inst.opcode == LirOpcode::Psllb) {
+                enc_.vec_shl_imm_16b(dst, src, static_cast<uint8_t>(shift));
+            } else if (inst.opcode == LirOpcode::Psrlb) {
+                enc_.vec_ushr_imm_16b(dst, src, static_cast<uint8_t>(shift));
+            } else {
+                enc_.vec_sshr_imm_16b(dst, src, static_cast<uint8_t>(shift));
+            }
+            break;
+        }
+
+        case LirOpcode::Psllw:
+        case LirOpcode::Psrlw:
+        case LirOpcode::Psraw: {
+            FPR dst = to_fpr(inst.defs[0]);
+            FPR src = to_fpr(inst.uses[0]);
+            uint32_t shift = static_cast<uint32_t>(inst.uses.back().imm_int);
+            if (shift == 0) {
+                if (dst != src) enc_.vec_orr(dst, src, src);
+            } else if (shift >= 16u) {
+                if (inst.opcode == LirOpcode::Psraw) enc_.vec_sshr_imm_8h(dst, src, 16u);
+                else enc_.movi_zero(dst);
+            } else if (inst.opcode == LirOpcode::Psllw) {
+                enc_.vec_shl_imm_8h(dst, src, static_cast<uint8_t>(shift));
+            } else if (inst.opcode == LirOpcode::Psrlw) {
+                enc_.vec_ushr_imm_8h(dst, src, static_cast<uint8_t>(shift));
+            } else {
+                enc_.vec_sshr_imm_8h(dst, src, static_cast<uint8_t>(shift));
+            }
             break;
         }
 
@@ -101,6 +156,44 @@ void AArch64EmitContext::emit_vec_lane_instruction(const LirInst& inst) {
             } else {
                 if (inst.opcode == LirOpcode::Psrlq) enc_.vec_ushr_imm_2d(dst, src, static_cast<uint8_t>(shift));
                 else enc_.vec_sshr_imm_2d(dst, src, static_cast<uint8_t>(shift));
+            }
+            break;
+        }
+
+        case LirOpcode::Vpsllvb:
+        case LirOpcode::Vpsrlvb:
+        case LirOpcode::Vpsravb: {
+            FPR dst = to_fpr(inst.defs[0]);
+            FPR val = to_fpr(inst.uses[0]);
+            FPR amt = to_fpr(inst.uses[1]);
+            bool is_arith = (inst.opcode == LirOpcode::Vpsravb);
+            enc_.vec_movi_16b(FPR::V30, is_arith ? 7u : 8u);
+            enc_.vec_umin_16b(FPR::V30, amt, FPR::V30);
+            if (inst.opcode == LirOpcode::Vpsllvb) {
+                enc_.vec_ushl_16b(dst, val, FPR::V30);
+            } else {
+                enc_.vec_neg_16b(FPR::V30, FPR::V30);
+                if (is_arith) enc_.vec_sshl_16b(dst, val, FPR::V30);
+                else enc_.vec_ushl_16b(dst, val, FPR::V30);
+            }
+            break;
+        }
+
+        case LirOpcode::Vpsllvw:
+        case LirOpcode::Vpsrlvw:
+        case LirOpcode::Vpsravw: {
+            FPR dst = to_fpr(inst.defs[0]);
+            FPR val = to_fpr(inst.uses[0]);
+            FPR amt = to_fpr(inst.uses[1]);
+            bool is_arith = (inst.opcode == LirOpcode::Vpsravw);
+            enc_.vec_movi_8h(FPR::V30, is_arith ? 15u : 16u, 0);
+            enc_.vec_umin_8h(FPR::V30, amt, FPR::V30);
+            if (inst.opcode == LirOpcode::Vpsllvw) {
+                enc_.vec_ushl_8h(dst, val, FPR::V30);
+            } else {
+                enc_.vec_neg_8h(FPR::V30, FPR::V30);
+                if (is_arith) enc_.vec_sshl_8h(dst, val, FPR::V30);
+                else enc_.vec_ushl_8h(dst, val, FPR::V30);
             }
             break;
         }
@@ -307,6 +400,24 @@ void AArch64EmitContext::emit_vec_lane_instruction(const LirInst& inst) {
             enc_.lsr(GPR::X17, GPR::X17, 62);
             enc_.and32_imm(GPR::X17, GPR::X17, 2u);
             enc_.orr32(dst, GPR::X16, GPR::X17);
+            break;
+        }
+
+        case LirOpcode::Vany8: {
+            GPR dst = to_gpr(inst.defs[0]);
+            enc_.vec_cmlt_zero_16b(FPR::V30, to_fpr(inst.uses[0]));
+            enc_.vec_umaxv_16b(FPR::V30, FPR::V30);
+            enc_.fmov_to_gpr32(dst, FPR::V30);
+            enc_.lsr32(dst, dst, 7);
+            break;
+        }
+
+        case LirOpcode::Vany16: {
+            GPR dst = to_gpr(inst.defs[0]);
+            enc_.vec_cmlt_zero_8h(FPR::V30, to_fpr(inst.uses[0]));
+            enc_.vec_umaxv_8h(FPR::V30, FPR::V30);
+            enc_.fmov_to_gpr32(dst, FPR::V30);
+            enc_.lsr32(dst, dst, 15);
             break;
         }
 

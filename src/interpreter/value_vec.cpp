@@ -36,10 +36,38 @@ template <typename T> struct FSub { T operator()(T a, T b) const noexcept { retu
 template <typename T> struct FMul { T operator()(T a, T b) const noexcept { return fparith::mul(a, b); } };
 template <typename T> struct FDiv { T operator()(T a, T b) const noexcept { return fparith::div(a, b); } };
 
+template <typename Fn>
+bool narrow_int_vec_binop(RuntimeValue lhs, RuntimeValue rhs, Fn fn, RuntimeValue& out) {
+    if (lhs.is_i8x16()) {
+        int8_t r[16];
+        for (size_t i = 0; i < 16; ++i) r[i] = static_cast<int8_t>(fn(lhs.i8_lane(i), rhs.i8_lane(i)));
+        out = RuntimeValue::from_i8x16(r);
+        return true;
+    }
+    if (lhs.is_i16x8()) {
+        int16_t r[8];
+        for (size_t i = 0; i < 8; ++i) r[i] = static_cast<int16_t>(fn(lhs.i16_lane(i), rhs.i16_lane(i)));
+        out = RuntimeValue::from_i16x8(r);
+        return true;
+    }
+    return false;
+}
+
+template <typename T>
+T sdiv_wrap(T a, T b) noexcept {
+    if (b == 0) return 0;
+    if (a == std::numeric_limits<T>::min() && b == T{-1}) return a;
+    return static_cast<T>(a / b);
+}
+
 } // namespace
 
 RuntimeValue val_vadd(RuntimeValue lhs, RuntimeValue rhs) {
     if (RuntimeValue r; float_lane_binop<FAdd>(lhs, rhs, r)) return r;
+    if (RuntimeValue r; narrow_int_vec_binop(lhs, rhs, [](auto a, auto b) {
+            using U = std::make_unsigned_t<decltype(a)>;
+            return static_cast<U>(a) + static_cast<U>(b);
+        }, r)) return r;
     if (lhs.is_i32x4()) {
         return RuntimeValue::from_i32x4(
             static_cast<int32_t>(static_cast<uint32_t>(lhs.i32_lane(0)) + static_cast<uint32_t>(rhs.i32_lane(0))),
@@ -79,6 +107,10 @@ RuntimeValue val_vadd(RuntimeValue lhs, RuntimeValue rhs) {
 
 RuntimeValue val_vsub(RuntimeValue lhs, RuntimeValue rhs) {
     if (RuntimeValue r; float_lane_binop<FSub>(lhs, rhs, r)) return r;
+    if (RuntimeValue r; narrow_int_vec_binop(lhs, rhs, [](auto a, auto b) {
+            using U = std::make_unsigned_t<decltype(a)>;
+            return static_cast<U>(a) - static_cast<U>(b);
+        }, r)) return r;
     if (lhs.is_i32x4()) {
         return RuntimeValue::from_i32x4(
             static_cast<int32_t>(static_cast<uint32_t>(lhs.i32_lane(0)) - static_cast<uint32_t>(rhs.i32_lane(0))),
@@ -118,6 +150,10 @@ RuntimeValue val_vsub(RuntimeValue lhs, RuntimeValue rhs) {
 
 RuntimeValue val_vmul(RuntimeValue lhs, RuntimeValue rhs) {
     if (RuntimeValue r; float_lane_binop<FMul>(lhs, rhs, r)) return r;
+    if (RuntimeValue r; narrow_int_vec_binop(lhs, rhs, [](auto a, auto b) {
+            using U = std::make_unsigned_t<decltype(a)>;
+            return static_cast<U>(a) * static_cast<U>(b);
+        }, r)) return r;
     if (lhs.is_i32x4()) {
         return RuntimeValue::from_i32x4(
             static_cast<int32_t>(static_cast<uint32_t>(lhs.i32_lane(0)) * static_cast<uint32_t>(rhs.i32_lane(0))),
@@ -157,6 +193,7 @@ RuntimeValue val_vmul(RuntimeValue lhs, RuntimeValue rhs) {
 
 RuntimeValue val_vdiv(RuntimeValue lhs, RuntimeValue rhs) {
     if (RuntimeValue r; float_lane_binop<FDiv>(lhs, rhs, r)) return r;
+    if (RuntimeValue r; narrow_int_vec_binop(lhs, rhs, [](auto a, auto b) { return sdiv_wrap(a, b); }, r)) return r;
     if (lhs.is_i32x4()) {
         auto sdiv32 = [](int32_t a, int32_t b) -> int32_t {
             if (b == 0) return 0;
@@ -215,6 +252,16 @@ RuntimeValue val_vdiv(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_vneg(RuntimeValue val) {
+    if (val.is_i8x16()) {
+        int8_t r[16];
+        for (size_t i = 0; i < 16; ++i) r[i] = static_cast<int8_t>(-static_cast<uint8_t>(val.i8_lane(i)));
+        return RuntimeValue::from_i8x16(r);
+    }
+    if (val.is_i16x8()) {
+        int16_t r[8];
+        for (size_t i = 0; i < 8; ++i) r[i] = static_cast<int16_t>(-static_cast<uint16_t>(val.i16_lane(i)));
+        return RuntimeValue::from_i16x8(r);
+    }
     if (val.is_f32x4()) {
         return RuntimeValue::from_f32x4(
             -val.f32_lane(0),
@@ -287,6 +334,7 @@ RuntimeValue val_vneg(RuntimeValue val) {
 }
 
 RuntimeValue val_vmin(RuntimeValue lhs, RuntimeValue rhs) {
+    if (RuntimeValue r; narrow_int_vec_binop(lhs, rhs, [](auto a, auto b) { return std::min(a, b); }, r)) return r;
     if (lhs.is_f32x4()) {
         auto min_f = [](float a, float b) { return (b < a) ? b : a; };
         return RuntimeValue::from_f32x4(
@@ -363,6 +411,7 @@ RuntimeValue val_vmin(RuntimeValue lhs, RuntimeValue rhs) {
 }
 
 RuntimeValue val_vmax(RuntimeValue lhs, RuntimeValue rhs) {
+    if (RuntimeValue r; narrow_int_vec_binop(lhs, rhs, [](auto a, auto b) { return std::max(a, b); }, r)) return r;
     if (lhs.is_f32x4()) {
         auto max_f = [](float a, float b) { return (b > a) ? b : a; };
         return RuntimeValue::from_f32x4(
@@ -540,6 +589,16 @@ RuntimeValue val_vnot(RuntimeValue val) {
 
 RuntimeValue val_vbroadcast(Type vec_type, RuntimeValue val) {
     switch (vec_type.kind()) {
+        case TypeKind::I8x16: {
+            int8_t lanes[16];
+            std::fill(std::begin(lanes), std::end(lanes), static_cast<int8_t>(val.as_i32()));
+            return RuntimeValue::from_i8x16(lanes);
+        }
+        case TypeKind::I16x8: {
+            int16_t lanes[8];
+            std::fill(std::begin(lanes), std::end(lanes), static_cast<int16_t>(val.as_i32()));
+            return RuntimeValue::from_i16x8(lanes);
+        }
         case TypeKind::F32x4: {
             float f = val.is_f32() ? val.as_f32() : static_cast<float>(val.as_f64());
             return RuntimeValue::from_f32x4(f, f, f, f);
@@ -578,6 +637,12 @@ RuntimeValue val_vbroadcast(Type vec_type, RuntimeValue val) {
 }
 
 RuntimeValue val_vextract_lane(RuntimeValue val, uint32_t lane) {
+    if (val.is_i8x16()) {
+        return RuntimeValue::from_u32(static_cast<uint8_t>(val.i8_lane(lane)));
+    }
+    if (val.is_i16x8()) {
+        return RuntimeValue::from_u32(static_cast<uint16_t>(val.i16_lane(lane)));
+    }
     if (val.is_f32x4() || val.is_f32x8()) {
         return RuntimeValue::from_f32(val.f32_lane(lane));
     }
@@ -621,6 +686,16 @@ RuntimeValue val_vinsert_lane(RuntimeValue vec, RuntimeValue scalar, uint32_t la
     }
     uint8_t out[16];
     std::memcpy(out, vec.v128_bytes(), 16);
+    if (vec.is_i8x16()) {
+        uint8_t b = static_cast<uint8_t>(scalar.as_i32() & 0xFF);
+        if (lane < 16) out[lane] = b;
+        return RuntimeValue::from_v128(Type::i8x16(), out);
+    }
+    if (vec.is_i16x8()) {
+        uint16_t w = static_cast<uint16_t>(scalar.as_i32() & 0xFFFF);
+        if (lane < 8) std::memcpy(out + lane * sizeof(uint16_t), &w, sizeof(uint16_t));
+        return RuntimeValue::from_v128(Type::i16x8(), out);
+    }
     if (vec.is_f32x4()) {
         float f = scalar.is_f32() ? scalar.as_f32() : static_cast<float>(scalar.as_f64());
         if (lane < 4) std::memcpy(out + lane * sizeof(float), &f, sizeof(float));

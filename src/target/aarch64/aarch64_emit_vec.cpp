@@ -5,6 +5,18 @@ namespace brass::aarch64 {
 using namespace brass::codegen;
 
 void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
+    auto emit_bin_op = [&](auto reg_fn) {
+        FPR dst = to_fpr(inst.defs[0]);
+        FPR src1 = to_fpr(inst.uses[0]);
+        const auto& src2 = inst.uses.back();
+        if (src2.is_preg()) {
+            (enc_.*reg_fn)(dst, src1, to_fpr(src2));
+        } else {
+            enc_.ldr_q(FPR::V31, ensure_accessible_mem(to_mem_address(src2)));
+            (enc_.*reg_fn)(dst, src1, FPR::V31);
+        }
+    };
+
     switch (inst.opcode) {
         case LirOpcode::Movaps:
         case LirOpcode::Movups:
@@ -641,6 +653,36 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             buffer_.emit_inst(0x4F405400u | (shift << 16) | (reg_code(src) << 5) | reg_code(dst));
             break;
         }
+
+        case LirOpcode::Paddb:  emit_bin_op(&AArch64Encoder::vec_add_16b); break;
+        case LirOpcode::Paddw:  emit_bin_op(&AArch64Encoder::vec_add_8h); break;
+        case LirOpcode::Psubb:  emit_bin_op(&AArch64Encoder::vec_sub_16b); break;
+        case LirOpcode::Psubw:  emit_bin_op(&AArch64Encoder::vec_sub_8h); break;
+        case LirOpcode::Pmulb:  emit_bin_op(&AArch64Encoder::vec_mul_16b); break;
+        case LirOpcode::Pmullw: emit_bin_op(&AArch64Encoder::vec_mul_8h); break;
+        case LirOpcode::Pminsb: emit_bin_op(&AArch64Encoder::vec_smin_16b); break;
+        case LirOpcode::Pminsw: emit_bin_op(&AArch64Encoder::vec_smin_8h); break;
+        case LirOpcode::Pmaxsb: emit_bin_op(&AArch64Encoder::vec_smax_16b); break;
+        case LirOpcode::Pmaxsw: emit_bin_op(&AArch64Encoder::vec_smax_8h); break;
+
+        case LirOpcode::Pinsrb:
+            enc_.vec_ins_b(to_fpr(inst.defs[0]), to_gpr(inst.uses[1]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        case LirOpcode::Pinsrw:
+            enc_.vec_ins_h(to_fpr(inst.defs[0]), to_gpr(inst.uses[1]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        case LirOpcode::Pextrb:
+            enc_.vec_umov_b(to_gpr(inst.defs[0]), to_fpr(inst.uses[0]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        case LirOpcode::Pextrw:
+            enc_.vec_umov_h(to_gpr(inst.defs[0]), to_fpr(inst.uses[0]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        case LirOpcode::Vpbroadcastb:
+            enc_.vec_dup_16b(to_fpr(inst.defs[0]), to_gpr(inst.uses[0]));
+            break;
+        case LirOpcode::Vpbroadcastw:
+            enc_.vec_dup_8h(to_fpr(inst.defs[0]), to_gpr(inst.uses[0]));
+            break;
 
         default:
             throw_unsupported("aarch64 emit (vector)", to_string(inst.opcode));

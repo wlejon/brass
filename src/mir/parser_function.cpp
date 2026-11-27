@@ -67,6 +67,8 @@ Type Parser::parse_type() {
     if (tok.is(TokenKind::Kw_gcref)) { advance(); return Type::gcref(); }
     if (tok.is(TokenKind::Kw_tagged)) { advance(); return Type::tagged(); }
     if (tok.is(TokenKind::Kw_void)) { advance(); return Type::void_type(); }
+    if (tok.is(TokenKind::Kw_i8x16)) { advance(); return Type::i8x16(); }
+    if (tok.is(TokenKind::Kw_i16x8)) { advance(); return Type::i16x8(); }
     if (tok.is(TokenKind::Kw_f32x4)) { advance(); return Type::f32x4(); }
     if (tok.is(TokenKind::Kw_f64x2)) { advance(); return Type::f64x2(); }
     if (tok.is(TokenKind::Kw_i32x4)) { advance(); return Type::i32x4(); }

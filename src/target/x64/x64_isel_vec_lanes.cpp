@@ -64,7 +64,8 @@ void X64ISel::lower_vector_lanes(const Instruction& inst, LirBlock& lir_bb) {
 
     const Type t0 = inst.operand(0)->type();
     const uint8_t sz0 = static_cast<uint8_t>(t0.size_in_bytes());
-    const bool wide_lanes = t0.element_type().size_in_bytes() == 8;
+    const size_t elem_sz = t0.element_type().size_in_bytes();
+    const bool wide_lanes = elem_sz == 8;
 
     switch (inst.opcode()) {
         case Opcode::vcmp_eq: case Opcode::vcmp_ne: case Opcode::vcmp_lt:
@@ -86,8 +87,12 @@ void X64ISel::lower_vector_lanes(const Instruction& inst, LirBlock& lir_bb) {
                 emit3(wide_lanes ? LirOpcode::Vcmppd : LirOpcode::Vcmpps, dst, a, b, sz0, pred);
                 break;
             }
-            const LirOpcode eq = wide_lanes ? LirOpcode::Vpcmpeqq : LirOpcode::Vpcmpeqd;
-            const LirOpcode gt = wide_lanes ? LirOpcode::Vpcmpgtq : LirOpcode::Vpcmpgtd;
+            const LirOpcode eq = (elem_sz == 1) ? LirOpcode::Vpcmpeqb
+                               : (elem_sz == 2) ? LirOpcode::Vpcmpeqw
+                               : wide_lanes ? LirOpcode::Vpcmpeqq : LirOpcode::Vpcmpeqd;
+            const LirOpcode gt = (elem_sz == 1) ? LirOpcode::Vpcmpgtb
+                               : (elem_sz == 2) ? LirOpcode::Vpcmpgtw
+                               : wide_lanes ? LirOpcode::Vpcmpgtq : LirOpcode::Vpcmpgtd;
             switch (inst.opcode()) {
                 case Opcode::vcmp_eq: emit3(eq, dst, a, b, sz0); break;
                 case Opcode::vcmp_gt: emit3(gt, dst, a, b, sz0); break;
@@ -111,8 +116,28 @@ void X64ISel::lower_vector_lanes(const Instruction& inst, LirBlock& lir_bb) {
             VReg b = get_vreg(inst.operand(2));
             const Type t = inst.type();
             const uint8_t sz = static_cast<uint8_t>(t.size_in_bytes());
-            auto i = std::make_unique<LirInst>(t.element_type().size_in_bytes() == 8 ? LirOpcode::Vblendvpd
-                                                                                      : LirOpcode::Vblendvps);
+            const size_t esz = t.element_type().size_in_bytes();
+            if (esz <= 2) {
+                VReg bmask = mask;
+                if (esz == 2) {
+                    bmask = vreg_xmm(16);
+                    emit_copy(bmask, mask, 16);
+                    auto s = std::make_unique<LirInst>(LirOpcode::Psraw);
+                    s->add_def(LirOperand::vreg(bmask, 16));
+                    s->add_use(LirOperand::vreg(bmask, 16));
+                    s->add_use(LirOperand::imm(15, 1));
+                    lir_bb.append_inst(std::move(s));
+                }
+                auto i = std::make_unique<LirInst>(LirOpcode::Vpblendvb);
+                i->add_def(LirOperand::vreg(dst, 16));
+                i->add_use(LirOperand::vreg(b, 16));
+                i->add_use(LirOperand::vreg(a, 16));
+                i->add_use(LirOperand::vreg(bmask, 16));
+                i->mir_origin = &inst;
+                lir_bb.append_inst(std::move(i));
+                break;
+            }
+            auto i = std::make_unique<LirInst>(esz == 8 ? LirOpcode::Vblendvpd : LirOpcode::Vblendvps);
             i->add_def(LirOperand::vreg(dst, sz));
             i->add_use(LirOperand::vreg(b, sz));
             i->add_use(LirOperand::vreg(a, sz));
@@ -126,6 +151,56 @@ void X64ISel::lower_vector_lanes(const Instruction& inst, LirBlock& lir_bb) {
             VReg dst = get_vreg(inst.result());
             VReg v = get_vreg(inst.operand(0));
             VReg s = get_vreg(inst.operand(1));
+            auto emit_two_imm = [&](LirOpcode sop, VReg r, int imm) {
+                auto i = std::make_unique<LirInst>(sop);
+                i->add_def(LirOperand::vreg(r, 16));
+                i->add_use(LirOperand::vreg(r, 16));
+                i->add_use(LirOperand::imm(imm, 1));
+                lir_bb.append_inst(std::move(i));
+            };
+            auto shift_chunk4 = [&](VReg v_chunk, VReg s_chunk, bool is_byte) {
+                LirOpcode vext = (inst.opcode() == Opcode::vashr)
+                    ? (is_byte ? LirOpcode::Vpmovsxbd : LirOpcode::Vpmovsxwd)
+                    : (is_byte ? LirOpcode::Vpmovzxbd : LirOpcode::Vpmovzxwd);
+                LirOpcode sext = is_byte ? LirOpcode::Vpmovzxbd : LirOpcode::Vpmovzxwd;
+                LirOpcode sh_op = inst.opcode() == Opcode::vshl ? LirOpcode::Vpsllvd
+                                : inst.opcode() == Opcode::vlshr ? LirOpcode::Vpsrlvd : LirOpcode::Vpsravd;
+                VReg vw = vreg_xmm(16), sw = vreg_xmm(16), sh = vreg_xmm(16);
+                emit2(vext, vw, 16, v_chunk, 16);
+                emit2(sext, sw, 16, s_chunk, 16);
+                emit3(sh_op, sh, vw, sw, 16);
+                if (inst.opcode() != Opcode::vashr) {
+                    const int sbits = is_byte ? 24 : 16;
+                    emit_two_imm(LirOpcode::Pslld, sh, sbits);
+                    emit_two_imm(LirOpcode::Psrad, sh, sbits);
+                }
+                return sh;
+            };
+            if (elem_sz == 2) {
+                VReg v_hi = vreg_xmm(16), s_hi = vreg_xmm(16);
+                emit3(LirOpcode::Pshufd, v_hi, v, v, 16, 0x4E);
+                emit3(LirOpcode::Pshufd, s_hi, s, s, 16, 0x4E);
+                emit3(LirOpcode::Vpackssdw, dst, shift_chunk4(v, s, false), shift_chunk4(v_hi, s_hi, false), 16);
+                break;
+            }
+            if (elem_sz == 1) {
+                const int perms[4] = {0x00, 0x55, 0xAA, 0xFF};
+                VReg q[4];
+                for (int k = 0; k < 4; ++k) {
+                    VReg vc = (k == 0) ? v : vreg_xmm(16);
+                    VReg sc = (k == 0) ? s : vreg_xmm(16);
+                    if (k > 0) {
+                        emit3(LirOpcode::Pshufd, vc, v, v, 16, perms[k]);
+                        emit3(LirOpcode::Pshufd, sc, s, s, 16, perms[k]);
+                    }
+                    q[k] = shift_chunk4(vc, sc, true);
+                }
+                VReg lo8 = vreg_xmm(16), hi8 = vreg_xmm(16);
+                emit3(LirOpcode::Vpackssdw, lo8, q[0], q[1], 16);
+                emit3(LirOpcode::Vpackssdw, hi8, q[2], q[3], 16);
+                emit3(LirOpcode::Vpacksswb, dst, lo8, hi8, 16);
+                break;
+            }
             if (!wide_lanes) {
                 const LirOpcode op = inst.opcode() == Opcode::vshl ? LirOpcode::Vpsllvd
                                    : inst.opcode() == Opcode::vlshr ? LirOpcode::Vpsrlvd : LirOpcode::Vpsravd;
@@ -202,10 +277,20 @@ void X64ISel::lower_vector_lanes(const Instruction& inst, LirBlock& lir_bb) {
             VReg dst = get_vreg(inst.result());
             VReg v = get_vreg(inst.operand(0));
             VReg bits = lir_fn_->allocate_vreg(RegClass::GPR, 4);
-            auto msk = std::make_unique<LirInst>(wide_lanes ? LirOpcode::Vmovmskpd : LirOpcode::Vmovmskps);
+            const LirOpcode mop = (elem_sz <= 2) ? LirOpcode::Vpmovmskb
+                                : (wide_lanes ? LirOpcode::Vmovmskpd : LirOpcode::Vmovmskps);
+            auto msk = std::make_unique<LirInst>(mop);
             msk->add_def(LirOperand::vreg(bits, 4));
             msk->add_use(LirOperand::vreg(v, sz0));
             lir_bb.append_inst(std::move(msk));
+
+            if (elem_sz == 2) {
+                auto and_msk = std::make_unique<LirInst>(LirOpcode::And32);
+                and_msk->add_def(LirOperand::vreg(bits, 4));
+                and_msk->add_use(LirOperand::vreg(bits, 4));
+                and_msk->add_use(LirOperand::imm(0xAAAA, 4));
+                lir_bb.append_inst(std::move(and_msk));
+            }
 
             auto test = std::make_unique<LirInst>(LirOpcode::Test32);
             test->add_use(LirOperand::vreg(bits, 4));

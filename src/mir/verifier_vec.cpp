@@ -276,6 +276,10 @@ bool verify_vector_instruction(
                 report_error(inst_prefix + "Operands must be vector types.");
                 return false;
             }
+            if (t0.element_type().size_in_bytes() < 4) {
+                report_error(inst_prefix + "vshuffle requires 32-bit or 64-bit vector lanes.");
+                return false;
+            }
             if (t0 != t1) {
                 report_error(inst_prefix + "Vector operand types mismatch: " +
                              std::string(t0.name()) + " vs " + std::string(t1.name()) + ".");

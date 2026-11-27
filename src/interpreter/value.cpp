@@ -523,6 +523,24 @@ std::string to_string(const RuntimeValue& val) {
             ss << ">";
             return ss.str();
         }
+        case RuntimeValueKind::I8x16: {
+            ss << "<";
+            for (size_t i = 0; i < 16; ++i) {
+                if (i > 0) ss << ", ";
+                ss << static_cast<int>(val.i8_lane(i));
+            }
+            ss << ">";
+            return ss.str();
+        }
+        case RuntimeValueKind::I16x8: {
+            ss << "<";
+            for (size_t i = 0; i < 8; ++i) {
+                if (i > 0) ss << ", ";
+                ss << static_cast<int>(val.i16_lane(i));
+            }
+            ss << ">";
+            return ss.str();
+        }
         case RuntimeValueKind::I32x4: {
             ss << "<" << val.i32_lane(0) << ", " << val.i32_lane(1) << ", "
                << val.i32_lane(2) << ", " << val.i32_lane(3) << ">";

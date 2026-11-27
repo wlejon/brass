@@ -125,9 +125,17 @@ DEFINE_SSE2_OP(maxpd, 0x5F)
 DEFINE_SSE2_OP(sqrtpd, 0x51)
 
 // -------------------------------------------------------------------------
-// Integer vectors (i32x4 & i64x2)
+// Integer vectors (i8x16, i16x8, i32x4 & i64x2)
 // -------------------------------------------------------------------------
 
+DEFINE_SSE2_OP(paddb, 0xFC)
+DEFINE_SSE2_OP(psubb, 0xF8)
+DEFINE_SSE2_OP(paddw, 0xFD)
+DEFINE_SSE2_OP(psubw, 0xF9)
+DEFINE_SSE2_OP(pmullw, 0xD5)
+DEFINE_SSE2_OP(pminsw, 0xEA)
+DEFINE_SSE2_OP(pmaxsw, 0xEE)
+DEFINE_SSE2_OP(punpcklbw, 0x60)
 DEFINE_SSE2_OP(paddd, 0xFE)
 DEFINE_SSE2_OP(psubd, 0xFA)
 DEFINE_SSE2_OP(paddq, 0xD4)
@@ -167,6 +175,8 @@ DEFINE_SSE2_OP(pandn, 0xDF)
         emit_mem_operand(reg_code(dst), src);                                 \
     }
 
+DEFINE_SSE41_OP(pminsb, 0x38)
+DEFINE_SSE41_OP(pmaxsb, 0x3C)
 DEFINE_SSE41_OP(pmulld, 0x40)
 DEFINE_SSE41_OP(pminsd, 0x39)
 DEFINE_SSE41_OP(pmaxsd, 0x3D)
@@ -199,6 +209,42 @@ void X64Encoder::pslld(XMM dst, uint8_t imm) {
     buffer_.emit8(0x0F);
     buffer_.emit8(0x72);
     emit_modrm(3, 6, reg_code(dst));
+    buffer_.emit8(imm);
+}
+
+void X64Encoder::psrad(XMM dst, uint8_t imm) {
+    buffer_.emit8(0x66);
+    emit_rex(false, false, false, is_extended(dst));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x72);
+    emit_modrm(3, 4, reg_code(dst));
+    buffer_.emit8(imm);
+}
+
+void X64Encoder::psllw(XMM dst, uint8_t imm) {
+    buffer_.emit8(0x66);
+    emit_rex(false, false, false, is_extended(dst));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x71);
+    emit_modrm(3, 6, reg_code(dst));
+    buffer_.emit8(imm);
+}
+
+void X64Encoder::psrlw(XMM dst, uint8_t imm) {
+    buffer_.emit8(0x66);
+    emit_rex(false, false, false, is_extended(dst));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x71);
+    emit_modrm(3, 2, reg_code(dst));
+    buffer_.emit8(imm);
+}
+
+void X64Encoder::psraw(XMM dst, uint8_t imm) {
+    buffer_.emit8(0x66);
+    emit_rex(false, false, false, is_extended(dst));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x71);
+    emit_modrm(3, 4, reg_code(dst));
     buffer_.emit8(imm);
 }
 
@@ -241,6 +287,15 @@ void X64Encoder::pshufd(XMM dst, XMM src, uint8_t imm) {
     buffer_.emit8(imm);
 }
 
+void X64Encoder::pshuflw(XMM dst, XMM src, uint8_t imm) {
+    buffer_.emit8(0xF2);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x70);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+    buffer_.emit8(imm);
+}
+
 void X64Encoder::movddup(XMM dst, XMM src) {
     buffer_.emit8(0xF2);
     emit_rex(false, is_extended(dst), false, is_extended(src));
@@ -252,6 +307,44 @@ void X64Encoder::movddup(XMM dst, XMM src) {
 // -------------------------------------------------------------------------
 // Lane insert & extract
 // -------------------------------------------------------------------------
+
+void X64Encoder::pinsrb(XMM dst, GPR src, uint8_t lane) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x3A);
+    buffer_.emit8(0x20);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+    buffer_.emit8(lane);
+}
+
+void X64Encoder::pextrb(GPR dst, XMM src, uint8_t lane) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(src), false, is_extended(dst));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0x3A);
+    buffer_.emit8(0x14);
+    emit_modrm(3, reg_code(src), reg_code(dst));
+    buffer_.emit8(lane);
+}
+
+void X64Encoder::pinsrw(XMM dst, GPR src, uint8_t lane) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0xC4);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+    buffer_.emit8(lane);
+}
+
+void X64Encoder::pextrw(GPR dst, XMM src, uint8_t lane) {
+    buffer_.emit8(0x66);
+    emit_rex(false, is_extended(dst), false, is_extended(src));
+    buffer_.emit8(0x0F);
+    buffer_.emit8(0xC5);
+    emit_modrm(3, reg_code(dst), reg_code(src));
+    buffer_.emit8(lane);
+}
 
 void X64Encoder::pinsrd(XMM dst, GPR src, uint8_t lane) {
     buffer_.emit8(0x66);

@@ -632,6 +632,15 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Minpd:
         case LirOpcode::Maxpd:
         case LirOpcode::Sqrtpd:
+        case LirOpcode::Paddb:
+        case LirOpcode::Psubb:
+        case LirOpcode::Pminsb:
+        case LirOpcode::Pmaxsb:
+        case LirOpcode::Paddw:
+        case LirOpcode::Psubw:
+        case LirOpcode::Pmullw:
+        case LirOpcode::Pminsw:
+        case LirOpcode::Pmaxsw:
         case LirOpcode::Paddd:
         case LirOpcode::Psubd:
         case LirOpcode::Pmulld:
@@ -644,6 +653,9 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Pxor:
         case LirOpcode::Pandn:
         case LirOpcode::Pcmpeqd:
+        case LirOpcode::Psllw:
+        case LirOpcode::Psrlw:
+        case LirOpcode::Psraw:
         case LirOpcode::Pslld:
         case LirOpcode::Psllq:
         case LirOpcode::Psrld:
@@ -653,7 +665,13 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
         case LirOpcode::Shufps:
         case LirOpcode::Shufpd:
         case LirOpcode::Pshufd:
+        case LirOpcode::Pshuflw:
+        case LirOpcode::Punpcklbw:
         case LirOpcode::Movddup:
+        case LirOpcode::Pinsrb:
+        case LirOpcode::Pextrb:
+        case LirOpcode::Pinsrw:
+        case LirOpcode::Pextrw:
         case LirOpcode::Pinsrd:
         case LirOpcode::Pextrd:
         case LirOpcode::Pinsrq:
@@ -708,17 +726,24 @@ void EmitContext::emit_instruction(const LirInst& inst, bool is_entry_block, boo
             emit_vec_instruction(inst);
             break;
         case LirOpcode::Vcmpps: case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqb: case LirOpcode::Vpcmpgtb:
+        case LirOpcode::Vpcmpeqw: case LirOpcode::Vpcmpgtw:
         case LirOpcode::Vpcmpeqd: case LirOpcode::Vpcmpgtd:
         case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
         case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
         case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
         case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq:
         case LirOpcode::Vpsravd: case LirOpcode::Vpsravq:
-        case LirOpcode::Vshufps: case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
+        case LirOpcode::Vshufps: case LirOpcode::Vpblendvb:
+        case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
         case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
         case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:
         case LirOpcode::Vcvtps2pd: case LirOpcode::Vcvtpd2ps: case LirOpcode::Vpmovsxdq:
+        case LirOpcode::Vpmovsxwd: case LirOpcode::Vpmovzxwd:
+        case LirOpcode::Vpmovsxbd: case LirOpcode::Vpmovzxbd:
+        case LirOpcode::Vpackssdw: case LirOpcode::Vpacksswb:
         case LirOpcode::Vroundps: case LirOpcode::Vroundpd:
+        case LirOpcode::Vpmovmskb:
         case LirOpcode::Vmovmskps: case LirOpcode::Vmovmskpd:
             emit_vex_lanes_instruction(inst);
             break;

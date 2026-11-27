@@ -24,6 +24,8 @@ std::string_view Type::name() const noexcept {
         case TypeKind::Ptr: return "ptr";
         case TypeKind::GCRef: return "gcref";
         case TypeKind::Void: return "void";
+        case TypeKind::I8x16: return "i8x16";
+        case TypeKind::I16x8: return "i16x8";
         case TypeKind::F32x4: return "f32x4";
         case TypeKind::F64x2: return "f64x2";
         case TypeKind::I32x4: return "i32x4";

@@ -18,6 +18,8 @@ Type parse_type_from_string(std::string_view s) {
     if (s == "gcref") return Type::gcref();
     if (s == "tagged") return Type::tagged();
     if (s == "void") return Type::void_type();
+    if (s == "i8x16") return Type::i8x16();
+    if (s == "i16x8") return Type::i16x8();
     if (s == "f32x4") return Type::f32x4();
     if (s == "f64x2") return Type::f64x2();
     if (s == "i32x4") return Type::i32x4();

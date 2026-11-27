@@ -257,6 +257,8 @@ std::string MslFnBuilder::msl_type(Type t) const {
             case TypeKind::F64x2:
             case TypeKind::F32x8:
             case TypeKind::F64x4:
+            case TypeKind::I8x16:
+            case TypeKind::I16x8:
             case TypeKind::I32x8:
             case TypeKind::I64x4:
                 fail_msl(fn_, "unsupported type in Metal MSL: " + std::string(t.name()));

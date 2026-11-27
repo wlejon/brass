@@ -20,6 +20,31 @@ std::pair<BVNodeId, BVNodeId> pack_4x32(BVContext& ctx, const std::array<BVNodeI
     return {ctx.make_concat(lanes[1], lanes[0]), ctx.make_concat(lanes[3], lanes[2])};
 }
 
+template <size_t N>
+std::array<BVNodeId, N> extract_v128(BVContext& ctx, BVNodeId lo, BVNodeId hi) {
+    constexpr uint32_t w = 128u / static_cast<uint32_t>(N);
+    constexpr size_t half = N / 2;
+    std::array<BVNodeId, N> r{};
+    for (size_t i = 0; i < half; ++i) {
+        uint32_t b = static_cast<uint32_t>(i) * w;
+        r[i] = ctx.make_extract(lo, b + w - 1, b);
+        r[half + i] = ctx.make_extract(hi, b + w - 1, b);
+    }
+    return r;
+}
+
+template <size_t N>
+std::pair<BVNodeId, BVNodeId> pack_v128(BVContext& ctx, const std::array<BVNodeId, N>& lanes) {
+    constexpr size_t half = N / 2;
+    BVNodeId lo = lanes[half - 1];
+    BVNodeId hi = lanes[N - 1];
+    for (size_t k = half - 1; k-- > 0;) {
+        lo = ctx.make_concat(lo, lanes[k]);
+        hi = ctx.make_concat(hi, lanes[half + k]);
+    }
+    return {lo, hi};
+}
+
 BVNodeId cmp_f_mask(BVContext& ctx, int pred, BVNodeId a, BVNodeId b, uint32_t w) {
     BVNodeId cond = ctx.make_const(0, 1);
     switch (pred) {
@@ -704,6 +729,199 @@ bool execute_arm64_vec_inst(BVContext& ctx, Arm64InitEnv& env, Arm64ExecState& s
             auto [bl, bh] = read_v(op1);
             uint32_t mask = static_cast<uint32_t>(inst.uses.back().imm_int);
             write_v(inst.defs[0], (mask & 1u) ? ah : al, (mask & 2u) ? bh : bl);
+            return true;
+        }
+
+        // Narrow 128-bit integer SIMD (16x i8 and 8x i16)
+        case LirOpcode::Paddb: case LirOpcode::Psubb: case LirOpcode::Pmulb:
+        case LirOpcode::Pminsb: case LirOpcode::Pmaxsb:
+        case LirOpcode::Vpcmpeqb: case LirOpcode::Vpcmpgtb:
+        case LirOpcode::Paddw: case LirOpcode::Psubw: case LirOpcode::Pmullw:
+        case LirOpcode::Pminsw: case LirOpcode::Pmaxsw:
+        case LirOpcode::Vpcmpeqw: case LirOpcode::Vpcmpgtw: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto run_bin = [&](auto tag) {
+                constexpr size_t N = decltype(tag)::value;
+                constexpr uint32_t W = 128u / static_cast<uint32_t>(N);
+                auto [al, ah] = read_v(inst.uses[0]);
+                auto [bl, bh] = read_v(inst.uses.back());
+                auto a = extract_v128<N>(ctx, al, ah);
+                auto b = extract_v128<N>(ctx, bl, bh);
+                std::array<BVNodeId, N> r{};
+                for (size_t i = 0; i < N; ++i) {
+                    if (op == LirOpcode::Paddb || op == LirOpcode::Paddw) r[i] = ctx.make_binary(BVOp::Add, a[i], b[i], W);
+                    else if (op == LirOpcode::Psubb || op == LirOpcode::Psubw) r[i] = ctx.make_binary(BVOp::Sub, a[i], b[i], W);
+                    else if (op == LirOpcode::Pmulb || op == LirOpcode::Pmullw) r[i] = ctx.make_binary(BVOp::Mul, a[i], b[i], W);
+                    else if (op == LirOpcode::Pminsb || op == LirOpcode::Pminsw) r[i] = ctx.make_ite(ctx.make_binary(BVOp::Slt, a[i], b[i], 1), a[i], b[i]);
+                    else if (op == LirOpcode::Pmaxsb || op == LirOpcode::Pmaxsw) r[i] = ctx.make_ite(ctx.make_binary(BVOp::Sgt, a[i], b[i], 1), a[i], b[i]);
+                    else if (op == LirOpcode::Vpcmpeqb || op == LirOpcode::Vpcmpeqw) r[i] = mask_from_cond(ctx, ctx.make_binary(BVOp::Eq, a[i], b[i], 1), W);
+                    else r[i] = mask_from_cond(ctx, ctx.make_binary(BVOp::Sgt, a[i], b[i], 1), W);
+                }
+                auto [rl, rh] = pack_v128<N>(ctx, r);
+                write_v(inst.defs[0], rl, rh);
+            };
+            bool is_byte = (op == LirOpcode::Paddb || op == LirOpcode::Psubb || op == LirOpcode::Pmulb ||
+                            op == LirOpcode::Pminsb || op == LirOpcode::Pmaxsb ||
+                            op == LirOpcode::Vpcmpeqb || op == LirOpcode::Vpcmpgtb);
+            if (is_byte) run_bin(std::integral_constant<size_t, 16>{});
+            else run_bin(std::integral_constant<size_t, 8>{});
+            return true;
+        }
+
+        case LirOpcode::Vpblendvb:
+        case LirOpcode::Vblendvw: {
+            if (inst.defs.empty() || inst.uses.size() < 3) return true;
+            auto run_sel = [&](auto tag) {
+                constexpr size_t N = decltype(tag)::value;
+                constexpr uint32_t msb_bit = (128u / static_cast<uint32_t>(N)) - 1u;
+                auto [bl, bh] = read_v(inst.uses[0]);
+                auto [al, ah] = read_v(inst.uses[1]);
+                auto [ml, mh] = read_v(inst.uses[2]);
+                auto vb = extract_v128<N>(ctx, bl, bh);
+                auto va = extract_v128<N>(ctx, al, ah);
+                auto vm = extract_v128<N>(ctx, ml, mh);
+                std::array<BVNodeId, N> r{};
+                for (size_t i = 0; i < N; ++i) r[i] = ctx.make_ite(ctx.make_extract(vm[i], msb_bit, msb_bit), va[i], vb[i]);
+                auto [rl, rh] = pack_v128<N>(ctx, r);
+                write_v(inst.defs[0], rl, rh);
+            };
+            if (op == LirOpcode::Vpblendvb) run_sel(std::integral_constant<size_t, 16>{});
+            else run_sel(std::integral_constant<size_t, 8>{});
+            return true;
+        }
+
+        case LirOpcode::Psllb: case LirOpcode::Psrlb: case LirOpcode::Psrab:
+        case LirOpcode::Psllw: case LirOpcode::Psrlw: case LirOpcode::Psraw: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto run_imm_sh = [&](auto tag) {
+                constexpr size_t N = decltype(tag)::value;
+                constexpr uint32_t W = 128u / static_cast<uint32_t>(N);
+                auto [lo, hi] = read_v(inst.uses[0]);
+                uint32_t raw_sh = static_cast<uint32_t>(inst.uses.back().imm_int);
+                auto a = extract_v128<N>(ctx, lo, hi);
+                std::array<BVNodeId, N> r{};
+                if (raw_sh >= W) {
+                    if (op == LirOpcode::Psrab || op == LirOpcode::Psraw) {
+                        BVNodeId sh_c = ctx.make_const(W - 1, W);
+                        for (size_t i = 0; i < N; ++i) r[i] = ctx.make_binary(BVOp::AShr, a[i], sh_c, W);
+                    } else {
+                        r.fill(ctx.make_const(0, W));
+                    }
+                } else {
+                    BVNodeId sh_c = ctx.make_const(raw_sh, W);
+                    BVOp sop = (op == LirOpcode::Psllb || op == LirOpcode::Psllw) ? BVOp::Shl
+                             : (op == LirOpcode::Psrlb || op == LirOpcode::Psrlw) ? BVOp::LShr : BVOp::AShr;
+                    for (size_t i = 0; i < N; ++i) r[i] = ctx.make_binary(sop, a[i], sh_c, W);
+                }
+                auto [rl, rh] = pack_v128<N>(ctx, r);
+                write_v(inst.defs[0], rl, rh);
+            };
+            if (op == LirOpcode::Psllb || op == LirOpcode::Psrlb || op == LirOpcode::Psrab)
+                run_imm_sh(std::integral_constant<size_t, 16>{});
+            else
+                run_imm_sh(std::integral_constant<size_t, 8>{});
+            return true;
+        }
+
+        case LirOpcode::Vpsllvb: case LirOpcode::Vpsrlvb: case LirOpcode::Vpsravb:
+        case LirOpcode::Vpsllvw: case LirOpcode::Vpsrlvw: case LirOpcode::Vpsravw: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto run_var_sh = [&](auto tag) {
+                constexpr size_t N = decltype(tag)::value;
+                constexpr uint32_t W = 128u / static_cast<uint32_t>(N);
+                auto [al, ah] = read_v(inst.uses[0]);
+                auto [sl, sh] = read_v(inst.uses[1]);
+                auto va = extract_v128<N>(ctx, al, ah);
+                auto vs = extract_v128<N>(ctx, sl, sh);
+                BVNodeId cw = ctx.make_const(W, W), cwm1 = ctx.make_const(W - 1, W), cz = ctx.make_const(0, W);
+                bool is_ashr = (op == LirOpcode::Vpsravb || op == LirOpcode::Vpsravw);
+                BVOp sop = (op == LirOpcode::Vpsllvb || op == LirOpcode::Vpsllvw) ? BVOp::Shl : BVOp::LShr;
+                std::array<BVNodeId, N> r{};
+                for (size_t i = 0; i < N; ++i) {
+                    BVNodeId past = ctx.make_binary(BVOp::Uge, vs[i], cw, 1);
+                    if (is_ashr) r[i] = ctx.make_binary(BVOp::AShr, va[i], ctx.make_ite(past, cwm1, vs[i]), W);
+                    else r[i] = ctx.make_ite(past, cz, ctx.make_binary(sop, va[i], vs[i], W));
+                }
+                auto [rl, rh] = pack_v128<N>(ctx, r);
+                write_v(inst.defs[0], rl, rh);
+            };
+            if (op == LirOpcode::Vpsllvb || op == LirOpcode::Vpsrlvb || op == LirOpcode::Vpsravb)
+                run_var_sh(std::integral_constant<size_t, 16>{});
+            else
+                run_var_sh(std::integral_constant<size_t, 8>{});
+            return true;
+        }
+
+        case LirOpcode::Vpbroadcastb: {
+            if (inst.defs.empty() || inst.uses.empty()) return true;
+            std::array<BVNodeId, 16> r{};
+            r.fill(read_op(inst.uses[0], 8));
+            auto [rl, rh] = pack_v128<16>(ctx, r);
+            write_v(inst.defs[0], rl, rh);
+            return true;
+        }
+        case LirOpcode::Vpbroadcastw: {
+            if (inst.defs.empty() || inst.uses.empty()) return true;
+            std::array<BVNodeId, 8> r{};
+            r.fill(read_op(inst.uses[0], 16));
+            auto [rl, rh] = pack_v128<8>(ctx, r);
+            write_v(inst.defs[0], rl, rh);
+            return true;
+        }
+
+        case LirOpcode::Pinsrb: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            const auto& base_op = (inst.uses.size() >= 3) ? inst.uses[0] : inst.defs[0];
+            const auto& scalar_op = (inst.uses.size() >= 3) ? inst.uses[1] : inst.uses[0];
+            auto [lo, hi] = read_v(base_op);
+            auto lanes = extract_v128<16>(ctx, lo, hi);
+            lanes[static_cast<uint32_t>(inst.uses.back().imm_int) & 15u] = read_op(scalar_op, 8);
+            auto [rl, rh] = pack_v128<16>(ctx, lanes);
+            write_v(inst.defs[0], rl, rh);
+            return true;
+        }
+        case LirOpcode::Pinsrw: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            const auto& base_op = (inst.uses.size() >= 3) ? inst.uses[0] : inst.defs[0];
+            const auto& scalar_op = (inst.uses.size() >= 3) ? inst.uses[1] : inst.uses[0];
+            auto [lo, hi] = read_v(base_op);
+            auto lanes = extract_v128<8>(ctx, lo, hi);
+            lanes[static_cast<uint32_t>(inst.uses.back().imm_int) & 7u] = read_op(scalar_op, 16);
+            auto [rl, rh] = pack_v128<8>(ctx, lanes);
+            write_v(inst.defs[0], rl, rh);
+            return true;
+        }
+        case LirOpcode::Pextrb: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto [lo, hi] = read_v(inst.uses[0]);
+            auto lanes = extract_v128<16>(ctx, lo, hi);
+            write_op(inst.defs[0], ctx.make_zext(lanes[static_cast<uint32_t>(inst.uses.back().imm_int) & 15u], 24));
+            return true;
+        }
+        case LirOpcode::Pextrw: {
+            if (inst.defs.empty() || inst.uses.size() < 2) return true;
+            auto [lo, hi] = read_v(inst.uses[0]);
+            auto lanes = extract_v128<8>(ctx, lo, hi);
+            write_op(inst.defs[0], ctx.make_zext(lanes[static_cast<uint32_t>(inst.uses.back().imm_int) & 7u], 16));
+            return true;
+        }
+
+        case LirOpcode::Vany8: {
+            if (inst.defs.empty() || inst.uses.empty()) return true;
+            auto [lo, hi] = read_v(inst.uses[0]);
+            auto a = extract_v128<16>(ctx, lo, hi);
+            BVNodeId any1 = ctx.make_const(0, 1);
+            for (BVNodeId l : a) any1 = ctx.make_binary(BVOp::Or, any1, ctx.make_extract(l, 7, 7), 1);
+            write_op(inst.defs[0], ctx.make_zext(any1, 31));
+            return true;
+        }
+        case LirOpcode::Vany16: {
+            if (inst.defs.empty() || inst.uses.empty()) return true;
+            auto [lo, hi] = read_v(inst.uses[0]);
+            auto a = extract_v128<8>(ctx, lo, hi);
+            BVNodeId any1 = ctx.make_const(0, 1);
+            for (BVNodeId l : a) any1 = ctx.make_binary(BVOp::Or, any1, ctx.make_extract(l, 15, 15), 1);
+            write_op(inst.defs[0], ctx.make_zext(any1, 31));
             return true;
         }
 

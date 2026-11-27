@@ -704,6 +704,16 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Vfmadd213pd:
         case LirOpcode::Vfmadd231pd:
         case LirOpcode::Fneg2d:
+        case LirOpcode::Paddb:
+        case LirOpcode::Psubb:
+        case LirOpcode::Pmulb:
+        case LirOpcode::Pminsb:
+        case LirOpcode::Pmaxsb:
+        case LirOpcode::Paddw:
+        case LirOpcode::Psubw:
+        case LirOpcode::Pmullw:
+        case LirOpcode::Pminsw:
+        case LirOpcode::Pmaxsw:
         case LirOpcode::Paddd:
         case LirOpcode::Psubd:
         case LirOpcode::Pmulld:
@@ -715,14 +725,20 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Por:
         case LirOpcode::Pxor:
         case LirOpcode::Pnot:
+        case LirOpcode::Pinsrb:
+        case LirOpcode::Pinsrw:
         case LirOpcode::Pinsrd:
         case LirOpcode::Pinsrq:
+        case LirOpcode::Pextrb:
+        case LirOpcode::Pextrw:
         case LirOpcode::Pextrd:
         case LirOpcode::Pextrq:
         case LirOpcode::Extractps:
         case LirOpcode::Insertps:
         case LirOpcode::Vbroadcastss:
         case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vpbroadcastb:
+        case LirOpcode::Vpbroadcastw:
         case LirOpcode::Vpbroadcastd:
         case LirOpcode::Vpbroadcastq:
         case LirOpcode::Pshufd:
@@ -763,25 +779,43 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
             emit_vec_instruction(inst);
             break;
 
+        case LirOpcode::Psllb:
+        case LirOpcode::Psllw:
+        case LirOpcode::Psrlb:
+        case LirOpcode::Psrlw:
         case LirOpcode::Psrld:
         case LirOpcode::Psrlq:
+        case LirOpcode::Psrab:
+        case LirOpcode::Psraw:
         case LirOpcode::Psrad:
         case LirOpcode::Psraq:
         case LirOpcode::Vcmpps:
         case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqb:
+        case LirOpcode::Vpcmpgtb:
+        case LirOpcode::Vpcmpeqw:
+        case LirOpcode::Vpcmpgtw:
         case LirOpcode::Vpcmpeqd:
         case LirOpcode::Vpcmpgtd:
         case LirOpcode::Vpcmpeqq:
         case LirOpcode::Vpcmpgtq:
         case LirOpcode::Vpminsd:
         case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvb:
+        case LirOpcode::Vpsllvw:
         case LirOpcode::Vpsllvd:
         case LirOpcode::Vpsllvq:
+        case LirOpcode::Vpsrlvb:
+        case LirOpcode::Vpsrlvw:
         case LirOpcode::Vpsrlvd:
         case LirOpcode::Vpsrlvq:
+        case LirOpcode::Vpsravb:
+        case LirOpcode::Vpsravw:
         case LirOpcode::Vpsravd:
         case LirOpcode::Vpsravq:
         case LirOpcode::Vshufps:
+        case LirOpcode::Vpblendvb:
+        case LirOpcode::Vblendvw:
         case LirOpcode::Vblendvps:
         case LirOpcode::Vblendvpd:
         case LirOpcode::Vcvtdq2ps:
@@ -795,6 +829,8 @@ void AArch64EmitContext::emit_instruction(const LirInst& inst, bool is_entry_blo
         case LirOpcode::Vroundpd:
         case LirOpcode::Vmovmskps:
         case LirOpcode::Vmovmskpd:
+        case LirOpcode::Vany8:
+        case LirOpcode::Vany16:
             emit_vec_lane_instruction(inst);
             break;
 

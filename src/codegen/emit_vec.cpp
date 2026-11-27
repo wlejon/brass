@@ -119,6 +119,16 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
         EMIT_VEC_BINOP(Minpd, minpd)
         EMIT_VEC_BINOP(Maxpd, maxpd)
 
+        EMIT_VEC_BINOP(Paddb, paddb)
+        EMIT_VEC_BINOP(Psubb, psubb)
+        EMIT_VEC_BINOP(Pminsb, pminsb)
+        EMIT_VEC_BINOP(Pmaxsb, pmaxsb)
+        EMIT_VEC_BINOP(Paddw, paddw)
+        EMIT_VEC_BINOP(Psubw, psubw)
+        EMIT_VEC_BINOP(Pmullw, pmullw)
+        EMIT_VEC_BINOP(Pminsw, pminsw)
+        EMIT_VEC_BINOP(Pmaxsw, pmaxsw)
+        EMIT_VEC_BINOP(Punpcklbw, punpcklbw)
         EMIT_VEC_BINOP(Paddd, paddd)
         EMIT_VEC_BINOP(Psubd, psubd)
         EMIT_VEC_BINOP(Pmulld, pmulld)
@@ -270,10 +280,26 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
             break;
         }
 
+        case LirOpcode::Psllw: {
+            enc_.psllw(to_xmm(inst.defs[0]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
+        case LirOpcode::Psrlw: {
+            enc_.psrlw(to_xmm(inst.defs[0]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
+        case LirOpcode::Psraw: {
+            enc_.psraw(to_xmm(inst.defs[0]), static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
         case LirOpcode::Pslld: {
             XMM dst = to_xmm(inst.defs[0]);
             uint8_t imm = static_cast<uint8_t>(inst.uses.back().imm_int);
             enc_.pslld(dst, imm);
+            break;
+        }
+        case LirOpcode::Psrad: {
+            enc_.psrad(to_xmm(inst.defs[0]), static_cast<uint8_t>(inst.uses.back().imm_int));
             break;
         }
         case LirOpcode::Psllq: {
@@ -311,10 +337,35 @@ void EmitContext::emit_vec_instruction(const LirInst& inst) {
             enc_.pshufd(dst, src, imm);
             break;
         }
+        case LirOpcode::Pshuflw: {
+            enc_.pshuflw(to_xmm(inst.defs[0]), to_xmm(inst.uses[1]),
+                         static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
         case LirOpcode::Movddup: {
             XMM dst = to_xmm(inst.defs[0]);
             XMM src = to_xmm(inst.uses.back());
             enc_.movddup(dst, src);
+            break;
+        }
+        case LirOpcode::Pinsrb: {
+            enc_.pinsrb(to_xmm(inst.defs[0]), to_gpr(inst.uses[1]),
+                        static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
+        case LirOpcode::Pextrb: {
+            enc_.pextrb(to_gpr(inst.defs[0]), to_xmm(inst.uses[0]),
+                        static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
+        case LirOpcode::Pinsrw: {
+            enc_.pinsrw(to_xmm(inst.defs[0]), to_gpr(inst.uses[1]),
+                        static_cast<uint8_t>(inst.uses.back().imm_int));
+            break;
+        }
+        case LirOpcode::Pextrw: {
+            enc_.pextrw(to_gpr(inst.defs[0]), to_xmm(inst.uses[0]),
+                        static_cast<uint8_t>(inst.uses.back().imm_int));
             break;
         }
         case LirOpcode::Pinsrd: {

@@ -20,6 +20,8 @@ enum class TypeKind : uint8_t {
     Ptr,
     GCRef,
     Void,
+    I8x16,
+    I16x8,
     F32x4,
     F64x2,
     I32x4,
@@ -55,6 +57,8 @@ public:
     static constexpr Type tagged() noexcept { return Type(TypeKind::Tagged); }
     static constexpr Type void_type() noexcept { return Type(TypeKind::Void); }
 
+    static constexpr Type i8x16() noexcept { return Type(TypeKind::I8x16); }
+    static constexpr Type i16x8() noexcept { return Type(TypeKind::I16x8); }
     static constexpr Type f32x4() noexcept { return Type(TypeKind::F32x4); }
     static constexpr Type f64x2() noexcept { return Type(TypeKind::F64x2); }
     static constexpr Type i32x4() noexcept { return Type(TypeKind::I32x4); }
@@ -81,6 +85,8 @@ public:
             case TypeKind::GCRef:
             case TypeKind::Tagged: return 8;
             case TypeKind::Void: return 0;
+            case TypeKind::I8x16:
+            case TypeKind::I16x8:
             case TypeKind::F32x4:
             case TypeKind::F64x2:
             case TypeKind::I32x4:
@@ -168,7 +174,8 @@ public:
     }
 
     constexpr bool is_v128() const noexcept {
-        return kind_ == TypeKind::F32x4 || kind_ == TypeKind::F64x2 ||
+        return kind_ == TypeKind::I8x16 || kind_ == TypeKind::I16x8 ||
+               kind_ == TypeKind::F32x4 || kind_ == TypeKind::F64x2 ||
                kind_ == TypeKind::I32x4 || kind_ == TypeKind::I64x2;
     }
 
@@ -179,6 +186,10 @@ public:
 
     constexpr uint32_t vector_lanes() const noexcept {
         switch (kind_) {
+            case TypeKind::I8x16:
+                return 16;
+            case TypeKind::I16x8:
+                return 8;
             case TypeKind::F32x4:
             case TypeKind::I32x4:
                 return 4;
@@ -198,6 +209,8 @@ public:
 
     constexpr Type element_type() const noexcept {
         switch (kind_) {
+            case TypeKind::I8x16: return Type(TypeKind::I8);
+            case TypeKind::I16x8: return Type(TypeKind::I16);
             case TypeKind::F32x4: return Type(TypeKind::F32);
             case TypeKind::F64x2: return Type(TypeKind::F64);
             case TypeKind::I32x4: return Type(TypeKind::I32);
@@ -214,6 +227,8 @@ public:
     // type of its lane masks (f32x8 -> i32x8, f64x4 -> i64x4).
     constexpr Type vector_mask_type() const noexcept {
         switch (kind_) {
+            case TypeKind::I8x16: return Type(TypeKind::I8x16);
+            case TypeKind::I16x8: return Type(TypeKind::I16x8);
             case TypeKind::F32x4: case TypeKind::I32x4: return Type(TypeKind::I32x4);
             case TypeKind::F64x2: case TypeKind::I64x2: return Type(TypeKind::I64x2);
             case TypeKind::F32x8: case TypeKind::I32x8: return Type(TypeKind::I32x8);

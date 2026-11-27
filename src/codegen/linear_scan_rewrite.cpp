@@ -214,67 +214,52 @@ static bool is_xmm_opcode(LirOpcode op) {
         case LirOpcode::Minpd:
         case LirOpcode::Maxpd:
         case LirOpcode::Sqrtpd:
-        case LirOpcode::Paddd:
-        case LirOpcode::Psubd:
-        case LirOpcode::Pmulld:
-        case LirOpcode::Pminsd:
-        case LirOpcode::Pmaxsd:
-        case LirOpcode::Paddq:
-        case LirOpcode::Psubq:
-        case LirOpcode::Pand:
-        case LirOpcode::Por:
-        case LirOpcode::Pxor:
-        case LirOpcode::Pandn:
-        case LirOpcode::Pcmpeqd:
-        case LirOpcode::Pslld:
-        case LirOpcode::Psllq:
-        case LirOpcode::Psrld:
-        case LirOpcode::Psrlq:
-        case LirOpcode::Psrad:
-        case LirOpcode::Psraq:
-        case LirOpcode::Shufps:
-        case LirOpcode::Shufpd:
-        case LirOpcode::Pshufd:
+        case LirOpcode::Paddb: case LirOpcode::Psubb: case LirOpcode::Pmulb:
+        case LirOpcode::Pminsb: case LirOpcode::Pmaxsb:
+        case LirOpcode::Paddw: case LirOpcode::Psubw: case LirOpcode::Pmullw:
+        case LirOpcode::Pminsw: case LirOpcode::Pmaxsw:
+        case LirOpcode::Paddd: case LirOpcode::Psubd: case LirOpcode::Pmulld:
+        case LirOpcode::Pminsd: case LirOpcode::Pmaxsd:
+        case LirOpcode::Paddq: case LirOpcode::Psubq:
+        case LirOpcode::Pand: case LirOpcode::Por: case LirOpcode::Pxor:
+        case LirOpcode::Pandn: case LirOpcode::Pnot: case LirOpcode::Pcmpeqd:
+        case LirOpcode::Psllb: case LirOpcode::Psrlb: case LirOpcode::Psrab:
+        case LirOpcode::Psllw: case LirOpcode::Psrlw: case LirOpcode::Psraw:
+        case LirOpcode::Pslld: case LirOpcode::Psllq:
+        case LirOpcode::Psrld: case LirOpcode::Psrlq:
+        case LirOpcode::Psrad: case LirOpcode::Psraq:
+        case LirOpcode::Shufps: case LirOpcode::Shufpd:
+        case LirOpcode::Pshufd: case LirOpcode::Pshuflw: case LirOpcode::Punpcklbw:
         case LirOpcode::Movddup:
-        case LirOpcode::Pinsrd:
-        case LirOpcode::Pinsrq:
+        case LirOpcode::Pinsrb: case LirOpcode::Pinsrw:
+        case LirOpcode::Pinsrd: case LirOpcode::Pinsrq:
         case LirOpcode::Insertps:
-        case LirOpcode::Vfmadd213ss:
-        case LirOpcode::Vfmadd231ss:
-        case LirOpcode::Vfmadd213sd:
-        case LirOpcode::Vfmadd231sd:
-        case LirOpcode::Vfmadd213ps:
-        case LirOpcode::Vfmadd231ps:
-        case LirOpcode::Vfmadd213pd:
-        case LirOpcode::Vfmadd231pd:
-        case LirOpcode::Vbroadcastss:
-        case LirOpcode::Vbroadcastsd:
-        case LirOpcode::Vcmpps:
-        case LirOpcode::Vcmppd:
-        case LirOpcode::Vpcmpeqd:
-        case LirOpcode::Vpcmpgtd:
-        case LirOpcode::Vpcmpeqq:
-        case LirOpcode::Vpcmpgtq:
-        case LirOpcode::Vpminsd:
-        case LirOpcode::Vpmaxsd:
-        case LirOpcode::Vpsllvd:
-        case LirOpcode::Vpsllvq:
-        case LirOpcode::Vpsrlvd:
-        case LirOpcode::Vpsrlvq:
-        case LirOpcode::Vpsravd:
-        case LirOpcode::Vpsravq:
-        case LirOpcode::Vshufps:
-        case LirOpcode::Vblendvps:
-        case LirOpcode::Vblendvpd:
-        case LirOpcode::Vcvtdq2ps:
-        case LirOpcode::Vcvttps2dq:
-        case LirOpcode::Vcvtdq2pd:
-        case LirOpcode::Vcvttpd2dq:
-        case LirOpcode::Vcvtps2pd:
-        case LirOpcode::Vcvtpd2ps:
+        case LirOpcode::Vfmadd213ss: case LirOpcode::Vfmadd231ss:
+        case LirOpcode::Vfmadd213sd: case LirOpcode::Vfmadd231sd:
+        case LirOpcode::Vfmadd213ps: case LirOpcode::Vfmadd231ps:
+        case LirOpcode::Vfmadd213pd: case LirOpcode::Vfmadd231pd:
+        case LirOpcode::Vbroadcastss: case LirOpcode::Vbroadcastsd:
+        case LirOpcode::Vcmpps: case LirOpcode::Vcmppd:
+        case LirOpcode::Vpcmpeqb: case LirOpcode::Vpcmpgtb:
+        case LirOpcode::Vpcmpeqw: case LirOpcode::Vpcmpgtw:
+        case LirOpcode::Vpcmpeqd: case LirOpcode::Vpcmpgtd:
+        case LirOpcode::Vpcmpeqq: case LirOpcode::Vpcmpgtq:
+        case LirOpcode::Vpminsd: case LirOpcode::Vpmaxsd:
+        case LirOpcode::Vpsllvb: case LirOpcode::Vpsrlvb: case LirOpcode::Vpsravb:
+        case LirOpcode::Vpsllvw: case LirOpcode::Vpsrlvw: case LirOpcode::Vpsravw:
+        case LirOpcode::Vpsllvd: case LirOpcode::Vpsllvq:
+        case LirOpcode::Vpsrlvd: case LirOpcode::Vpsrlvq:
+        case LirOpcode::Vpsravd: case LirOpcode::Vpsravq:
+        case LirOpcode::Vshufps: case LirOpcode::Vpblendvb: case LirOpcode::Vblendvw:
+        case LirOpcode::Vblendvps: case LirOpcode::Vblendvpd:
+        case LirOpcode::Vcvtdq2ps: case LirOpcode::Vcvttps2dq:
+        case LirOpcode::Vcvtdq2pd: case LirOpcode::Vcvttpd2dq:
+        case LirOpcode::Vcvtps2pd: case LirOpcode::Vcvtpd2ps:
         case LirOpcode::Vpmovsxdq:
-        case LirOpcode::Vroundps:
-        case LirOpcode::Vroundpd:
+        case LirOpcode::Vpmovsxwd: case LirOpcode::Vpmovzxwd:
+        case LirOpcode::Vpmovsxbd: case LirOpcode::Vpmovzxbd:
+        case LirOpcode::Vpackssdw: case LirOpcode::Vpacksswb:
+        case LirOpcode::Vroundps: case LirOpcode::Vroundpd:
             return true;
         default:
             return false;
@@ -640,7 +625,8 @@ void LinearScanAllocator::rewrite_instructions() {
                 const uint8_t sz = inst->uses[i].size;
                 bool is_xmm_use = (i < orig_use_is_xmm.size()) ? orig_use_is_xmm[i] : false;
                 if (!is_xmm_use) {
-                    if (inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq) {
+                    if (inst->opcode == LirOpcode::Pinsrb || inst->opcode == LirOpcode::Pinsrw ||
+                        inst->opcode == LirOpcode::Pinsrd || inst->opcode == LirOpcode::Pinsrq) {
                         is_xmm_use = (i == 0);
                     } else if (inst->opcode == LirOpcode::Movd_xg || inst->opcode == LirOpcode::Movq_xg ||
                                inst->opcode == LirOpcode::Cvtsi2sd || inst->opcode == LirOpcode::Cvtsi2sd32 ||
@@ -649,8 +635,11 @@ void LinearScanAllocator::rewrite_instructions() {
                     } else if (inst->opcode == LirOpcode::Cvttsd2si || inst->opcode == LirOpcode::Cvttsd2si32 ||
                                inst->opcode == LirOpcode::Cvttss2si || inst->opcode == LirOpcode::Cvttss2si32 ||
                                inst->opcode == LirOpcode::Movq_gx || inst->opcode == LirOpcode::Movd_gx ||
+                               inst->opcode == LirOpcode::Pextrb || inst->opcode == LirOpcode::Pextrw ||
                                inst->opcode == LirOpcode::Pextrd || inst->opcode == LirOpcode::Pextrq ||
                                inst->opcode == LirOpcode::Extractps ||
+                               inst->opcode == LirOpcode::Vpmovmskb || inst->opcode == LirOpcode::Vany8 ||
+                               inst->opcode == LirOpcode::Vany16 ||
                                inst->opcode == LirOpcode::Vmovmskps || inst->opcode == LirOpcode::Vmovmskpd) {
                         is_xmm_use = true;
                     } else {

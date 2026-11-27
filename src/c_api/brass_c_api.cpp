@@ -20,6 +20,8 @@ static BrassType_T s_type_f64{ Type::f64() };
 static BrassType_T s_type_ptr{ Type::ptr() };
 static BrassType_T s_type_dynamic{ Type::gcref() };
 
+static BrassType_T s_type_v128_i8{ Type::i8x16() };
+static BrassType_T s_type_v128_i16{ Type::i16x8() };
 static BrassType_T s_type_v128_f32{ Type::f32x4() };
 static BrassType_T s_type_v128_f64{ Type::f64x2() };
 static BrassType_T s_type_v128_i32{ Type::i32x4() };
@@ -44,6 +46,8 @@ BrassType get_type_handle(Type t) {
         case TypeKind::Ptr: return &s_type_ptr;
         case TypeKind::GCRef: return &s_type_dynamic;
         case TypeKind::Tagged: return &s_type_dynamic;
+        case TypeKind::I8x16: return &s_type_v128_i8;
+        case TypeKind::I16x8: return &s_type_v128_i16;
         case TypeKind::F32x4: return &s_type_v128_f32;
         case TypeKind::F64x2: return &s_type_v128_f64;
         case TypeKind::I32x4: return &s_type_v128_i32;
