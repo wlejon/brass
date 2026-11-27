@@ -493,6 +493,10 @@ void AArch64EmitContext::emit_vec_instruction(const LirInst& inst) {
             if (inst.uses.size() >= 2 && inst.uses[0].is_preg()) {
                 FPR src0 = to_fpr(inst.uses[0]);
                 if (dst != src0) {
+                    if (dst == src) {
+                        enc_.vec_orr(FPR::V31, src, src);
+                        src = FPR::V31;
+                    }
                     enc_.vec_orr(dst, src0, src0);
                 }
             }

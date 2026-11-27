@@ -952,6 +952,27 @@ TEST_CASE("ARM64 ISEL - Constant Multiply (2^k+1) and Broadcast Lane Extraction"
         auto compiled = compile_lir_to_aarch64(*lir, Target::aarch64_macos());
         CHECK(!compiled.code_buffer.empty());
     }
+
+    // 3. Insertps where dst == uses[1] (scalar source) must preserve uses[1] across src0 copy.
+    {
+        LirFunction fn;
+        fn.name = "ins_alias_test";
+        fn.calling_conv = CallingConvention::aapcs64();
+        auto bb = std::make_unique<LirBlock>(0, "entry");
+        auto ins2 = std::make_unique<LirInst>(LirOpcode::Insertps);
+        ins2->add_def(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        ins2->add_use(LirOperand::preg_aarch64_fpr(FPR::V1, 16));
+        ins2->add_use(LirOperand::preg_aarch64_fpr(FPR::V0, 16));
+        ins2->add_use(LirOperand::imm(3 << 4, 1));
+        bb->append_inst(std::move(ins2));
+        auto ret = std::make_unique<LirInst>(LirOpcode::Ret);
+        bb->append_inst(std::move(ret));
+        fn.blocks.push_back(std::move(bb));
+
+        auto compiled = compile_lir_to_aarch64(fn, Target::aarch64_macos());
+        // Expected 3 instructions before ret: orr v31, v0, v0; orr v0, v1, v1; ins v0.s[3], v31.s[0]; ret
+        CHECK_EQ(compiled.code_buffer.size(), size_t(16));
+    }
 }
 
 #ifdef BRASS_STANDALONE_TEST
