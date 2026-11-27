@@ -158,6 +158,16 @@ void MslFnBuilder::lower_call(const Instruction& inst, int d) {
         return;
     }
 
+    if (sym == "ptx_ldg_f32" || sym == "ptx_ldg_i32" || sym == "ptx_ldg_i64" ||
+        sym == "ptx_ldg_f32x4" || sym == "ptx_ldg_i32x4") {
+        std::string sp = ptr_space(inst.operand(0));
+        std::string mt = msl_type(inst.type());
+        std::string addr = arg(0);
+        if (inst.operand_count() > 1) addr = "(" + addr + " + static_cast<int64_t>(" + arg(1) + "))";
+        emit_assign(inst, "*reinterpret_cast<const " + sp + " " + mt + "*>(" + addr + ")", d);
+        return;
+    }
+
     if (sym == "ptx_mul_hi_u32") {
         emit_assign(inst, "as_type<int32_t>(mulhi(as_type<uint32_t>(" + arg(0) + "), as_type<uint32_t>(" + arg(1) + ")))", d);
         return;

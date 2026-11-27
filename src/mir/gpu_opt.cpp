@@ -221,6 +221,15 @@ bool optimize_gpu_function(Function& fn, Module& mod, const GpuOptOptions& opts)
     if (opts.enable_fdiv_pow2) {
         changed |= (rewrite_fdiv_pow2(fn) > 0);
     }
+    if (opts.enable_small_loop_unroll) {
+        if (unroll_small_gpu_loops(fn, opts.max_unroll_trip_count)) {
+            changed = true;
+            changed |= scalar_cleanup(fn);
+        }
+    }
+    if (opts.enable_load_coalesce) {
+        changed |= coalesce_gpu_v4_accesses(fn, opts.assume_disjoint_buffers);
+    }
     if (opts.enable_fma) {
         FmaOptOptions fma_opts;
         fma_opts.enable_scalar = true;

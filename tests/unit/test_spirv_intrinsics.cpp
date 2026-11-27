@@ -31,6 +31,7 @@ enum class Sig {
     coop_load_a, coop_load_b, coop_load_acc, coop_mma, coop_store_acc, coop_scale, coop_add,
     coop_acc_len, coop_get_acc, coop_set_acc,
     load_narrow, store_narrow,
+    ldg_f32, ldg_i32, ldg_i64, ldg_f32x4, ldg_i32x4,
     // textures and images (a 2D image unless named; KernelBuilder::ImageRef)
     tex_sample, tex_sample_lod, tex_sample_grad, tex_sample_offset, tex_sample_lod_offset, tex_sample_grad_offset,
     tex_compare, tex_compare_lod, tex_fetch, tex_gather, tex_size, tex_levels, img_load, img_store, img_size,
@@ -78,7 +79,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_f32_to_i32", Sig::f32_i32}, {"ptx_f32_to_u32", Sig::f32_i32},
         {"ptx_f16_to_f32", Sig::i32_f32}, {"ptx_f16_hi_to_f32", Sig::i32_f32},
         {"ptx_f32_to_f16", Sig::f32_i32}, {"ptx_pack_f16x2", Sig::f32f32_i32},
-        {"ptx_f32_to_bf16", Sig::f32_i32},
+        {"ptx_f32_to_bf16", Sig::f32_i32}, {"ptx_bf16_to_f32", Sig::i32_f32},
         {"ptx_ldexp_f32", Sig::f32i32_f32},
         {"ptx_sdot4", Sig::i32x3_i32},
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
@@ -149,6 +150,8 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_load_u8", Sig::load_narrow}, {"ptx_load_s8", Sig::load_narrow},
         {"ptx_load_u16", Sig::load_narrow}, {"ptx_load_s16", Sig::load_narrow},
         {"ptx_store_u8", Sig::store_narrow}, {"ptx_store_u16", Sig::store_narrow},
+        {"ptx_ldg_f32", Sig::ldg_f32}, {"ptx_ldg_i32", Sig::ldg_i32}, {"ptx_ldg_i64", Sig::ldg_i64},
+        {"ptx_ldg_f32x4", Sig::ldg_f32x4}, {"ptx_ldg_i32x4", Sig::ldg_i32x4},
 
         {"tanf", Sig::f32_f32}, {"asinf", Sig::f32_f32}, {"acosf", Sig::f32_f32}, {"atanf", Sig::f32_f32},
         {"sinhf", Sig::f32_f32}, {"coshf", Sig::f32_f32}, {"atan2f", Sig::f32f32_f32}, {"powf", Sig::f32f32_f32},
@@ -425,6 +428,11 @@ Function* build(Module& mod, const std::string& name, Sig sig) {
         }
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, b.build_iconst_i32(3)}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
+        case Sig::ldg_f32: r = b.build_call(name, Type::f32(), {p, b.build_iconst_i32(4)}); break;
+        case Sig::ldg_i32: r = b.build_call(name, Type::i32(), {p, b.build_iconst_i32(4)}); break;
+        case Sig::ldg_i64: r = b.build_call(name, Type::i64(), {p, b.build_iconst_i32(8)}); break;
+        case Sig::ldg_f32x4: r = b.build_call(name, Type::f32x4(), {p, b.build_iconst_i32(16)}); break;
+        case Sig::ldg_i32x4: r = b.build_call(name, Type::i32x4(), {p, b.build_iconst_i32(16)}); break;
         case Sig::tex_sample: r = b.build_call(name, Type::f32x4(), img(1, {x, x})); break;
         case Sig::tex_sample_lod: r = b.build_call(name, Type::f32x4(), img(1, {x, x, x})); break;
         case Sig::tex_sample_grad: r = b.build_call(name, Type::f32x4(), img(1, {x, x, x, x, x, x})); break;

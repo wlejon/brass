@@ -61,12 +61,12 @@ enum class Type : uint8_t {
     b8, b16, b32, b64,
     u8, u16, u32, u64,
     s8, s16, s32, s64,
-    f16, f32, f64
+    f16, bf16, f32, f64
 };
 
 std::string_view to_string(Type t) noexcept; // "f32", "u64", ... ("" for none)
 
-constexpr bool is_float(Type t) noexcept { return t == Type::f16 || t == Type::f32 || t == Type::f64; }
+constexpr bool is_float(Type t) noexcept { return t == Type::f16 || t == Type::bf16 || t == Type::f32 || t == Type::f64; }
 constexpr bool is_signed(Type t) noexcept { return t == Type::s8 || t == Type::s16 || t == Type::s32 || t == Type::s64; }
 constexpr bool is_unsigned(Type t) noexcept { return t == Type::u8 || t == Type::u16 || t == Type::u32 || t == Type::u64; }
 constexpr bool is_bits(Type t) noexcept { return t == Type::b8 || t == Type::b16 || t == Type::b32 || t == Type::b64; }
@@ -107,7 +107,10 @@ enum class Opcode : uint8_t {
     shfl, bar, atom,
     rsqrt, sqrt, sin, cos, ex2, lg2, rcp, tanh,
     activemask, vote,
-    wmma_load, wmma_mma, wmma_store
+    wmma_load, wmma_mma, wmma_store,
+    cvta,
+    cp_async, cp_async_commit, cp_async_wait_group, cp_async_wait_all,
+    ldmatrix, mma_sync
 };
 
 std::string_view to_string(Opcode op) noexcept; // mnemonic ("and", "or", ...)
@@ -248,6 +251,12 @@ struct Inst {
     bool is_sync = false;         // shfl.sync / bar.sync
     bool is_warp = false;         // bar.warp.sync
     bool is_uni = false;          // bra.uni / ret.uni
+    bool is_nc = false;           // ld.global.nc
+    bool is_cg = false;           // cp.async.cg (vs .ca)
+    bool is_trans = false;        // ldmatrix ... .trans
+    bool is_to_space = false;     // cvta.to.<space>
+    uint8_t cp_async_bytes = 0;   // cp.async copy size (4, 8, 16)
+    uint8_t ldmatrix_num = 1;     // ldmatrix .x1/.x2/.x4
     StateSpace state_space = StateSpace::none;
     VecWidth vec_width = VecWidth::v1;
     MulMode mul_mode = MulMode::none;
@@ -258,6 +267,7 @@ struct Inst {
     WmmaLayout wmma_layout = WmmaLayout::row;
     WmmaLayout wmma_layout_b = WmmaLayout::col;
     Type wmma_c_type = Type::none;
+    Type mma_ab_type = Type::f16;
 
     bool has_guard = false;
     bool guard_negated = false;
@@ -287,6 +297,12 @@ struct Inst {
     Inst& sync() { is_sync = true; return *this; }
     Inst& warp() { is_warp = true; return *this; }
     Inst& uni() { is_uni = true; return *this; }
+    Inst& nc() { is_nc = true; return *this; }
+    Inst& cg() { is_cg = true; return *this; }
+    Inst& trans() { is_trans = true; return *this; }
+    Inst& to_space() { is_to_space = true; return *this; }
+    Inst& async_bytes(uint8_t n) { cp_async_bytes = n; return *this; }
+    Inst& matrix_num(uint8_t n) { ldmatrix_num = n; return *this; }
     Inst& space(StateSpace s) { state_space = s; return *this; }
     Inst& vec(VecWidth w) { vec_width = w; return *this; }
     Inst& lo() { mul_mode = MulMode::lo; return *this; }
@@ -299,6 +315,7 @@ struct Inst {
     Inst& layout(WmmaLayout l) { wmma_layout = l; return *this; }
     Inst& layout_b(WmmaLayout l) { wmma_layout_b = l; return *this; }
     Inst& ctype(Type t) { wmma_c_type = t; return *this; }
+    Inst& ab_type(Type t) { mma_ab_type = t; return *this; }
     Inst& origin(const brass::Instruction* i) { mir_origin = i; return *this; }
 
     bool is_terminator() const noexcept {
@@ -337,6 +354,9 @@ class Function {
 public:
     std::string name;
     bool is_entry = true;
+    uint32_t maxntid[3] = {0, 0, 0};
+    uint32_t minnctapersm = 0;
+    uint32_t maxnreg = 0;
     std::vector<Param> params;
     std::vector<SharedDecl> shared;
     std::array<uint32_t, kRegClassCount> reg_counts{};

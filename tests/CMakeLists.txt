@@ -301,6 +301,7 @@ add_executable(brass_unit_tests
     unit/test_ptx_ir.cpp
     unit/test_ptx_isel.cpp
     unit/test_ptx_intrinsics.cpp
+    unit/test_ptx_ampere_and_gpu_opt.cpp
     unit/test_ptx_vector.cpp
     unit/test_ptx_cleanup.cpp
     unit/test_gpu_intrinsics.cpp
@@ -403,6 +404,11 @@ add_executable(test_gpu_sandbox_harden unit/test_gpu_sandbox_harden.cpp)
 target_compile_definitions(test_gpu_sandbox_harden PRIVATE BRASS_STANDALONE_TEST)
 target_link_libraries(test_gpu_sandbox_harden PRIVATE brass)
 target_include_directories(test_gpu_sandbox_harden PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
+
+add_executable(test_ptx_ampere_and_gpu_opt unit/test_ptx_ampere_and_gpu_opt.cpp)
+target_compile_definitions(test_ptx_ampere_and_gpu_opt PRIVATE BRASS_STANDALONE_TEST)
+target_link_libraries(test_ptx_ampere_and_gpu_opt PRIVATE brass)
+target_include_directories(test_ptx_ampere_and_gpu_opt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/harness" "${BRASS_INCLUDE_DIR}")
 
 add_executable(test_artifact_cache unit/test_artifact_cache.cpp unit/test_native_module_cache.cpp)
 target_compile_definitions(test_artifact_cache PRIVATE BRASS_STANDALONE_TEST)

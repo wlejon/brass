@@ -21,6 +21,11 @@ namespace {
 ptx::Function lower_and_verify(const Function& fn, const PtxOptions& opts) {
     ptx::PtxISel isel;
     ptx::Function lowered = isel.lower(fn);
+    for (int d = 0; d < 3; ++d) {
+        if (lowered.maxntid[d] == 0 && opts.maxntid[d] > 0) lowered.maxntid[d] = opts.maxntid[d];
+    }
+    if (lowered.minnctapersm == 0 && opts.minnctapersm > 0) lowered.minnctapersm = opts.minnctapersm;
+    if (lowered.maxnreg == 0 && opts.maxnreg > 0) lowered.maxnreg = opts.maxnreg;
     if (opts.cleanup) ptx::cleanup(lowered);
     std::vector<ptx::Diagnostic> diags = ptx::verify(lowered);
     if (!diags.empty()) {

@@ -344,6 +344,13 @@ void SpirvISel::Intrinsics::store_narrow(SpirvISel& isel, const brass::Instructi
 template void SpirvISel::Intrinsics::store_narrow<8>(SpirvISel&, const brass::Instruction&);
 template void SpirvISel::Intrinsics::store_narrow<16>(SpirvISel&, const brass::Instruction&);
 
+void SpirvISel::Intrinsics::ldg_global(SpirvISel& isel, const brass::Instruction& inst) {
+    Id addr = byte_address(isel, inst.operand(0), inst.operand(1));
+    const Type rt = inst.type();
+    const uint32_t align = static_cast<uint32_t>(rt.is_vector() ? 16 : rt.size_in_bytes());
+    isel.define(inst.result(), isel.load_global(addr, isel.part_type(rt), align));
+}
+
 // ---------------------------------------------------------------------------
 // Subgroup operations over the whole subgroup (not the 32-lane segments the
 // shuffles keep): reductions of the active invocations' values

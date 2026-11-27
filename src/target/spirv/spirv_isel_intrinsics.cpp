@@ -181,6 +181,12 @@ void SpirvISel::Intrinsics::f32_to_bf16(SpirvISel& isel, const brass::Instructio
     isel.define(inst.result(), isel.op(spv::OpSelect, u32, {pnan, quiet, rnd}));
 }
 
+void SpirvISel::Intrinsics::bf16_to_f32(SpirvISel& isel, const brass::Instruction& inst) {
+    Id u = isel.as_u32(inst.operand(0), "argument 0");
+    Id shifted = isel.op(spv::OpShiftLeftLogical, isel.t_u32(), {u, isel.m_.c_u32(16)});
+    isel.define(inst.result(), isel.op(spv::OpBitcast, isel.t_f32(), {shifted}));
+}
+
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
@@ -284,6 +290,7 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_f32_to_f16",    &f32_to_f16 },
         { "ptx_pack_f16x2",    &pack_f16x2 },
         { "ptx_f32_to_bf16",   &f32_to_bf16 },
+        { "ptx_bf16_to_f32",   &bf16_to_f32 },
         { "ptx_ldexp_f32",     &ldexp_f32 },
         { "ptx_sdot4",         &sdot4 },
 
@@ -404,6 +411,11 @@ const SpirvISel::Intrinsics::Table& SpirvISel::Intrinsics::table() {
         { "ptx_load_s16",  &load_narrow<16, true> },
         { "ptx_store_u8",  &store_narrow<8> },
         { "ptx_store_u16", &store_narrow<16> },
+        { "ptx_ldg_f32",   &ldg_global },
+        { "ptx_ldg_i32",   &ldg_global },
+        { "ptx_ldg_i64",   &ldg_global },
+        { "ptx_ldg_f32x4", &ldg_global },
+        { "ptx_ldg_i32x4", &ldg_global },
 
         // Descriptor-bound 2D/3D storage images & sampled textures
         { "spirv_tex_sample",                 &tex_sample<0> },
@@ -495,6 +507,23 @@ const std::unordered_map<std::string_view, const char*>& SpirvISel::Intrinsics::
                              "ticks of an unspecified frequency" },
         { "ptx_bar_sync_count", "bar.sync with a thread count synchronizes a subset of the block; "
                                 "OpControlBarrier always waits for the whole workgroup" },
+        { "ptx_cvta_to_shared_u32", "SPIR-V uses logical Workgroup storage pointers rather than numeric 32-bit generic-to-shared offsets" },
+        { "ptx_cvta_to_shared_u64", "SPIR-V uses logical Workgroup storage pointers rather than numeric 64-bit generic-to-shared offsets" },
+        { "ptx_cp_async_cg_16", "PTX cp.async asynchronous global-to-shared copy has no core SPIR-V equivalent" },
+        { "ptx_cp_async_ca_4", "PTX cp.async asynchronous global-to-shared copy has no core SPIR-V equivalent" },
+        { "ptx_cp_async_ca_8", "PTX cp.async asynchronous global-to-shared copy has no core SPIR-V equivalent" },
+        { "ptx_cp_async_ca_16", "PTX cp.async asynchronous global-to-shared copy has no core SPIR-V equivalent" },
+        { "ptx_cp_async_commit", "PTX cp.async asynchronous copy groups have no core SPIR-V equivalent" },
+        { "ptx_cp_async_wait_group", "PTX cp.async asynchronous copy groups have no core SPIR-V equivalent" },
+        { "ptx_cp_async_wait_all", "PTX cp.async asynchronous copy groups have no core SPIR-V equivalent" },
+        { "ptx_ldmatrix_x1", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_ldmatrix_x1_trans", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_ldmatrix_x2", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_ldmatrix_x2_trans", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_ldmatrix_x4", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_ldmatrix_x4_trans", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_mma_m16n8k16_f16_f32", "PTX warp-level mma.sync fragment instruction has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_mma_m16n8k16_bf16_f32", "PTX warp-level mma.sync fragment instruction has no direct core SPIR-V equivalent (use ptx_coop_*)" },
     };
     return kUnsupported;
 }

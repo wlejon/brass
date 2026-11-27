@@ -65,6 +65,7 @@ std::string_view to_string(Type t) noexcept {
         case Type::s32:  return "s32";
         case Type::s64:  return "s64";
         case Type::f16:  return "f16";
+        case Type::bf16: return "bf16";
         case Type::f32:  return "f32";
         case Type::f64:  return "f64";
     }
@@ -76,7 +77,7 @@ uint32_t bit_width(Type t) noexcept {
         case Type::none: return 0;
         case Type::pred: return 1;
         case Type::b8: case Type::u8: case Type::s8: return 8;
-        case Type::b16: case Type::u16: case Type::s16: case Type::f16: return 16;
+        case Type::b16: case Type::u16: case Type::s16: case Type::f16: case Type::bf16: return 16;
         case Type::b32: case Type::u32: case Type::s32: case Type::f32: return 32;
         case Type::b64: case Type::u64: case Type::s64: case Type::f64: return 64;
     }
@@ -196,6 +197,13 @@ std::string_view to_string(Opcode op) noexcept {
         case Opcode::wmma_load:  return "wmma.load";
         case Opcode::wmma_mma:   return "wmma.mma";
         case Opcode::wmma_store: return "wmma.store";
+        case Opcode::cvta:                return "cvta";
+        case Opcode::cp_async:            return "cp.async";
+        case Opcode::cp_async_commit:     return "cp.async.commit_group";
+        case Opcode::cp_async_wait_group: return "cp.async.wait_group";
+        case Opcode::cp_async_wait_all:   return "cp.async.wait_all";
+        case Opcode::ldmatrix:            return "ldmatrix";
+        case Opcode::mma_sync:            return "mma.sync";
     }
     return "?";
 }
@@ -400,9 +408,18 @@ bool allows_immediate(Opcode op, size_t src_index) noexcept {
             return src_index == 1;
         case Opcode::wmma_store:                 // stride is source 2
             return src_index == 2;
+        case Opcode::cp_async_wait_group:        // N is source 0
+            return src_index == 0;
+        case Opcode::cp_async:                   // byte count (src 2) and optional zfill src_size (src 3)
+            return src_index == 2 || src_index == 3;
         case Opcode::wmma_mma:
         case Opcode::activemask:
         case Opcode::ld: case Opcode::cvt:
+        case Opcode::cvta:
+        case Opcode::cp_async_commit:
+        case Opcode::cp_async_wait_all:
+        case Opcode::ldmatrix:
+        case Opcode::mma_sync:
         case Opcode::bra: case Opcode::ret: case Opcode::trap: case Opcode::exit:
             return false;
     }

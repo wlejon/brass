@@ -84,7 +84,10 @@ inline std::string_view canonical_gpu_intrinsic(std::string_view sym) noexcept {
         {"gpu_shared_store_i32x4_indexed", "ptx_shared_store_i32x4_indexed"},
         {"gpu_shared_store_u16_indexed", "ptx_shared_store_u16_indexed"},
 
-        // Narrow memory & atomics
+        // Narrow memory, read-only cache loads (.nc) & atomics
+        {"gpu_ldg_f32", "ptx_ldg_f32"}, {"gpu_ldg_i32", "ptx_ldg_i32"},
+        {"gpu_ldg_i64", "ptx_ldg_i64"}, {"gpu_ldg_f32x4", "ptx_ldg_f32x4"},
+        {"gpu_ldg_i32x4", "ptx_ldg_i32x4"},
         {"gpu_load_u8", "ptx_load_u8"}, {"gpu_load_s8", "ptx_load_s8"},
         {"gpu_load_u16", "ptx_load_u16"}, {"gpu_load_s16", "ptx_load_s16"},
         {"gpu_store_u8", "ptx_store_u8"}, {"gpu_store_u16", "ptx_store_u16"},

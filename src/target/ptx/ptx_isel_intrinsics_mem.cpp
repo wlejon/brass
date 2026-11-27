@@ -276,4 +276,31 @@ void PtxISel::Intrinsics::store_narrow(PtxISel& isel, const brass::Instruction& 
 template void PtxISel::Intrinsics::store_narrow<Type::u8>(PtxISel&, const brass::Instruction&);
 template void PtxISel::Intrinsics::store_narrow<Type::u16>(PtxISel&, const brass::Instruction&);
 
+// ---------------------------------------------------------------------------
+// Read-only cache loads: ld.global.nc{.v4}.<T>
+// ---------------------------------------------------------------------------
+
+template <Type T>
+void PtxISel::Intrinsics::ldg_scalar(PtxISel& isel, const brass::Instruction& inst) {
+    Reg dst = isel.result_reg(inst);
+    if (dst.cls != reg_class_for(T)) isel.malformed(inst, "ldg result type mismatch");
+    isel.emit(Inst::make(Opcode::ld, T).space(StateSpace::global).nc()
+                  .dst(dst)
+                  .src(isel.address_operand(inst.operand(0), inst.operand(1), "pointer")));
+}
+template void PtxISel::Intrinsics::ldg_scalar<Type::f32>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::ldg_scalar<Type::u32>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::ldg_scalar<Type::u64>(PtxISel&, const brass::Instruction&);
+
+template <Type T>
+void PtxISel::Intrinsics::ldg_v4(PtxISel& isel, const brass::Instruction& inst) {
+    const std::vector<Reg>& dsts = isel.result_regs(inst);
+    if (dsts.size() != 4) isel.malformed(inst, "ldg_v4 requires 4-element vector result");
+    isel.emit(Inst::make(Opcode::ld, T).space(StateSpace::global).nc().vec(VecWidth::v4)
+                  .dst(Operand::vec(dsts))
+                  .src(isel.address_operand(inst.operand(0), inst.operand(1), "pointer")));
+}
+template void PtxISel::Intrinsics::ldg_v4<Type::f32>(PtxISel&, const brass::Instruction&);
+template void PtxISel::Intrinsics::ldg_v4<Type::u32>(PtxISel&, const brass::Instruction&);
+
 } // namespace brass::ptx

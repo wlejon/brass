@@ -33,7 +33,11 @@ bool is_non_portable_intrinsic(std::string_view sym) noexcept {
     return sym == "ptx_warpid" || sym == "ptx_warp_id" || sym == "ptx_nwarpid" ||
            sym == "ptx_smid" || sym == "ptx_nsmid" || sym == "ptx_clock" ||
            sym == "ptx_clock64" || sym == "ptx_globaltimer" ||
-           sym == "ptx_bar_sync_count";
+           sym == "ptx_bar_sync_count" ||
+           sym.rfind("ptx_cp_async", 0) == 0 ||
+           sym.rfind("ptx_ldmatrix", 0) == 0 ||
+           sym.rfind("ptx_mma_m16n8k16", 0) == 0 ||
+           sym.rfind("ptx_cvta_", 0) == 0;
 }
 
 bool is_fp64_type(Type t) noexcept {

@@ -65,6 +65,7 @@ struct PtxISel::Intrinsics {
     static void f32_to_f16(PtxISel& isel, const brass::Instruction& inst);
     static void pack_f16x2(PtxISel& isel, const brass::Instruction& inst);
     static void f32_to_bf16(PtxISel& isel, const brass::Instruction& inst);
+    static void bf16_to_f32(PtxISel& isel, const brass::Instruction& inst);
     static void ldexp_f32(PtxISel& isel, const brass::Instruction& inst);
     static void sdot4(PtxISel& isel, const brass::Instruction& inst);
     static void f32_to_f64(PtxISel& isel, const brass::Instruction& inst);
@@ -105,6 +106,25 @@ struct PtxISel::Intrinsics {
     static void load_narrow(PtxISel& isel, const brass::Instruction& inst);
     template <Type T>
     static void store_narrow(PtxISel& isel, const brass::Instruction& inst);
+    template <Type T>
+    static void ldg_scalar(PtxISel& isel, const brass::Instruction& inst);
+    template <Type T>
+    static void ldg_v4(PtxISel& isel, const brass::Instruction& inst);
+
+    // ---- Ampere/Ada async copy, ldmatrix & mma.sync (ptx_isel_mma.cpp) ----
+    static Operand shared_addr_operand(PtxISel& isel, const brass::Instruction& inst,
+                                       const Value* addr_val, const char* what);
+    template <Type T>
+    static void cvta_to_shared(PtxISel& isel, const brass::Instruction& inst);
+    template <uint8_t Bytes, bool Cg>
+    static void cp_async(PtxISel& isel, const brass::Instruction& inst);
+    static void cp_async_commit(PtxISel& isel, const brass::Instruction& inst);
+    static void cp_async_wait_group(PtxISel& isel, const brass::Instruction& inst);
+    static void cp_async_wait_all(PtxISel& isel, const brass::Instruction& inst);
+    template <uint8_t Num, bool Trans>
+    static void ldmatrix(PtxISel& isel, const brass::Instruction& inst);
+    template <Type AB>
+    static void mma_m16n8k16(PtxISel& isel, const brass::Instruction& inst);
 
     // ---- cooperative matrix 16x16x16 (ptx_isel_coopmat.cpp) ----------------
     template <uint32_t Use>

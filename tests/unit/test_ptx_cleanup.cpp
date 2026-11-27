@@ -493,7 +493,16 @@ struct PipelineResult {
 
 // ISel -> count -> cleanup -> verify -> ptxas; then a second cleanup must
 // change nothing.
-PipelineResult run_pipeline(const Function& fn, const char* what) {
+const char* arch_for_intrinsic(std::string_view name) noexcept {
+    if (name.rfind("ptx_cp_async", 0) == 0 ||
+        name.rfind("ptx_ldmatrix", 0) == 0 ||
+        name.rfind("ptx_mma_m16n8k16", 0) == 0) {
+        return "sm_80";
+    }
+    return "sm_70";
+}
+
+PipelineResult run_pipeline(const Function& fn, const char* what, const target::PtxOptions& opts = {}) {
     ptx::PtxISel isel;
     ptx::Function raw = isel.lower(fn);
     auto raw_diags = ptx::verify(raw);
@@ -510,7 +519,7 @@ PipelineResult run_pipeline(const Function& fn, const char* what) {
     auto diags = ptx::verify(cleaned);
     if (!diags.empty()) std::cerr << what << ":\n" << ptx::format_diagnostics(diags) << ptx::print_body(cleaned);
     CHECK(diags.empty());
-    r.ptx = ptx::print(cleaned);
+    r.ptx = ptx::print(cleaned, opts);
 
     std::string once = ptx::print_body(cleaned);
     ptx::CleanupStats again = ptx::cleanup(cleaned);
@@ -518,7 +527,7 @@ PipelineResult run_pipeline(const Function& fn, const char* what) {
     CHECK_EQ(ptx::print_body(cleaned), once);
 
     // PtxTarget's default path is exactly this pipeline.
-    CHECK_EQ(target::PtxTarget::emit_function(fn), r.ptx);
+    CHECK_EQ(target::PtxTarget::emit_function(fn, opts), r.ptx);
     return r;
 }
 
@@ -530,11 +539,13 @@ TEST_CASE("PTX cleanup - every intrinsic verifies, assembles and gets shorter af
     for (std::string_view name : ptx::PtxISel::intrinsic_names()) {
         Module mod("intrin");
         Function* f = build_intrinsic_kernel(mod, std::string(name));
-        PipelineResult r = run_pipeline(*f, std::string(name).c_str());
+        target::PtxOptions opts;
+        opts.sm_arch = arch_for_intrinsic(name);
+        PipelineResult r = run_pipeline(*f, std::string(name).c_str(), opts);
         if (r.after >= r.before) std::cerr << "intrinsic " << name << ": " << r.before << " -> " << r.after << "\n" << r.ptx;
         CHECK(r.after < r.before);
         if (have_ptxas) {
-            bool ok = ptxas_assembles(r.ptx);
+            bool ok = ptxas_assembles(r.ptx, opts.sm_arch.c_str());
             if (!ok) std::cerr << "ptxas rejected " << name << ":\n" << r.ptx;
             CHECK(ok);
         }

@@ -13,6 +13,10 @@ struct PtxOptions {
     std::string sm_arch = "sm_70"; // sm_70, sm_75, sm_80, sm_89, sm_90
     uint32_t ptx_version_major = 7;
     uint32_t ptx_version_minor = 0;
+    // Optional entry launch-bound metadata (0 = omitted).
+    uint32_t maxntid[3] = {0, 0, 0};
+    uint32_t minnctapersm = 0;
+    uint32_t maxnreg = 0;
     // Run the ptx::cleanup passes (copy propagation, dead code, branch
     // simplification, register renumbering) between ISel and the verifier.
     // Off prints the raw ISel output; the result is the same program.

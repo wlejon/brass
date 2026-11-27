@@ -65,6 +65,11 @@ enum class Sig {
     coop_load_a, coop_load_b, coop_load_acc, coop_mma, coop_store_acc, coop_scale, coop_add, coop_acc_len, coop_get_acc, coop_set_acc,
     load_narrow,     // (ptr[, off]) -> i32
     store_narrow,    // (ptr, i32[, off]) -> void
+    ldg_f32, ldg_i32, ldg_i64, ldg_f32x4, ldg_i32x4,
+    cvta_u32, cvta_u64,
+    cp_async, cp_async_wait_group,
+    ldmatrix_x1, ldmatrix_x2, ldmatrix_x4,
+    mma_sync,
 };
 
 const std::map<std::string, Sig>& signatures() {
@@ -100,7 +105,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_f32_to_i32", Sig::f32_i32}, {"ptx_f32_to_u32", Sig::f32_i32},
         {"ptx_f16_to_f32", Sig::i32_f32}, {"ptx_f16_hi_to_f32", Sig::i32_f32},
         {"ptx_f32_to_f16", Sig::f32_i32}, {"ptx_pack_f16x2", Sig::f32f32_i32},
-        {"ptx_f32_to_bf16", Sig::f32_i32},
+        {"ptx_f32_to_bf16", Sig::f32_i32}, {"ptx_bf16_to_f32", Sig::i32_f32},
         {"ptx_ldexp_f32", Sig::f32i32_f32},
         {"ptx_sdot4", Sig::i32x3_i32},
         {"ptx_f32_to_f64", Sig::f32_f64}, {"ptx_f64_to_f32", Sig::f64_f32},
@@ -169,6 +174,13 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_coop_scale_acc", Sig::coop_scale},
         {"ptx_coop_add_acc", Sig::coop_add},
         {"ptx_coop_acc_len", Sig::coop_acc_len}, {"ptx_coop_get_acc", Sig::coop_get_acc}, {"ptx_coop_set_acc", Sig::coop_set_acc},
+        {"ptx_ldg_f32", Sig::ldg_f32}, {"ptx_ldg_i32", Sig::ldg_i32}, {"ptx_ldg_i64", Sig::ldg_i64}, {"ptx_ldg_f32x4", Sig::ldg_f32x4}, {"ptx_ldg_i32x4", Sig::ldg_i32x4},
+        {"ptx_cvta_to_shared_u32", Sig::cvta_u32}, {"ptx_cvta_to_shared_u64", Sig::cvta_u64},
+        {"ptx_cp_async_cg_16", Sig::cp_async}, {"ptx_cp_async_ca_4", Sig::cp_async}, {"ptx_cp_async_ca_8", Sig::cp_async}, {"ptx_cp_async_ca_16", Sig::cp_async},
+        {"ptx_cp_async_commit", Sig::bar}, {"ptx_cp_async_wait_group", Sig::cp_async_wait_group}, {"ptx_cp_async_wait_all", Sig::bar},
+        {"ptx_ldmatrix_x1", Sig::ldmatrix_x1}, {"ptx_ldmatrix_x1_trans", Sig::ldmatrix_x1}, {"ptx_ldmatrix_x2", Sig::ldmatrix_x2}, {"ptx_ldmatrix_x2_trans", Sig::ldmatrix_x2},
+        {"ptx_ldmatrix_x4", Sig::ldmatrix_x4}, {"ptx_ldmatrix_x4_trans", Sig::ldmatrix_x4},
+        {"ptx_mma_m16n8k16_f16_f32", Sig::mma_sync}, {"ptx_mma_m16n8k16_bf16_f32", Sig::mma_sync},
     };
     return kSigs;
 }
@@ -267,80 +279,35 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
         }
         case Sig::f32i32_f32: r = b.build_call(name, Type::f32(), {x, i}); break;
         case Sig::f32f32_i32: r = b.build_call(name, Type::i32(), {x, x}); break;
-        case Sig::coop_alloc_a: {
-            Value* ca = b.build_call(name, Type::ptr());
-            b.build_call("ptx_coop_load_a", Type::void_type(), {ca, p, b.build_iconst_i32(16), b.build_iconst_i32(0)});
-            break;
-        }
-        case Sig::coop_alloc_b: {
-            Value* cb = b.build_call(name, Type::ptr());
-            b.build_call("ptx_coop_load_b", Type::void_type(), {cb, p, b.build_iconst_i32(16), b.build_iconst_i32(1)});
-            break;
-        }
-        case Sig::coop_alloc_acc: {
-            Value* cc = b.build_call(name, Type::ptr());
-            b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x});
-            b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)});
-            break;
-        }
-        case Sig::coop_fill: {
-            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            b.build_call(name, Type::void_type(), {cc, x});
-            break;
-        }
-        case Sig::coop_load_a: {
-            Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(64)});
-            Value* ca = b.build_call("ptx_coop_alloc_a", Type::ptr());
-            b.build_call(name, Type::void_type(), {ca, s, b.build_iconst_i32(32), b.build_iconst_i32(0)});
-            break;
-        }
-        case Sig::coop_load_b: {
-            Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(64)});
-            Value* cb = b.build_call("ptx_coop_alloc_b", Type::ptr());
-            b.build_call(name, Type::void_type(), {cb, s, b.build_iconst_i32(32), b.build_iconst_i32(1)});
-            break;
-        }
-        case Sig::coop_load_acc: {
-            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            b.build_call(name, Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(1)});
-            break;
-        }
-        case Sig::coop_mma: {
-            Value* ca = b.build_call("ptx_coop_alloc_a", Type::ptr());
-            Value* cb = b.build_call("ptx_coop_alloc_b", Type::ptr());
-            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, b.build_fconst_f32(0.0f)});
-            b.build_call("ptx_coop_load_a", Type::void_type(), {ca, p, b.build_iconst_i32(16), b.build_iconst_i32(0)});
-            b.build_call("ptx_coop_load_b", Type::void_type(), {cb, p, b.build_iconst_i32(16), b.build_iconst_i32(1)});
-            b.build_call(name, Type::void_type(), {cc, ca, cb});
-            b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(1)});
-            break;
-        }
-        case Sig::coop_store_acc: {
-            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x});
-            b.build_call(name, Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)});
-            break;
-        }
-        case Sig::coop_scale: {
-            Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x});
-            b.build_call(name, Type::void_type(), {cc, x});
-            break;
-        }
-        case Sig::coop_add: {
-            Value* c0 = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            Value* c1 = b.build_call("ptx_coop_alloc_acc", Type::ptr());
-            b.build_call("ptx_coop_fill_acc", Type::void_type(), {c0, x});
-            b.build_call("ptx_coop_fill_acc", Type::void_type(), {c1, x});
-            b.build_call(name, Type::void_type(), {c0, c1});
-            break;
-        }
+        case Sig::coop_alloc_a: { Value* ca = b.build_call(name, Type::ptr()); b.build_call("ptx_coop_load_a", Type::void_type(), {ca, p, b.build_iconst_i32(16), b.build_iconst_i32(0)}); break; }
+        case Sig::coop_alloc_b: { Value* cb = b.build_call(name, Type::ptr()); b.build_call("ptx_coop_load_b", Type::void_type(), {cb, p, b.build_iconst_i32(16), b.build_iconst_i32(1)}); break; }
+        case Sig::coop_alloc_acc: { Value* cc = b.build_call(name, Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)}); break; }
+        case Sig::coop_fill: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call(name, Type::void_type(), {cc, x}); break; }
+        case Sig::coop_load_a: { Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(64)}); Value* ca = b.build_call("ptx_coop_alloc_a", Type::ptr()); b.build_call(name, Type::void_type(), {ca, s, b.build_iconst_i32(32), b.build_iconst_i32(0)}); break; }
+        case Sig::coop_load_b: { Value* s = b.build_call("ptx_shared_alloc_i32x4", Type::ptr(), {b.build_iconst_i32(64)}); Value* cb = b.build_call("ptx_coop_alloc_b", Type::ptr()); b.build_call(name, Type::void_type(), {cb, s, b.build_iconst_i32(32), b.build_iconst_i32(1)}); break; }
+        case Sig::coop_load_acc: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call(name, Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(1)}); break; }
+        case Sig::coop_mma: { Value* ca = b.build_call("ptx_coop_alloc_a", Type::ptr()); Value* cb = b.build_call("ptx_coop_alloc_b", Type::ptr()); Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, b.build_fconst_f32(0.0f)}); b.build_call("ptx_coop_load_a", Type::void_type(), {ca, p, b.build_iconst_i32(16), b.build_iconst_i32(0)}); b.build_call("ptx_coop_load_b", Type::void_type(), {cb, p, b.build_iconst_i32(16), b.build_iconst_i32(1)}); b.build_call(name, Type::void_type(), {cc, ca, cb}); b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(1)}); break; }
+        case Sig::coop_store_acc: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); b.build_call(name, Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)}); break; }
+        case Sig::coop_scale: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); b.build_call(name, Type::void_type(), {cc, x}); break; }
+        case Sig::coop_add: { Value* c0 = b.build_call("ptx_coop_alloc_acc", Type::ptr()); Value* c1 = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {c0, x}); b.build_call("ptx_coop_fill_acc", Type::void_type(), {c1, x}); b.build_call(name, Type::void_type(), {c0, c1}); break; }
         case Sig::coop_acc_len: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); r = b.build_call(name, Type::i32(), {cc}); break; }
         case Sig::coop_get_acc: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); r = b.build_call(name, Type::f32(), {cc, i}); break; }
         case Sig::coop_set_acc: { Value* cc = b.build_call("ptx_coop_alloc_acc", Type::ptr()); b.build_call("ptx_coop_fill_acc", Type::void_type(), {cc, x}); b.build_call(name, Type::void_type(), {cc, i, x}); b.build_call("ptx_coop_store_acc", Type::void_type(), {cc, p, b.build_iconst_i32(16), b.build_iconst_i32(0), b.build_iconst_i32(0)}); break; }
         case Sig::load_narrow: r = b.build_call(name, Type::i32(), {p, c4}); break;
         case Sig::store_narrow: b.build_call(name, Type::void_type(), {p, i, i}); break;
+        case Sig::ldg_f32: r = b.build_call(name, Type::f32(), {p, c4}); break;
+        case Sig::ldg_i32: r = b.build_call(name, Type::i32(), {p, c4}); break;
+        case Sig::ldg_i64: r = b.build_call(name, Type::i64(), {p, b.build_iconst_i32(8)}); break;
+        case Sig::ldg_f32x4: r = b.build_call(name, Type::f32x4(), {p, b.build_iconst_i32(16)}); break;
+        case Sig::ldg_i32x4: r = b.build_call(name, Type::i32x4(), {p, b.build_iconst_i32(16)}); break;
+        case Sig::cvta_u32: r = b.build_call(name, Type::i32(), {smem_i}); break;
+        case Sig::cvta_u64: r = b.build_call(name, Type::i64(), {smem_i}); break;
+        case Sig::cp_async: { Value* s = b.build_call("ptx_cvta_to_shared_u32", Type::i32(), {smem_i}); b.build_call(name, Type::void_type(), {s, p}); b.build_call("ptx_cp_async_commit", Type::void_type()); b.build_call("ptx_cp_async_wait_all", Type::void_type()); break; }
+        case Sig::cp_async_wait_group: b.build_call(name, Type::void_type(), {b.build_iconst_i32(0)}); break;
+        case Sig::ldmatrix_x1: { r = b.build_call(name, Type::i32(), {b.build_call("ptx_cvta_to_shared_u32", Type::i32(), {smem_i})}); break; }
+        case Sig::ldmatrix_x2: { r = b.build_call(name, Type::i64(), {b.build_call("ptx_cvta_to_shared_u32", Type::i32(), {smem_i})}); break; }
+        case Sig::ldmatrix_x4: { r = b.build_call(name, Type::i32x4(), {b.build_call("ptx_cvta_to_shared_u32", Type::i32(), {smem_i})}); break; }
+        case Sig::mma_sync: { r = b.build_call(name, Type::f32x4(), {b.build_vzero(Type::i32x4()), i, i, b.build_vzero(Type::f32x4())}); break; }
     }
     if (r) {
         if (r->type() == Type::ptr()) b.build_store(Type::i64(), p, 0, r);
@@ -351,9 +318,16 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
     return f;
 }
 
+const char* arch_for_intrinsic(std::string_view name) noexcept {
+    const bool sm80 = name.rfind("ptx_cp_async", 0) == 0 || name.rfind("ptx_ldmatrix", 0) == 0 || name.rfind("ptx_mma_m16n8k16", 0) == 0;
+    return sm80 ? "sm_80" : "sm_70";
+}
+
 std::string intrinsic_kernel_ptx(const std::string& name, Sig sig) {
     Module mod("intrin");
-    return target::PtxTarget::emit_function(*build_intrinsic_kernel(mod, name, sig));
+    target::PtxOptions opts;
+    opts.sm_arch = arch_for_intrinsic(name);
+    return target::PtxTarget::emit_function(*build_intrinsic_kernel(mod, name, sig), opts);
 }
 
 } // namespace
@@ -395,7 +369,7 @@ TEST_CASE("PTX intrinsics - every table entry has a signature, lowers, verifies 
         }
         CHECK(ptx.find("call ") == std::string::npos); // lowered inline, not a call
         if (have_ptxas) {
-            bool ok = ptxas_assembles(ptx);
+            bool ok = ptxas_assembles(ptx, arch_for_intrinsic(name));
             if (!ok) std::cerr << "ptxas rejected intrinsic " << name << ":\n" << ptx;
             CHECK(ok);
         }

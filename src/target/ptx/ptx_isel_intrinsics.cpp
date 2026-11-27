@@ -181,36 +181,15 @@ void PtxISel::Intrinsics::sdot4(PtxISel& isel, const brass::Instruction& inst) {
                   .src(isel.operand_of(inst.operand(2), Opcode::dp4a, 2, Type::s32, "acc")));
 }
 
-// Round-to-nearest-even + quiet-NaN f32 -> bf16 bits in low 16 bits of b32,
-// valid across all SM targets without requiring sm_80+ cvt.rn.bf16.f32.
+// sm_80+ emits native `cvt.rn.bf16.f32`; older SM targets expand cleanly in PtxPrinter.
 void PtxISel::Intrinsics::f32_to_bf16(PtxISel& isel, const brass::Instruction& inst) {
+    cvt(isel, inst, Type::bf16, Type::f32, Rounding::rn);
+}
+void PtxISel::Intrinsics::bf16_to_f32(PtxISel& isel, const brass::Instruction& inst) {
     Reg src = isel.reg_of(inst.operand(0), "argument 0");
-    Reg u = isel.fn_->new_b32();
-    Reg hi = isel.fn_->new_b32();
-    Reg lsb = isel.fn_->new_b32();
-    Reg t0 = isel.fn_->new_b32();
-    Reg t1 = isel.fn_->new_b32();
-    Reg rnd = isel.fn_->new_b32();
-    Reg exp = isel.fn_->new_b32();
-    Reg man = isel.fn_->new_b32();
-    Reg p_exp = isel.fn_->new_pred();
-    Reg p_man = isel.fn_->new_pred();
-    Reg quiet = isel.fn_->new_b32();
-    Reg t_nan = isel.fn_->new_b32();
-
-    isel.emit(Inst::make(Opcode::mov, Type::b32).dst(u).src(src));
-    isel.emit(Inst::make(Opcode::shr, Type::u32).dst(hi).src(u).src(Operand::imm(16)));
-    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(lsb).src(hi).src(Operand::imm(1)));
-    isel.emit(Inst::make(Opcode::add, Type::u32).dst(t0).src(u).src(Operand::imm(0x7FFF)));
-    isel.emit(Inst::make(Opcode::add, Type::u32).dst(t1).src(t0).src(lsb));
-    isel.emit(Inst::make(Opcode::shr, Type::u32).dst(rnd).src(t1).src(Operand::imm(16)));
-    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(exp).src(u).src(Operand::imm(0x7F800000)));
-    isel.emit(Inst::make(Opcode::and_, Type::b32).dst(man).src(u).src(Operand::imm(0x007FFFFF)));
-    isel.emit(Inst::make(Opcode::setp, Type::u32).cmp(CmpOp::eq).dst(p_exp).src(exp).src(Operand::imm(0x7F800000)));
-    isel.emit(Inst::make(Opcode::setp, Type::u32).cmp(CmpOp::ne).dst(p_man).src(man).src(Operand::imm(0)));
-    isel.emit(Inst::make(Opcode::or_, Type::b32).dst(quiet).src(hi).src(Operand::imm(0x40)));
-    isel.emit(Inst::make(Opcode::selp, Type::b32).dst(t_nan).src(quiet).src(rnd).src(p_man));
-    isel.emit(Inst::make(Opcode::selp, Type::b32).dst(isel.result_reg(inst)).src(t_nan).src(rnd).src(p_exp));
+    Reg shifted = isel.fn_->new_b32();
+    isel.emit(Inst::make(Opcode::shl, Type::b32).dst(shifted).src(src).src(Operand::imm(16)));
+    isel.emit(Inst::make(Opcode::mov, Type::b32).dst(isel.result_reg(inst)).src(shifted));
 }
 void PtxISel::Intrinsics::f32_to_f64(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f64, Type::f32, Rounding::none); }
 void PtxISel::Intrinsics::f64_to_f32(PtxISel& isel, const brass::Instruction& inst) { cvt(isel, inst, Type::f32, Type::f64, Rounding::rn); }
@@ -305,7 +284,8 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_f16_hi_to_f32", &f16_hi_to_f32 }, // (i32 bits) -> f32
         { "ptx_f32_to_f16",    &f32_to_f16 },   // (f32) -> i32 bits   cvt.rn.f16.f32
         { "ptx_pack_f16x2",    &pack_f16x2 },    // (f32 lo, f32 hi) -> i32 packed f16x2
-        { "ptx_f32_to_bf16",   &f32_to_bf16 },  // (f32) -> i32 bits   RNE + qNaN bf16
+        { "ptx_f32_to_bf16",   &f32_to_bf16 },  // (f32) -> i32 bits   cvt.rn.bf16.f32 (emulated <sm_80)
+        { "ptx_bf16_to_f32",   &bf16_to_f32 },  // (i32 bits) -> f32   cvt.f32.bf16 (emulated <sm_80)
         { "ptx_ldexp_f32",     &ldexp_f32 },     // (f32, i32) -> f32
         { "ptx_sdot4",         &sdot4 },         // (i32, i32, i32) -> i32 dp4a.s32.s32
         { "ptx_f32_to_f64",   &f32_to_f64 },   // (f32) -> f64   cvt.f64.f32
@@ -413,6 +393,32 @@ const PtxISel::Intrinsics::Table& PtxISel::Intrinsics::table() {
         { "ptx_load_s16",  &load_narrow<Type::s16> },
         { "ptx_store_u8",  &store_narrow<Type::u8> },
         { "ptx_store_u16", &store_narrow<Type::u16> },
+
+        // Read-only global cache loads (ld.global.nc)
+        { "ptx_ldg_f32",   &ldg_scalar<Type::f32> },
+        { "ptx_ldg_i32",   &ldg_scalar<Type::u32> },
+        { "ptx_ldg_i64",   &ldg_scalar<Type::u64> },
+        { "ptx_ldg_f32x4", &ldg_v4<Type::f32> },
+        { "ptx_ldg_i32x4", &ldg_v4<Type::u32> },
+
+        // Ampere/Ada async global->shared, cvta, ldmatrix, mma.sync
+        { "ptx_cvta_to_shared_u32",     &cvta_to_shared<Type::u32> },
+        { "ptx_cvta_to_shared_u64",     &cvta_to_shared<Type::u64> },
+        { "ptx_cp_async_cg_16",         &cp_async<16, true> },
+        { "ptx_cp_async_ca_4",          &cp_async<4, false> },
+        { "ptx_cp_async_ca_8",          &cp_async<8, false> },
+        { "ptx_cp_async_ca_16",         &cp_async<16, false> },
+        { "ptx_cp_async_commit",        &cp_async_commit },
+        { "ptx_cp_async_wait_group",    &cp_async_wait_group },
+        { "ptx_cp_async_wait_all",      &cp_async_wait_all },
+        { "ptx_ldmatrix_x1",            &ldmatrix<1, false> },
+        { "ptx_ldmatrix_x1_trans",      &ldmatrix<1, true> },
+        { "ptx_ldmatrix_x2",            &ldmatrix<2, false> },
+        { "ptx_ldmatrix_x2_trans",      &ldmatrix<2, true> },
+        { "ptx_ldmatrix_x4",            &ldmatrix<4, false> },
+        { "ptx_ldmatrix_x4_trans",      &ldmatrix<4, true> },
+        { "ptx_mma_m16n8k16_f16_f32",   &mma_m16n8k16<Type::f16> },
+        { "ptx_mma_m16n8k16_bf16_f32",  &mma_m16n8k16<Type::bf16> },
 
         // Cooperative matrix 16x16x16 (wmma.sync.aligned.m16n16k16)
         { "ptx_coop_alloc_a",   &coop_alloc<0> },

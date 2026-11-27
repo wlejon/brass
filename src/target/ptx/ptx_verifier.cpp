@@ -77,6 +77,9 @@ bool takes_type(Opcode op) {
     switch (op) {
         case Opcode::bra: case Opcode::ret: case Opcode::call:
         case Opcode::trap: case Opcode::exit: case Opcode::bar:
+        case Opcode::cp_async: case Opcode::cp_async_commit:
+        case Opcode::cp_async_wait_group: case Opcode::cp_async_wait_all:
+        case Opcode::ldmatrix:
             return false;
         default:
             return true;
@@ -368,8 +371,11 @@ private:
         if (I.cmp_op != CmpOp::none && I.op != Opcode::setp)
             error("only setp takes a comparison operator");
         if (I.state_space != StateSpace::none && I.op != Opcode::ld && I.op != Opcode::st &&
-            I.op != Opcode::atom && I.op != Opcode::wmma_load && I.op != Opcode::wmma_store)
-            error("only ld/st/atom/wmma take a state space");
+            I.op != Opcode::atom && I.op != Opcode::wmma_load && I.op != Opcode::wmma_store &&
+            I.op != Opcode::cvta)
+            error("only ld/st/atom/wmma/cvta take a state space");
+        if (I.is_nc && (I.op != Opcode::ld || I.state_space != StateSpace::global))
+            error(".nc modifier is only valid on ld.global");
 
         switch (I.op) {
             case Opcode::ld:    verify_ld(); break;
@@ -401,6 +407,13 @@ private:
             case Opcode::wmma_load:  verify_wmma_load(); break;
             case Opcode::wmma_store: verify_wmma_store(); break;
             case Opcode::wmma_mma:   verify_wmma_mma(); break;
+            case Opcode::cvta:                verify_cvta(); break;
+            case Opcode::cp_async:            verify_cp_async(); break;
+            case Opcode::cp_async_commit:
+            case Opcode::cp_async_wait_all:   check_arity(0, 0, 0); break;
+            case Opcode::cp_async_wait_group: verify_cp_async_wait_group(); break;
+            case Opcode::ldmatrix:            verify_ldmatrix(); break;
+            case Opcode::mma_sync:            verify_mma_sync(); break;
             default:
                 if (is_binary_alu(I.op)) verify_binary();
                 else if (is_unary_math(I.op)) verify_unary_math();
@@ -463,6 +476,10 @@ private:
                 error("symbol '" + s.name + "' is not a declared .shared array");
             if (!(is_integer(I.type) || is_bits(I.type)))
                 error("address-of-symbol move requires an integer type");
+            return;
+        }
+        if (I.type == Type::b64 && s.is_vec()) {
+            verify_wmma_tuple(s, 2u, Type::b32, "mov.b64 pack source");
             return;
         }
         expect_value(s, I.type, "source 0");
@@ -693,6 +710,72 @@ private:
         expect_addr(I.srcs[0], "wmma.store address");
         verify_wmma_tuple(I.srcs[1], nregs, elem_t, "wmma.store source");
         expect_b32_or_imm(I.srcs[2], "wmma.store stride");
+    }
+
+    void verify_mma_sync() {
+        const Inst& I = *inst_;
+        if (!check_arity(1, 3, 3)) return;
+        verify_wmma_tuple(I.dsts[0], 4u, Type::f32, "mma.sync d");
+        verify_wmma_tuple(I.srcs[0], 4u, Type::b32, "mma.sync a");
+        verify_wmma_tuple(I.srcs[1], 2u, Type::b32, "mma.sync b");
+        verify_wmma_tuple(I.srcs[2], 4u, Type::f32, "mma.sync c");
+    }
+
+    void verify_cvta() {
+        const Inst& I = *inst_;
+        if (!check_arity(1, 1, 1)) return;
+        if (I.state_space != StateSpace::shared && I.state_space != StateSpace::global) {
+            error("cvta requires .shared or .global state space");
+        }
+        if (I.type != Type::u32 && I.type != Type::u64) {
+            error("cvta requires .u32 or .u64 destination type");
+        }
+        expect_reg(I.dsts[0], I.type, "cvta destination");
+        expect_reg_class(I.srcs[0], RegClass::B64, "cvta source pointer");
+    }
+
+    void verify_cp_async() {
+        const Inst& I = *inst_;
+        if (!check_arity(0, 3, 4)) return;
+        if (!I.srcs[0].is_addr()) error("cp.async dst must be a shared address");
+        else if (I.srcs[0].addr_base.valid() &&
+                 I.srcs[0].addr_base.cls != RegClass::B32 && I.srcs[0].addr_base.cls != RegClass::B64) {
+            error("cp.async shared dst base must be b32 or b64");
+        }
+        if (!I.srcs[1].is_addr() || !I.srcs[1].addr_base.valid() || I.srcs[1].addr_base.cls != RegClass::B64) {
+            error("cp.async global src must be a b64 address");
+        }
+        if (!I.srcs[2].is_imm_int()) {
+            error("cp.async size must be an immediate constant (4, 8, or 16)");
+        } else {
+            const int64_t bytes = I.srcs[2].imm_int;
+            if (bytes != 4 && bytes != 8 && bytes != 16) error("cp.async size must be 4, 8, or 16");
+            if (I.is_cg && bytes != 16) error("cp.async.cg only supports 16-byte copies");
+        }
+        if (I.srcs.size() == 4) expect_b32_or_imm(I.srcs[3], "cp.async src-size");
+    }
+
+    void verify_cp_async_wait_group() {
+        const Inst& I = *inst_;
+        if (!check_arity(0, 1, 1)) return;
+        if (!I.srcs[0].is_imm_int() || I.srcs[0].imm_int < 0 || I.srcs[0].imm_int > 63) {
+            error("cp.async.wait_group count must be an immediate integer in [0, 63]");
+        }
+    }
+
+    void verify_ldmatrix() {
+        const Inst& I = *inst_;
+        if (!check_arity(1, 1, 1)) return;
+        if (I.ldmatrix_num != 1 && I.ldmatrix_num != 2 && I.ldmatrix_num != 4) {
+            error("ldmatrix count must be 1, 2, or 4");
+        }
+        verify_wmma_tuple(I.dsts[0], I.ldmatrix_num, Type::b32, "ldmatrix destination");
+        if (!I.srcs[0].is_addr()) {
+            error("ldmatrix source must be a shared address");
+        } else if (I.srcs[0].addr_base.valid() &&
+                   I.srcs[0].addr_base.cls != RegClass::B32 && I.srcs[0].addr_base.cls != RegClass::B64) {
+            error("ldmatrix address base must be b32 or b64");
+        }
     }
 
     void verify_wmma_mma() {

@@ -517,6 +517,27 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
             }
             if (ca.op == BVOp::Sub && ca.b == b) return ca.a;
             if (cb.op == BVOp::Sub && cb.b == a) return cb.a;
+            if (ca.op == BVOp::Add && nodes_[ca.b].op == BVOp::Const && cb.op != BVOp::Const) {
+                return make_binary(BVOp::Add, make_binary(BVOp::Add, ca.a, b, w), ca.b, w);
+            }
+            if (cb.op == BVOp::Add && nodes_[cb.b].op == BVOp::Const) {
+                return make_binary(BVOp::Add, make_binary(BVOp::Add, a, cb.a, w), cb.b, w);
+            }
+            if (ca.op == BVOp::Or && nodes_[ca.b].op == BVOp::Const) {
+                const uint64_t c = nodes_[ca.b].imm & m;
+                if (c != 0 && (intervals_[ca.a].known_zeros & c) == c) {
+                    if (cb.op == BVOp::Const) {
+                        return make_binary(BVOp::Add, ca.a, make_const((c + cb.imm) & m, w), w);
+                    }
+                    return make_binary(BVOp::Add, make_binary(BVOp::Add, ca.a, b, w), ca.b, w);
+                }
+            }
+            if (cb.op == BVOp::Or && nodes_[cb.b].op == BVOp::Const) {
+                const uint64_t c = nodes_[cb.b].imm & m;
+                if (c != 0 && (intervals_[cb.a].known_zeros & c) == c) {
+                    return make_binary(BVOp::Add, make_binary(BVOp::Add, a, cb.a, w), cb.b, w);
+                }
+            }
             if (((intervals_[a].known_zeros | intervals_[b].known_zeros) & m) == m) {
                 return make_binary(BVOp::Or, a, b, w);
             }
@@ -659,6 +680,11 @@ BVNodeId BVContext::make_binary(BVOp op, BVNodeId a, BVNodeId b, uint32_t res_wi
                     BVNodeId t1 = make_binary(BVOp::Shl, ca.a, b, w);
                     BVNodeId t2 = make_const((nodes_[ca.b].imm << sh) & m, w);
                     return make_binary(BVOp::Add, t1, t2, w);
+                }
+                if (op == BVOp::Shl && sh < w && ca.op == BVOp::Or && nodes_[ca.b].op == BVOp::Const) {
+                    BVNodeId t1 = make_binary(BVOp::Shl, ca.a, b, w);
+                    BVNodeId t2 = make_const((nodes_[ca.b].imm << sh) & m, w);
+                    return make_binary(BVOp::Or, t1, t2, w);
                 }
                 if (op == BVOp::Shl && sh < w && ca.op == BVOp::LShr && nodes_[ca.b].op == BVOp::Const && nodes_[ca.b].imm == sh) {
                     return make_binary(BVOp::And, ca.a, make_const((m << sh) & m, w), w);

@@ -55,6 +55,7 @@ struct SpirvISel::Intrinsics {
     static void f32_to_f16(SpirvISel& isel, const brass::Instruction& inst);
     static void pack_f16x2(SpirvISel& isel, const brass::Instruction& inst);
     static void f32_to_bf16(SpirvISel& isel, const brass::Instruction& inst);
+    static void bf16_to_f32(SpirvISel& isel, const brass::Instruction& inst);
     static void ldexp_f32(SpirvISel& isel, const brass::Instruction& inst);
     static void sdot4(SpirvISel& isel, const brass::Instruction& inst);
 
@@ -103,6 +104,7 @@ struct SpirvISel::Intrinsics {
     static void load_narrow(SpirvISel& isel, const brass::Instruction& inst);
     template <uint32_t Bits>
     static void store_narrow(SpirvISel& isel, const brass::Instruction& inst);
+    static void ldg_global(SpirvISel& isel, const brass::Instruction& inst);
     static Id byte_address(SpirvISel& isel, const Value* ptr, const Value* offset);
     enum class Group { add, min, max };
     template <Group G>
