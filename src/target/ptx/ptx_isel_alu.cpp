@@ -207,6 +207,10 @@ void PtxISel::lower_comparison(const brass::Instruction& inst, CmpOp cmp, bool i
 }
 
 void PtxISel::lower_select(const brass::Instruction& inst) {
+    if (inst.type().is_vector()) {
+        lower_vector_select(inst);
+        return;
+    }
     Reg p = materialize_pred(inst.operand(0));
     Type t = bit_type_for(inst.type());
     emit(Inst::make(Opcode::selp, t)

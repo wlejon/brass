@@ -154,6 +154,7 @@ private:
     void lower_vinsert_lane(const brass::Instruction& inst);
     void lower_vshuffle(const brass::Instruction& inst);
     void lower_vzero(const brass::Instruction& inst);
+    void lower_vector_select(const brass::Instruction& inst);
     Type vector_elem_type(const brass::Instruction& inst, brass::Type vt) const;
 
     // ---- intrinsic helpers (ptx_isel_intrinsics.cpp) ----------------------

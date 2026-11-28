@@ -268,4 +268,16 @@ void PtxISel::lower_vzero(const brass::Instruction& inst) {
     }
 }
 
+void PtxISel::lower_vector_select(const brass::Instruction& inst) {
+    Reg p = materialize_pred(inst.operand(0));
+    Type t = vec_bit_type(inst.type());
+    const auto& dst = result_regs(inst);
+    const auto& a = regs_of(inst.operand(1), "true value");
+    const auto& b = regs_of(inst.operand(2), "false value");
+    if (a.size() != dst.size() || b.size() != dst.size()) malformed(inst, "operand lane count mismatch");
+    for (size_t lane = 0; lane < dst.size(); ++lane) {
+        emit(Inst::make(Opcode::selp, t).dst(dst[lane]).src(a[lane]).src(b[lane]).src(p));
+    }
+}
+
 } // namespace brass::ptx

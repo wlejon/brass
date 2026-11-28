@@ -576,3 +576,90 @@ TEST_CASE("PTX vector - an unrolled loop body may not end in its own terminator"
     b2.build_ret_void();
     lower_ok(*f2);
 }
+
+TEST_CASE("PTX vector - select lowers per lane for f32x4, i32x4, f64x2 and f32x8") {
+    {
+        std::vector<float> a = {1.5f, -2.0f, 4.0f, 9.0f};
+        std::vector<float> b = {0.5f, 4.0f, -1.0f, 3.0f};
+        std::string ptx;
+        auto got = run_vec<float>(Type::f32x4(), a, b, 8, [](KernelBuilder& kb, Value* va, Value* vb) {
+            Builder& bd = kb.builder();
+            Value* cond_t = bd.build_slt(bd.build_vextract_lane(vb, 0), bd.build_vextract_lane(va, 0));
+            Value* cond_f = bd.build_slt(bd.build_vextract_lane(va, 0), bd.build_vextract_lane(vb, 0));
+            return std::vector<Value*>{
+                bd.build_select(cond_t, va, vb),
+                bd.build_select(cond_f, va, vb),
+            };
+        }, &ptx);
+        CHECK(ptx.find("selp.f32") != std::string::npos);
+        if (!got.empty()) {
+            for (size_t l = 0; l < 4; ++l) {
+                CHECK_EQ(got[l], a[l]);
+                CHECK_EQ(got[4 + l], b[l]);
+            }
+        }
+    }
+    {
+        std::vector<int32_t> a = {10, -20, 30, 40};
+        std::vector<int32_t> b = {3, 6, -9, 12};
+        std::string ptx;
+        auto got = run_vec<int32_t>(Type::i32x4(), a, b, 8, [](KernelBuilder& kb, Value* va, Value* vb) {
+            Builder& bd = kb.builder();
+            Value* cond_t = bd.build_slt(bd.build_vextract_lane(vb, 0), bd.build_vextract_lane(va, 0));
+            Value* cond_f = bd.build_slt(bd.build_vextract_lane(va, 0), bd.build_vextract_lane(vb, 0));
+            return std::vector<Value*>{
+                bd.build_select(cond_t, va, vb),
+                bd.build_select(cond_f, va, vb),
+            };
+        }, &ptx);
+        CHECK(ptx.find("selp.b32") != std::string::npos);
+        if (!got.empty()) {
+            for (size_t l = 0; l < 4; ++l) {
+                CHECK_EQ(got[l], a[l]);
+                CHECK_EQ(got[4 + l], b[l]);
+            }
+        }
+    }
+    {
+        std::vector<double> a = {1.25, -3.0};
+        std::vector<double> b = {0.5, 8.0};
+        std::string ptx;
+        auto got = run_vec<double>(Type::f64x2(), a, b, 4, [](KernelBuilder& kb, Value* va, Value* vb) {
+            Builder& bd = kb.builder();
+            Value* cond_t = bd.build_slt(bd.build_vextract_lane(vb, 0), bd.build_vextract_lane(va, 0));
+            Value* cond_f = bd.build_slt(bd.build_vextract_lane(va, 0), bd.build_vextract_lane(vb, 0));
+            return std::vector<Value*>{
+                bd.build_select(cond_t, va, vb),
+                bd.build_select(cond_f, va, vb),
+            };
+        }, &ptx);
+        CHECK(ptx.find("selp.f64") != std::string::npos);
+        if (!got.empty()) {
+            for (size_t l = 0; l < 2; ++l) {
+                CHECK_EQ(got[l], a[l]);
+                CHECK_EQ(got[2 + l], b[l]);
+            }
+        }
+    }
+    {
+        std::vector<float> a = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f};
+        std::vector<float> b = {10.f, 20.f, 30.f, 40.f, 50.f, 60.f, 70.f, 80.f};
+        std::string ptx;
+        auto got = run_vec<float>(Type::f32x8(), a, b, 16, [](KernelBuilder& kb, Value* va, Value* vb) {
+            Builder& bd = kb.builder();
+            Value* cond_t = bd.build_slt(bd.build_vextract_lane(va, 0), bd.build_vextract_lane(vb, 0));
+            Value* cond_f = bd.build_slt(bd.build_vextract_lane(vb, 0), bd.build_vextract_lane(va, 0));
+            return std::vector<Value*>{
+                bd.build_select(cond_t, va, vb),
+                bd.build_select(cond_f, va, vb),
+            };
+        }, &ptx);
+        CHECK(ptx.find("selp.f32") != std::string::npos);
+        if (!got.empty()) {
+            for (size_t l = 0; l < 8; ++l) {
+                CHECK_EQ(got[l], a[l]);
+                CHECK_EQ(got[8 + l], b[l]);
+            }
+        }
+    }
+}
