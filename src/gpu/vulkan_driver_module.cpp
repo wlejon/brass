@@ -63,6 +63,8 @@ std::string VulkanDeviceCaps::missing_for(const brass::target::SpirvKernel& k) c
          "shaderBufferFloat64AtomicAdd (VK_EXT_shader_atomic_float)"},
         {"Int64Atomics", &VulkanDeviceCaps::buffer_int64_atomics, "shaderBufferInt64Atomics"},
         {"ShaderClockKHR", &VulkanDeviceCaps::subgroup_clock, "shaderSubgroupClock (VK_KHR_shader_clock)"},
+        {"SignedZeroInfNanPreserve", &VulkanDeviceCaps::signed_zero_inf_nan_preserve_f32,
+         "shaderSignedZeroInfNanPreserveFloat32"},
     };
     std::ostringstream out;
     for (const std::string& cap : k.capabilities) {

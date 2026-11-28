@@ -98,6 +98,10 @@ struct SpirvOptions {
     // push constant so kernels are never capped at Vulkan's 128B floor.
     bool spill_overflow_params = true;
     uint32_t max_push_constant_bytes = 128;
+    // Emits OpCapability SignedZeroInfNanPreserve + OpExecutionMode
+    // SignedZeroInfNanPreserve 32 so drivers that default to fast-math
+    // (notably MoltenVK/Metal) preserve IEEE-754 NaN, Inf, and signed zero.
+    bool preserve_signed_zero_inf_nan = false;
 };
 
 struct SpirvParam {

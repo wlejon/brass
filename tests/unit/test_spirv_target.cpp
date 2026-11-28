@@ -193,4 +193,23 @@ TEST_CASE("SPIR-V Target - parameters exceeding 128B spill into a BDA parameter 
     CHECK_EQ(kern.params.back().offset, 260u);
 }
 
+TEST_CASE("SPIR-V Target - preserve_signed_zero_inf_nan emits capability and execution mode") {
+    Kernel k({Type::ptr(), Type::f32()}, "div_self");
+    Builder& b = k.b;
+    b.build_store(Type::f32(), k.p(0), 0, b.build_sdiv(k.p(1), k.p(1)));
+    b.build_ret_void();
+
+    target::SpirvOptions opts;
+    opts.preserve_signed_zero_inf_nan = true;
+    target::SpirvKernel kern = compile_checked(*k.fn, opts);
+    CHECK(has_cap(kern, "SignedZeroInfNanPreserve"));
+    std::string text = dump_of(*k.fn, opts);
+    CHECK(has(text, "OpCapability SignedZeroInfNanPreserve"));
+    CHECK(has(text, "OpExecutionMode") && has(text, " 4461 32"));
+    std::string dis = disassemble(kern.words);
+    if (!dis.empty()) {
+        CHECK(has(dis, "OpExecutionMode") && has(dis, "SignedZeroInfNanPreserve 32"));
+    }
+}
+
 } // namespace

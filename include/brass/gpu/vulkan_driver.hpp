@@ -64,6 +64,7 @@ struct VulkanDeviceCaps {
     bool subgroup_clock = false;      // VK_KHR_shader_clock
     bool subgroup_size_control = false;   // VK_EXT_subgroup_size_control / Vulkan 1.3
     bool compute_full_subgroups = false;
+    bool signed_zero_inf_nan_preserve_f32 = false;
 
     // Limits.
     uint32_t subgroup_size = 0;           // the driver's default

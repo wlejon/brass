@@ -122,6 +122,10 @@ KernelLayout SpirvISel::lower(const brass::Function& mir_fn) {
     } else if (opts_.stage == target::SpirvStage::Fragment) {
         m_.add_execution_mode(fn().id, spv::ExecutionModeOriginUpperLeft, {});
     }
+    if (opts_.preserve_signed_zero_inf_nan) {
+        m_.add_capability(spv::CapabilitySignedZeroInfNanPreserve);
+        m_.add_execution_mode(fn().id, spv::ExecutionModeSignedZeroInfNanPreserve, {32});
+    }
 
     KernelLayout layout;
     cur_ = node_block_[0];

@@ -187,10 +187,12 @@ bool open_device(Runtime& r) {
 
     // --- properties ---
     auto sg_size_props = vk::make<VkPhysicalDeviceSubgroupSizeControlProperties>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES);
+    auto fc_props = vk::make<VkPhysicalDeviceFloatControlsProperties>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES);
     auto sg_props = vk::make<VkPhysicalDeviceSubgroupProperties>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES);
     auto drv = vk::make<VkPhysicalDeviceDriverProperties>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES);
     sg_props.pNext = &drv;
-    if (ext_sg_size) drv.pNext = &sg_size_props;
+    drv.pNext = &fc_props;
+    if (ext_sg_size) fc_props.pNext = &sg_size_props;
     auto props2 = vk::make<VkPhysicalDeviceProperties2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2);
     props2.pNext = &sg_props;
     r.vkGetPhysicalDeviceProperties2(r.phys, &props2);
@@ -231,6 +233,7 @@ bool open_device(Runtime& r) {
         c.buffer_float64_atomic_add = faf.shaderBufferFloat64AtomicAdd;
     }
     c.subgroup_clock = ext_clock && fclk.shaderSubgroupClock;
+    c.signed_zero_inf_nan_preserve_f32 = fc_props.shaderSignedZeroInfNanPreserveFloat32;
     if (ext_sg_size) {
         c.subgroup_size_control = fsg.subgroupSizeControl;
         c.compute_full_subgroups = fsg.computeFullSubgroups;
