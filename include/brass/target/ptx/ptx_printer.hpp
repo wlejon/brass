@@ -27,6 +27,15 @@ std::string to_string(const Inst& inst);   // "@%p1 add.f32 %f0, %f1, %f2;" (no 
 // ".version / .target / .address_size" preamble.
 std::string print_header(const target::PtxOptions& opts);
 
+// Minimum SM architecture and PTX ISA version required by the instructions
+// present in `fn` (does not alter header defaults when callers want higher).
+struct PtxIsaRequirement {
+    uint32_t min_sm = 70;
+    uint32_t min_ptx_major = 7;
+    uint32_t min_ptx_minor = 0;
+};
+PtxIsaRequirement required_isa(const Function& fn) noexcept;
+
 // Function body only: signature, declarations, blocks. `native_tanh` false
 // (a target before sm_75) prints tanh as ex2/rcp arithmetic.
 std::string print_body(const Function& fn);

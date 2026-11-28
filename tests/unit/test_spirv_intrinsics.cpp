@@ -558,11 +558,18 @@ TEST_CASE("SPIR-V intrinsics - every PTX intrinsic is lowered or diagnosed with 
         BasicBlock* e = b.append_block("entry");
         b.position_at_end(e);
         Value* p = b.add_block_param(e, Type::ptr());
-        Type rt = name == "ptx_globaltimer" ? Type::i64() : Type::i32();
+        Type rt = (name == "ptx_globaltimer" ||
+                   name == "ptx_l2_evict_first_policy" ||
+                   name == "ptx_mma_m16n8k16_f16_f16")
+                      ? Type::i64()
+                      : (name == "ptx_shared_dynamic" ? Type::ptr() : Type::i32());
         if (name == "ptx_bar_sync_count") {
             b.build_call(std::string(name), Type::void_type(), {b.build_iconst_i32(1), b.build_iconst_i32(64)});
+        } else if (name == "ptx_mma_m16n8k16_f16_f16") {
+            Value* zero = b.build_iconst_i32(0);
+            b.build_store(rt, p, 0, b.build_call(std::string(name), rt, {b.build_vzero(Type::i32x4()), zero, zero, zero, zero}));
         } else {
-            b.build_store(rt, p, 0, b.build_call(std::string(name), rt));
+            b.build_store(rt == Type::ptr() ? Type::i64() : rt, p, 0, b.build_call(std::string(name), rt));
         }
         b.build_ret_void();
         std::string reason = SpirvISel::unsupported_reason(name);

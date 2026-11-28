@@ -6,6 +6,8 @@
 #include <brass/mir/loop_opt.hpp>
 #include <brass/mir/module.hpp>
 #include <brass/target/msl_target.hpp>
+#include <brass/target/ptx/ptx_isel.hpp>
+#include <brass/target/ptx/ptx_printer.hpp>
 #include <brass/target/ptx_target.hpp>
 #if BRASS_WITH_SPIRV
 #include <brass/target/spirv_target.hpp>
@@ -312,6 +314,48 @@ TEST_CASE("GPU Opt - Small Loop Unroll + 4x32-bit v4 Coalescing") {
     eopts.loop_unroll_bound = 8;
     const EquivResult eq = verify_mir_equivalence(*sum_ref, *sum_fn, eopts);
     CHECK(eq.is_equivalent());
+}
+
+TEST_CASE("PTX Ampere - required_isa reports minimal SM and PTX version") {
+    auto isa_for = [](auto&& build_body) {
+        Module mod("isa_mod");
+        Function* fn = mod.create_function("k", Type::void_type(), {Type::ptr()});
+        Builder b(mod);
+        b.set_function(fn);
+        BasicBlock* e = b.append_block("entry");
+        b.position_at_end(e);
+        Value* p = b.add_block_param(e, Type::ptr());
+        build_body(b, p);
+        b.build_ret_void();
+        fn->rebuild_cfg_predecessors();
+        ptx::PtxISel isel;
+        ptx::Function ptx_fn = isel.lower(*fn);
+        return ptx::required_isa(ptx_fn);
+    };
+
+    const ptx::PtxIsaRequirement base = isa_for([](Builder& b, Value* p) {
+        b.build_store(Type::i32(), p, 0, b.build_iconst_i32(42));
+    });
+    CHECK(base.min_sm == 70);
+    CHECK(base.min_ptx_major == 7);
+    CHECK(base.min_ptx_minor == 0);
+
+    const ptx::PtxIsaRequirement ampere = isa_for([](Builder& b, Value* p) {
+        Value* s = b.build_call("ptx_shared_alloc_i32", Type::ptr(), {b.build_iconst_i32(16)});
+        b.build_call("ptx_cp_async_cg_16", Type::void_type(), {s, p});
+        b.build_call("ptx_cp_async_wait_all", Type::void_type());
+    });
+    CHECK(ampere.min_sm == 80);
+    CHECK(ampere.min_ptx_major == 7);
+    CHECK(ampere.min_ptx_minor == 0);
+
+    const ptx::PtxIsaRequirement l2 = isa_for([](Builder& b, Value* p) {
+        Value* pol = b.build_call("ptx_l2_evict_first_policy", Type::i64());
+        b.build_store(Type::i64(), p, 0, pol);
+    });
+    CHECK(l2.min_sm == 80);
+    CHECK(l2.min_ptx_major == 7);
+    CHECK(l2.min_ptx_minor == 4);
 }
 
 #ifdef BRASS_STANDALONE_TEST

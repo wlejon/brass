@@ -262,6 +262,35 @@ std::string print_header(const target::PtxOptions& opts) {
     return ss.str();
 }
 
+PtxIsaRequirement required_isa(const Function& fn) noexcept {
+    PtxIsaRequirement req;
+    auto bump = [&](uint32_t sm, uint32_t ptx_maj, uint32_t ptx_min) {
+        if (sm > req.min_sm) req.min_sm = sm;
+        if (ptx_maj > req.min_ptx_major ||
+            (ptx_maj == req.min_ptx_major && ptx_min > req.min_ptx_minor)) {
+            req.min_ptx_major = ptx_maj;
+            req.min_ptx_minor = ptx_min;
+        }
+    };
+    for (const auto& block : fn.blocks) {
+        for (const auto& inst : block->insts) {
+            if (inst.op == Opcode::createpolicy_evict_first ||
+                (inst.op == Opcode::cp_async && inst.has_cache_hint)) {
+                bump(80, 7, 4);
+            } else if (inst.op == Opcode::cp_async ||
+                       inst.op == Opcode::cp_async_commit ||
+                       inst.op == Opcode::cp_async_wait_group ||
+                       inst.op == Opcode::cp_async_wait_all ||
+                       inst.op == Opcode::ldmatrix ||
+                       inst.op == Opcode::mma_sync ||
+                       (inst.op == Opcode::cvt && (inst.type == Type::bf16 || inst.src_type == Type::bf16))) {
+                bump(80, 7, 0);
+            }
+        }
+    }
+    return req;
+}
+
 namespace {
 
 int parse_sm_version(const std::string& sm_arch) {
