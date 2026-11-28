@@ -89,7 +89,7 @@ ModeTable compute_mode_table(const EGraph& eg, ExtractCostMode mode) {
                 if (mode != ExtractCostMode::StaticOps) {
                     lat = (std::min)(static_cast<uint64_t>(max_child_lat) + eop_mode_cost(n.op, mode),
                                      static_cast<uint64_t>(UINT32_MAX - 1u));
-                    metric = (std::min)(lat * 256ULL + (std::min)(scost, 255ULL),
+                    metric = (std::min)(lat * static_cast<uint64_t>(256u) + (std::min)(scost, static_cast<uint64_t>(255u)),
                                         static_cast<uint64_t>(UINT32_MAX - 1u));
                 }
 
