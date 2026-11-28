@@ -24,8 +24,13 @@ void SpirvISel::lower_binary(const brass::Instruction& inst, spv::Op int_op, spv
     const std::vector<Id> b = ids_of(inst.operand(1), "operand 1");
     if (a.size() != b.size()) malformed(inst, "operand widths differ");
     Id pt = part_type(t);
+    const bool no_contract = element_of(t).is_float() && inst.no_contraction();
     std::vector<Id> out;
-    for (size_t k = 0; k < a.size(); ++k) out.push_back(op(o, pt, {a[k], b[k]}));
+    for (size_t k = 0; k < a.size(); ++k) {
+        Id r = op(o, pt, {a[k], b[k]});
+        if (no_contract) m_.decorate(r, spv::DecorationNoContraction);
+        out.push_back(r);
+    }
     define(inst.result(), std::move(out));
 }
 

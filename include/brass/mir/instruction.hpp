@@ -166,10 +166,13 @@ public:
     bool non_trapping_load() const noexcept { return non_trapping_load_; }
     void set_non_trapping_load(bool non_trapping = true) noexcept { non_trapping_load_ = non_trapping; }
 
+    bool no_contraction() const noexcept { return no_contraction_; }
+    void set_no_contraction(bool on = true) noexcept { no_contraction_ = on; }
+
     // The plain attributes a copy of `src` keeps: immediates, scale, offset,
-    // memory type, alias class, inline hint, fresh-in-twin, non-trapping-load
-    // (not symbols, which live in a module's pool, nor the debug location or a
-    // barrier certificate).
+    // memory type, alias class, inline hint, fresh-in-twin, non-trapping-load,
+    // no-contraction (not symbols, which live in a module's pool, nor the debug
+    // location or a barrier certificate).
     void copy_attributes_from(const Instruction& src) noexcept {
         imm_bits_ = src.imm_bits_;
         scale_ = src.scale_;
@@ -179,6 +182,7 @@ public:
         inline_hint_ = src.inline_hint_;
         fresh_in_twin_ = src.fresh_in_twin_;
         non_trapping_load_ = src.non_trapping_load_;
+        no_contraction_ = src.no_contraction_;
     }
 
     bool has_extra() const noexcept { return extra_ != nullptr; }
@@ -311,6 +315,7 @@ private:
     bool inline_hint_ = false;
     bool fresh_in_twin_ = false;
     bool non_trapping_load_ = false;
+    bool no_contraction_ = false;
     BarrierCertKind barrier_cert_ = BarrierCertKind::None;
 };
 

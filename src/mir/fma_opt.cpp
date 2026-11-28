@@ -24,7 +24,7 @@ bool fma_opt_pass(Function& fn, const FmaOptOptions& options) {
             Instruction* next = inst->next();
 
             // Scalar FMA pattern matching: add(mul(a, b), c) or add(c, mul(a, b))
-            if (options.enable_scalar && inst->opcode() == Opcode::add) {
+            if (options.enable_scalar && inst->opcode() == Opcode::add && !inst->no_contraction()) {
                 Type ty = inst->type();
                 if (ty == Type::f32() || ty == Type::f64()) {
                     Value* op0 = inst->operand(0);
@@ -36,11 +36,13 @@ bool fma_opt_pass(Function& fn, const FmaOptOptions& options) {
                     Value* b = nullptr;
                     Value* c = nullptr;
 
-                    if (mul0 && mul0->opcode() == Opcode::mul && mul0->type() == ty && mul0->operand_count() >= 2) {
+                    if (mul0 && mul0->opcode() == Opcode::mul && !mul0->no_contraction() &&
+                        mul0->type() == ty && mul0->operand_count() >= 2) {
                         a = mul0->operand(0);
                         b = mul0->operand(1);
                         c = op1;
-                    } else if (mul1 && mul1->opcode() == Opcode::mul && mul1->type() == ty && mul1->operand_count() >= 2) {
+                    } else if (mul1 && mul1->opcode() == Opcode::mul && !mul1->no_contraction() &&
+                               mul1->type() == ty && mul1->operand_count() >= 2) {
                         a = mul1->operand(0);
                         b = mul1->operand(1);
                         c = op0;

@@ -370,11 +370,14 @@ void SpirvISel::lower_instruction(const brass::Instruction& inst) {
         case Opcode::sub: lower_binary(inst, spv::OpISub, spv::OpFSub); break;
         case Opcode::mul: lower_binary(inst, spv::OpIMul, spv::OpFMul); break;
         case Opcode::fma_f32:
-        case Opcode::fma_f64:
-            define(inst.result(), ext(GLSLstd450Fma, part_type(inst.type()),
-                                      {id_of(inst.operand(0), "operand 0"), id_of(inst.operand(1), "operand 1"),
-                                       id_of(inst.operand(2), "operand 2")}));
+        case Opcode::fma_f64: {
+            Id r = ext(GLSLstd450Fma, part_type(inst.type()),
+                       {id_of(inst.operand(0), "operand 0"), id_of(inst.operand(1), "operand 1"),
+                        id_of(inst.operand(2), "operand 2")});
+            if (inst.no_contraction()) m_.decorate(r, spv::DecorationNoContraction);
+            define(inst.result(), r);
             break;
+        }
         case Opcode::sdiv:
             if (inst.type().is_float()) lower_binary(inst, spv::OpFDiv, spv::OpFDiv);
             else lower_int_div_rem(inst, false, false);
@@ -385,10 +388,13 @@ void SpirvISel::lower_instruction(const brass::Instruction& inst) {
             else lower_int_div_rem(inst, true, false);
             break;
         case Opcode::umod: lower_int_div_rem(inst, true, true); break;
-        case Opcode::neg:
-            define(inst.result(), op(inst.type().is_float() ? spv::OpFNegate : spv::OpSNegate, scalar_type(inst.type()),
-                                     {id_of(inst.operand(0), "operand 0")}));
+        case Opcode::neg: {
+            Id r = op(inst.type().is_float() ? spv::OpFNegate : spv::OpSNegate, scalar_type(inst.type()),
+                      {id_of(inst.operand(0), "operand 0")});
+            if (inst.type().is_float() && inst.no_contraction()) m_.decorate(r, spv::DecorationNoContraction);
+            define(inst.result(), r);
             break;
+        }
         case Opcode::sqrt_f32:
         case Opcode::sqrt_f64:  lower_unary_glsl(inst, GLSLstd450Sqrt); break;
         case Opcode::floor_f32:
