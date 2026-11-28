@@ -1,6 +1,7 @@
 #include <brass/mir/superopt.hpp>
 #include "const_div_opt.hpp"
 #include <brass/mir/egraph.hpp>
+#include <brass/mir/inst_opt_model.hpp>
 #include "../verify/bv_solver.hpp"
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
@@ -10,6 +11,7 @@
 #include <brass/verify/smt_equiv.hpp>
 #include <algorithm>
 #include <bit>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -423,10 +425,27 @@ bool run_mir_superopt(
             }
             BVNodeId path_cond = build_path_cond(orig_bv);
 
+            std::optional<InstOptPrediction> cur_pred;
+            if (opts.use_inst_opt_model) {
+                const InstOptModel& mdl = opts.inst_opt_model ? *opts.inst_opt_model : InstOptModel::builtin();
+                const InstOptTarget tgt = opts.enable_gpu_superopt ? InstOptTarget::GPU_PTX : InstOptTarget::X64;
+                cur_pred = mdl.predict(extract_inst_opt_features(cur, bb, tgt, !assumptions.empty()));
+            }
+            auto policy_allows = [&](InstOptAction act) -> bool {
+                if (!opts.use_inst_opt_model || !cur_pred.has_value()) return true;
+                const float p_noop = cur_pred->action_probs[static_cast<size_t>(InstOptAction::NoOp)];
+                const float p_act = cur_pred->action_probs[static_cast<size_t>(act)];
+                if (p_noop > 0.85f && p_act < opts.model_policy_min_prob) {
+                    if (opts.stats) opts.stats->solver_queries_skipped_by_model++;
+                    return false;
+                }
+                return true;
+            };
+
             // ---------------------------------------------------------------
             // 1. Solver-Proven Redundant Bitmask Elision
             // ---------------------------------------------------------------
-            if (op == Opcode::and_ || op == Opcode::or_) {
+            if ((op == Opcode::and_ || op == Opcode::or_) && policy_allows(InstOptAction::GuardMaskElide)) {
                 Value* op0 = cur->operand(0);
                 Value* op1 = cur->operand(1);
                 BVNodeId b0 = enc.encode(op0);
@@ -459,7 +478,8 @@ bool run_mir_superopt(
             // ---------------------------------------------------------------
             // 2. Solver-Proven Redundant Sign/Zero-Extension & Truncation Elision
             // ---------------------------------------------------------------
-            if (op == Opcode::sext_i64 || op == Opcode::zext_i64 || op == Opcode::trunc_i32) {
+            if ((op == Opcode::sext_i64 || op == Opcode::zext_i64 || op == Opcode::trunc_i32) &&
+                policy_allows(InstOptAction::GuardExtTruncNarrow)) {
                 Value* inner = cur->operand(0);
                 if (inner && inner->is_instruction()) {
                     Instruction* inner_inst = inner->defining_instruction();
@@ -544,7 +564,8 @@ bool run_mir_superopt(
             // ---------------------------------------------------------------
             // 5. Solver-Proven Signed/Unsigned Division & Modulo Strength Reduction
             // ---------------------------------------------------------------
-            if (op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod || op == Opcode::umod) {
+            if ((op == Opcode::sdiv || op == Opcode::udiv || op == Opcode::smod || op == Opcode::umod) &&
+                policy_allows(InstOptAction::DivModReduce)) {
                 Value* lhs = cur->operand(0);
                 int64_t div_imm = 0;
                 if (lhs && get_const_imm(cur->operand(1), div_imm)) {
@@ -626,7 +647,8 @@ bool run_mir_superopt(
                 int64_t c1 = 0, c2 = 0;
                 if (d0 && d0->opcode() == op && (op == Opcode::and_ || op == Opcode::or_ ||
                     op == Opcode::xor_ || op == Opcode::add) &&
-                    get_const_imm(d0->operand(1), c1) && get_const_imm(op1, c2)) {
+                    get_const_imm(d0->operand(1), c1) && get_const_imm(op1, c2) &&
+                    policy_allows(InstOptAction::AssocConstCombine)) {
                     Value* x = d0->operand(0);
                     BVNodeId x_bv = enc.encode(x);
                     uint64_t comb = (op == Opcode::and_) ? (static_cast<uint64_t>(c1) & static_cast<uint64_t>(c2))
@@ -656,7 +678,8 @@ bool run_mir_superopt(
 
                 // 6b. Distributive factoring: (x & y) | (x & z) -> x & (y | z),
                 //     (x | y) & (x | z) -> x | (y & z), (x * y) + (x * z) -> x * (y + z), etc.
-                if (d0 && d1 && d0->opcode() == d1->opcode() && d0->operand_count() == 2 && d1->operand_count() == 2) {
+                if (d0 && d1 && d0->opcode() == d1->opcode() && d0->operand_count() == 2 && d1->operand_count() == 2 &&
+                    policy_allows((d0->opcode() == Opcode::mul) ? InstOptAction::MulAddFactor : InstOptAction::BitwiseDeMorganDist)) {
                     Opcode inner_op = d0->opcode();
                     bool valid_pair =
                         (inner_op == Opcode::and_ && (op == Opcode::or_ || op == Opcode::xor_)) ||
@@ -712,7 +735,8 @@ bool run_mir_superopt(
 
                 // 6c. De Morgan's laws: (~x & ~y) -> ~(x | y) and (~x | ~y) -> ~(x & y)
                 if ((op == Opcode::and_ || op == Opcode::or_) &&
-                    d0 && d1 && d0->opcode() == Opcode::not_ && d1->opcode() == Opcode::not_) {
+                    d0 && d1 && d0->opcode() == Opcode::not_ && d1->opcode() == Opcode::not_ &&
+                    policy_allows(InstOptAction::BitwiseDeMorganDist)) {
                     Value* x = d0->operand(0);
                     Value* y = d1->operand(0);
                     BVOp inner_bop = (op == Opcode::and_) ? BVOp::Or : BVOp::And;

@@ -7,6 +7,9 @@
 
 namespace brass {
 
+class InstOptModel;
+class OnlineCostCalibrator;
+
 struct SuperoptStats {
     uint32_t masks_elided = 0;
     uint32_t extensions_elided = 0;
@@ -17,6 +20,8 @@ struct SuperoptStats {
     uint32_t indices_narrowed = 0;
     uint32_t egraph_rewrites = 0;
     uint32_t solver_queries = 0;
+    uint32_t model_guided_rewrites = 0;
+    uint32_t solver_queries_skipped_by_model = 0;
 };
 
 struct SuperoptOptions {
@@ -31,6 +36,10 @@ struct SuperoptOptions {
     bool enable_egraph = true;
     uint32_t egraph_max_enodes = 512;
     uint32_t egraph_max_iters = 4;
+    bool use_inst_opt_model = false;
+    const InstOptModel* inst_opt_model = nullptr;
+    const OnlineCostCalibrator* cost_calibrator = nullptr;
+    float model_policy_min_prob = 0.02f;
     SuperoptStats* stats = nullptr;
 };
 

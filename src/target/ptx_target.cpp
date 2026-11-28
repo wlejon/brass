@@ -8,6 +8,7 @@
 #include <brass/target/ptx/ptx_cleanup.hpp>
 #include <brass/target/ptx/ptx_isel.hpp>
 #include <brass/target/ptx/ptx_printer.hpp>
+#include <brass/target/ptx/ptx_schedule.hpp>
 #include <brass/target/ptx/ptx_verifier.hpp>
 
 #include <stdexcept>
@@ -27,6 +28,14 @@ ptx::Function lower_and_verify(const Function& fn, const PtxOptions& opts) {
     if (lowered.minnctapersm == 0 && opts.minnctapersm > 0) lowered.minnctapersm = opts.minnctapersm;
     if (lowered.maxnreg == 0 && opts.maxnreg > 0) lowered.maxnreg = opts.maxnreg;
     if (opts.cleanup) ptx::cleanup(lowered);
+    if (opts.sched_mode != ptx::PtxSchedMode::None || opts.enable_ptx_remat) {
+        ptx::PtxScheduleOptions sopts;
+        sopts.mode = opts.sched_mode;
+        sopts.enable_remat = opts.enable_ptx_remat;
+        sopts.reg_pressure_limit = opts.sched_reg_pressure_limit;
+        (void)ptx::schedule_and_remat(lowered, sopts);
+        ptx::renumber_registers(lowered);
+    }
     std::vector<ptx::Diagnostic> diags = ptx::verify(lowered);
     if (!diags.empty()) {
         throw std::runtime_error("PtxTarget: PtxISel produced ill-formed PTX for kernel '" +
@@ -37,6 +46,10 @@ ptx::Function lower_and_verify(const Function& fn, const PtxOptions& opts) {
 }
 
 } // namespace
+
+ptx::Function PtxTarget::lower_function(const Function& fn, const PtxOptions& opts) {
+    return lower_and_verify(fn, opts);
+}
 
 std::string PtxTarget::emit_function(const Function& fn, const PtxOptions& opts) {
     return ptx::print(lower_and_verify(fn, opts), opts);

@@ -13,6 +13,10 @@
 
 namespace brass {
 
+class InstOptModel;
+class OnlineCostCalibrator;
+enum class InstOptTarget : uint8_t;
+
 using EClassId = uint32_t;
 inline constexpr EClassId kInvalidEClass = UINT32_MAX;
 
@@ -463,6 +467,24 @@ struct ExtractedExpr {
 };
 
 bool extract_min_cost(const EGraph& eg, EClassId root, ExtractedExpr& out);
+
+/// Extract up to `max_k` structurally distinct equivalent expressions from `root`.
+bool extract_top_k_candidates(
+    const EGraph& eg,
+    EClassId root,
+    uint32_t max_k,
+    std::vector<ExtractedExpr>& out);
+
+/// Extract the lowest predicted hardware-cost expression using `InstOptModel`.
+bool extract_min_cost_learned(
+    const EGraph& eg,
+    EClassId root,
+    ExtractedExpr& out,
+    const InstOptModel& model,
+    InstOptTarget target,
+    bool has_runtime_guards = false,
+    const OnlineCostCalibrator* cal = nullptr,
+    float* out_predicted_cost = nullptr);
 
 bool run_mir_egraph_superopt(
     Function& fn,

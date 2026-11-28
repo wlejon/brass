@@ -1,4 +1,5 @@
 #include <brass/mir/egraph.hpp>
+#include <brass/mir/inst_opt_model.hpp>
 #include "../verify/bv_solver.hpp"
 #include <brass/mir/builder.hpp>
 #include <brass/mir/dominators.hpp>
@@ -6,21 +7,58 @@
 #include <brass/mir/range_analysis.hpp>
 #include <brass/mir/uses.hpp>
 #include <algorithm>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace brass {
 
-bool extract_min_cost(const EGraph& eg, EClassId root, ExtractedExpr& out) {
-    const EClassId canon_root = eg.find(root);
-    const auto& classes = eg.classes();
-    if (canon_root >= classes.size()) return false;
+namespace {
 
+enum class ExtractCostMode : uint8_t {
+    StaticOps = 0,
+    LatencyDepth = 1,
+    MulPenaltyLatency = 2
+};
+
+uint32_t eop_mode_cost(EOp op, ExtractCostMode mode) noexcept {
+    if (mode == ExtractCostMode::StaticOps) return eop_cost(op);
+    if (mode == ExtractCostMode::LatencyDepth) {
+        switch (op) {
+            case EOp::Var: case EOp::Const: return 0;
+            case EOp::Select: return 2;
+            case EOp::Mul: return 3;
+            case EOp::SDiv: case EOp::UDiv: case EOp::SMod: case EOp::UMod: return 10;
+            default: return 1;
+        }
+    }
+    switch (op) {
+        case EOp::Var: case EOp::Const: return 0;
+        case EOp::Select: return 2;
+        case EOp::Mul: return 6;
+        case EOp::SDiv: case EOp::UDiv: case EOp::SMod: case EOp::UMod: return 16;
+        default: return 1;
+    }
+}
+
+struct ModeTable {
+    std::vector<uint32_t> best_metric;
+    std::vector<uint32_t> best_lat;
+    std::vector<uint32_t> static_cost;
+    std::vector<ENode> best_node;
+    std::vector<uint8_t> has_best;
+};
+
+ModeTable compute_mode_table(const EGraph& eg, ExtractCostMode mode) {
+    const auto& classes = eg.classes();
     const size_t n_classes = classes.size();
-    std::vector<uint32_t> best_cost(n_classes, UINT32_MAX);
-    std::vector<ENode> best_node(n_classes);
-    std::vector<uint8_t> has_best(n_classes, 0);
+    ModeTable tbl;
+    tbl.best_metric.assign(n_classes, UINT32_MAX);
+    tbl.best_lat.assign(n_classes, UINT32_MAX);
+    tbl.static_cost.assign(n_classes, UINT32_MAX);
+    tbl.best_node.resize(n_classes);
+    tbl.has_best.assign(n_classes, 0);
 
     bool changed = true;
     while (changed) {
@@ -31,37 +69,254 @@ bool extract_min_cost(const EGraph& eg, EClassId root, ExtractedExpr& out) {
             for (const ENode& raw_n : classes[cid].nodes) {
                 const ENode n = eg.canonicalize(raw_n);
                 const uint32_t ar = eop_arity(n.op);
-                uint64_t cost = eop_cost(n.op);
-                if (ar >= 1) { if (n.a >= n_classes || best_cost[n.a] == UINT32_MAX) continue; cost += best_cost[n.a]; }
-                if (ar >= 2) { if (n.b >= n_classes || best_cost[n.b] == UINT32_MAX) continue; cost += best_cost[n.b]; }
-                if (ar >= 3) { if (n.c >= n_classes || best_cost[n.c] == UINT32_MAX) continue; cost += best_cost[n.c]; }
+                uint64_t scost = eop_cost(n.op);
+                uint32_t max_child_lat = 0;
+                uint64_t sum_child_s = 0;
+                bool ok = true;
+                const EClassId ch[3] = {n.a, n.b, n.c};
+                for (uint32_t k = 0; k < ar; ++k) {
+                    if (ch[k] == cid || ch[k] >= n_classes || tbl.best_metric[ch[k]] == UINT32_MAX) {
+                        ok = false;
+                        break;
+                    }
+                    max_child_lat = (std::max)(max_child_lat, tbl.best_lat[ch[k]]);
+                    sum_child_s += tbl.static_cost[ch[k]];
+                }
+                if (!ok) continue;
+                scost = (std::min)(scost + sum_child_s, static_cast<uint64_t>(UINT32_MAX - 1u));
+                uint64_t lat = scost;
+                uint64_t metric = scost;
+                if (mode != ExtractCostMode::StaticOps) {
+                    lat = (std::min)(static_cast<uint64_t>(max_child_lat) + eop_mode_cost(n.op, mode),
+                                     static_cast<uint64_t>(UINT32_MAX - 1u));
+                    metric = (std::min)(lat * 256ULL + (std::min)(scost, 255ULL),
+                                        static_cast<uint64_t>(UINT32_MAX - 1u));
+                }
 
-                if (cost < best_cost[cid] ||
-                    (cost == best_cost[cid] && has_best[cid] && n.op == EOp::Const && best_node[cid].op != EOp::Const)) {
-                    best_cost[cid] = static_cast<uint32_t>(cost);
-                    best_node[cid] = n;
-                    has_best[cid] = 1;
+                if (metric < tbl.best_metric[cid] ||
+                    (metric == tbl.best_metric[cid] && tbl.has_best[cid] && n.op == EOp::Const && tbl.best_node[cid].op != EOp::Const)) {
+                    tbl.best_metric[cid] = static_cast<uint32_t>(metric);
+                    tbl.best_lat[cid] = static_cast<uint32_t>(lat);
+                    tbl.static_cost[cid] = static_cast<uint32_t>(scost);
+                    tbl.best_node[cid] = n;
+                    tbl.has_best[cid] = 1;
                     changed = true;
                 }
             }
         }
     }
-    if (!has_best[canon_root] || best_cost[canon_root] == UINT32_MAX) return false;
+    return tbl;
+}
 
-    auto build_tree = [&](auto& self, EClassId cid, uint32_t depth) -> ExtractedExpr {
-        cid = eg.find(cid);
-        ExtractedExpr expr{cid, best_cost[cid], best_node[cid], nullptr, {}};
-        expr.leaf_value = (expr.node.op == EOp::Var) ? eg.var_value(static_cast<uint32_t>(expr.node.imm)) : nullptr;
-        if (!expr.leaf_value) expr.leaf_value = eg.class_value(cid);
-        const uint32_t ar = eop_arity(expr.node.op);
-        if (ar == 0 || depth > n_classes) return expr;
-        expr.children.reserve(ar);
-        if (ar >= 1) expr.children.push_back(self(self, expr.node.a, depth + 1));
-        if (ar >= 2) expr.children.push_back(self(self, expr.node.b, depth + 1));
-        if (ar >= 3) expr.children.push_back(self(self, expr.node.c, depth + 1));
-        return expr;
+bool build_expr_from_table(const EGraph& eg,
+                           EClassId cid,
+                           const ModeTable& tbl,
+                           uint32_t depth,
+                           std::vector<uint8_t>& visiting,
+                           ExtractedExpr& out) {
+    cid = eg.find(cid);
+    const size_t n_classes = eg.classes().size();
+    if (cid >= n_classes || !tbl.has_best[cid] || visiting[cid] || depth > 24) {
+        return false;
+    }
+    visiting[cid] = 1;
+    out = ExtractedExpr{cid, tbl.static_cost[cid], tbl.best_node[cid], nullptr, {}};
+    out.leaf_value = (out.node.op == EOp::Var) ? eg.var_value(static_cast<uint32_t>(out.node.imm)) : nullptr;
+    if (!out.leaf_value) out.leaf_value = eg.class_value(cid);
+    const uint32_t ar = eop_arity(out.node.op);
+    if (ar > 0) {
+        out.children.resize(ar);
+        const EClassId ch[3] = {out.node.a, out.node.b, out.node.c};
+        for (uint32_t k = 0; k < ar; ++k) {
+            if (!build_expr_from_table(eg, ch[k], tbl, depth + 1, visiting, out.children[k])) {
+                visiting[cid] = 0;
+                return false;
+            }
+        }
+    }
+    visiting[cid] = 0;
+    return true;
+}
+
+std::string extracted_expr_sig(const ExtractedExpr& e, uint32_t depth = 0) {
+    if (depth > 24) return "?";
+    if (e.node.op == EOp::Var) return "V" + std::to_string(e.node.imm);
+    if (e.node.op == EOp::Const) return "C" + std::to_string(e.node.imm);
+    std::string s = "(" + std::to_string(static_cast<uint32_t>(e.node.op)) + " ";
+    for (size_t i = 0; i < e.children.size(); ++i) {
+        if (i > 0) s.push_back(' ');
+        s += extracted_expr_sig(e.children[i], depth + 1);
+    }
+    s.push_back(')');
+    return s;
+}
+
+std::string mir_expr_sig(const Value* v, const BasicBlock* bb, uint32_t depth = 0) {
+    if (!v) return "?";
+    if (!v->is_instruction() || depth >= 8) return "V" + std::to_string(v->id());
+    const Instruction* inst = v->defining_instruction();
+    if (!inst || inst->parent() != bb) return "V" + std::to_string(v->id());
+    const Opcode oc = inst->opcode();
+    if (oc == Opcode::iconst_i32) return "C" + std::to_string(static_cast<uint32_t>(inst->imm_i32()));
+    if (oc == Opcode::iconst_i64) return "C" + std::to_string(static_cast<uint64_t>(inst->imm_i64()));
+    EOp eop = EOp::Var;
+    bool sw = false;
+    // Forward-declared helper resolved below via manual mapping or identical signature helper
+    if (inst->has_side_effects() || !inst->produces_value()) return "V" + std::to_string(v->id());
+    switch (oc) {
+        case Opcode::add:  eop = EOp::Add;  break;
+        case Opcode::sub:  eop = EOp::Sub;  break;
+        case Opcode::mul:  eop = EOp::Mul;  break;
+        case Opcode::sdiv: eop = EOp::SDiv; break;
+        case Opcode::udiv: eop = EOp::UDiv; break;
+        case Opcode::smod: eop = EOp::SMod; break;
+        case Opcode::umod: eop = EOp::UMod; break;
+        case Opcode::and_: eop = EOp::And;  break;
+        case Opcode::or_:  eop = EOp::Or;   break;
+        case Opcode::xor_: eop = EOp::Xor;  break;
+        case Opcode::shl:  eop = EOp::Shl;  break;
+        case Opcode::lshr: eop = EOp::LShr; break;
+        case Opcode::ashr: eop = EOp::AShr; break;
+        case Opcode::neg:  eop = EOp::Neg;  break;
+        case Opcode::not_: eop = EOp::Not;  break;
+        case Opcode::select:    eop = EOp::Select;  break;
+        case Opcode::sext_i64:  eop = EOp::SExt64;  break;
+        case Opcode::zext_i64:  eop = EOp::ZExt64;  break;
+        case Opcode::trunc_i32: eop = EOp::Trunc32; break;
+        case Opcode::eq: eop = EOp::Eq; break;
+        case Opcode::ne: eop = EOp::Ne; break;
+        case Opcode::slt: eop = EOp::Slt; break;
+        case Opcode::sgt: eop = EOp::Slt; sw = true; break;
+        case Opcode::ult: eop = EOp::Ult; break;
+        case Opcode::ugt: eop = EOp::Ult; sw = true; break;
+        case Opcode::sle: eop = EOp::Sle; break;
+        case Opcode::sge: eop = EOp::Sle; sw = true; break;
+        case Opcode::ule: eop = EOp::Ule; break;
+        case Opcode::uge: eop = EOp::Ule; sw = true; break;
+        default: return "V" + std::to_string(v->id());
+    }
+    const uint32_t ar = eop_arity(eop);
+    std::string ch0 = (ar >= 1 && inst->operand_count() >= 1) ? mir_expr_sig(inst->operand(0), bb, depth + 1) : "";
+    std::string ch1 = (ar >= 2 && inst->operand_count() >= 2) ? mir_expr_sig(inst->operand(1), bb, depth + 1) : "";
+    std::string ch2 = (ar >= 3 && inst->operand_count() >= 3) ? mir_expr_sig(inst->operand(2), bb, depth + 1) : "";
+    if (sw) std::swap(ch0, ch1);
+    std::string s = "(" + std::to_string(static_cast<uint32_t>(eop));
+    if (ar >= 1) s += " " + ch0;
+    if (ar >= 2) s += " " + ch1;
+    if (ar >= 3) s += " " + ch2;
+    s.push_back(')');
+    return s;
+}
+
+} // namespace
+
+bool extract_min_cost(const EGraph& eg, EClassId root, ExtractedExpr& out) {
+    const EClassId canon_root = eg.find(root);
+    const auto& classes = eg.classes();
+    if (canon_root >= classes.size()) return false;
+    const ModeTable tbl = compute_mode_table(eg, ExtractCostMode::StaticOps);
+    if (!tbl.has_best[canon_root] || tbl.static_cost[canon_root] == UINT32_MAX) return false;
+    std::vector<uint8_t> visiting(classes.size(), 0);
+    return build_expr_from_table(eg, canon_root, tbl, 0, visiting, out);
+}
+
+bool extract_top_k_candidates(
+    const EGraph& eg,
+    EClassId root,
+    uint32_t max_k,
+    std::vector<ExtractedExpr>& out) {
+    out.clear();
+    if (max_k == 0) return false;
+    const EClassId canon_root = eg.find(root);
+    const auto& classes = eg.classes();
+    if (canon_root >= classes.size()) return false;
+
+    const ModeTable tables[3] = {
+        compute_mode_table(eg, ExtractCostMode::StaticOps),
+        compute_mode_table(eg, ExtractCostMode::LatencyDepth),
+        compute_mode_table(eg, ExtractCostMode::MulPenaltyLatency)
     };
-    out = build_tree(build_tree, canon_root, 0);
+    if (!tables[0].has_best[canon_root]) return false;
+
+    std::unordered_set<std::string> seen;
+    auto push_unique = [&](ExtractedExpr&& cand) {
+        if (out.size() >= max_k) return;
+        std::string sig = extracted_expr_sig(cand);
+        if (seen.insert(std::move(sig)).second) {
+            out.push_back(std::move(cand));
+        }
+    };
+
+    const size_t n_classes = classes.size();
+    std::vector<uint8_t> visiting(n_classes, uint8_t{0});
+    for (int m = 0; m < 3 && out.size() < max_k; ++m) {
+        if (tables[m].has_best[canon_root]) {
+            std::fill(visiting.begin(), visiting.end(), uint8_t{0});
+            ExtractedExpr cand;
+            if (build_expr_from_table(eg, canon_root, tables[m], 0, visiting, cand)) {
+                push_unique(std::move(cand));
+            }
+        }
+    }
+
+    for (int m = 0; m < 2 && out.size() < max_k; ++m) {
+        const ModeTable& tbl = tables[m];
+        for (const ENode& raw_n : classes[canon_root].nodes) {
+            if (out.size() >= max_k) break;
+            const ENode n = eg.canonicalize(raw_n);
+            const uint32_t ar = eop_arity(n.op);
+            if ((ar >= 1 && (n.a == canon_root || n.a >= n_classes || !tbl.has_best[n.a])) ||
+                (ar >= 2 && (n.b == canon_root || n.b >= n_classes || !tbl.has_best[n.b])) ||
+                (ar >= 3 && (n.c == canon_root || n.c >= n_classes || !tbl.has_best[n.c]))) {
+                continue;
+            }
+            uint64_t scost = eop_cost(n.op);
+            if (ar >= 1) scost += tbl.static_cost[n.a];
+            if (ar >= 2) scost += tbl.static_cost[n.b];
+            if (ar >= 3) scost += tbl.static_cost[n.c];
+            ExtractedExpr cand{canon_root, static_cast<uint32_t>(scost), n, nullptr, {}};
+            cand.leaf_value = (n.op == EOp::Var) ? eg.var_value(static_cast<uint32_t>(n.imm)) : nullptr;
+            if (!cand.leaf_value) cand.leaf_value = eg.class_value(canon_root);
+            cand.children.resize(ar);
+            bool ch_ok = true;
+            const EClassId ch[3] = {n.a, n.b, n.c};
+            for (uint32_t k = 0; k < ar; ++k) {
+                std::fill(visiting.begin(), visiting.end(), uint8_t{0});
+                visiting[canon_root] = 1;
+                if (!build_expr_from_table(eg, ch[k], tbl, 1, visiting, cand.children[k])) {
+                    ch_ok = false;
+                    break;
+                }
+            }
+            if (ch_ok) push_unique(std::move(cand));
+        }
+    }
+    return !out.empty();
+}
+
+bool extract_min_cost_learned(
+    const EGraph& eg,
+    EClassId root,
+    ExtractedExpr& out,
+    const InstOptModel& model,
+    InstOptTarget target,
+    bool has_runtime_guards,
+    const OnlineCostCalibrator* cal,
+    float* out_predicted_cost) {
+    std::vector<ExtractedExpr> cands;
+    if (!extract_top_k_candidates(eg, root, 12, cands) || cands.empty()) return false;
+    size_t best_idx = 0;
+    float best_pred = 1e30f;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        const InstOptFeatures feat = extract_inst_opt_features(cands[i], target, has_runtime_guards);
+        const float p = model.predict_cost(feat, cal);
+        if (p < best_pred || (p == best_pred && cands[i].cost < cands[best_idx].cost)) {
+            best_pred = p;
+            best_idx = i;
+        }
+    }
+    out = std::move(cands[best_idx]);
+    if (out_predicted_cost) *out_predicted_cost = best_pred;
     return true;
 }
 
@@ -478,7 +733,25 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
             const uint32_t orig_cost = current_mir_cost(res_v, bb);
 
             ExtractedExpr best_expr;
-            if (orig_cost > 0 && extract_min_cost(eg, cid, best_expr) && best_expr.cost < orig_cost &&
+            bool accept_candidate = false;
+            bool used_learned_model = false;
+            if (opts.use_inst_opt_model && orig_cost > 0) {
+                const InstOptModel& mdl = opts.inst_opt_model ? *opts.inst_opt_model : InstOptModel::builtin();
+                const InstOptTarget tgt = opts.enable_gpu_superopt ? InstOptTarget::GPU_PTX : InstOptTarget::X64;
+                const bool has_guards = !assumptions.empty();
+                const float orig_pred = mdl.predict_cost(
+                    extract_inst_opt_features(cur, bb, tgt, has_guards), opts.cost_calibrator);
+                float cand_pred = 0.0f;
+                if (extract_min_cost_learned(eg, cid, best_expr, mdl, tgt, has_guards, opts.cost_calibrator, &cand_pred) &&
+                    ((cand_pred < orig_pred * 0.985f) || (cand_pred <= orig_pred && best_expr.cost < orig_cost)) &&
+                    extracted_expr_sig(best_expr) != mir_expr_sig(res_v, bb)) {
+                    accept_candidate = true;
+                    used_learned_model = true;
+                }
+            } else if (orig_cost > 0 && extract_min_cost(eg, cid, best_expr) && best_expr.cost < orig_cost) {
+                accept_candidate = true;
+            }
+            if (accept_candidate &&
                 expr_leaves_dominate(best_expr, var_map, dominating_vals)) {
                 const BVNodeId orig_bv = enc.encode(res_v, 0);
                 const BVNodeId cand_bv = encode_extracted_bv(ctx, enc, best_expr, var_map);
@@ -521,6 +794,7 @@ bool run_mir_egraph_superopt(Function& fn, Module& mod, const SuperoptOptions& o
                             if (opts.stats) {
                                 opts.stats->egraph_rewrites++;
                                 opts.stats->dags_synthesized++;
+                                if (used_learned_model) opts.stats->model_guided_rewrites++;
                                 if ((op == Opcode::and_ || op == Opcode::or_) && cur->operand_count() == 2 &&
                                     (repl == cur->operand(0) || repl == cur->operand(1))) {
                                     opts.stats->masks_elided++;

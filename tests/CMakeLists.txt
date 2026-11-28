@@ -336,6 +336,8 @@ add_executable(brass_unit_tests
     test_arm64_lir_equiv.cpp
     unit/test_superopt.cpp
     unit/test_egraph_superopt.cpp
+    unit/test_inst_opt_model.cpp
+    unit/test_ptx_schedule.cpp
     unit/test_fp_loop_equiv.cpp
     unit/test_tv_corpus.cpp
 )
