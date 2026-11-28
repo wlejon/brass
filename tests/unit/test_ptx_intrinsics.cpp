@@ -25,9 +25,10 @@ namespace {
 // (i32 i, f32 x, f64 d, i64 l, ptr p). Result type per kind.
 // ---------------------------------------------------------------------------
 
-enum class Sig {
+    enum class Sig {
     void_i32,        // () -> i32
     void_i64,        // () -> i64
+    void_ptr,        // () -> ptr
     f32_f32,         // (f32) -> f32
     f32f32_f32,      // (f32, f32) -> f32
     f32x3_f32,       // (f32, f32, f32) -> f32
@@ -69,7 +70,7 @@ enum class Sig {
     cvta_u32, cvta_u64,
     cp_async, cp_async_wait_group,
     ldmatrix_x1, ldmatrix_x2, ldmatrix_x4,
-    mma_sync,
+    mma_sync, mma_sync_f16,
 };
 
 const std::map<std::string, Sig>& signatures() {
@@ -156,6 +157,7 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_shared_store_i32x4_indexed", Sig::shared_stx_v4},
         {"ptx_shared_load_f32_from_v4", Sig::shared_ldf_v4},
         {"ptx_shared_alloc_u16", Sig::shared_alloc_u16},
+        {"ptx_shared_dynamic", Sig::void_ptr},
         {"ptx_shared_load_u16_indexed", Sig::shared_ldx_u16},
         {"ptx_shared_store_u16_indexed", Sig::shared_stx_u16},
 
@@ -181,6 +183,8 @@ const std::map<std::string, Sig>& signatures() {
         {"ptx_ldmatrix_x1", Sig::ldmatrix_x1}, {"ptx_ldmatrix_x1_trans", Sig::ldmatrix_x1}, {"ptx_ldmatrix_x2", Sig::ldmatrix_x2}, {"ptx_ldmatrix_x2_trans", Sig::ldmatrix_x2},
         {"ptx_ldmatrix_x4", Sig::ldmatrix_x4}, {"ptx_ldmatrix_x4_trans", Sig::ldmatrix_x4},
         {"ptx_mma_m16n8k16_f16_f32", Sig::mma_sync}, {"ptx_mma_m16n8k16_bf16_f32", Sig::mma_sync},
+        {"ptx_mma_m16n8k16_f16_f16", Sig::mma_sync_f16},
+        {"ptx_l2_evict_first_policy", Sig::void_i64},
     };
     return kSigs;
 }
@@ -207,6 +211,7 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
     switch (sig) {
         case Sig::void_i32: r = b.build_call(name, Type::i32()); break;
         case Sig::void_i64: r = b.build_call(name, Type::i64()); break;
+        case Sig::void_ptr: r = b.build_call(name, Type::ptr()); break;
         case Sig::f32_f32: r = b.build_call(name, Type::f32(), {x}); break;
         case Sig::f32f32_f32: r = b.build_call(name, Type::f32(), {x, x}); break;
         case Sig::f32x3_f32: r = b.build_call(name, Type::f32(), {x, x, x}); break;
@@ -308,6 +313,7 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
         case Sig::ldmatrix_x2: { r = b.build_call(name, Type::i64(), {b.build_call("ptx_cvta_to_shared_u32", Type::i32(), {smem_i})}); break; }
         case Sig::ldmatrix_x4: { r = b.build_call(name, Type::i32x4(), {b.build_call("ptx_cvta_to_shared_u32", Type::i32(), {smem_i})}); break; }
         case Sig::mma_sync: { r = b.build_call(name, Type::f32x4(), {b.build_vzero(Type::i32x4()), i, i, b.build_vzero(Type::f32x4())}); break; }
+        case Sig::mma_sync_f16: { r = b.build_call(name, Type::i64(), {b.build_vzero(Type::i32x4()), i, i, i, i}); break; }
     }
     if (r) {
         if (r->type() == Type::ptr()) b.build_store(Type::i64(), p, 0, r);
@@ -319,7 +325,8 @@ Function* build_intrinsic_kernel(Module& mod, const std::string& name, Sig sig) 
 }
 
 const char* arch_for_intrinsic(std::string_view name) noexcept {
-    const bool sm80 = name.rfind("ptx_cp_async", 0) == 0 || name.rfind("ptx_ldmatrix", 0) == 0 || name.rfind("ptx_mma_m16n8k16", 0) == 0;
+    const bool sm80 = name.rfind("ptx_cp_async", 0) == 0 || name.rfind("ptx_ldmatrix", 0) == 0 ||
+                      name.rfind("ptx_mma_m16n8k16", 0) == 0 || name == "ptx_l2_evict_first_policy";
     return sm80 ? "sm_80" : "sm_70";
 }
 

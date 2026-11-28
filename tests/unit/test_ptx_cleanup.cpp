@@ -496,7 +496,8 @@ struct PipelineResult {
 const char* arch_for_intrinsic(std::string_view name) noexcept {
     if (name.rfind("ptx_cp_async", 0) == 0 ||
         name.rfind("ptx_ldmatrix", 0) == 0 ||
-        name.rfind("ptx_mma_m16n8k16", 0) == 0) {
+        name.rfind("ptx_mma_m16n8k16", 0) == 0 ||
+        name == "ptx_l2_evict_first_policy") {
         return "sm_80";
     }
     return "sm_70";

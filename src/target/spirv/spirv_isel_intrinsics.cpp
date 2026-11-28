@@ -524,6 +524,9 @@ const std::unordered_map<std::string_view, const char*>& SpirvISel::Intrinsics::
         { "ptx_ldmatrix_x4_trans", "PTX warp-level ldmatrix has no direct core SPIR-V equivalent (use ptx_coop_*)" },
         { "ptx_mma_m16n8k16_f16_f32", "PTX warp-level mma.sync fragment instruction has no direct core SPIR-V equivalent (use ptx_coop_*)" },
         { "ptx_mma_m16n8k16_bf16_f32", "PTX warp-level mma.sync fragment instruction has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_mma_m16n8k16_f16_f16", "PTX warp-level mma.sync fragment instruction has no direct core SPIR-V equivalent (use ptx_coop_*)" },
+        { "ptx_shared_dynamic", "PTX .extern .shared dynamic shared memory has no direct core SPIR-V equivalent (use static ptx_shared_alloc_*)" },
+        { "ptx_l2_evict_first_policy", "PTX L2 cache eviction policy (createpolicy.fractional.L2::evict_first) has no core SPIR-V equivalent" },
     };
     return kUnsupported;
 }
