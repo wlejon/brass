@@ -1,6 +1,7 @@
 #include "msl_builder.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <iomanip>
 #include <set>
@@ -18,12 +19,27 @@ std::string hex_u32(uint32_t v) {
 std::string f32_literal(float f) {
     uint32_t bits = 0;
     std::memcpy(&bits, &f, 4);
+    if (bits == 0u) return "0.0f";
     return "as_type<float>(" + hex_u32(bits) + ")";
+}
+
+std::string i32_literal(int32_t v) {
+    if (v == INT32_MIN) return "(-2147483647 - 1)";
+    if (v < 0) return "(" + std::to_string(v) + ")";
+    return std::to_string(v);
 }
 
 std::string i64_literal(int64_t v) {
     if (v == INT64_MIN) return "(-9223372036854775807LL - 1LL)";
+    if (v < 0) return "(" + std::to_string(v) + "LL)";
     return std::to_string(v) + "LL";
+}
+
+bool is_inlinable_const(const Instruction& inst) {
+    if (!inst.result()) return false;
+    const Opcode op = inst.opcode();
+    if (op == Opcode::iconst_i32 || op == Opcode::iconst_i64) return true;
+    return op == Opcode::fconst_f64 && inst.type().kind() == TypeKind::F32;
 }
 
 std::string sanitize_ident(std::string_view sv) {
@@ -105,7 +121,49 @@ MslEmitter::KernelResult MslFnBuilder::run() {
                                   std::to_string(buf_idx) + ")]]");
         }
 
-        // Pre-allocate shared arrays, block phi variables, and SSA result variables.
+        // Track which SSA values cross basic-block boundaries (including branch args)
+        // vs block-local SSA values that can be emitted as inline `const` bindings.
+        std::unordered_map<const Value*, const BasicBlock*> def_bb;
+        for (const auto* bb : fn_.blocks()) {
+            for (const auto* inst : *bb) {
+                if (inst->result()) def_bb[inst->result()] = bb;
+            }
+        }
+        std::unordered_set<const Value*> cross_block_vals;
+        for (const auto* bb : fn_.blocks()) {
+            const Instruction* term = bb->terminator();
+            for (const auto* inst : *bb) {
+                for (size_t i = 0; i < inst->operand_count(); ++i) {
+                    const Value* op = inst->operand(i);
+                    auto it = def_bb.find(op);
+                    if (it != def_bb.end() && it->second != bb) {
+                        cross_block_vals.insert(op);
+                    }
+                }
+                if (inst == term) {
+                    auto mark_tgt = [&](const BranchTarget& tgt) {
+                        for (const Value* av : tgt.args) {
+                            if (def_bb.count(av)) cross_block_vals.insert(av);
+                        }
+                    };
+                    switch (term->opcode()) {
+                        case Opcode::br: mark_tgt(term->branch_target()); break;
+                        case Opcode::br_if:
+                            mark_tgt(term->true_target());
+                            mark_tgt(term->false_target());
+                            break;
+                        case Opcode::switch_:
+                            for (const auto& sc : term->switch_cases()) mark_tgt(sc.target);
+                            mark_tgt(term->default_target());
+                            break;
+                        default: break;
+                    }
+                }
+            }
+        }
+
+        // Pre-allocate shared arrays, block phi variables, and cross-block SSA variables.
+        // Inline literal constants and mark intra-block SSA values for declaration at def site.
         std::ostringstream decls;
         for (const auto* bb : fn_.blocks()) {
             for (const auto* inst : *bb) {
@@ -126,11 +184,23 @@ MslEmitter::KernelResult MslFnBuilder::run() {
                           << " " << cname << "[4];\n";
                     coop_vars_[inst->result()] = {cname, use};
                     res_.uses_coopmat = true;
+                } else if (is_inlinable_const(*inst)) {
+                    const Opcode op = inst->opcode();
+                    val_names_[inst->result()] = (op == Opcode::iconst_i32)
+                                                     ? i32_literal(inst->imm_i32())
+                                                 : (op == Opcode::iconst_i64)
+                                                     ? i64_literal(inst->imm_i64())
+                                                     : f32_literal(static_cast<float>(inst->imm_f64()));
+                    inlined_consts_.insert(inst->result());
                 } else if (inst->result() && !inst->type().is_void()) {
                     std::string vn = "v_" + std::to_string(inst->result()->id());
                     val_names_[inst->result()] = vn;
-                    decls << "    " << msl_val_type(inst->type(), inst->result()) << " " << vn << " = "
-                          << zero_init(inst->type(), inst->result()) << ";\n";
+                    if (cross_block_vals.count(inst->result())) {
+                        decls << "    " << msl_val_type(inst->type(), inst->result()) << " " << vn << " = "
+                              << zero_init(inst->type(), inst->result()) << ";\n";
+                    } else {
+                        local_vals_.insert(inst->result());
+                    }
                 }
             }
         }
@@ -471,13 +541,17 @@ void MslFnBuilder::emit_node(size_t n, size_t stop_node, size_t loop_merge, size
     }
 
 void MslFnBuilder::emit_assign(const Instruction& inst, const std::string& expr, int d) {
-    if (!inst.result() || inst.type().is_void()) {
+    const Value* res = inst.result();
+    if (!res || inst.type().is_void()) {
         indent_line(d);
         body_ << expr << ";\n";
         return;
     }
     indent_line(d);
-    body_ << val_expr(inst.result()) << " = " << expr << ";\n";
+    if (local_vals_.count(res)) {
+        body_ << msl_val_type(inst.type(), res) << " const ";
+    }
+    body_ << val_expr(res) << " = " << expr << ";\n";
 }
 
 void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
@@ -486,10 +560,14 @@ void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
         auto t = inst.type();
 
         switch (op) {
-            case Opcode::iconst_i32: emit_assign(inst, std::to_string(inst.imm_i32()), d); return;
-            case Opcode::iconst_i64: emit_assign(inst, i64_literal(inst.imm_i64()), d); return;
+            case Opcode::iconst_i32:
+            case Opcode::iconst_i64:
+                if (inst.result() && inlined_consts_.count(inst.result())) return;
+                emit_assign(inst, (op == Opcode::iconst_i32) ? i32_literal(inst.imm_i32()) : i64_literal(inst.imm_i64()), d);
+                return;
             case Opcode::fconst_f64:
                 if (t.kind() == TypeKind::F32) {
+                    if (inst.result() && inlined_consts_.count(inst.result())) return;
                     emit_assign(inst, f32_literal(static_cast<float>(inst.imm_f64())), d);
                     return;
                 }
@@ -668,6 +746,9 @@ void MslFnBuilder::lower_inst(const Instruction& inst, int d) {
             case Opcode::vinsert_lane: {
                 std::string vn = val_expr(inst.result());
                 indent_line(d);
+                if (local_vals_.count(inst.result())) {
+                    body_ << msl_val_type(t, inst.result()) << " ";
+                }
                 body_ << vn << " = " << arg(0) << "; " << vn << "[" << inst.lane() << "] = " << arg(1) << ";\n";
                 return;
             }

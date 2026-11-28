@@ -36,6 +36,8 @@ private:
     std::ostringstream body_;
     std::unordered_map<const Value*, std::string> val_names_;
     std::unordered_set<const Value*> shared_ptrs_;
+    std::unordered_set<const Value*> inlined_consts_;
+    std::unordered_set<const Value*> local_vals_;
     std::unordered_map<const Value*, std::pair<std::string, int>> coop_vars_; // name, use (0=A,1=B,2=Acc)
     uint32_t shared_count_ = 0;
     uint32_t coop_count_ = 0;

@@ -263,16 +263,16 @@ TEST_CASE("GPU Opt - LICM Hoists In-Loop Constant Operands Before Hoisted Users"
     target::MslOptions msl_opts;
     msl_opts.workgroup_x = 32;
     std::string msl_src = target::MslTarget::compile(*fn, msl_opts).source;
-    size_t pos_33 = msl_src.find("= 33;");
+    size_t pos_33 = msl_src.find("33)");
     size_t pos_while = msl_src.find("while (true)");
     CHECK(pos_33 != std::string::npos);
     CHECK(pos_while != std::string::npos);
     CHECK(pos_33 < pos_while);
 
-    // Constant 33 must appear before any preheader multiply that uses it.
-    size_t pos_mul = msl_src.find(" * ", pos_33);
+    // Preheader multiply must use the hoisted constant 33 before the loop.
+    size_t pos_mul = msl_src.rfind(" * ", pos_33);
     CHECK(pos_mul != std::string::npos);
-    CHECK(pos_mul < pos_while);
+    CHECK(pos_mul < pos_33);
 
     CHECK(!target::PtxTarget::emit_function(*fn).empty());
     target::SpirvOptions spv_opts;
